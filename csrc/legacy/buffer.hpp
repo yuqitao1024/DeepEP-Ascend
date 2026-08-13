@@ -1760,10 +1760,6 @@ static void register_apis(pybind11::module_& m) {
         .def("get_rdma_buffer_size_hint", &Config::get_rdma_buffer_size_hint);
     m.def("get_low_latency_rdma_size_hint", &get_low_latency_rdma_size_hint);
 
-    pybind11::class_<EventHandle>(m, "EventHandle")
-        .def(pybind11::init<>())
-        .def("current_stream_wait", &EventHandle::current_stream_wait);
-
     pybind11::class_<Buffer>(m, "Buffer")
         .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, bool>())
         .def("is_available", &Buffer::is_available)

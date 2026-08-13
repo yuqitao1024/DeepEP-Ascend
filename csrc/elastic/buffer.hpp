@@ -1343,14 +1343,9 @@ public:
     }
 };
 
-static void register_apis(pybind11::module_& m) {
-    pybind11::class_<ElasticBuffer>(m, "ElasticBuffer")
-        .def(pybind11::init<int, int, int64_t, symmetric::cpu_comm_t, int64_t, int64_t, bool, bool, bool, int, int, int, int, bool>())
-        .def("destroy", &ElasticBuffer::destroy)
-        .def("get_comm_stream", &ElasticBuffer::get_comm_stream)
-        .def("get_physical_domain_size", &ElasticBuffer::get_physical_domain_size)
-        .def("get_logical_domain_size", &ElasticBuffer::get_logical_domain_size)
-        .def("barrier", &ElasticBuffer::barrier)
+static void register_cuda_only_apis(pybind11::module_& m,
+                                    pybind11::class_<ElasticBuffer>& cls) {
+    cls
         .def("engram_write", &ElasticBuffer::engram_write)
         .def("engram_fetch", &ElasticBuffer::engram_fetch)
         .def("pp_set_config", &ElasticBuffer::pp_set_config)
@@ -1360,21 +1355,16 @@ static void register_apis(pybind11::module_& m) {
         .def("destroy_agrs_session", &ElasticBuffer::destroy_agrs_session)
         .def("agrs_set_config", &ElasticBuffer::agrs_set_config)
         .def("agrs_get_inplace_tensor", &ElasticBuffer::agrs_get_inplace_tensor)
-        .def("all_gather", &ElasticBuffer::all_gather)
-        .def("dispatch", &ElasticBuffer::dispatch)
-        .def("combine", &ElasticBuffer::combine);
+        .def("all_gather", &ElasticBuffer::all_gather);
+
     m.def("create_cpu_handle", &ElasticBuffer::create_cpu_handle);
-    m.def("calculate_elastic_buffer_size", &ElasticBuffer::calculate_buffer_size);
     m.def("get_elastic_buffer_alignment", [=]() {
         return symmetric::kNumAlignmentBytes;
     });
 
-    // NCCL communicator handle
     m.def("get_local_nccl_unique_id", &nccl::get_local_unique_id);
     m.def("create_nccl_comm", &nccl::create_nccl_comm);
     m.def("destroy_nccl_comm", &nccl::destroy_nccl_comm);
-
-    // Communication domain utilities
     m.def("get_physical_domain_size", &nccl::get_physical_domain_size);
     m.def("get_logical_domain_size", &nccl::get_logical_domain_size);
 }
