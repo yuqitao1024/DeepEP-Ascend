@@ -5,6 +5,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 
@@ -278,6 +279,51 @@ def _install_fake_find_pkgs(events):
 
     find_pkgs.find_nccl_root = find_nccl_root
     sys.modules["deep_ep.utils.find_pkgs"] = find_pkgs
+
+
+def _load_low_level_extension(path):
+    """Load a candidate extension without executing deep_ep.__init__."""
+    if path.suffix != ".py":
+        import torch  # noqa: F401
+
+    spec = importlib.util.spec_from_file_location("deep_ep._C", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot create an extension loader for: {path}")
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get("deep_ep._C")
+    sys.modules["deep_ep._C"] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            sys.modules.pop("deep_ep._C", None)
+        else:
+            sys.modules["deep_ep._C"] = previous
+    return module
+
+
+def _find_in_place_extension():
+    extensions = sorted((ROOT / "deep_ep").glob("_C*.so"))
+    return extensions[0] if extensions else None
+
+
+def _probe_low_level_extension(path, forbid_package=False):
+    command = [sys.executable, str(pathlib.Path(__file__).resolve()),
+               "--probe-low-level-extension", str(path)]
+    if forbid_package:
+        command.append("--forbid-package")
+    result = subprocess.run(
+        command,
+        cwd=ROOT, capture_output=True, text=True, check=False)
+    if result.returncode:
+        raise RuntimeError(
+            f"low-level extension probe failed\nstdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}")
+    return result.stdout.strip()
+
+
+def _is_ascend_extension_available(path, forbid_package=False):
+    return _probe_low_level_extension(path, forbid_package) == "ascend"
 
 
 def _load_package(platform, block_accelerator_imports=False):
@@ -594,6 +640,15 @@ def _scenario_cuda_preservation():
     assert buffer.comm_handle is None
 
 
+def _scenario_stale_cuda_extension_guard():
+    with tempfile.TemporaryDirectory() as directory:
+        path = pathlib.Path(directory) / "_C_stale.py"
+        path.write_text("def get_platform():\n    return 'cuda'\n")
+        assert not _is_ascend_extension_available(path, forbid_package=True)
+        assert "deep_ep" not in sys.modules
+        assert "deep_ep._C" not in sys.modules
+
+
 SCENARIOS = {
     "ascend_import": _scenario_ascend_import,
     "invalid_platform": _scenario_invalid_platform,
@@ -603,6 +658,7 @@ SCENARIOS = {
     "ascend_contextmanager_gate": _scenario_ascend_contextmanager_gate,
     "ascend_weak_lru_gate": _scenario_ascend_weak_lru_gate,
     "cuda_preservation": _scenario_cuda_preservation,
+    "stale_cuda_extension_guard": _scenario_stale_cuda_extension_guard,
 }
 
 
@@ -639,6 +695,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_cuda_initialization_and_constructor_behavior_are_preserved(self):
         self.run_scenario("cuda_preservation")
+
+    def test_stale_cuda_extension_skips_before_package_initialization(self):
+        self.run_scenario("stale_cuda_extension_guard")
 
 
 class PythonGateSourceTest(unittest.TestCase):
@@ -680,17 +739,19 @@ class PythonGateSourceTest(unittest.TestCase):
                 self.assert_first_require_cuda(functions[name], name)
 
 
-TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
-ASCEND_EXTENSION_AVAILABLE = TORCH_AVAILABLE and any(
-    (ROOT / "deep_ep").glob("_C*.so"))
-
-
-@unittest.skipUnless(
-    ASCEND_EXTENSION_AVAILABLE,
-    "real Ascend package tests require PyTorch and an in-place built extension")
 class RealAscendPythonApiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if importlib.util.find_spec("torch") is None:
+            raise unittest.SkipTest("real Ascend package tests require PyTorch")
+        extension_path = _find_in_place_extension()
+        if extension_path is None:
+            raise unittest.SkipTest(
+                "real Ascend package tests require an in-place built extension")
+        if not _is_ascend_extension_available(extension_path):
+            raise unittest.SkipTest(
+                "real Ascend package tests require an Ascend extension")
+
         import torch
         import deep_ep
         import deep_ep._C as extension
@@ -699,8 +760,7 @@ class RealAscendPythonApiTest(unittest.TestCase):
         cls.deep_ep = deep_ep
         cls.extension = extension
         if extension.get_platform() != "ascend":
-            raise unittest.SkipTest(
-                "real Ascend package tests require an Ascend extension")
+            raise AssertionError("low-level extension platform changed before package import")
 
     def setUp(self):
         self.assertEqual(self.extension.get_platform(), "ascend")
@@ -771,5 +831,19 @@ class RealAscendPythonApiTest(unittest.TestCase):
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--isolation":
         SCENARIOS[sys.argv[2]]()
+    elif (len(sys.argv) in (3, 4) and
+          sys.argv[1] == "--probe-low-level-extension"):
+        finder = None
+        if len(sys.argv) == 4:
+            if sys.argv[3] != "--forbid-package":
+                raise RuntimeError(f"unknown probe argument: {sys.argv[3]}")
+            finder = _ForbiddenImportFinder()
+            finder.FORBIDDEN = {"deep_ep"}
+            sys.meta_path.insert(0, finder)
+        try:
+            print(_load_low_level_extension(pathlib.Path(sys.argv[2])).get_platform())
+        finally:
+            if finder is not None:
+                sys.meta_path.remove(finder)
     else:
         unittest.main()

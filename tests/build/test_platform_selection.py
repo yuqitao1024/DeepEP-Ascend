@@ -47,12 +47,28 @@ class BuildPlatformTest(unittest.TestCase):
             SETUP.get_build_platform({"DEEP_EP_PLATFORM": "rocm"})
 
     @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is required to construct extensions")
-    def test_ascend_extension_has_no_cuda_sources_or_libraries(self):
+    def test_ascend_extension_is_pure_and_has_exact_host_build_fields(self):
         extension = SETUP.make_extension("ascend")
         self.assertEqual(extension.sources, ["csrc/python_api.cpp"])
+        self.assertEqual(extension.include_dirs, [str(ROOT / "deep_ep" / "include")])
         self.assertIn(("DEEP_EP_PLATFORM_ASCEND", "1"), extension.define_macros)
-        forbidden = " ".join(extension.sources + list(extension.libraries or []) +
-                             list(extension.library_dirs or []))
+        self.assertEqual(extension.define_macros, [("DEEP_EP_PLATFORM_ASCEND", "1")])
+        self.assertEqual(
+            extension.extra_compile_args,
+            ["-O3", "-std=c++17", "-Wno-deprecated-declarations"])
+        dependency_fields = (
+            "sources", "include_dirs", "libraries", "library_dirs",
+            "extra_compile_args", "extra_link_args", "extra_objects",
+            "define_macros", "runtime_library_dirs",
+        )
+        for field in ("libraries", "library_dirs", "extra_link_args", "extra_objects",
+                      "runtime_library_dirs"):
+            self.assertFalse(getattr(extension, field, None), field)
+        forbidden = " ".join(
+            str(value)
+            for field in dependency_fields
+            for value in (getattr(extension, field, None) or [])
+        )
         for name in ("cuda", "nccl", "nvshmem", "cann", "hccl"):
             self.assertNotIn(name, forbidden.lower())
 

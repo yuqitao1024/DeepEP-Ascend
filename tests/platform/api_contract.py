@@ -22,3 +22,19 @@ ASCEND_MODULE_NAMES = COMMON_MODULE_NAMES
 CUDA_MODULE_NAMES = COMMON_MODULE_NAMES | CUDA_ONLY_MODULE_NAMES
 ASCEND_ELASTIC_BUFFER_METHODS = COMMON_BUFFER_METHODS
 CUDA_ELASTIC_BUFFER_METHODS = COMMON_BUFFER_METHODS | CUDA_ONLY_BUFFER_METHODS
+
+# These sets mirror only methods registered through the current PyBind surface.
+CUDA_BUFFER_METHODS = {
+    "is_available", "get_num_rdma_ranks", "get_rdma_rank", "get_root_rdma_rank",
+    "get_local_device_id", "get_local_ipc_handle", "get_local_nvshmem_unique_id",
+    "get_local_buffer_tensor", "get_comm_stream", "sync", "destroy",
+    "get_dispatch_layout", "intranode_dispatch", "intranode_combine",
+    "internode_dispatch", "internode_combine", "clean_low_latency_buffer",
+    "low_latency_dispatch", "low_latency_combine", "low_latency_update_mask_buffer",
+    "low_latency_query_mask_buffer", "low_latency_clean_mask_buffer",
+    "get_next_low_latency_combine_buffer",
+}
+CUDA_CONFIG_METHODS = {
+    "get_nvl_buffer_size_hint", "get_rdma_buffer_size_hint",
+}
+CUDA_EVENT_HANDLE_METHODS = {"current_stream_wait"}
