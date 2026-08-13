@@ -1,21 +1,36 @@
+import os
+
+
+def get_build_platform(environ=os.environ):
+    platform = environ.get('DEEP_EP_PLATFORM', 'cuda').strip().lower()
+    if platform not in ('cuda', 'ascend'):
+        raise ValueError('DEEP_EP_PLATFORM must be cuda or ascend')
+    return platform
+
+
+if __name__ == '__main__':
+    build_platform = get_build_platform()
+
+
 import ast
 import re
-import os
 import subprocess
 import setuptools
 import importlib
 
 from pathlib import Path
 from setuptools.command.build_py import build_py
-from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension
 
 current_dir = os.path.dirname(os.path.realpath(__file__))
 persistent_env_names = ('EP_JIT_CACHE_DIR', 'EP_JIT_PRINT_COMPILER_COMMAND', 'EP_NUM_TOPK_IDX_BITS', 'EP_NCCL_ROOT_DIR')
 
-# Load discover module without triggering `deep_ep.__init__`
-find_pkgs_spec = importlib.util.spec_from_file_location('find_pkgs', os.path.join(current_dir, 'deep_ep', 'utils', 'find_pkgs.py'))
-find_pkgs = importlib.util.module_from_spec(find_pkgs_spec)
-find_pkgs_spec.loader.exec_module(find_pkgs)
+def load_find_pkgs():
+    # Load discover module without triggering `deep_ep.__init__`
+    spec = importlib.util.spec_from_file_location(
+        'find_pkgs', os.path.join(current_dir, 'deep_ep', 'utils', 'find_pkgs.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 # Wheel specific: NVIDIA pip wheels (nvidia-nvshmem-cu12, nvidia-nccl-cu12)
@@ -89,14 +104,11 @@ class CustomBuildPy(build_py):
             f.write(code)
 
 
-def get_build_platform(environ=os.environ):
-    platform = environ.get('DEEP_EP_PLATFORM', 'cuda').strip().lower()
-    if platform not in ('cuda', 'ascend'):
-        raise ValueError('DEEP_EP_PLATFORM must be cuda or ascend')
-    return platform
-
-
 def make_cuda_extension(define_macros=None):
+    from torch.utils.cpp_extension import CUDAExtension
+
+    find_pkgs = load_find_pkgs()
+
     # TODO: make NVSHMEM and legacy optional
     nvshmem_root_dir = find_pkgs.find_nvshmem_root()
     nccl_root_dir = find_pkgs.find_nccl_root()
@@ -212,6 +224,8 @@ def make_cuda_extension(define_macros=None):
 
 
 def make_ascend_extension():
+    from torch.utils.cpp_extension import CppExtension
+
     return CppExtension(
         name='deep_ep._C',
         sources=['csrc/python_api.cpp'],
@@ -228,10 +242,11 @@ def make_extension(platform):
 
 
 if __name__ == '__main__':
-    platform = get_build_platform()
-    extension = make_extension(platform)
+    from torch.utils.cpp_extension import BuildExtension
 
-    if platform == 'ascend':
+    extension = make_extension(build_platform)
+
+    if build_platform == 'ascend':
         print('Build summary:')
         print(' > Platform: ascend')
         print()
