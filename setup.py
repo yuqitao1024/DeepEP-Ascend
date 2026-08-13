@@ -7,7 +7,7 @@ import importlib
 
 from pathlib import Path
 from setuptools.command.build_py import build_py
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension
 
 current_dir = os.path.dirname(os.path.realpath(__file__))
 persistent_env_names = ('EP_JIT_CACHE_DIR', 'EP_JIT_PRINT_COMPILER_COMMAND', 'EP_NUM_TOPK_IDX_BITS', 'EP_NCCL_ROOT_DIR')
@@ -89,7 +89,14 @@ class CustomBuildPy(build_py):
             f.write(code)
 
 
-if __name__ == '__main__':
+def get_build_platform(environ=os.environ):
+    platform = environ.get('DEEP_EP_PLATFORM', 'cuda').strip().lower()
+    if platform not in ('cuda', 'ascend'):
+        raise ValueError('DEEP_EP_PLATFORM must be cuda or ascend')
+    return platform
+
+
+def make_cuda_extension(define_macros=None):
     # TODO: make NVSHMEM and legacy optional
     nvshmem_root_dir = find_pkgs.find_nvshmem_root()
     nccl_root_dir = find_pkgs.find_nccl_root()
@@ -175,6 +182,7 @@ if __name__ == '__main__':
 
     # Summary
     print('Build summary:')
+    print(' > Platform: cuda')
     print(f' > Sources: {sources}')
     print(f' > Includes: {include_dirs}')
     print(f' > Libraries: {library_dirs}')
@@ -194,6 +202,40 @@ if __name__ == '__main__':
             print(f'   > {k}: {v}')
     print()
 
+    return CUDAExtension(name='deep_ep._C',
+                         include_dirs=include_dirs,
+                         library_dirs=library_dirs,
+                         sources=sources,
+                         define_macros=define_macros,
+                         extra_compile_args=extra_compile_args,
+                         extra_link_args=extra_link_args)
+
+
+def make_ascend_extension():
+    return CppExtension(
+        name='deep_ep._C',
+        sources=['csrc/python_api.cpp'],
+        include_dirs=[f'{current_dir}/deep_ep/include'],
+        define_macros=[('DEEP_EP_PLATFORM_ASCEND', '1')],
+        extra_compile_args=['-O3', '-std=c++17', '-Wno-deprecated-declarations'])
+
+
+def make_extension(platform):
+    if platform == 'ascend':
+        return make_ascend_extension()
+    return make_cuda_extension(
+        define_macros=[('DEEP_EP_PLATFORM_CUDA', '1')])
+
+
+if __name__ == '__main__':
+    platform = get_build_platform()
+    extension = make_extension(platform)
+
+    if platform == 'ascend':
+        print('Build summary:')
+        print(' > Platform: ascend')
+        print()
+
     setuptools.setup(
         name='deep_ep',
         version=get_package_version(),
@@ -203,14 +245,7 @@ if __name__ == '__main__':
                 'include/deep_ep/**/*',
             ]
         },
-        ext_modules=[
-            CUDAExtension(name='deep_ep._C',
-                          include_dirs=include_dirs,
-                          library_dirs=library_dirs,
-                          sources=sources,
-                          extra_compile_args=extra_compile_args,
-                          extra_link_args=extra_link_args)
-        ],
+        ext_modules=[extension],
         cmdclass={
             'build_ext': BuildExtension,
             'build_py': CustomBuildPy
