@@ -222,6 +222,12 @@ def _install_fake_extension(platform, events):
         def barrier(self, use_comm_stream, with_cpu_sync, sequential):
             events.append(("runtime.barrier", use_comm_stream, with_cpu_sync, sequential))
 
+        def create_agrs_session(self):
+            events.append("runtime.create_agrs_session")
+
+        def destroy_agrs_session(self):
+            events.append("runtime.destroy_agrs_session")
+
         def dispatch(self, *args):
             self.dispatch_calls.append(args)
             recv_src_metadata = _FakeTensor(shape=(1,))
@@ -430,11 +436,12 @@ def _scenario_ascend_method_gates():
         "pp_recv": lambda: buffer.pp_recv(poison, poison),
         "create_agrs_session": buffer.create_agrs_session,
         "destroy_agrs_session": buffer.destroy_agrs_session,
-        "agrs_new_session": lambda: buffer.agrs_new_session(False).__enter__(),
+        "agrs_new_session": lambda: buffer.agrs_new_session(False),
         "agrs_set_config": lambda: buffer.agrs_set_config(poison, poison),
         "agrs_get_inplace_tensor": lambda: buffer.agrs_get_inplace_tensor(poison, poison),
         "all_gather": lambda: buffer.all_gather(poison),
-        "get_theoretical_num_sms": lambda: buffer.get_theoretical_num_sms(poison, poison),
+        "get_theoretical_num_sms": lambda: buffer.get_theoretical_num_sms(
+            [poison], [poison]),
         "get_theoretical_num_qps": lambda: buffer.get_theoretical_num_qps(poison),
         "dispatch": lambda: buffer.dispatch(poison),
         "combine": lambda: buffer.combine(poison, poison),
@@ -451,6 +458,24 @@ def _scenario_ascend_method_gates():
         "get_logical_domain_size",
         lambda: envs.get_logical_domain_size(poison))
     buffer.destroy()
+
+
+def _scenario_ascend_contextmanager_gate():
+    deep_ep, extension, events = _load_package("ascend", True)
+    buffer = deep_ep.ElasticBuffer(
+        _FakeGroup(events), num_bytes=4096, explicitly_destroy=True)
+    _assert_phase_error(
+        "agrs_new_session", lambda: buffer.agrs_new_session(False))
+
+
+def _scenario_ascend_weak_lru_gate():
+    deep_ep, extension, events = _load_package("ascend", True)
+    buffer = deep_ep.ElasticBuffer(
+        _FakeGroup(events), num_bytes=4096, explicitly_destroy=True)
+    poison = _Poison()
+    _assert_phase_error(
+        "get_theoretical_num_sms",
+        lambda: buffer.get_theoretical_num_sms([poison], [poison]))
 
 
 def _scenario_cuda_preservation():
@@ -508,6 +533,31 @@ def _scenario_cuda_preservation():
                    if isinstance(event, tuple) and event[0] == "torch.cuda.synchronize"]
     assert len(sync_events) == 2
 
+    agrs_start = len(events)
+    with buffer.agrs_new_session(False):
+        events.append("agrs.disabled.body")
+    assert events[agrs_start:] == ["agrs.disabled.body"]
+
+    agrs_start = len(events)
+    with buffer.agrs_new_session():
+        events.append("agrs.enabled.body")
+    assert events[agrs_start:] == [
+        "runtime.create_agrs_session", "agrs.enabled.body",
+        "runtime.destroy_agrs_session"]
+
+    properties_before = sum(
+        isinstance(event, tuple) and event[0] == "torch.cuda.get_device_properties"
+        for event in events)
+    first_num_sms = buffer.get_theoretical_num_sms(
+        8, 1, rdma_gbs=100, nvlink_gbs=100)
+    second_num_sms = buffer.get_theoretical_num_sms(
+        8, 1, rdma_gbs=100, nvlink_gbs=100)
+    assert first_num_sms == second_num_sms
+    properties_after = sum(
+        isinstance(event, tuple) and event[0] == "torch.cuda.get_device_properties"
+        for event in events)
+    assert properties_after - properties_before == 1
+
     stream = buffer.get_comm_stream()
     assert (stream.stream_id, stream.device_index, stream.device_type) == (17, 2, 1)
     platform = importlib.import_module("deep_ep.platform")
@@ -550,6 +600,8 @@ SCENARIOS = {
     "ascend_construction": _scenario_ascend_construction,
     "ascend_implicit_size": _scenario_ascend_implicit_size,
     "ascend_method_gates": _scenario_ascend_method_gates,
+    "ascend_contextmanager_gate": _scenario_ascend_contextmanager_gate,
+    "ascend_weak_lru_gate": _scenario_ascend_weak_lru_gate,
     "cuda_preservation": _scenario_cuda_preservation,
 }
 
@@ -578,6 +630,12 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_all_runtime_methods_fail_before_argument_or_symbol_access(self):
         self.run_scenario("ascend_method_gates")
+
+    def test_contextmanager_method_gates_when_called(self):
+        self.run_scenario("ascend_contextmanager_gate")
+
+    def test_cached_method_gates_before_hashing_arguments(self):
+        self.run_scenario("ascend_weak_lru_gate")
 
     def test_cuda_initialization_and_constructor_behavior_are_preserved(self):
         self.run_scenario("cuda_preservation")

@@ -678,7 +678,6 @@ class ElasticBuffer:
         require_cuda("destroy_agrs_session")
         self.runtime.destroy_agrs_session()
 
-    @contextmanager
     def agrs_new_session(self, enabled: bool = True):
         """
         (Experimental) Context manager that wraps `create_agrs_session` and `destroy_agrs_session`.
@@ -687,6 +686,10 @@ class ElasticBuffer:
             enabled: if `False`, the context manager is a no-op.
         """
         require_cuda("agrs_new_session")
+        return self._agrs_new_session(enabled)
+
+    @contextmanager
+    def _agrs_new_session(self, enabled: bool = True):
         if not enabled:
             yield
             return
@@ -758,7 +761,6 @@ class ElasticBuffer:
         tensors, handle = self.runtime.all_gather(t)
         return *tensors, handle
 
-    @weak_lru(maxsize=None)
     def get_theoretical_num_sms(self, num_experts: int, num_topk: int,
                                 num_scaleout_topk: int = 0,
                                 rdma_gbs: float = 0, nvlink_gbs: float = 0,
@@ -781,6 +783,16 @@ class ElasticBuffer:
             num_sms: the recommended SM count (even, at least 4).
         """
         require_cuda("get_theoretical_num_sms")
+        return self._get_theoretical_num_sms(
+            num_experts, num_topk, num_scaleout_topk, rdma_gbs, nvlink_gbs,
+            sm_read_gbs, sm_write_gbs)
+
+    @weak_lru(maxsize=None)
+    def _get_theoretical_num_sms(self, num_experts: int, num_topk: int,
+                                 num_scaleout_topk: int = 0,
+                                 rdma_gbs: float = 0, nvlink_gbs: float = 0,
+                                 sm_read_gbs: float = 200,
+                                 sm_write_gbs: float = 50) -> int:
         # TODO: support `do_expand` and `allow_multiple_reduction`
 
         # The `1` in this function means scale-up traffic
