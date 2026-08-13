@@ -1,34 +1,31 @@
 import unittest
 
-from api_contract import (COMMON_BUFFER_METHODS, COMMON_MODULE_NAMES,
-                          CUDA_ONLY_BUFFER_METHODS, CUDA_ONLY_MODULE_NAMES)
+from api_contract import (ASCEND_ELASTIC_BUFFER_METHODS, ASCEND_MODULE_NAMES,
+                          CUDA_ELASTIC_BUFFER_METHODS, CUDA_MODULE_NAMES)
 from extension_loader import load_extension
 
 
 _C = load_extension()
 
 
+def public_names(owner):
+    return {name for name in vars(owner) if not name.startswith("_")}
+
+
 class ExtensionContractTest(unittest.TestCase):
     def test_platform_name(self):
         self.assertIn(_C.get_platform(), ("cuda", "ascend"))
 
-    def test_common_names(self):
-        for name in COMMON_MODULE_NAMES:
-            self.assertTrue(hasattr(_C, name), name)
-        for name in COMMON_BUFFER_METHODS:
-            self.assertTrue(hasattr(_C.ElasticBuffer, name), name)
-
-    def test_platform_specific_names(self):
+    def test_exact_platform_surface(self):
         if _C.get_platform() == "cuda":
-            for name in CUDA_ONLY_MODULE_NAMES:
-                self.assertTrue(hasattr(_C, name), name)
-            for name in CUDA_ONLY_BUFFER_METHODS:
-                self.assertTrue(hasattr(_C.ElasticBuffer, name), name)
+            module_names = CUDA_MODULE_NAMES
+            buffer_methods = CUDA_ELASTIC_BUFFER_METHODS
         else:
-            for name in CUDA_ONLY_MODULE_NAMES:
-                self.assertFalse(hasattr(_C, name), name)
-            for name in CUDA_ONLY_BUFFER_METHODS:
-                self.assertFalse(hasattr(_C.ElasticBuffer, name), name)
+            module_names = ASCEND_MODULE_NAMES
+            buffer_methods = ASCEND_ELASTIC_BUFFER_METHODS
+
+        self.assertSetEqual(public_names(_C), module_names)
+        self.assertSetEqual(public_names(_C.ElasticBuffer), buffer_methods)
 
 
 if __name__ == "__main__":

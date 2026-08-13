@@ -78,6 +78,8 @@ class ElasticBuffer {
     int agrs_buffer_slot_idx = 0;
 
 public:
+    using cpu_comm_t = symmetric::cpu_comm_t;
+
     ElasticBuffer(const int& rank_idx, const int& num_ranks,
                   const int64_t& nccl_comm, const symmetric::cpu_comm_t& cpu_comm,
                   const int64_t& num_buffer_bytes, const int64_t& num_cpu_buffer_bytes,

@@ -1,3 +1,5 @@
+import ast
+import importlib.util
 import pathlib
 import subprocess
 import tempfile
@@ -7,12 +9,19 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HEADER = ROOT / "csrc/backends/ascend/elastic_buffer.hpp"
+API_CONTRACT = ROOT / "tests/platform/api_contract.py"
+EXTENSION_CONTRACT = ROOT / "tests/platform/test_extension_contract.py"
+STUB_TEST = ROOT / "tests/ascend/test_stub.py"
 
 
 PYBIND11_HEADER = r"""
 #pragma once
 #include <exception>
+#include <map>
+#include <set>
 #include <string>
+#include <type_traits>
+#include <utility>
 
 struct _object {};
 using PyObject = _object;
@@ -23,6 +32,44 @@ inline void PyErr_SetString(PyObject*, const char* message) { python_error = mes
 namespace pybind11 {
 class object {};
 class error_already_set : public std::exception {};
+
+class module_ {
+public:
+    std::set<std::string> names;
+    std::map<std::string, std::set<std::string>> class_methods;
+
+    template <typename Function>
+    void def(const char* name, Function&&) {
+        names.emplace(name);
+    }
+};
+
+template <typename... Args>
+struct init {};
+
+template <typename Type>
+class class_ {
+    module_* module;
+    std::string name;
+
+public:
+    class_(module_& owner, const char* class_name)
+        : module(&owner), name(class_name) {
+        module->names.emplace(name);
+    }
+
+    template <typename... Args>
+    class_& def(init<Args...>) {
+        static_assert(std::is_constructible_v<Type, Args...>);
+        return *this;
+    }
+
+    template <typename Function>
+    class_& def(const char* method_name, Function&&) {
+        module->class_methods[name].emplace(method_name);
+        return *this;
+    }
+};
 }  // namespace pybind11
 """
 
@@ -61,9 +108,10 @@ PROBE = r"""
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
-#include "csrc/backends/ascend/elastic_buffer.hpp"
+#include "csrc/elastic/api.hpp"
 
 using Buffer = deep_ep::ascend::ElasticBuffer;
 using Event = deep_ep::ascend::EventHandle;
@@ -71,18 +119,22 @@ using Tensor = torch::Tensor;
 
 using DispatchResult = std::tuple<
     Tensor, std::optional<Tensor>, std::optional<Tensor>, std::optional<Tensor>,
-    std::optional<Tensor>, std::vector<int>, Tensor, Tensor, Tensor, Tensor,
-    std::optional<Tensor>, std::optional<Tensor>, std::optional<Event>>;
+    std::optional<Tensor>, int, int, std::vector<int>, Tensor, Tensor, Tensor,
+    Tensor, Tensor, std::optional<Tensor>, std::optional<Tensor>,
+    std::optional<Event>>;
 using Dispatch = DispatchResult (Buffer::*)(
     const Tensor&, const std::optional<Tensor>&, const Tensor&,
     const std::optional<Tensor>&, const std::optional<Tensor>&,
-    const std::optional<int>&, const std::optional<std::vector<int>>&,
+    const std::optional<int>&, const std::optional<int>&,
+    const std::optional<std::vector<int>>&,
+    const std::optional<Tensor>&, const std::optional<Tensor>&,
+    const std::optional<Tensor>&,
     const std::optional<Tensor>&, const std::optional<Tensor>&,
     const std::optional<Tensor>&, const std::optional<Tensor>&,
-    const std::optional<Tensor>&, const int&, const int&, const int&,
-    const int&, const int&, const std::optional<Event>&,
+    const int&, const int&, const int&, const int&, const int&,
+    const std::optional<Event>&,
     const std::optional<Event>&, const bool&, const bool&, const bool&,
-    const bool&, const bool&, const bool&) const;
+    const bool&, const bool&, const bool&, const bool&) const;
 
 using CombineResult = std::tuple<Tensor, std::optional<Tensor>, std::optional<Event>>;
 using Combine = CombineResult (Buffer::*)(
@@ -110,12 +162,28 @@ bool raises_phase_error(const char* operation, Call call) {
 }
 
 int main() {
-    Buffer buffer(0, 1, 0, 4096, false, true, true, true, 3, 0, 300, 100, true);
+    pybind11::module_ module;
+    deep_ep::elastic::register_apis(module);
+    if (module.names != std::set<std::string>{
+            "EventHandle", "ElasticBuffer", "calculate_elastic_buffer_size"})
+        return 17;
+    if (module.class_methods["EventHandle"] !=
+        std::set<std::string>{"current_stream_wait"})
+        return 18;
+    if (module.class_methods["ElasticBuffer"] != std::set<std::string>{
+            "destroy", "get_comm_stream", "get_physical_domain_size",
+            "get_logical_domain_size", "barrier", "dispatch", "combine"})
+        return 19;
+
+    Buffer::cpu_comm_t cpu_comm;
+    Buffer buffer(0, 1, 0, cpu_comm, 4096, 0,
+                  false, true, true, 3, 0, 300, 100, true);
     buffer.destroy();
     buffer.destroy();
 
     try {
-        Buffer invalid(0, 1, 7, 4096, false, true, true, true, 3, 0, 300, 100, true);
+        Buffer invalid(0, 1, 7, cpu_comm, 4096, 0,
+                       false, true, true, 3, 0, 300, 100, true);
         return 1;
     } catch (const std::runtime_error& error) {
         if (std::string(error.what()).find("comm_handle must be zero") == std::string::npos)
@@ -123,7 +191,8 @@ int main() {
     }
 
     try {
-        Buffer invalid(0, 1, 0, 0, false, true, true, true, 3, 0, 300, 100, true);
+        Buffer invalid(0, 1, 0, cpu_comm, 0, 0,
+                       false, true, true, 3, 0, 300, 100, true);
         return 3;
     } catch (const std::runtime_error& error) {
         if (std::string(error.what()).find("num_buffer_bytes must be positive") == std::string::npos)
@@ -131,7 +200,8 @@ int main() {
     }
 
     try {
-        Buffer invalid(0, 0, 0, 4096, false, true, true, true, 3, 0, 300, 100, true);
+        Buffer invalid(0, 0, 0, cpu_comm, 4096, 0,
+                       false, true, true, 3, 0, 300, 100, true);
         return 5;
     } catch (const std::runtime_error& error) {
         if (std::string(error.what()).find("num_ranks must be positive") == std::string::npos)
@@ -139,7 +209,8 @@ int main() {
     }
 
     try {
-        Buffer invalid(1, 1, 0, 4096, false, true, true, true, 3, 0, 300, 100, true);
+        Buffer invalid(1, 1, 0, cpu_comm, 4096, 0,
+                       false, true, true, 3, 0, 300, 100, true);
         return 7;
     } catch (const std::runtime_error& error) {
         if (std::string(error.what()).find("rank_idx must be in [0, num_ranks)") ==
@@ -157,7 +228,27 @@ int main() {
     if (!raises_phase_error("get_logical_domain_size",
                             [&] { buffer.get_logical_domain_size(); }))
         return 12;
-    if (!raises_phase_error("barrier", [&] { buffer.barrier(true, false); }))
+    try {
+        Buffer::cpu_comm_t unsupported_cpu_comm{{1, 2}};
+        Buffer invalid(0, 1, 0, unsupported_cpu_comm, 4096, 0,
+                       false, true, true, 3, 0, 300, 100, true);
+        return 20;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("cpu_comm must be empty") == std::string::npos)
+            return 21;
+    }
+
+    try {
+        Buffer invalid(0, 1, 0, cpu_comm, 4096, 4096,
+                       false, true, true, 3, 0, 300, 100, true);
+        return 22;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("num_cpu_buffer_bytes must be zero") ==
+            std::string::npos)
+            return 23;
+    }
+
+    if (!raises_phase_error("barrier", [&] { buffer.barrier(true, false, true); }))
         return 13;
     if (!raises_phase_error("calculate_elastic_buffer_size", [] {
             Buffer::calculate_buffer_size(0, 128, 7168, 8, false, true, true);
@@ -172,10 +263,11 @@ int main() {
     if (!raises_phase_error("dispatch", [&] {
             buffer.dispatch(
                 tensor, optional_tensor, tensor, optional_tensor, optional_tensor,
-                optional_int, optional_ints, optional_tensor, optional_tensor,
+                optional_int, optional_int, optional_ints,
+                optional_tensor, optional_tensor, optional_tensor, optional_tensor,
                 optional_tensor, optional_tensor, optional_tensor,
                 1, 1, 1, 1, 0, optional_event, optional_event,
-                false, false, true, true, false, false);
+                false, false, true, true, false, false, false);
         }))
         return 15;
     if (!raises_phase_error("combine", [&] {
@@ -202,7 +294,8 @@ class AscendStubSourceTest(unittest.TestCase):
             probe.write_text(textwrap.dedent(PROBE))
             binary = include / "probe"
             compile_result = subprocess.run(
-                ["c++", "-std=c++17", f"-I{include}", f"-I{ROOT}",
+                ["c++", "-std=c++17", "-DDEEP_EP_PLATFORM_ASCEND=1",
+                 f"-I{include}", f"-I{ROOT}",
                  str(probe), "-o", str(binary)],
                 capture_output=True, text=True, check=False)
             self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
@@ -216,6 +309,57 @@ class AscendStubSourceTest(unittest.TestCase):
                     if line.lstrip().startswith("#include")]
         for forbidden in ("cuda", "nccl", "nvshmem", "cann", "hccl", "torch_npu"):
             self.assertFalse(any(forbidden in include for include in includes), forbidden)
+
+    def test_contract_defines_exact_public_allowlists(self):
+        spec = importlib.util.spec_from_file_location("api_contract", API_CONTRACT)
+        contract = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(contract)
+
+        self.assertEqual(contract.ASCEND_MODULE_NAMES, {
+            "get_platform", "topk_idx_t", "EventHandle", "ElasticBuffer",
+            "calculate_elastic_buffer_size",
+        })
+        self.assertEqual(contract.CUDA_MODULE_NAMES - contract.ASCEND_MODULE_NAMES, {
+            "is_sm90_compiled", "init_jit", "Config", "Buffer",
+            "get_low_latency_rdma_size_hint", "get_local_nccl_unique_id",
+            "create_nccl_comm", "destroy_nccl_comm", "get_physical_domain_size",
+            "get_logical_domain_size",
+        })
+        self.assertEqual(contract.ASCEND_ELASTIC_BUFFER_METHODS,
+                         contract.COMMON_BUFFER_METHODS)
+        self.assertEqual(contract.CUDA_ELASTIC_BUFFER_METHODS,
+                         contract.COMMON_BUFFER_METHODS |
+                         contract.CUDA_ONLY_BUFFER_METHODS)
+
+        tree = ast.parse(EXTENSION_CONTRACT.read_text())
+        called_attributes = {
+            node.func.attr for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        called_names = {
+            node.func.id for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertIn("assertSetEqual", called_attributes)
+        self.assertIn("public_names", called_names)
+        self.assertNotIn("hasattr", called_names)
+
+    def test_python_phase_error_helper_requires_exact_type_and_message(self):
+        tree = ast.parse(STUB_TEST.read_text())
+        helper = next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.FunctionDef) and
+                      node.name == "assert_phase_error")
+        calls = {
+            node.func.attr: [ast.unparse(argument) for argument in node.args]
+            for node in ast.walk(helper)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and
+            node.func.attr.startswith("assert")
+        }
+        self.assertNotIn("assertRaisesRegex", calls)
+        self.assertEqual(calls["assertRaises"], ["NotImplementedError"])
+        self.assertEqual(calls["assertIs"],
+                         ["type(exception)", "NotImplementedError"])
+        self.assertEqual(calls["assertEqual"], ["str(exception)", "message"])
 
 
 if __name__ == "__main__":

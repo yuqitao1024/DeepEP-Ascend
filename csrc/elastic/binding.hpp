@@ -16,8 +16,10 @@ void register_event(pybind11::module_& m) {
 template <typename ElasticBuffer>
 pybind11::class_<ElasticBuffer> register_common_apis(pybind11::module_& m) {
     pybind11::class_<ElasticBuffer> cls(m, "ElasticBuffer");
-    cls.def(pybind11::init<int, int, int64_t, int64_t,
-                          bool, bool, bool, bool, int, int, int, int, bool>())
+    cls.def(pybind11::init<int, int, int64_t,
+                          typename ElasticBuffer::cpu_comm_t,
+                          int64_t, int64_t,
+                          bool, bool, bool, int, int, int, int, bool>())
        .def("destroy", &ElasticBuffer::destroy)
        .def("get_comm_stream", &ElasticBuffer::get_comm_stream)
        .def("get_physical_domain_size", &ElasticBuffer::get_physical_domain_size)
