@@ -11,7 +11,7 @@ from typing import Tuple
 # noinspection PyUnresolvedReferences
 import deep_ep._C as _C
 
-from .comm import get_nccl_comm_handle
+from ..platform import comm_handle_value, get_comm_handle, require_cuda
 
 _local_rank = None
 _local_seed = 0
@@ -124,7 +124,9 @@ def get_physical_domain_size(group: dist.ProcessGroup) -> Tuple[int, int]:
         num_rdma_ranks: the number of physical RDMA ranks.
         num_nvlink_ranks: the number of physical NVLink ranks.
     """
-    return _C.get_physical_domain_size(get_nccl_comm_handle(group).get())
+    require_cuda("get_physical_domain_size")
+    return _C.get_physical_domain_size(
+        comm_handle_value(get_comm_handle(group)))
 
 
 def get_logical_domain_size(group: dist.ProcessGroup, allow_hybrid_mode: bool = True) -> Tuple[int, int]:
@@ -139,7 +141,9 @@ def get_logical_domain_size(group: dist.ProcessGroup, allow_hybrid_mode: bool = 
         num_scaleout_ranks: the number of logical scaleout ranks.
         num_scaleup_ranks: the number of logical scaleup ranks.
     """
-    return _C.get_logical_domain_size(get_nccl_comm_handle(group).get(), allow_hybrid_mode)
+    require_cuda("get_logical_domain_size")
+    return _C.get_logical_domain_size(
+        comm_handle_value(get_comm_handle(group)), allow_hybrid_mode)
 
 
 def check_nvlink_connections(group: dist.ProcessGroup) -> None:

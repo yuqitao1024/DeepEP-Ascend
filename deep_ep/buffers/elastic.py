@@ -11,6 +11,16 @@ import deep_ep._C as _C
 # noinspection PyUnresolvedReferences
 from deep_ep._C import EventHandle
 
+from ..platform import (
+    capture_event,
+    comm_handle_value,
+    get_comm_handle,
+    is_cuda,
+    require_cuda,
+    synchronize,
+    unwrap_event,
+    wrap_stream,
+)
 from ..utils.event import EventOverlap
 from ..utils.math import align
 from ..utils.semantic import value_or, weak_lru
@@ -19,7 +29,6 @@ from ..utils.envs import (
     check_nvlink_connections, check_torch_deterministic,
     get_nvlink_gbs, get_rdma_gbs
 )
-from ..utils.comm import get_nccl_comm_handle
 
 
 class EPHandle:
@@ -275,39 +284,40 @@ class ElasticBuffer:
         self.allow_multiple_reduction = allow_multiple_reduction
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
         self.deterministic = deterministic
+        self.comm_handle = get_comm_handle(group)
+        comm_handle = comm_handle_value(self.comm_handle)
 
-        if os.environ.get('NCCL_GIN_CROSS_NIC') == '0':
-            # TODO: move this variable into NCCL runtime
-            # Multi-plane: all ranks share CPU segments, skip proxy re-export for sysmem handles
-            os.environ.setdefault('NCCL_SYM_REUSE_SYSMEM_HANDLES', '1')
+        if is_cuda():
+            if os.environ.get('NCCL_GIN_CROSS_NIC') == '0':
+                # TODO: move this variable into NCCL runtime
+                # Multi-plane: all ranks share CPU segments, skip proxy re-export for sysmem handles
+                os.environ.setdefault('NCCL_SYM_REUSE_SYSMEM_HANDLES', '1')
 
-        # For extreme large buffer size, we have to enlarge the NCCL VA space
-        if num_cpu_bytes > 0:
-            assert num_bytes is not None
-            num_gpu_bytes = num_bytes - num_cpu_bytes
-            num_max_local_ranks = int(os.getenv('EP_NUM_MAX_LOCAL_RANKS', 16)) if allow_hybrid_mode else 1
+            # For extreme large buffer size, we have to enlarge the NCCL VA space
+            if num_cpu_bytes > 0:
+                assert num_bytes is not None
+                num_gpu_bytes = num_bytes - num_cpu_bytes
+                num_max_local_ranks = int(os.getenv('EP_NUM_MAX_LOCAL_RANKS', 16)) if allow_hybrid_mode else 1
 
-            # Add 4 GiB of slack for the workspace
-            num_registered_bytes = num_gpu_bytes + num_cpu_bytes * num_max_local_ranks + (1 << 32)
-            num_total_gpu_bytes = torch.cuda.get_device_properties('cuda').total_memory
-            if num_registered_bytes > num_total_gpu_bytes:
-                # NCCL aligns the stride up to 4 GiB internally.
-                win_stride = align(num_registered_bytes, 1 << 32)
-                # TODO: setting the window stride via an env var is fragile. Replace this once
-                # NCCL exposes a better way to configure the symmetric window stride.
-                os.environ['NCCL_WIN_STRIDE'] = str(win_stride)
-
-        # Create NCCL comm handle
-        self.nccl_comm_handle = get_nccl_comm_handle(group, force_new_comm=num_cpu_bytes > 0)
+                # Add 4 GiB of slack for the workspace
+                num_registered_bytes = num_gpu_bytes + num_cpu_bytes * num_max_local_ranks + (1 << 32)
+                num_total_gpu_bytes = torch.cuda.get_device_properties('cuda').total_memory
+                if num_registered_bytes > num_total_gpu_bytes:
+                    # NCCL aligns the stride up to 4 GiB internally.
+                    win_stride = align(num_registered_bytes, 1 << 32)
+                    # TODO: setting the window stride via an env var is fragile. Replace this once
+                    # NCCL exposes a better way to configure the symmetric window stride.
+                    os.environ['NCCL_WIN_STRIDE'] = str(win_stride)
 
         # Calculate buffer size (already 2 MB-aligned from hint functions / calculate_elastic_buffer_size)
         if num_bytes is None:
             # NOTES: we allow `num_topk == 0`, as the buffer size can also be calculated by number of ranks (maybe bigger though)
             num_bytes = _C.calculate_elastic_buffer_size(
-                self.nccl_comm_handle.get(),
+                comm_handle,
                 num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
                 allow_hybrid_mode, allow_multiple_reduction)
-
+        if num_bytes <= 0:
+            raise ValueError("num_bytes must be positive")
         if os.environ.get('EP_BUFFER_DEBUG', 0):
             print(f'Initializing EP elastic buffer with {num_bytes} bytes '
                   f'(cpu: {num_cpu_bytes}) at rank EP {group.rank()}/{group.size()}')
@@ -316,27 +326,30 @@ class ElasticBuffer:
         # Store default values
         self.num_max_tokens_per_rank = num_max_tokens_per_rank
 
-        # Check PCIe GPUs
-        check_nvlink_connections(group)
+        if is_cuda():
+            # Check PCIe GPUs
+            check_nvlink_connections(group)
 
-        # RDMA SL
-        if 'EP_OVERRIDE_RDMA_SL' in os.environ:
-            sl_idx = int(os.environ['EP_OVERRIDE_RDMA_SL'])
+            # RDMA SL
+            if 'EP_OVERRIDE_RDMA_SL' in os.environ:
+                sl_idx = int(os.environ['EP_OVERRIDE_RDMA_SL'])
 
-        # Automatic maximum QP count allowed
-        # TODO(tianr22): revise the QP count in consideration of Engram
-        if num_allocated_qps == 0:
-            # Hybrid mode will consume more QPs
-            # The extra QP is for notify warps
-            if self.allow_hybrid_mode:
-                num_allocated_qps = 65 if check_fast_rdma_atomic_support() else 129
-            else:
-                num_allocated_qps = 17
+            # Automatic maximum QP count allowed
+            # TODO(tianr22): revise the QP count in consideration of Engram
+            if num_allocated_qps == 0:
+                # Hybrid mode will consume more QPs
+                # The extra QP is for notify warps
+                if self.allow_hybrid_mode:
+                    num_allocated_qps = 65 if check_fast_rdma_atomic_support() else 129
+                else:
+                    num_allocated_qps = 17
+        else:
+            num_allocated_qps = 0
         self.num_allocated_qps = num_allocated_qps
 
         # Create CPU communicator (exchange POSIX FD handles for CPU segments)
         cpu_comm = []
-        if allow_hybrid_mode and num_cpu_bytes > 0:
+        if is_cuda() and allow_hybrid_mode and num_cpu_bytes > 0:
             pid, fd = _C.create_cpu_handle(num_cpu_bytes)
             cpu_comm = [None] * self.num_ranks
             dist.all_gather_object(cpu_comm, (pid, fd), self.group)
@@ -344,7 +357,7 @@ class ElasticBuffer:
         # Create CPP handle
         self.explicitly_destroy = explicitly_destroy
         self.runtime = _C.ElasticBuffer(group.rank(), group.size(),
-                                        self.nccl_comm_handle.get(), cpu_comm,
+                                        comm_handle, cpu_comm,
                                         num_bytes, num_cpu_bytes,
                                         allow_hybrid_mode,
                                         allow_multiple_reduction,
@@ -353,18 +366,23 @@ class ElasticBuffer:
                                         num_cpu_timeout_secs, num_gpu_timeout_secs,
                                         self.explicitly_destroy)
 
-        # Logical rank indices
-        self.num_scaleout_ranks, self.num_scaleup_ranks = self.get_logical_domain_size()
-        self.scaleout_rank_idx = self.rank_idx // self.num_scaleup_ranks
-        self.scaleup_rank_idx = self.rank_idx % self.num_scaleup_ranks
+        if is_cuda():
+            # Logical rank indices
+            self.num_scaleout_ranks, self.num_scaleup_ranks = self.get_logical_domain_size()
+            self.scaleout_rank_idx = self.rank_idx // self.num_scaleup_ranks
+            self.scaleup_rank_idx = self.rank_idx % self.num_scaleup_ranks
 
-        # Physical rank indices
-        self.num_rdma_ranks, self.num_nvlink_ranks = self.get_physical_domain_size()
+            # Physical rank indices
+            self.num_rdma_ranks, self.num_nvlink_ranks = self.get_physical_domain_size()
 
-        # Call a barrier to ensure initialization visibility for all peers
-        torch.cuda.synchronize()
-        group.barrier()
-        torch.cuda.synchronize()
+            # Call a barrier to ensure initialization visibility for all peers
+            synchronize()
+            group.barrier()
+            synchronize()
+        else:
+            self.num_scaleout_ranks = self.num_scaleup_ranks = None
+            self.scaleout_rank_idx = self.scaleup_rank_idx = None
+            self.num_rdma_ranks = self.num_nvlink_ranks = None
 
     def destroy(self) -> None:
         """
@@ -375,7 +393,7 @@ class ElasticBuffer:
         if self.runtime is not None:
             self.runtime.destroy()
             self.runtime = None  # Cannot use anymore
-            self.nccl_comm_handle = None
+            self.comm_handle = None
 
     @staticmethod
     def get_buffer_size_hint(group: dist.ProcessGroup,
@@ -400,8 +418,9 @@ class ElasticBuffer:
             size: the recommended buffer size in bytes (2 MB-aligned).
         """
         # NOTES: calculate_elastic_buffer_size already returns 2 MB-aligned values
+        comm_handle = get_comm_handle(group)
         return _C.calculate_elastic_buffer_size(
-            get_nccl_comm_handle(group).get(),
+            comm_handle_value(comm_handle),
             num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
             allow_hybrid_mode, allow_multiple_reduction)
 
@@ -505,6 +524,7 @@ class ElasticBuffer:
                 in parallel across SMs. Sequential mode provides better synchronization guarantees,
                 mainly used for test synchronization.
         """
+        require_cuda("barrier")
         self.runtime.barrier(use_comm_stream, with_cpu_sync, sequential)
 
     @staticmethod
@@ -534,7 +554,7 @@ class ElasticBuffer:
         Returns:
             event_handle: the captured event handle.
         """
-        return EventHandle()
+        return capture_event()
 
     def get_comm_stream(self) -> torch.Stream:
         """
@@ -543,8 +563,8 @@ class ElasticBuffer:
         Returns:
             stream: the communication stream.
         """
-        ts: torch.Stream = self.runtime.get_comm_stream()
-        return torch.cuda.Stream(stream_id=ts.stream_id, device_index=ts.device_index, device_type=ts.device_type)
+        require_cuda("get_comm_stream")
+        return wrap_stream(self.runtime.get_comm_stream())
 
     def get_physical_domain_size(self) -> Tuple[int, int]:
         """
@@ -554,6 +574,7 @@ class ElasticBuffer:
             num_rdma_ranks: the number of physical RDMA ranks.
             num_nvlink_ranks: the number of physical NVLink ranks.
         """
+        require_cuda("get_physical_domain_size")
         return self.runtime.get_physical_domain_size()
 
     def get_logical_domain_size(self) -> Tuple[int, int]:
@@ -564,6 +585,7 @@ class ElasticBuffer:
             num_scaleout_ranks: the number of logical scaleout ranks.
             num_scaleup_ranks: the number of logical scaleup ranks.
         """
+        require_cuda("get_logical_domain_size")
         return self.runtime.get_logical_domain_size()
 
     def engram_write(self, storage: torch.Tensor,
@@ -579,6 +601,7 @@ class ElasticBuffer:
                 factors (row-major). Each pack is an opaque 4-byte element, either `torch.float32` or
                 packed UE8M0x4 (`torch.int32`). Must be provided iff the storage is FP8.
         """
+        require_cuda("engram_write")
         self.runtime.engram_write(storage, sf)
 
     def engram_fetch(self, indices: torch.Tensor, num_qps: int = 0,
@@ -601,6 +624,7 @@ class ElasticBuffer:
                 `[num_tokens, num_entries_per_token * num_sf_packs]` in FP8 mode, otherwise `None`.
                 In FP8 mode the factors come from the `sf` tensor supplied at `engram_write`.
         """
+        require_cuda("engram_fetch")
         return self.runtime.engram_fetch(indices, num_qps, use_tma_aligned_col_major_sf)
 
     def pp_set_config(self, num_max_tensor_bytes: int, num_max_inflight_tensors: int):
@@ -611,6 +635,7 @@ class ElasticBuffer:
             num_max_tensor_bytes: the maximum tensor size in bytes per send/recv operation.
             num_max_inflight_tensors: the maximum number of in-flight tensors at once.
         """
+        require_cuda("pp_set_config")
         self.runtime.pp_set_config(num_max_tensor_bytes, num_max_inflight_tensors)
 
     def pp_send(self, t: torch.Tensor, dst_rank_idx: int, num_sms: int = 0) -> None:
@@ -622,6 +647,7 @@ class ElasticBuffer:
             dst_rank_idx: the destination rank index (must be prev or next rank in the ring).
             num_sms: the number of SMs to use (0 for all SMs).
         """
+        require_cuda("pp_send")
         self.runtime.pp_send(t, dst_rank_idx, num_sms)
 
     def pp_recv(self, t: torch.Tensor, src_rank_idx: int, num_sms: int = 0) -> None:
@@ -633,6 +659,7 @@ class ElasticBuffer:
             src_rank_idx: the source rank index (must be prev or next rank in the ring).
             num_sms: the number of SMs to use (0 for all SMs).
         """
+        require_cuda("pp_recv")
         self.runtime.pp_recv(t, src_rank_idx, num_sms)
 
     def create_agrs_session(self) -> None:
@@ -640,6 +667,7 @@ class ElasticBuffer:
         (Experimental) Begin a new all-gather reduce-scatter (AGRS) session. Must be paired with `destroy_agrs_session`.
 
         """
+        require_cuda("create_agrs_session")
         self.runtime.create_agrs_session()
 
     def destroy_agrs_session(self) -> None:
@@ -647,6 +675,7 @@ class ElasticBuffer:
         (Experimental) End the current AGRS session. Waits for the compute stream, signals session completion to all peers.
 
         """
+        require_cuda("destroy_agrs_session")
         self.runtime.destroy_agrs_session()
 
     @contextmanager
@@ -657,6 +686,7 @@ class ElasticBuffer:
         Arguments:
             enabled: if `False`, the context manager is a no-op.
         """
+        require_cuda("agrs_new_session")
         if not enabled:
             yield
             return
@@ -676,6 +706,7 @@ class ElasticBuffer:
             num_max_session_bytes: the maximum total bytes of gathered tensors per session.
             num_max_all_gathers_per_session: the maximum number of all-gather operations per session.
         """
+        require_cuda("agrs_set_config")
         self.runtime.agrs_set_config(num_max_session_bytes, num_max_all_gathers_per_session)
 
     # noinspection PyTypeChecker
@@ -694,6 +725,7 @@ class ElasticBuffer:
         Returns:
             tensor: a single tensor if a single shape is given, or a tuple of tensors for batched mode.
         """
+        require_cuda("agrs_get_inplace_tensor")
         is_batched_mode = isinstance(shapes[0], tuple)
         if not is_batched_mode:
             shapes = (shapes, )
@@ -717,6 +749,7 @@ class ElasticBuffer:
                 `num_ranks`, and `handle` is a callable to wait for data arrival.
             For a sequence: `(*gathered_tensors, handle)` with one gathered tensor per input.
         """
+        require_cuda("all_gather")
         if isinstance(t, torch.Tensor):
             tensors, handle = self.runtime.all_gather((t,))
             return tensors[0], handle
@@ -747,6 +780,7 @@ class ElasticBuffer:
         Returns:
             num_sms: the recommended SM count (even, at least 4).
         """
+        require_cuda("get_theoretical_num_sms")
         # TODO: support `do_expand` and `allow_multiple_reduction`
 
         # The `1` in this function means scale-up traffic
@@ -843,6 +877,7 @@ class ElasticBuffer:
         Returns:
             num_qps: the recommended QP count, capped by `num_allocated_qps`.
         """
+        require_cuda("get_theoretical_num_qps")
         # For direct mode, we encourage less QPs to reduce DB ringing overhead
         num_qps = min(num_sms, 8 + 1)
 
@@ -921,6 +956,7 @@ class ElasticBuffer:
             handle: the returned communication handle.
             event: the event after executing the kernel (valid only if `async_with_compute_stream` is set).
         """
+        require_cuda("dispatch")
         check_torch_deterministic()
 
         # Automatic decide SM and QP count
@@ -988,8 +1024,8 @@ class ElasticBuffer:
                                         num_max_tokens_per_rank,
                                         num_experts, expert_alignment,
                                         num_sms, num_qps,
-                                        previous_event,
-                                        previous_event_before_epilogue,
+                                        unwrap_event(previous_event),
+                                        unwrap_event(previous_event_before_epilogue),
                                         async_with_compute_stream, allocate_on_comm_stream,
                                         do_handle_copy, do_cpu_sync, do_expand,
                                         do_zero_padding,
@@ -1080,6 +1116,7 @@ class ElasticBuffer:
             combined_topk_weights: the reduced top-k weights, with shape `[num_combined_tokens, num_topk]` and type `torch.float`.
             event: the event after executing the kernel (valid only if `async_with_compute_stream` is set).
         """
+        require_cuda("combine")
         check_torch_deterministic()
 
         # Automatic decide SM and QP count
@@ -1099,8 +1136,8 @@ class ElasticBuffer:
                                  handle.num_experts,
                                  handle.num_max_tokens_per_rank,
                                  num_sms, num_qps,
-                                 previous_event,
-                                 previous_event_before_epilogue,
+                                 unwrap_event(previous_event),
+                                 unwrap_event(previous_event_before_epilogue),
                                  async_with_compute_stream,
                                  allocate_on_comm_stream,
                                  handle.do_expand)

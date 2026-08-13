@@ -7,11 +7,11 @@ from deep_ep._C import EventHandle
 
 class EventOverlap:
     """
-    A wrapper class to manage CUDA events, also for better overlapping convenience.
+    A wrapper class to manage backend events, also for better overlapping convenience.
 
     Attributes:
-        event: the CUDA event captured.
-        extra_tensors: an easier way to simulate PyTorch tensor `record_stream`, may be useful with CUDA graph.
+        event: the backend event captured.
+        extra_tensors: an easier way to simulate PyTorch tensor `record_stream`, may be useful with accelerator graphs.
     """
 
     def __init__(self, event: Optional[EventHandle] = None, extra_tensors: Optional[Tuple[torch.Tensor]] = None) -> None:
@@ -19,8 +19,8 @@ class EventOverlap:
         Initialize the class.
 
         Arguments:
-            event: the CUDA event captured.
-            extra_tensors: an easier way to simulate PyTorch tensor `record_stream`, may be useful with CUDA graph.
+            event: the backend event captured.
+            extra_tensors: an easier way to simulate PyTorch tensor `record_stream`, may be useful with accelerator graphs.
         """
         self.event = event
 

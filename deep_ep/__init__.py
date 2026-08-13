@@ -5,7 +5,9 @@ import subprocess
 import torch
 import os
 
-from .utils.find_pkgs import find_nccl_root
+# noinspection PyUnresolvedReferences
+import deep_ep._C as _C
+from .platform import COMPILED_PLATFORM
 
 # Set some default environment provided at setup
 try:
@@ -51,6 +53,8 @@ def check_nccl_so():
     if int(os.environ.get('EP_SUPPRESS_NCCL_CHECK', 0)):
         return
 
+    from .utils.find_pkgs import find_nccl_root
+
     # PyTorch may load another NCCL library, which is different to the linked one
     with open('/proc/self/maps', 'r') as f:
         loaded_nccl_so = None
@@ -72,26 +76,34 @@ def init_jit():
     """
     Initialize the JIT compilation runtime. Sets up CUDA and NCCL root paths for the JIT compiler.
     """
-    # noinspection PyUnresolvedReferences
-    import deep_ep._C as _C
+    from .utils.find_pkgs import find_nccl_root
+
     library_root_path = os.path.dirname(os.path.abspath(__file__))
     _C.init_jit(library_root_path,  # Library root directory path
                 find_cuda_home(),   # CUDA home
                 find_nccl_root())   # NCCL root
 
 # Run initialization
-check_nccl_so()
-init_jit()
+if COMPILED_PLATFORM == "cuda":
+    check_nccl_so()
+    init_jit()
 
 
-# Import APIs after initialization
-from .buffers.legacy import Buffer
+# Preserve the legacy-first CUDA import order after initialization.
+if COMPILED_PLATFORM == "cuda":
+    from .buffers.legacy import Buffer
+
 from .buffers.elastic import ElasticBuffer, EPHandle
 # noinspection PyUnresolvedReferences
 from .utils.event import EventOverlap, EventHandle
-from .utils.envs import get_physical_domain_size, get_logical_domain_size
 
-# noinspection PyUnresolvedReferences
-from deep_ep._C import Config, topk_idx_t
+# Preserve the remaining CUDA root surface after wrapper initialization.
+if COMPILED_PLATFORM == "cuda":
+    from .utils.envs import get_physical_domain_size, get_logical_domain_size
+    # noinspection PyUnresolvedReferences
+    from deep_ep._C import Config, topk_idx_t
+else:
+    # noinspection PyUnresolvedReferences
+    from deep_ep._C import topk_idx_t
 
 __version__ = '2.1.0'
