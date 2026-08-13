@@ -100,6 +100,26 @@ python tests/elastic/test_engram.py
 python tests/elastic/test_pp.py
 ```
 
+#### Platform builds
+
+```bash
+# Existing/default CUDA build
+python setup.py build_ext --inplace
+
+# Explicit CUDA build
+DEEP_EP_PLATFORM=cuda python setup.py build_ext --inplace
+
+# Phase-1 host-only Ascend abstraction build
+DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace
+```
+
+Each installation contains one `deep_ep._C` extension; use
+`_C.get_platform()` to identify the compiled platform. The default build and
+the explicit CUDA build select CUDA. The phase-1 Ascend build establishes the
+EPv2 interface only: communication, topology, stream, and size-calculation
+operations raise `NotImplementedError`. Ascend C, ACL, HCCL, and `torch_npu`
+are not integrated in phase 1.
+
 ### Installation
 
 ```bash
