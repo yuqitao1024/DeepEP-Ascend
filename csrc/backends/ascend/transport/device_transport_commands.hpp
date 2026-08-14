@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cann_compat.hpp"
 #include "simt_intrinsics.hpp"
 #include "transport_commands.hpp"
 
@@ -54,6 +55,31 @@ DEEP_EP_ASCEND_SIMT_CALLEE __gm__ DeviceTransportDiagnostic* diagnostic(
         return nullptr;
     return reinterpret_cast<__gm__ DeviceTransportDiagnostic*>(
         simt::load_observed(&queue->diagnostic));
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE __gm__ std::uint64_t* signal_address(
+    const DeviceTransportContext& context, int source_rank,
+    std::uint32_t signal_index) {
+    if (context.channel_table == 0 || source_rank < 0)
+        return nullptr;
+    auto* team = reinterpret_cast<__gm__ cann_abi::Team*>(
+        context.channel_table);
+    const auto members = simt::load_observed(&team->member_count);
+    const auto self = simt::load_observed(&team->self_member);
+    const auto signals = simt::load_observed(&team->signal_count);
+    const auto memories_address =
+        simt::load_observed(&team->remote_sync_memories);
+    if (static_cast<std::uint32_t>(source_rank) >= members || self >= members ||
+        signal_index >= signals || memories_address == 0)
+        return nullptr;
+    auto* memories = reinterpret_cast<__gm__ cann_abi::Memory*>(
+        memories_address);
+    const auto base = simt::load_observed(&memories[self].address);
+    const auto offset =
+        (static_cast<std::uint64_t>(signal_index) * members +
+         static_cast<std::uint32_t>(source_rank)) * sizeof(std::uint64_t);
+    return reinterpret_cast<__gm__ std::uint64_t*>(
+        base + offset);
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE void record_error(
@@ -335,14 +361,45 @@ DEEP_EP_ASCEND_SIMT_CALLEE void signal(
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE SignalValue read_signal(
-    const DeviceTransportContext&, DeviceChannel, TransportTeam, int,
-    std::uint32_t) {
-    return 0;
+    const DeviceTransportContext& context, DeviceChannel channel,
+    TransportTeam team, int source_rank, std::uint32_t signal_index) {
+    if (channel != 0 || team == TransportTeam::kScaleOut)
+        return 0;
+    auto* address = detail::signal_address(context, source_rank, signal_index);
+    if (address == nullptr)
+        return 0;
+    const auto value = simt::load_observed(address);
+    simt::system_fence();
+    return value;
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE void wait_signal(
-    const DeviceTransportContext&, DeviceChannel, TransportTeam, int,
-    std::uint32_t, SignalValue, std::uint64_t) {}
+    const DeviceTransportContext& context, DeviceChannel channel,
+    TransportTeam team, int source_rank, std::uint32_t signal_index,
+    SignalValue target, std::uint64_t timeout_cycles) {
+    if (channel != 0 || team == TransportTeam::kScaleOut)
+        return;
+    auto* address = detail::signal_address(context, source_rank, signal_index);
+    auto* queue = detail::command_queue(context);
+    if (address == nullptr) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidAddress,
+            TransportCommandOpcode::kSignal, source_rank, channel);
+        return;
+    }
+    const auto limit = timeout_cycles == 0 ?
+        std::uint64_t{1000000} : timeout_cycles;
+    std::uint64_t retry = 0;
+    while (retry < limit && simt::load_observed(address) < target)
+        ++retry;
+    if (retry >= limit) {
+        detail::record_error(
+            queue, DeviceTransportError::kCompletionTimeout,
+            TransportCommandOpcode::kSignal, source_rank, channel);
+        return;
+    }
+    simt::system_fence();
+}
 
 DEEP_EP_ASCEND_SIMT_CALLEE void flush(
     const DeviceTransportContext& context, DeviceChannel channel,
