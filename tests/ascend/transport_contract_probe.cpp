@@ -34,11 +34,11 @@ static_assert(capability_bit(TransportCapability::kDeviceGet) !=
 
 using DevicePut = void (*)(
     const DeviceTransportContext&, device::DeviceChannel, TransportTeam, int,
-    void*, const void*, std::size_t, CooperationScope, MemorySegment,
+    DeviceAddress, DeviceAddress, std::size_t, CooperationScope, MemorySegment,
     DeviceOptions, const RemoteAction&);
 using DeviceGet = void (*)(
     const DeviceTransportContext&, device::DeviceChannel, TransportTeam, int,
-    const void*, void*, std::size_t, CooperationScope, MemorySegment,
+    DeviceAddress, DeviceAddress, std::size_t, CooperationScope, MemorySegment,
     DeviceOptions);
 using ReadSignal = SignalValue (*)(
     const DeviceTransportContext&, device::DeviceChannel, TransportTeam, int,

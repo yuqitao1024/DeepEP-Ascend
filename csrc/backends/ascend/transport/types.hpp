@@ -118,6 +118,9 @@ using DeviceOptions = std::uint32_t;
 inline constexpr DeviceOptions kDefaultOptions = 0;
 inline constexpr DeviceOptions kAggregateRequests = DeviceOptions{1} << 0;
 
+using DeviceAddress = std::uintptr_t;
+inline constexpr DeviceAddress kNullDeviceAddress = 0;
+
 enum class RemoteActionKind : std::uint8_t {
     kNone,
     kSignalAdd,

@@ -17,6 +17,8 @@ int main() {
     context.topology.scale_up_rank = 1;
     context.topology.scale_out_rank = 2;
     context.local_window_base = reinterpret_cast<std::uintptr_t>(storage);
+    const DeviceAddress storage_address =
+        reinterpret_cast<DeviceAddress>(storage);
 
     DeviceTransportFacade transport(context, 3);
     if (!transport.is_peer_directly_accessible(TransportTeam::kWorld, 5))
@@ -24,12 +26,13 @@ int main() {
     if (transport.is_peer_directly_accessible(TransportTeam::kWorld, 4))
         return 2;
     if (transport.get_symmetric_pointer(
-            TransportTeam::kScaleUp, 1, storage) != storage)
+            TransportTeam::kScaleUp, 1, storage_address) != storage_address)
         return 3;
     if (transport.get_symmetric_pointer(
-            TransportTeam::kScaleUp, 0, storage) != nullptr)
+            TransportTeam::kScaleUp, 0, storage_address) != kNullDeviceAddress)
         return 4;
-    if (transport.get_symmetric_offset(storage + 2) !=
+    if (transport.get_symmetric_offset(
+            reinterpret_cast<DeviceAddress>(storage + 2)) !=
         2 * sizeof(std::uint64_t))
         return 5;
 
@@ -37,19 +40,21 @@ int main() {
     const DeviceRequest request_snapshot = request;
 
     transport.put(
-        TransportTeam::kWorld, 0, storage, storage, sizeof(storage),
+        TransportTeam::kWorld, 0, storage_address, storage_address,
+        sizeof(storage),
         CooperationScope::kParticipant, MemorySegment::kDevice,
         kDefaultOptions, RemoteAction::none());
     transport.get(
-        TransportTeam::kScaleOut, 0, storage, storage, sizeof(storage),
+        TransportTeam::kScaleOut, 0, storage_address, storage_address,
+        sizeof(storage),
         CooperationScope::kWorkgroup, MemorySegment::kMixed,
         kAggregateRequests);
     transport.put_value(
-        TransportTeam::kScaleUp, 0, storage, 7, sizeof(std::uint64_t),
+        TransportTeam::kScaleUp, 0, storage_address, 7,
+        sizeof(std::uint64_t),
         kDefaultOptions);
     transport.remote_add_release(
-        TransportTeam::kWorld, 0,
-        reinterpret_cast<std::int64_t*>(storage), 1);
+        TransportTeam::kWorld, 0, storage_address, 1);
     transport.signal(
         TransportTeam::kScaleOut, 0, RemoteAction::signal_increment(1));
     if (transport.read_signal(TransportTeam::kWorld, 0, 1) != 0)
@@ -59,11 +64,11 @@ int main() {
     transport.flush_async(
         TransportTeam::kWorld, 0, CooperationScope::kParticipant, &request);
     transport.wait(&request);
-    if (transport.load_acquire(storage) != 0)
+    if (transport.load_acquire(storage_address) != 0)
         return 7;
-    transport.store_release(storage, 99);
+    transport.store_release(storage_address, 99);
     transport.system_fence();
-    transport.device_barrier(1, storage, 1000);
+    transport.device_barrier(1, storage_address, 1000);
 
     if (std::memcmp(storage_snapshot, storage, sizeof(storage)) != 0)
         return 8;

@@ -16,18 +16,18 @@ public:
     }
 
     DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t get_symmetric_offset(
-        const void* local_pointer) const {
-        return device::get_symmetric_offset(context_, local_pointer);
+        DeviceAddress local_address) const {
+        return device::get_symmetric_offset(context_, local_address);
     }
 
-    DEEP_EP_ASCEND_SIMT_CALLEE void* get_symmetric_pointer(
-        TransportTeam team, int rank, void* local_pointer) const {
-        return device::get_symmetric_pointer(context_, team, rank, local_pointer);
+    DEEP_EP_ASCEND_SIMT_CALLEE DeviceAddress get_symmetric_pointer(
+        TransportTeam team, int rank, DeviceAddress local_address) const {
+        return device::get_symmetric_pointer(context_, team, rank, local_address);
     }
 
     DEEP_EP_ASCEND_SIMT_CALLEE void put(
-        TransportTeam team, int destination_rank, void* destination,
-        const void* source, std::size_t bytes, CooperationScope scope,
+        TransportTeam team, int destination_rank, DeviceAddress destination,
+        DeviceAddress source, std::size_t bytes, CooperationScope scope,
         MemorySegment segment, DeviceOptions options,
         const RemoteAction& remote_action) const {
         device::put(context_, channel_, team, destination_rank, destination,
@@ -35,15 +35,15 @@ public:
     }
 
     DEEP_EP_ASCEND_SIMT_CALLEE void get(
-        TransportTeam team, int source_rank, const void* source,
-        void* destination, std::size_t bytes, CooperationScope scope,
+        TransportTeam team, int source_rank, DeviceAddress source,
+        DeviceAddress destination, std::size_t bytes, CooperationScope scope,
         MemorySegment segment, DeviceOptions options) const {
         device::get(context_, channel_, team, source_rank, source, destination,
                     bytes, scope, segment, options);
     }
 
     DEEP_EP_ASCEND_SIMT_CALLEE void put_value(
-        TransportTeam team, int destination_rank, void* destination,
+        TransportTeam team, int destination_rank, DeviceAddress destination,
         std::uint64_t value, std::uint32_t value_bytes,
         DeviceOptions options) const {
         device::put_value(context_, channel_, team, destination_rank,
@@ -51,7 +51,7 @@ public:
     }
 
     DEEP_EP_ASCEND_SIMT_CALLEE void remote_add_release(
-        TransportTeam team, int destination_rank, std::int64_t* destination,
+        TransportTeam team, int destination_rank, DeviceAddress destination,
         std::int64_t value) const {
         device::remote_add_release(context_, channel_, team, destination_rank,
                                    destination, value);
@@ -92,13 +92,13 @@ public:
     }
 
     DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t load_acquire(
-        const std::uint64_t* pointer) const {
-        return device::load_acquire(pointer);
+        DeviceAddress address) const {
+        return device::load_acquire(address);
     }
 
     DEEP_EP_ASCEND_SIMT_CALLEE void store_release(
-        std::uint64_t* pointer, std::uint64_t value) const {
-        device::store_release(pointer, value);
+        DeviceAddress address, std::uint64_t value) const {
+        device::store_release(address, value);
     }
 
     DEEP_EP_ASCEND_SIMT_CALLEE void system_fence() const {
@@ -106,7 +106,7 @@ public:
     }
 
     DEEP_EP_ASCEND_SIMT_CALLEE void device_barrier(
-        std::uint32_t team_mask, void* workspace,
+        std::uint32_t team_mask, DeviceAddress workspace,
         std::uint64_t timeout_cycles) const {
         device::device_barrier(
             context_, team_mask, workspace, timeout_cycles);
