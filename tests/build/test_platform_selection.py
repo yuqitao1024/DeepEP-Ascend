@@ -48,26 +48,45 @@ class BuildPlatformTest(unittest.TestCase):
 
     @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is required to construct extensions")
     def test_ascend_extension_is_pure_and_has_exact_host_build_fields(self):
+        from torch.utils.cpp_extension import CppExtension
+
         extension = SETUP.make_extension("ascend")
-        self.assertEqual(extension.sources, ["csrc/python_api.cpp"])
-        self.assertEqual(extension.include_dirs, [str(ROOT / "deep_ep" / "include")])
-        self.assertIn(("DEEP_EP_PLATFORM_ASCEND", "1"), extension.define_macros)
-        self.assertEqual(extension.define_macros, [("DEEP_EP_PLATFORM_ASCEND", "1")])
-        self.assertEqual(
-            extension.extra_compile_args,
-            ["-O3", "-std=c++17", "-Wno-deprecated-declarations"])
         dependency_fields = (
             "sources", "include_dirs", "libraries", "library_dirs",
             "extra_compile_args", "extra_link_args", "extra_objects",
-            "define_macros", "runtime_library_dirs",
+            "define_macros", "runtime_library_dirs", "depends",
+            "export_symbols", "swig_opts", "undef_macros",
         )
-        for field in ("libraries", "library_dirs", "extra_link_args", "extra_objects",
-                      "runtime_library_dirs"):
-            self.assertFalse(getattr(extension, field, None), field)
+
+        # CppExtension adds PyTorch's CPU extension defaults. Remove only the
+        # values from an equivalent dependency-free construction so the
+        # assertions below describe DeepEP's contribution, independently of
+        # the installed PyTorch layout.
+        baseline = CppExtension(name="deep_ep_baseline", sources=[])
+
+        def without_baseline(field):
+            remaining = list(getattr(extension, field, None) or [])
+            for value in getattr(baseline, field, None) or []:
+                remaining.remove(value)
+            return remaining
+
+        normalized = {field: without_baseline(field) for field in dependency_fields}
+        self.assertEqual(normalized["sources"], ["csrc/python_api.cpp"])
+        self.assertEqual(normalized["include_dirs"], [str(ROOT / "deep_ep" / "include")])
+        self.assertEqual(normalized["libraries"], [])
+        self.assertEqual(normalized["library_dirs"], [])
+        self.assertEqual(
+            normalized["extra_compile_args"],
+            ["-O3", "-std=c++17", "-Wno-deprecated-declarations"])
+        for field in ("extra_link_args", "extra_objects", "runtime_library_dirs",
+                      "depends", "export_symbols", "swig_opts", "undef_macros"):
+            self.assertEqual(normalized[field], [], field)
+        self.assertEqual(normalized["define_macros"], [("DEEP_EP_PLATFORM_ASCEND", "1")])
+
         forbidden = " ".join(
             str(value)
             for field in dependency_fields
-            for value in (getattr(extension, field, None) or [])
+            for value in normalized[field]
         )
         for name in ("cuda", "nccl", "nvshmem", "cann", "hccl"):
             self.assertNotIn(name, forbidden.lower())
