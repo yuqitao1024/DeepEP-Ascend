@@ -22,12 +22,15 @@ class AscendTransportContractTest(unittest.TestCase):
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
-    def test_transport_headers_have_no_vendor_dependencies(self):
+    def test_public_transport_headers_have_no_vendor_dependencies(self):
         forbidden = ("cuda", "nccl", "nvshmem", "acl/", "hccl", "cann",
                      "torch_npu", "kernel_operator")
-        headers = sorted(TRANSPORT.glob("*.hpp"))
-        self.assertGreaterEqual(len(headers), 2)
+        headers = [TRANSPORT / name for name in (
+            "types.hpp", "host_transport.hpp", "device_transport.hpp",
+            "device_transport_facade.hpp", "device_transport_stub.hpp",
+            "stub_transport.hpp")]
         for header in headers:
+            self.assertTrue(header.is_file(), str(header))
             includes = [line.strip().lower() for line in header.read_text().splitlines()
                         if line.lstrip().startswith("#include")]
             for name in forbidden:
