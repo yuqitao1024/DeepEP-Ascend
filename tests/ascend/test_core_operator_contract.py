@@ -60,7 +60,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         runner = (CORE_OPS / "core_operator_runner.asc").read_text()
         for case_name in ("dispatch-normal", "dispatch-expanded",
                           "dispatch-cached", "dispatch-zero-padding",
-                          "dispatch-empty"):
+                          "dispatch-empty", "combine-normal",
+                          "combine-expanded", "combine-multiple",
+                          "combine-single-reduction", "combine-weights",
+                          "combine-bias0", "combine-bias01", "round-trip"):
             self.assertIn(case_name, runner)
         probe = probe_path.read_text()
         self.assertIn("ElementKind", probe)
