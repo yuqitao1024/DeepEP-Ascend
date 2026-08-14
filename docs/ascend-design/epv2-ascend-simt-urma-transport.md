@@ -46,7 +46,8 @@ The first functional transport supports:
 - UBC_CTP channels owned by the AIV communication engine;
 - one device-visible symmetric window per transport instance;
 - one SIMT command producer and one AICore queue producer per selected channel;
-- device compilation and two-rank runtime validation on node 20002;
+- device compilation on node 20002 and two-rank runtime validation on a
+  single host exposing at least two Ascend 950 devices;
 - structured host errors and device-side diagnostic status;
 - explicit CANN version and ABI compatibility checks.
 
@@ -211,6 +212,11 @@ Initialization proceeds in this order:
 
 Teardown reverses the resource order and is idempotent. Partial initialization
 uses the same reverse-order cleanup path.
+
+FAA fetch-result SGEs use the team-owned shadow synchronization memory. An
+ordinary backend `aclrtMalloc` allocation is not exported as a fetch-result
+slot because it is absent from the channel's registered local-buffer table and
+therefore has no valid local token.
 
 ### SIMT command layer
 
@@ -453,6 +459,13 @@ mixed AICore/SIMT mode. Each production kernel that uses real transport must
 call the service boundary after its command-producing VF and before any
 consuming VF.
 
+The two-rank runner is an ASC shared library loaded into each `torchrun`
+process. It is not a child executable: `ProcessGroupHCCL.get_hccl_comm`
+returns a process-local communicator pointer, so the runner must execute in the
+same process and NPU context. The CANN 9.2 link set is `hcomm`, `ascendcl`, and
+`c_sec`; `c_sec` is explicit because the public team descriptor initializers
+inline calls to `memset_s` into the consumer object.
+
 Backend selection remains compile-time:
 
 ```text
@@ -489,7 +502,7 @@ No CUDA source, link option, or runtime behavior changes in Phase 2D.
 - WQE fields, owner transition, block count, and queue wrap arithmetic match
   CANN's UBC_CTP reference behavior.
 
-### Two-NPU semantic probes on node 20002
+### Two-NPU semantic probes
 
 - put transfers payload bytes in both directions;
 - 64-bit inline put transfers the exact value;
@@ -504,6 +517,34 @@ No CUDA source, link option, or runtime behavior changes in Phase 2D.
 
 GPU runtime validation remains deferred by project decision.
 
+### Validation record
+
+Validation performed on 2026-08-14 against CANN 9.2.0 and `dav-3510` on
+`root@121.41.199.170:20002` established the following:
+
+- all CANN compatibility, WQE, command, service, and host lifecycle probes
+  passed;
+- the primitive, command encoder, AICore service, and runtime shared-library
+  targets compiled with Bisheng for `dav-3510`;
+- the runtime shared library linked using public ACL/HCCL interfaces only;
+- a device runtime smoke completed the SIMT producer, AICore observation, and
+  SIMT consumer phases on `Ascend950PR_9589` with diagnostic `kNone`;
+- host lifecycle failure injection covered every team, window, channel,
+  allocation, zero, and copy boundary, including idempotent reverse cleanup.
+
+The 20002 execution container currently exposes only `/dev/davinci0`, and
+`torch.npu.device_count()` returns one. A two-process launch therefore failed
+at `torch.npu.set_device(1)` with CANN error `107001` before communicator or
+transport initialization. Port 20001 is a different single-NPU host; using it
+would turn this phase into an unplanned scale-out test rather than the required
+single-host UBC_CTP test.
+
+Consequently, no two-NPU put, put-value, FAA, signal, flush, ordering, barrier,
+or queue-wrap result is recorded yet. The runtime harness for those cases is
+present, but production capabilities remain exactly zero and Phase 2D does not
+meet its completion criteria until the harness passes on a single host exposing
+at least two Ascend 950 devices.
+
 ## Acceptance Criteria
 
 Phase 2D's minimal transport layer is complete when:
@@ -514,7 +555,8 @@ Phase 2D's minimal transport layer is complete when:
 3. the mixed SIMT-command/AICore-service boundary and its required hardware
    primitives are proven by compile and runtime probes;
 4. put, 64-bit put-value, 64-bit FAA, signal, flush, and barrier pass the
-   two-NPU semantic tests on node 20002;
+   two-NPU semantic tests on a single host exposing at least two Ascend 950
+   devices;
 5. ordering and repeated queue progress are validated, not inferred;
 6. deferred methods and capabilities remain disabled;
 7. existing CUDA production sources remain unchanged;

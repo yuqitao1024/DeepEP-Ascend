@@ -1,6 +1,8 @@
+import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -11,6 +13,34 @@ SIMT_URMA = ROOT / "tests/ascend/simt_urma"
 
 
 class AscendSimtUrmaTransportTest(unittest.TestCase):
+    def test_two_rank_runtime_harness_contract(self):
+        describe = subprocess.run(
+            [sys.executable, str(SIMT_URMA / "run_two_rank_probe.py"),
+             "--describe"],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(describe.returncode, 0, describe.stderr)
+        contract = json.loads(describe.stdout)
+
+        expected_cases = {
+            "put", "put-value64", "faa64", "signal", "flush",
+            "payload-signal-order", "barrier-repeat", "queue-wrap",
+            "phase-boundary", "teardown",
+        }
+        self.assertEqual(set(contract["cases"]), expected_cases)
+        self.assertEqual(
+            contract["communicator"],
+            "backend.get_hccl_comm(local_rank)")
+        self.assertEqual(contract["runner_loading"],
+                         "in-process-shared-library")
+        self.assertGreater(contract["timeout_ms"], 0)
+        self.assertGreaterEqual(
+            contract["cases"]["payload-signal-order"]["iterations"], 1000)
+        self.assertTrue(contract["cases"]["queue-wrap"]["requires_sq_wrap"])
+        for name in expected_cases - {"teardown"}:
+            self.assertEqual(
+                contract["cases"][name]["phases"],
+                ["producer", "service", "consumer"])
+
     def test_cann_host_transport_lifecycle(self):
         with tempfile.TemporaryDirectory() as directory:
             executable = pathlib.Path(directory) / "cann_transport_probe"
@@ -130,6 +160,33 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
                 ["cmake", "--build", directory, "--verbose"],
                 capture_output=True, text=True, check=False)
             self.assertEqual(build.returncode, 0, build.stderr)
+
+    def test_runtime_probe_builds_with_cann(self):
+        ascend_home = os.environ.get("ASCEND_HOME_PATH")
+        if not ascend_home:
+            self.skipTest("ASCEND_HOME_PATH is not configured")
+
+        with tempfile.TemporaryDirectory() as directory:
+            configure = subprocess.run(
+                ["cmake", "-S", str(SIMT_URMA), "-B", directory,
+                 "-DDEEP_EP_ASCEND_STAGED_URMA=ON",
+                 "-DDEEP_EP_BUILD_URMA_RUNTIME=ON"],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(configure.returncode, 0, configure.stderr)
+
+            build = subprocess.run(
+                ["cmake", "--build", directory, "--target",
+                 "deep_ep_ascend_urma_runner", "--verbose"],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(build.returncode, 0, build.stderr)
+
+            smoke = subprocess.run(
+                [sys.executable, str(SIMT_URMA / "run_two_rank_probe.py"),
+                 "--runner", str(pathlib.Path(directory) /
+                                   "deep_ep_ascend_urma_runner"),
+                 "--local-smoke"],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(smoke.returncode, 0, smoke.stderr)
 
     def test_production_transport_does_not_include_cann_internal_headers(self):
         for source in list(TRANSPORT.glob("*.hpp")) + list(

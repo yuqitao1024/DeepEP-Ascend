@@ -5,6 +5,11 @@
 
 #include "cann_compat.hpp"
 
+#ifndef DEEP_EP_ASCEND_AICORE_WQE_CALLEE
+#define DEEP_EP_ASCEND_AICORE_WQE_CALLEE
+#define DEEP_EP_ASCEND_AICORE_WQE_CALLEE_LOCAL 1
+#endif
+
 namespace deep_ep::ascend::transport::urma {
 
 inline constexpr std::uint32_t kStrongOrdering = 5U;
@@ -33,22 +38,24 @@ static_assert(sizeof(WriteRequest) == 64);
 static_assert(sizeof(InlineWrite64Request) == 64);
 static_assert(sizeof(Faa64Request) == 128);
 
-inline std::uint32_t sq_slot(std::uint32_t head, std::uint32_t depth) {
+DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline std::uint32_t sq_slot(
+    std::uint32_t head, std::uint32_t depth) {
     return depth == 0 ? 0 : head % depth;
 }
 
-inline std::uint32_t owner_for(std::uint32_t head, std::uint32_t depth) {
+DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline std::uint32_t owner_for(
+    std::uint32_t head, std::uint32_t depth) {
     return depth == 0 ? 0 : 1U ^ ((head / depth) & 1U);
 }
 
-inline bool cqe_owner_valid(
+DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline bool cqe_owner_valid(
     std::uint32_t owner, std::uint32_t tail, std::uint32_t depth) {
     return owner == owner_for(tail, depth);
 }
 
 namespace detail {
 
-inline std::uint64_t load_eid_word(
+DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline std::uint64_t load_eid_word(
     const std::uint8_t* eid, std::size_t start) {
     std::uint64_t result = 0;
     for (std::size_t byte = 0; byte < sizeof(result); ++byte)
@@ -56,7 +63,7 @@ inline std::uint64_t load_eid_word(
     return result;
 }
 
-inline cann_abi::UrmaSqe make_sqe(
+DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline cann_abi::UrmaSqe make_sqe(
     const cann_abi::SqContext& sq,
     const cann_abi::RegisteredBuffer& remote_memory,
     std::uint32_t head, std::uint64_t remote_address,
@@ -86,7 +93,7 @@ inline cann_abi::UrmaSqe make_sqe(
 
 }  // namespace detail
 
-inline WriteRequest make_write(
+DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline WriteRequest make_write(
     const cann_abi::SqContext& sq,
     const cann_abi::RegisteredBuffer& remote_memory,
     std::uint32_t head, std::uint64_t remote_address,
@@ -102,7 +109,7 @@ inline WriteRequest make_write(
     return result;
 }
 
-inline InlineWrite64Request make_inline_write64(
+DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline InlineWrite64Request make_inline_write64(
     const cann_abi::SqContext& sq,
     const cann_abi::RegisteredBuffer& remote_memory,
     std::uint32_t head, std::uint64_t remote_address,
@@ -115,7 +122,7 @@ inline InlineWrite64Request make_inline_write64(
     return result;
 }
 
-inline Faa64Request make_faa64(
+DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline Faa64Request make_faa64(
     const cann_abi::SqContext& sq,
     const cann_abi::RegisteredBuffer& remote_memory,
     std::uint32_t head, std::uint64_t remote_address,
@@ -133,3 +140,8 @@ inline Faa64Request make_faa64(
 }
 
 }  // namespace deep_ep::ascend::transport::urma
+
+#if defined(DEEP_EP_ASCEND_AICORE_WQE_CALLEE_LOCAL)
+#undef DEEP_EP_ASCEND_AICORE_WQE_CALLEE_LOCAL
+#undef DEEP_EP_ASCEND_AICORE_WQE_CALLEE
+#endif
