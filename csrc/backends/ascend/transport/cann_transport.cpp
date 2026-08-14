@@ -53,6 +53,8 @@ public:
     ~CannHostTransport() override { (void)destroy(); }
 
     TransportStatus initialize_resources() {
+        if (resources_initialized_)
+            return TransportStatus::success();
         auto status = allocate_zero(
             command_capacity_bytes(), &commands_, "allocate_commands");
         if (!status.ok()) return status;
@@ -69,11 +71,6 @@ public:
         status = allocate_zero(
             sizeof(StagedTransportContext), &staged_, "allocate_context");
         if (!status.ok()) return status;
-        status = allocate_zero(
-            static_cast<std::uint64_t>(world_size_) * sizeof(std::uint64_t),
-            &fetch_results_, "allocate_fetch_results");
-        if (!status.ok()) return status;
-
         TransportServiceState service_state;
         service_state.default_retry_limit = kDefaultRetryLimit;
         status = copy_to_device(
@@ -88,7 +85,10 @@ public:
         status = copy_to_device(queue_, queue_state, "initialize_queue");
         if (!status.ok()) return status;
 
-        return publish_staged_context("initialize_context");
+        status = publish_staged_context("initialize_context");
+        if (status.ok())
+            resources_initialized_ = true;
+        return status;
     }
 
     TransportCapabilities capabilities() const noexcept override {
@@ -134,14 +134,9 @@ public:
         window_ = window;
         local_window_base_ = pointer_value(base);
         window_bytes_ = static_cast<std::uint64_t>(bytes);
-        const auto status = publish_staged_context("publish_window");
-        if (!status.ok()) {
-            (void)api_.deregister_window(api_.user_data, team_, window_);
-            window_ = 0;
-            local_window_base_ = 0;
-            window_bytes_ = 0;
-        }
-        return status;
+        return resources_initialized_ ?
+            publish_staged_context("publish_window") :
+            TransportStatus::success();
     }
 
     TransportStatus unregister_symmetric_window() override {
@@ -155,7 +150,9 @@ public:
         local_window_base_ = 0;
         window_bytes_ = 0;
         channels_active_ = false;
-        return publish_staged_context("clear_window");
+        return resources_initialized_ ?
+            publish_staged_context("clear_window") :
+            TransportStatus::success();
     }
 
     TransportStatus get_peer_base_pointer(
@@ -192,8 +189,14 @@ public:
                 return backend_failure("acquire_channels", result);
             channels_created_ = true;
         }
+        auto status = initialize_resources();
+        if (!status.ok()) {
+            TransportStatus cleanup = TransportStatus::success();
+            release_backend_resources(cleanup);
+            return status;
+        }
         channels_active_ = true;
-        return publish_staged_context("publish_channels");
+        return TransportStatus::success();
     }
 
     TransportStatus release_channels() override {
@@ -237,12 +240,7 @@ public:
         channels_active_ = false;
 
         TransportStatus first_error = TransportStatus::success();
-        free_resource(fetch_results_, "free_fetch_results", first_error);
-        free_resource(staged_, "free_context", first_error);
-        free_resource(diagnostic_, "free_diagnostic", first_error);
-        free_resource(service_, "free_service", first_error);
-        free_resource(queue_, "free_queue", first_error);
-        free_resource(commands_, "free_commands", first_error);
+        release_backend_resources(first_error);
 
         if (window_ != 0) {
             const int result = api_.deregister_window(
@@ -312,9 +310,6 @@ private:
         context.command_queue = pointer_value(queue_);
         context.team = team_;
         context.window = window_;
-        context.fetch_results = pointer_value(fetch_results_);
-        context.fetch_result_bytes =
-            static_cast<std::uint64_t>(world_size_) * sizeof(std::uint64_t);
         return copy_to_device(staged_, context, operation);
     }
 
@@ -328,6 +323,15 @@ private:
         pointer = nullptr;
     }
 
+    void release_backend_resources(TransportStatus& first_error) {
+        free_resource(staged_, "free_context", first_error);
+        free_resource(diagnostic_, "free_diagnostic", first_error);
+        free_resource(service_, "free_service", first_error);
+        free_resource(queue_, "free_queue", first_error);
+        free_resource(commands_, "free_commands", first_error);
+        resources_initialized_ = false;
+    }
+
     TransportConfig config_;
     CannHostApi api_;
     std::uint32_t rank_ = 0;
@@ -338,6 +342,7 @@ private:
     std::uint64_t window_bytes_ = 0;
     bool channels_created_ = false;
     bool channels_active_ = false;
+    bool resources_initialized_ = false;
     bool destroyed_ = false;
 
     void* commands_ = nullptr;
@@ -345,7 +350,6 @@ private:
     void* service_ = nullptr;
     void* diagnostic_ = nullptr;
     void* staged_ = nullptr;
-    void* fetch_results_ = nullptr;
 };
 
 #if DEEP_EP_ASCEND_HAS_CANN_HOST_API
@@ -545,11 +549,6 @@ TransportCreateResult make_cann_transport(
 
     auto transport = std::make_unique<CannHostTransport>(
         config, api, rank, world_size, team);
-    status = transport->initialize_resources();
-    if (!status.ok()) {
-        (void)transport->destroy();
-        return {std::move(status), nullptr};
-    }
     return {TransportStatus::success(), std::move(transport)};
 }
 

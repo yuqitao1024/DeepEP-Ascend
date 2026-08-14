@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "csrc/backends/ascend/transport/cann_transport.hpp"
+#include "csrc/backends/ascend/transport/transport_commands.hpp"
 
 namespace transport = deep_ep::ascend::transport;
 
@@ -42,6 +43,8 @@ struct FakeApi {
     std::uintptr_t next_pointer = 0x100000;
     int fail_event = -1;
     int event_calls = 0;
+    transport::StagedTransportContext staged{};
+    std::uint32_t staged_copy_count = 0;
 
     bool fail_now() {
         return fail_event >= 0 && event_calls++ == fail_event;
@@ -56,6 +59,14 @@ struct FakeApi {
         for (std::uint32_t index = 0; index < event_count; ++index)
             result += events[index] == event ? 1U : 0U;
         return result;
+    }
+
+    std::uint32_t first(Event event) const {
+        for (std::uint32_t index = 0; index < event_count; ++index) {
+            if (events[index] == event)
+                return index;
+        }
+        return event_count;
     }
 
     static FakeApi& self(void* data) {
@@ -126,10 +137,22 @@ struct FakeApi {
         return 0;
     }
 
-    static int copy(void* data, void*, const void*, std::uint64_t) {
+    static int copy(
+        void* data, void*, const void* source, std::uint64_t bytes) {
         auto& fake = self(data);
         fake.record(Event::kCopy);
         if (fake.fail_now()) return 78;
+        if (bytes == sizeof(transport::StagedTransportContext)) {
+            const auto* candidate =
+                static_cast<const transport::StagedTransportContext*>(source);
+            if (candidate->struct_size ==
+                    sizeof(transport::StagedTransportContext) &&
+                candidate->cann_compatibility ==
+                    transport::kStagedTransportCannCompatibility) {
+                fake.staged = *candidate;
+                ++fake.staged_copy_count;
+            }
+        }
         return 0;
     }
 
@@ -193,21 +216,27 @@ void check_success_and_reverse_cleanup() {
     CHECK(context.capabilities == transport::kNoCapabilities);
     CHECK(context.topology.world_rank == 1);
     CHECK(context.topology.world_size == 2);
-    CHECK(fake.count(Event::kAllocate) == 6);
-    CHECK(fake.count(Event::kZero) == 6);
-    CHECK(fake.count(Event::kCopy) == 5);
+    CHECK(fake.first(Event::kCreateTeam) < fake.first(Event::kRegisterWindow));
+    CHECK(fake.first(Event::kRegisterWindow) < fake.first(Event::kCreateChannels));
+    CHECK(fake.first(Event::kCreateChannels) < fake.first(Event::kAllocate));
+    CHECK(fake.staged_copy_count == 1);
+    CHECK(fake.staged.fetch_results == 0);
+    CHECK(fake.staged.fetch_result_bytes == 0);
+    CHECK(fake.count(Event::kAllocate) == 5);
+    CHECK(fake.count(Event::kZero) == 5);
+    CHECK(fake.count(Event::kCopy) == 3);
 
     CHECK(created.transport->destroy().ok());
     const auto after_first_destroy = fake.event_count;
     CHECK(created.transport->destroy().ok());
     CHECK(fake.event_count == after_first_destroy);
-    CHECK(fake.count(Event::kFree) == 6);
+    CHECK(fake.count(Event::kFree) == 5);
     CHECK(fake.events[fake.event_count - 2] == Event::kDeregisterWindow);
     CHECK(fake.events[fake.event_count - 1] == Event::kDestroyTeam);
 }
 
 void check_partial_failure_cleans_up() {
-    for (int fail_event = 0; fail_event < 23; ++fail_event) {
+    for (int fail_event = 0; fail_event < 18; ++fail_event) {
         FakeApi fake;
         fake.fail_event = fail_event;
         auto created = transport::make_cann_transport(
@@ -229,7 +258,9 @@ void check_partial_failure_cleans_up() {
             (void)created.transport->acquire_channels(
                 1, transport::CooperationScope::kParticipant);
         (void)created.transport->destroy();
-        CHECK(fake.count(Event::kFree) == 6);
+        const auto allocations = static_cast<std::uint32_t>(
+            (fake.next_pointer - 0x100000) / 0x1000);
+        CHECK(fake.count(Event::kFree) == allocations);
         CHECK(fake.events[fake.event_count - 1] == Event::kDestroyTeam);
     }
 }
