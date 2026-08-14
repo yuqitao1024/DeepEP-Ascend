@@ -51,7 +51,8 @@ class AscendStubTest(unittest.TestCase):
         unavailable = "is unavailable until the Ascend device transport is implemented"
         self.assert_transport_error(
             "barrier", lambda: self.buffer.barrier(True, False, True),
-            "requires unavailable device transport capabilities: device_barrier")
+            "requires unavailable device transport capabilities: remote_signal, "
+            "system_memory_ordering, device_barrier")
         self.assert_transport_error("get_comm_stream", self.buffer.get_comm_stream, unavailable)
         self.assert_transport_error("get_physical_domain_size",
                                     self.buffer.get_physical_domain_size, unavailable)
@@ -59,6 +60,36 @@ class AscendStubTest(unittest.TestCase):
                                     self.buffer.get_logical_domain_size, unavailable)
         self.assert_transport_error("current_stream_wait",
                                     _C.EventHandle().current_stream_wait, unavailable)
+
+    def test_hybrid_runtime_primitives_raise(self):
+        hybrid_buffer = _C.ElasticBuffer(*ARGS[:6], True, *ARGS[7:])
+        self.assert_transport_error(
+            "barrier", lambda: hybrid_buffer.barrier(True, False, True),
+            "requires unavailable device transport capabilities: remote_signal, "
+            "system_memory_ordering, device_barrier, scale_up_team, scale_out_team")
+
+        x = torch.empty((1, 16), dtype=torch.bfloat16)
+        topk = torch.zeros((1, 1), dtype=torch.int64)
+        none = None
+        dispatch_args = (x, none, topk, none, none, none, none, none, none,
+                         none, none, none, none, none, none,
+                         1, 1, 1, 1, 0, none, none,
+                         False, False, True, True, False, False, False)
+        self.assert_transport_error(
+            "dispatch", lambda: hybrid_buffer.dispatch(*dispatch_args),
+            "requires unavailable device transport capabilities: symmetric_window, "
+            "direct_peer_pointer, device_put, device_put_value, "
+            "remote_atomic_add_release, remote_signal, system_memory_ordering, "
+            "device_barrier, scale_up_team, scale_out_team")
+        combine_args = (x, none, none, none, topk, topk, topk[:, 0].to(torch.int32),
+                        none, none, 1, 1, 1, 0, none, none, False, False, False)
+        self.assert_transport_error(
+            "combine", lambda: hybrid_buffer.combine(*combine_args),
+            "requires unavailable device transport capabilities: symmetric_window, "
+            "direct_peer_pointer, device_put, remote_atomic_add_release, remote_signal, "
+            "async_completion, system_memory_ordering, device_barrier, "
+            "scale_up_team, scale_out_team")
+        hybrid_buffer.destroy()
 
     def test_size_calculation_raises(self):
         self.assert_transport_error(

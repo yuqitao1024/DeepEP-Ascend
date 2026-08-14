@@ -24,9 +24,14 @@ namespace deep_ep::ascend {
 }
 
 [[noreturn]] inline void raise_transport_status(
-    const transport::TransportStatus& status) {
+    const transport::TransportStatus& status, int rank) {
     if (status.code == transport::TransportStatusCode::kUnsupportedCapability)
         raise_unsupported(status.operation.c_str(), status.message);
+    if (status.code == transport::TransportStatusCode::kRuntimeFailure) {
+        TORCH_CHECK(false, "DeepEP Ascend backend: ", status.operation,
+                    " failed on rank ", rank, " with backend error ",
+                    status.backend_code, ": ", status.message);
+    }
     TORCH_CHECK(false, "DeepEP Ascend backend: ", status.operation,
                 " ", status.message);
 }
@@ -74,11 +79,17 @@ class ElasticBuffer {
         transport::capability_bit(transport::TransportCapability::kScaleUpTeam) |
         transport::capability_bit(transport::TransportCapability::kScaleOutTeam);
 
+    static constexpr auto kBarrierCapabilities =
+        transport::capability_bit(transport::TransportCapability::kRemoteSignal) |
+        transport::capability_bit(
+            transport::TransportCapability::kSystemMemoryOrdering) |
+        transport::capability_bit(transport::TransportCapability::kDeviceBarrier);
+
     void require_transport(
         const char* operation, transport::TransportCapabilities required) const {
         const auto status = transport_->require_capabilities(required, operation);
         if (!status.ok())
-            raise_transport_status(status);
+            raise_transport_status(status, rank_idx_);
     }
 
 public:
@@ -109,7 +120,7 @@ public:
         destroyed_ = true;
         const auto status = transport_->destroy();
         if (!status.ok())
-            raise_transport_status(status);
+            raise_transport_status(status, rank_idx_);
     }
 
     pybind11::object get_comm_stream() const {
@@ -123,7 +134,7 @@ public:
         auto status = transport_->query_topology(&topology);
         if (!status.ok()) {
             status.operation = "get_physical_domain_size";
-            raise_transport_status(status);
+            raise_transport_status(status, rank_idx_);
         }
         return {topology.scale_out_size, topology.scale_up_size};
     }
@@ -133,17 +144,19 @@ public:
         auto status = transport_->query_topology(&topology);
         if (!status.ok()) {
             status.operation = "get_logical_domain_size";
-            raise_transport_status(status);
+            raise_transport_status(status, rank_idx_);
         }
         return {topology.scale_out_size, topology.scale_up_size};
     }
 
     void barrier(const bool&, const bool&, const bool&) const {
-        auto required = transport::capability_bit(
-            transport::TransportCapability::kDeviceBarrier);
+        auto required = kBarrierCapabilities;
         if (allow_hybrid_mode_)
             required |= kHybridCapabilities;
         require_transport("barrier", required);
+        raise_unsupported(
+            "barrier",
+            "is unavailable until the Ascend device transport is implemented");
     }
 
     static int64_t calculate_buffer_size(
@@ -182,6 +195,9 @@ public:
         if (allow_hybrid_mode_)
             required |= kHybridCapabilities;
         require_transport("dispatch", required);
+        raise_unsupported(
+            "dispatch",
+            "is unavailable until the Ascend device transport is implemented");
     }
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>,
@@ -203,6 +219,9 @@ public:
                 transport::TransportCapability::kAsyncCompletion);
         }
         require_transport("combine", required);
+        raise_unsupported(
+            "combine",
+            "is unavailable until the Ascend device transport is implemented");
     }
 };
 

@@ -262,7 +262,8 @@ int main() {
     }
 
     if (!raises_transport_error(
-            "barrier", "requires unavailable device transport capabilities: device_barrier",
+            "barrier", "requires unavailable device transport capabilities: remote_signal, "
+            "system_memory_ordering, device_barrier",
             [&] { buffer.barrier(true, false, true); }))
         return 13;
     if (!raises_transport_error(
@@ -301,6 +302,51 @@ int main() {
                     1, 1, 1, 0, optional_event, optional_event, false, false, false);
             }))
         return 16;
+
+    Buffer hybrid_buffer(0, 1, 0, cpu_comm, 4096, 0,
+                         true, true, true, 3, 0, 300, 100, true);
+    if (!raises_transport_error(
+            "barrier", "requires unavailable device transport capabilities: remote_signal, "
+            "system_memory_ordering, device_barrier, scale_up_team, scale_out_team",
+            [&] { hybrid_buffer.barrier(true, false, true); }))
+        return 24;
+    if (!raises_transport_error(
+            "dispatch", "requires unavailable device transport capabilities: "
+            "symmetric_window, direct_peer_pointer, device_put, device_put_value, "
+            "remote_atomic_add_release, remote_signal, system_memory_ordering, "
+            "device_barrier, scale_up_team, scale_out_team", [&] {
+                hybrid_buffer.dispatch(
+                    tensor, optional_tensor, tensor, optional_tensor, optional_tensor,
+                    optional_int, optional_int, optional_ints,
+                    optional_tensor, optional_tensor, optional_tensor, optional_tensor,
+                    optional_tensor, optional_tensor, optional_tensor,
+                    1, 1, 1, 1, 0, optional_event, optional_event,
+                    false, false, true, true, false, false, false);
+            }))
+        return 25;
+    if (!raises_transport_error(
+            "combine", "requires unavailable device transport capabilities: "
+            "symmetric_window, direct_peer_pointer, device_put, remote_atomic_add_release, "
+            "remote_signal, async_completion, system_memory_ordering, device_barrier, "
+            "scale_up_team, scale_out_team", [&] {
+                hybrid_buffer.combine(
+                    tensor, optional_tensor, optional_tensor, optional_tensor,
+                    tensor, tensor, tensor, optional_tensor, optional_tensor,
+                    1, 1, 1, 0, optional_event, optional_event, false, false, false);
+            }))
+        return 26;
+
+    try {
+        deep_ep::ascend::raise_transport_status(
+            deep_ep::ascend::transport::TransportStatus::runtime_failure(
+                "export_device_context", 73, "driver rejected the context"), 4);
+        return 27;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()) !=
+            "DeepEP Ascend backend: export_device_context failed on rank 4 "
+            "with backend error 73: driver rejected the context")
+            return 28;
+    }
     return 0;
 }
 """
@@ -318,7 +364,8 @@ class AscendStubSourceTest(unittest.TestCase):
             probe.write_text(textwrap.dedent(PROBE))
             binary = include / "probe"
             compile_result = subprocess.run(
-                ["c++", "-std=c++17", "-DDEEP_EP_PLATFORM_ASCEND=1",
+                ["c++", "-std=c++17", "-Werror=return-type",
+                 "-DDEEP_EP_PLATFORM_ASCEND=1",
                  f"-I{include}", f"-I{ROOT}",
                  str(probe), "-o", str(binary)],
                 capture_output=True, text=True, check=False)
