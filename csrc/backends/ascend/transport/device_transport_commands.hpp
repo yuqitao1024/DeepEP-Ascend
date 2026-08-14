@@ -1,0 +1,424 @@
+#pragma once
+
+#include "simt_intrinsics.hpp"
+#include "transport_commands.hpp"
+
+namespace deep_ep::ascend::transport::device {
+
+namespace detail {
+
+DEEP_EP_ASCEND_SIMT_CALLEE int local_rank(
+    const DeviceTransportContext& context, TransportTeam team) {
+    switch (team) {
+        case TransportTeam::kWorld: return context.topology.world_rank;
+        case TransportTeam::kScaleUp: return context.topology.scale_up_rank;
+        case TransportTeam::kScaleOut: return context.topology.scale_out_rank;
+    }
+    return -1;
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE int team_size(
+    const DeviceTransportContext& context, TransportTeam team) {
+    switch (team) {
+        case TransportTeam::kWorld: return context.topology.world_size;
+        case TransportTeam::kScaleUp: return context.topology.scale_up_size;
+        case TransportTeam::kScaleOut: return context.topology.scale_out_size;
+    }
+    return 0;
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE __gm__ TransportCommandQueue* command_queue(
+    const DeviceTransportContext& context) {
+    if (context.abi_version != kDeviceTransportAbiVersion ||
+        context.struct_size != sizeof(DeviceTransportContext) ||
+        context.backend_context == 0)
+        return nullptr;
+
+    auto* staged = reinterpret_cast<__gm__ StagedTransportContext*>(
+        context.backend_context);
+    if (simt::load_observed(&staged->abi_version) !=
+            kTransportCommandAbiVersion ||
+        simt::load_observed(&staged->struct_size) !=
+            sizeof(StagedTransportContext) ||
+        simt::load_observed(&staged->cann_compatibility) !=
+            kStagedTransportCannCompatibility)
+        return nullptr;
+
+    const auto address = simt::load_observed(&staged->command_queue);
+    return reinterpret_cast<__gm__ TransportCommandQueue*>(address);
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE __gm__ DeviceTransportDiagnostic* diagnostic(
+    __gm__ TransportCommandQueue* queue) {
+    if (queue == nullptr)
+        return nullptr;
+    return reinterpret_cast<__gm__ DeviceTransportDiagnostic*>(
+        simt::load_observed(&queue->diagnostic));
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void record_error(
+    __gm__ TransportCommandQueue* queue, DeviceTransportError error,
+    TransportCommandOpcode opcode, int peer, DeviceChannel channel) {
+    auto* output = diagnostic(queue);
+    if (output == nullptr ||
+        simt::load_observed(reinterpret_cast<__gm__ std::uint32_t*>(
+            &output->error)) !=
+            static_cast<std::uint32_t>(DeviceTransportError::kNone))
+        return;
+
+    const std::uint32_t command_index = queue == nullptr ? 0 :
+        simt::load_observed(&queue->count);
+    simt::store_published(&output->command_index, command_index);
+    simt::store_published(
+        reinterpret_cast<__gm__ std::uint32_t*>(&output->opcode),
+        static_cast<std::uint32_t>(opcode));
+    simt::store_published(&output->peer, static_cast<std::uint32_t>(peer));
+    simt::store_published(&output->channel, channel);
+    simt::system_fence();
+    simt::store_published(
+        reinterpret_cast<__gm__ std::uint32_t*>(&output->error),
+        static_cast<std::uint32_t>(error));
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE bool validate_queue(
+    __gm__ TransportCommandQueue* queue, TransportCommandOpcode opcode,
+    int peer, DeviceChannel channel) {
+    if (queue == nullptr)
+        return false;
+    if (simt::load_observed(&queue->abi_version) !=
+            kTransportCommandAbiVersion ||
+        simt::load_observed(&queue->struct_size) !=
+            sizeof(TransportCommandQueue)) {
+        record_error(
+            queue, DeviceTransportError::kInvalidAbi, opcode, peer, channel);
+        return false;
+    }
+    if (simt::load_observed(&queue->commands) == 0 ||
+        simt::load_observed(&queue->diagnostic) == 0) {
+        record_error(
+            queue, DeviceTransportError::kInvalidQueue, opcode, peer, channel);
+        return false;
+    }
+    return true;
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE bool validate_peer(
+    const DeviceTransportContext& context, __gm__ TransportCommandQueue* queue,
+    TransportTeam team, int peer, DeviceChannel channel,
+    TransportCommandOpcode opcode) {
+    if (channel != 0) {
+        record_error(
+            queue, DeviceTransportError::kInvalidChannel, opcode, peer,
+            channel);
+        return false;
+    }
+    if (team == TransportTeam::kScaleOut) {
+        record_error(
+            queue, DeviceTransportError::kUnsupportedOperation, opcode, peer,
+            channel);
+        return false;
+    }
+    if (peer < 0 || peer >= team_size(context, team)) {
+        record_error(
+            queue, DeviceTransportError::kInvalidRank, opcode, peer, channel);
+        return false;
+    }
+    return true;
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE bool append(
+    __gm__ TransportCommandQueue* queue,
+    const TransportCommand& transport_command) {
+    const auto count = simt::load_observed(&queue->count);
+    const auto capacity = simt::load_observed(&queue->capacity);
+    if (count >= capacity) {
+        record_error(
+            queue, DeviceTransportError::kCommandOverflow,
+            transport_command.opcode, transport_command.peer,
+            transport_command.channel);
+        return false;
+    }
+
+    const auto command_address = simt::load_observed(&queue->commands);
+    auto* target = reinterpret_cast<__gm__ TransportCommand*>(
+        command_address) + count;
+    auto* target_words = reinterpret_cast<__gm__ std::uint64_t*>(target);
+    const auto* source_words =
+        reinterpret_cast<const std::uint64_t*>(&transport_command);
+    for (std::uint32_t word = 0;
+         word < sizeof(TransportCommand) / sizeof(std::uint64_t); ++word)
+        simt::store_published(&target_words[word], source_words[word]);
+
+    simt::system_fence();
+    simt::store_published(&queue->count, count + 1);
+    simt::system_fence();
+    const auto generation = simt::load_observed(&queue->generation);
+    simt::store_published(&queue->generation, generation);
+    return true;
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE __gm__ TransportCommandQueue* prepare(
+    const DeviceTransportContext& context, DeviceChannel channel,
+    TransportTeam team, int peer, TransportCommandOpcode opcode) {
+    auto* queue = command_queue(context);
+    if (!validate_queue(queue, opcode, peer, channel) ||
+        !validate_peer(context, queue, team, peer, channel, opcode))
+        return nullptr;
+    return queue;
+}
+
+}  // namespace detail
+
+DEEP_EP_ASCEND_SIMT_CALLEE bool is_peer_directly_accessible(
+    const DeviceTransportContext& context, TransportTeam team, int rank) {
+    return rank == detail::local_rank(context, team);
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t get_symmetric_offset(
+    const DeviceTransportContext& context, DeviceAddress local_address) {
+    if (local_address == kNullDeviceAddress || context.local_window_base == 0)
+        return 0;
+    return local_address - context.local_window_base;
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE DeviceAddress get_symmetric_pointer(
+    const DeviceTransportContext& context, TransportTeam team, int rank,
+    DeviceAddress local_address) {
+    return is_peer_directly_accessible(context, team, rank) ?
+        local_address : kNullDeviceAddress;
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void put(
+    const DeviceTransportContext& context, DeviceChannel channel,
+    TransportTeam team, int destination_rank, DeviceAddress destination,
+    DeviceAddress source, std::size_t bytes, CooperationScope scope,
+    MemorySegment segment, DeviceOptions options,
+    const RemoteAction& remote_action) {
+    if (threadIdx.x != 0)
+        return;
+    auto* queue = detail::prepare(
+        context, channel, team, destination_rank,
+        TransportCommandOpcode::kPut);
+    if (queue == nullptr)
+        return;
+    if (destination == kNullDeviceAddress || source == kNullDeviceAddress ||
+        bytes == 0) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidAddress,
+            TransportCommandOpcode::kPut, destination_rank, channel);
+        return;
+    }
+    if (scope != CooperationScope::kParticipant ||
+        segment != MemorySegment::kDevice || options != kDefaultOptions ||
+        remote_action.kind != RemoteActionKind::kNone) {
+        detail::record_error(
+            queue, DeviceTransportError::kUnsupportedOperation,
+            TransportCommandOpcode::kPut, destination_rank, channel);
+        return;
+    }
+
+    TransportCommand command{};
+    command.opcode = TransportCommandOpcode::kPut;
+    command.team = team;
+    command.scope = scope;
+    command.segment = segment;
+    command.peer = destination_rank;
+    command.channel = channel;
+    command.options = options;
+    command.source = source;
+    command.destination = destination;
+    command.bytes = bytes;
+    detail::append(queue, command);
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void get(
+    const DeviceTransportContext&, DeviceChannel, TransportTeam, int,
+    DeviceAddress, DeviceAddress, std::size_t, CooperationScope, MemorySegment,
+    DeviceOptions) {}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void put_value(
+    const DeviceTransportContext& context, DeviceChannel channel,
+    TransportTeam team, int destination_rank, DeviceAddress destination,
+    std::uint64_t value, std::uint32_t value_bytes, DeviceOptions options) {
+    if (threadIdx.x != 0)
+        return;
+    auto* queue = detail::prepare(
+        context, channel, team, destination_rank,
+        TransportCommandOpcode::kPutValue64);
+    if (queue == nullptr)
+        return;
+    if (destination == kNullDeviceAddress) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidAddress,
+            TransportCommandOpcode::kPutValue64, destination_rank, channel);
+        return;
+    }
+    if (value_bytes != sizeof(std::uint64_t) ||
+        options != kDefaultOptions) {
+        detail::record_error(
+            queue, DeviceTransportError::kUnsupportedOperation,
+            TransportCommandOpcode::kPutValue64, destination_rank, channel);
+        return;
+    }
+
+    TransportCommand command{};
+    command.opcode = TransportCommandOpcode::kPutValue64;
+    command.team = team;
+    command.peer = destination_rank;
+    command.channel = channel;
+    command.options = options;
+    command.value_bytes = value_bytes;
+    command.destination = destination;
+    command.value = value;
+    detail::append(queue, command);
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void remote_add_release(
+    const DeviceTransportContext& context, DeviceChannel channel,
+    TransportTeam team, int destination_rank, DeviceAddress destination,
+    std::int64_t value) {
+    if (threadIdx.x != 0)
+        return;
+    auto* queue = detail::prepare(
+        context, channel, team, destination_rank,
+        TransportCommandOpcode::kRemoteAdd64);
+    if (queue == nullptr)
+        return;
+    if (destination == kNullDeviceAddress) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidAddress,
+            TransportCommandOpcode::kRemoteAdd64, destination_rank, channel);
+        return;
+    }
+
+    simt::system_fence();
+    TransportCommand command{};
+    command.opcode = TransportCommandOpcode::kRemoteAdd64;
+    command.team = team;
+    command.peer = destination_rank;
+    command.channel = channel;
+    command.destination = destination;
+    command.value = static_cast<std::uint64_t>(value);
+    detail::append(queue, command);
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void signal(
+    const DeviceTransportContext& context, DeviceChannel channel,
+    TransportTeam team, int destination_rank,
+    const RemoteAction& remote_action) {
+    if (threadIdx.x != 0)
+        return;
+    auto* queue = detail::prepare(
+        context, channel, team, destination_rank,
+        TransportCommandOpcode::kSignal);
+    if (queue == nullptr)
+        return;
+    if (remote_action.kind != RemoteActionKind::kSignalAdd &&
+        remote_action.kind != RemoteActionKind::kSignalIncrement) {
+        detail::record_error(
+            queue, DeviceTransportError::kUnsupportedOperation,
+            TransportCommandOpcode::kSignal, destination_rank, channel);
+        return;
+    }
+
+    simt::system_fence();
+    TransportCommand command{};
+    command.opcode = TransportCommandOpcode::kSignal;
+    command.team = team;
+    command.action_kind = remote_action.kind;
+    command.peer = destination_rank;
+    command.channel = channel;
+    command.signal_index = remote_action.signal_index;
+    command.symmetric_offset = remote_action.symmetric_offset;
+    command.value = remote_action.value;
+    detail::append(queue, command);
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE SignalValue read_signal(
+    const DeviceTransportContext&, DeviceChannel, TransportTeam, int,
+    std::uint32_t) {
+    return 0;
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void wait_signal(
+    const DeviceTransportContext&, DeviceChannel, TransportTeam, int,
+    std::uint32_t, SignalValue, std::uint64_t) {}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void flush(
+    const DeviceTransportContext& context, DeviceChannel channel,
+    CooperationScope scope) {
+    if (threadIdx.x != 0)
+        return;
+    auto* queue = detail::command_queue(context);
+    if (!detail::validate_queue(
+            queue, TransportCommandOpcode::kFlush, 0, channel))
+        return;
+    if (channel != 0) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidChannel,
+            TransportCommandOpcode::kFlush, 0, channel);
+        return;
+    }
+
+    TransportCommand command{};
+    command.opcode = TransportCommandOpcode::kFlush;
+    command.scope = scope;
+    command.channel = channel;
+    detail::append(queue, command);
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void flush_async(
+    const DeviceTransportContext&, DeviceChannel, TransportTeam, int,
+    CooperationScope, DeviceRequest*) {}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void wait(
+    const DeviceTransportContext&, DeviceRequest*) {}
+
+DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t load_acquire(
+    DeviceAddress address) {
+    if (address == kNullDeviceAddress)
+        return 0;
+    const auto value = simt::load_observed(
+        reinterpret_cast<const __gm__ std::uint64_t*>(address));
+    simt::system_fence();
+    return value;
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void store_release(
+    DeviceAddress address, std::uint64_t value) {
+    if (address == kNullDeviceAddress)
+        return;
+    simt::system_fence();
+    simt::store_published(
+        reinterpret_cast<__gm__ std::uint64_t*>(address), value);
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void system_fence() {
+    simt::system_fence();
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void device_barrier(
+    const DeviceTransportContext& context, std::uint32_t team_mask,
+    DeviceAddress, std::uint64_t timeout_cycles) {
+    if (threadIdx.x != 0)
+        return;
+    auto* queue = detail::command_queue(context);
+    if (!detail::validate_queue(
+            queue, TransportCommandOpcode::kBarrier, 0, 0))
+        return;
+    if (team_mask != 1) {
+        detail::record_error(
+            queue, DeviceTransportError::kUnsupportedOperation,
+            TransportCommandOpcode::kBarrier, 0, 0);
+        return;
+    }
+
+    simt::system_fence();
+    TransportCommand command{};
+    command.opcode = TransportCommandOpcode::kBarrier;
+    command.options = team_mask;
+    command.timeout_cycles = timeout_cycles;
+    detail::append(queue, command);
+}
+
+}  // namespace deep_ep::ascend::transport::device

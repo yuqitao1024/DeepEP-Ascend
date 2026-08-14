@@ -1,6 +1,10 @@
 #pragma once
 
+#if defined(DEEP_EP_ASCEND_STAGED_URMA) && DEEP_EP_ASCEND_STAGED_URMA
+#include "device_transport_commands.hpp"
+#else
 #include "device_transport_stub.hpp"
+#endif
 
 namespace deep_ep::ascend::transport {
 

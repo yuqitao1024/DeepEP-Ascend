@@ -9,6 +9,8 @@
 namespace deep_ep::ascend::transport {
 
 inline constexpr std::uint32_t kTransportCommandAbiVersion = 1;
+inline constexpr std::uint32_t kStagedTransportCannCompatibility =
+    0x00090200U;
 
 enum class TransportCommandOpcode : std::uint32_t {
     kNone,
@@ -93,14 +95,29 @@ struct alignas(64) DeviceTransportDiagnostic {
     std::uint64_t reserved[2]{};
 };
 
+struct alignas(64) StagedTransportContext {
+    std::uint32_t abi_version = kTransportCommandAbiVersion;
+    std::uint32_t struct_size = sizeof(StagedTransportContext);
+    std::uint32_t cann_compatibility = kStagedTransportCannCompatibility;
+    std::uint32_t flags = 0;
+    std::uintptr_t command_queue = 0;
+    std::uintptr_t team = 0;
+    std::uintptr_t window = 0;
+    std::uintptr_t fetch_results = 0;
+    std::uint64_t fetch_result_bytes = 0;
+    std::uint64_t reserved = 0;
+};
+
 static_assert(sizeof(TransportCommand) == 128);
 static_assert(sizeof(TransportCommandQueue) == 64);
 static_assert(sizeof(TransportServiceState) == 64);
 static_assert(sizeof(DeviceTransportDiagnostic) == 64);
+static_assert(sizeof(StagedTransportContext) == 64);
 static_assert(std::is_trivially_copyable_v<TransportCommand>);
 static_assert(std::is_trivially_copyable_v<TransportCommandQueue>);
 static_assert(std::is_trivially_copyable_v<TransportServiceState>);
 static_assert(std::is_trivially_copyable_v<DeviceTransportDiagnostic>);
+static_assert(std::is_trivially_copyable_v<StagedTransportContext>);
 
 namespace command {
 

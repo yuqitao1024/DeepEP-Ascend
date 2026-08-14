@@ -37,6 +37,7 @@ static_assert(offsetof(transport::TransportCommand, timeout_cycles) == 72);
 static_assert(sizeof(transport::TransportCommandQueue) == 64);
 static_assert(sizeof(transport::TransportServiceState) == 64);
 static_assert(sizeof(transport::DeviceTransportDiagnostic) == 64);
+static_assert(sizeof(transport::StagedTransportContext) == 64);
 
 void check_factories() {
     const auto put = transport::command::make_put(
