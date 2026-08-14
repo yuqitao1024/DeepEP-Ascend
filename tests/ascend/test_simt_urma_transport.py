@@ -29,6 +29,8 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
                               "x86_64-linux/pkg_inc"),
                     "-I", str(pathlib.Path(ascend_home) /
                               "x86_64-linux/asc/include"),
+                    "-I", str(pathlib.Path(ascend_home) /
+                              "x86_64-linux/asc/impl"),
                     str(ROOT / "tests/ascend/cann_abi_probe.cpp"),
                     "-o", str(executable),
                 ],
