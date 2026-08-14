@@ -1,3 +1,4 @@
+import os
 import unittest
 
 from api_contract import (ASCEND_ELASTIC_BUFFER_METHODS, ASCEND_MODULE_NAMES,
@@ -6,6 +7,10 @@ from api_contract import (ASCEND_ELASTIC_BUFFER_METHODS, ASCEND_MODULE_NAMES,
                           CUDA_EVENT_HANDLE_METHODS, CUDA_MODULE_NAMES)
 from extension_loader import load_extension
 
+
+if "DEEP_EP_EXTENSION_PATH" not in os.environ:
+    raise unittest.SkipTest(
+        "DEEP_EP_EXTENSION_PATH is required for compiled extension tests")
 
 _C = load_extension()
 

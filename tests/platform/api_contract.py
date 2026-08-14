@@ -8,9 +8,10 @@ COMMON_BUFFER_METHODS = {
 }
 CUDA_ONLY_MODULE_NAMES = {
     "is_sm90_compiled", "init_jit", "Config", "Buffer",
-    "get_low_latency_rdma_size_hint", "get_local_nccl_unique_id",
-    "create_nccl_comm", "destroy_nccl_comm", "get_physical_domain_size",
-    "get_logical_domain_size",
+    "get_low_latency_rdma_size_hint", "create_cpu_handle",
+    "get_elastic_buffer_alignment", "get_local_nccl_unique_id",
+    "create_nccl_comm", "destroy_nccl_comm",
+    "get_physical_domain_size", "get_logical_domain_size",
 }
 CUDA_ONLY_BUFFER_METHODS = {
     "engram_write", "engram_fetch", "pp_set_config", "pp_send", "pp_recv",

@@ -284,8 +284,6 @@ class ElasticBuffer:
         self.allow_multiple_reduction = allow_multiple_reduction
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
         self.deterministic = deterministic
-        self.comm_handle = get_comm_handle(group)
-        comm_handle = comm_handle_value(self.comm_handle)
 
         if is_cuda():
             if os.environ.get('NCCL_GIN_CROSS_NIC') == '0':
@@ -309,6 +307,12 @@ class ElasticBuffer:
                     # NCCL exposes a better way to configure the symmetric window stride.
                     os.environ['NCCL_WIN_STRIDE'] = str(win_stride)
 
+        self.comm_handle = get_comm_handle(
+            group, force_new_comm=num_cpu_bytes > 0)
+        if is_cuda():
+            self.nccl_comm_handle = self.comm_handle
+        comm_handle = comm_handle_value(self.comm_handle)
+
         # Calculate buffer size (already 2 MB-aligned from hint functions / calculate_elastic_buffer_size)
         if num_bytes is None:
             # NOTES: we allow `num_topk == 0`, as the buffer size can also be calculated by number of ranks (maybe bigger though)
@@ -316,7 +320,7 @@ class ElasticBuffer:
                 comm_handle,
                 num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
                 allow_hybrid_mode, allow_multiple_reduction)
-        if num_bytes <= 0:
+        if not is_cuda() and num_bytes <= 0:
             raise ValueError("num_bytes must be positive")
         if os.environ.get('EP_BUFFER_DEBUG', 0):
             print(f'Initializing EP elastic buffer with {num_bytes} bytes '
@@ -394,6 +398,8 @@ class ElasticBuffer:
             self.runtime.destroy()
             self.runtime = None  # Cannot use anymore
             self.comm_handle = None
+            if is_cuda():
+                self.nccl_comm_handle = None
 
     @staticmethod
     def get_buffer_size_hint(group: dist.ProcessGroup,
@@ -442,6 +448,7 @@ class ElasticBuffer:
             num_gpu_bytes: the recommended GPU buffer size in bytes for fetch recv area (2 MB-aligned).
             num_cpu_bytes: the recommended CPU buffer size in bytes for engram local storage (2 MB-aligned).
         """
+        require_cuda("get_engram_storage_size_hint")
         # TODO: refactor all APIs to allow more parallelism
         # TODO: consider FP4
         # NOTES: only the data (BF16 or FP8) is transported via RDMA; FP8 scaling factors are
@@ -467,6 +474,7 @@ class ElasticBuffer:
         Returns:
             size: the recommended PP buffer size in bytes (2 MB-aligned).
         """
+        require_cuda("get_pp_buffer_size_hint")
         # Align with `LDG.256`
         num_max_tensor_bytes = align(num_max_tensor_bytes, 32)
 
@@ -491,6 +499,7 @@ class ElasticBuffer:
         Returns:
             size: the total number of bytes that will be used in this session.
         """
+        require_cuda("get_agrs_num_max_session_bytes")
         if not isinstance(shapes[0], tuple):
             shapes = (shapes,)
         return sum(align(group.size() * math.prod(x) * dtype.itemsize, 32) for x in shapes)
@@ -510,6 +519,7 @@ class ElasticBuffer:
         Returns:
             size: the recommended AGRS buffer size in bytes (2 MB-aligned).
         """
+        require_cuda("get_agrs_buffer_size_hint")
         buffer_alignment = _C.get_elastic_buffer_alignment()
         return align(num_max_session_bytes, buffer_alignment)
 

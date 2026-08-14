@@ -321,9 +321,10 @@ class AscendStubSourceTest(unittest.TestCase):
         })
         self.assertEqual(contract.CUDA_MODULE_NAMES - contract.ASCEND_MODULE_NAMES, {
             "is_sm90_compiled", "init_jit", "Config", "Buffer",
-            "get_low_latency_rdma_size_hint", "get_local_nccl_unique_id",
-            "create_nccl_comm", "destroy_nccl_comm", "get_physical_domain_size",
-            "get_logical_domain_size",
+            "get_low_latency_rdma_size_hint", "create_cpu_handle",
+            "get_elastic_buffer_alignment", "get_local_nccl_unique_id",
+            "create_nccl_comm", "destroy_nccl_comm",
+            "get_physical_domain_size", "get_logical_domain_size",
         })
         self.assertEqual(contract.ASCEND_ELASTIC_BUFFER_METHODS,
                          contract.COMMON_BUFFER_METHODS)

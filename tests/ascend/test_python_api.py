@@ -20,6 +20,10 @@ GATED_METHODS = {
     "get_comm_stream": "get_comm_stream",
     "get_physical_domain_size": "get_physical_domain_size",
     "get_logical_domain_size": "get_logical_domain_size",
+    "get_engram_storage_size_hint": "get_engram_storage_size_hint",
+    "get_pp_buffer_size_hint": "get_pp_buffer_size_hint",
+    "get_agrs_num_max_session_bytes": "get_agrs_num_max_session_bytes",
+    "get_agrs_buffer_size_hint": "get_agrs_buffer_size_hint",
     "engram_write": "engram_write",
     "engram_fetch": "engram_fetch",
     "pp_set_config": "pp_set_config",
@@ -157,7 +161,8 @@ def _install_fake_torch(platform, events):
 
         def get_device_properties(self, device):
             self._record("get_device_properties", device)
-            return types.SimpleNamespace(multi_processor_count=80)
+            return types.SimpleNamespace(
+                multi_processor_count=80, total_memory=1 << 30)
 
         def set_device(self, device):
             self._record("set_device", device)
@@ -175,7 +180,10 @@ def _install_fake_torch(platform, events):
     distributed.new_group = lambda ranks: None
     distributed.init_process_group = lambda **kwargs: None
     distributed.barrier = lambda: events.append("dist.barrier")
-    distributed.all_gather_object = lambda output, value, group: None
+    def all_gather_object(output, value, group):
+        output[:] = [value] * len(output)
+
+    distributed.all_gather_object = all_gather_object
     torch.distributed = distributed
 
     sys.modules["torch"] = torch
@@ -262,7 +270,16 @@ def _install_fake_extension(platform, events):
         extension.destroy_nccl_comm = lambda handle: events.append(
             ("extension.destroy_nccl_comm", handle))
         extension.get_local_nccl_unique_id = lambda: "unused"
-        extension.create_nccl_comm = lambda unique_id, size, rank: 1234
+        def create_nccl_comm(unique_id, size, rank):
+            events.append((
+                "extension.create_nccl_comm", unique_id, size, rank,
+                os.environ.get("NCCL_SYM_REUSE_SYSMEM_HANDLES"),
+                os.environ.get("NCCL_WIN_STRIDE")))
+            return 1234
+
+        extension.create_nccl_comm = create_nccl_comm
+        extension.create_cpu_handle = lambda num_bytes: (
+            events.append(("extension.create_cpu_handle", num_bytes)) or (101, 202))
         extension.get_physical_domain_size = lambda handle: (2, 4)
         extension.get_logical_domain_size = lambda handle, hybrid: (2, 4)
 
@@ -422,6 +439,7 @@ def _scenario_ascend_construction():
     assert buffer.num_bytes == 4096
     assert buffer.num_allocated_qps == 0
     assert buffer.comm_handle is None
+    assert not hasattr(buffer, "nccl_comm_handle")
     assert buffer.num_scaleout_ranks is None
     assert buffer.num_scaleup_ranks is None
     assert buffer.scaleout_rank_idx is None
@@ -442,12 +460,13 @@ def _scenario_ascend_construction():
     assert buffer.runtime is None
     assert buffer.comm_handle is None
 
-    try:
-        deep_ep.ElasticBuffer(group, num_bytes=0, explicitly_destroy=True)
-    except ValueError as error:
-        assert str(error) == "num_bytes must be positive"
-    else:
-        raise AssertionError("zero-sized buffer was accepted")
+    for num_bytes in (0, -1):
+        try:
+            deep_ep.ElasticBuffer(group, num_bytes=num_bytes, explicitly_destroy=True)
+        except ValueError as error:
+            assert str(error) == "num_bytes must be positive"
+        else:
+            raise AssertionError(f"non-positive buffer size {num_bytes} was accepted")
 
 
 def _scenario_ascend_implicit_size():
@@ -475,6 +494,14 @@ def _scenario_ascend_method_gates():
         "get_comm_stream": buffer.get_comm_stream,
         "get_physical_domain_size": buffer.get_physical_domain_size,
         "get_logical_domain_size": buffer.get_logical_domain_size,
+        "get_engram_storage_size_hint": lambda: buffer.get_engram_storage_size_hint(
+            poison, poison, poison),
+        "get_pp_buffer_size_hint": lambda: buffer.get_pp_buffer_size_hint(
+            poison, poison),
+        "get_agrs_num_max_session_bytes": lambda: buffer.get_agrs_num_max_session_bytes(
+            poison, poison, poison),
+        "get_agrs_buffer_size_hint": lambda: buffer.get_agrs_buffer_size_hint(
+            poison, poison),
         "engram_write": lambda: buffer.engram_write(poison),
         "engram_fetch": lambda: buffer.engram_fetch(poison),
         "pp_set_config": lambda: buffer.pp_set_config(poison, poison),
@@ -561,11 +588,41 @@ def _scenario_cuda_preservation():
         "check_fast_rdma_atomic_support") or False
     os.environ["EP_OVERRIDE_RDMA_SL"] = "7"
     group = _FakeGroup(events, rank=5, size=8)
+
+    zero_buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=0, explicitly_destroy=True)
+    assert zero_buffer.num_bytes == 0
+    zero_runtime_args = extension.runtime_args[-1]
+    assert zero_runtime_args[:6] == (5, 8, 4242, [], 0, 0)
+    assert zero_runtime_args[9:11] == (7, 129)
+    zero_buffer.destroy()
+    events.clear()
+
+    os.environ["NCCL_GIN_CROSS_NIC"] = "0"
+    os.environ.pop("NCCL_SYM_REUSE_SYSMEM_HANDLES", None)
+    os.environ.pop("NCCL_WIN_STRIDE", None)
+    cpu_buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=8192, num_cpu_bytes=4096, explicitly_destroy=True)
+    cpu_runtime_args = extension.runtime_args[-1]
+    assert cpu_runtime_args[:3] == (5, 8, 1234)
+    assert cpu_runtime_args[3] == [(101, 202)] * 8
+    assert cpu_runtime_args[4:6] == (8192, 4096)
+    create_comm_event = next(
+        event for event in events if event[0] == "extension.create_nccl_comm")
+    assert create_comm_event[:4] == (
+        "extension.create_nccl_comm", "unused", 8, 5)
+    assert create_comm_event[4] == "1"
+    assert create_comm_event[5] is not None
+    assert ("extension.create_cpu_handle", 4096) in events
+    cpu_buffer.destroy()
+    events.clear()
+
     buffer = deep_ep.ElasticBuffer(group, num_bytes=4096, explicitly_destroy=True)
 
     runtime_args = extension.runtime_args[-1]
     assert runtime_args[:6] == (5, 8, 4242, [], 4096, 0)
     assert runtime_args[9:11] == (7, 129)
+    assert buffer.nccl_comm_handle is buffer.comm_handle
     assert buffer.num_allocated_qps == 129
     assert (buffer.num_scaleout_ranks, buffer.num_scaleup_ranks) == (2, 4)
     assert (buffer.scaleout_rank_idx, buffer.scaleup_rank_idx) == (1, 1)
@@ -638,6 +695,7 @@ def _scenario_cuda_preservation():
     assert extension.size_calls[-1] == (4242, 2, 32, 4, False, True, True)
     buffer.destroy()
     assert buffer.comm_handle is None
+    assert buffer.nccl_comm_handle is None
 
 
 def _scenario_stale_cuda_extension_guard():

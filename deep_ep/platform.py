@@ -21,11 +21,11 @@ def require_cuda(operation: str) -> None:
             f"DeepEP Ascend backend: {operation} is not implemented in phase 1")
 
 
-def get_comm_handle(group):
+def get_comm_handle(group, force_new_comm: bool = False):
     if not is_cuda():
         return None
     from .utils.comm import get_nccl_comm_handle
-    return get_nccl_comm_handle(group)
+    return get_nccl_comm_handle(group, force_new_comm=force_new_comm)
 
 
 def comm_handle_value(handle: Optional[object]) -> int:
