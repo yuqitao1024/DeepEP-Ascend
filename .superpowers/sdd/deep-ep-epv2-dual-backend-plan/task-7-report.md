@@ -34,7 +34,7 @@ dependency surface. The existing PyTorch-unavailable skip remains intact.
 
 ## Commit
 
-See the focused commit recorded after this report is written.
+`6291d66` (`test: normalize PyTorch Ascend extension defaults`)
 
 ## Self-Review
 
