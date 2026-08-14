@@ -51,8 +51,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE void wait_signal(
 DEEP_EP_ASCEND_SIMT_CALLEE void flush(
     const DeviceTransportContext&, DeviceChannel, CooperationScope);
 DEEP_EP_ASCEND_SIMT_CALLEE void flush_async(
-    const DeviceTransportContext&, DeviceChannel, int peer_rank,
-    CooperationScope, DeviceRequest* request);
+    const DeviceTransportContext&, DeviceChannel, TransportTeam,
+    int peer_rank, CooperationScope, DeviceRequest* request);
 DEEP_EP_ASCEND_SIMT_CALLEE void wait(
     const DeviceTransportContext&, DeviceRequest* request);
 DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t load_acquire(
