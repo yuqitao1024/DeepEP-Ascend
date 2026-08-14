@@ -112,6 +112,39 @@ enum class CooperationScope : std::uint8_t {
     kWorkgroup,
     kDevice,
 };
+enum class MemorySegment : std::uint8_t { kDevice, kMixed };
+
+using DeviceOptions = std::uint32_t;
+inline constexpr DeviceOptions kDefaultOptions = 0;
+inline constexpr DeviceOptions kAggregateRequests = DeviceOptions{1} << 0;
+
+enum class RemoteActionKind : std::uint8_t {
+    kNone,
+    kSignalAdd,
+    kSignalIncrement,
+};
+
+struct RemoteAction {
+    RemoteActionKind kind = RemoteActionKind::kNone;
+    std::uint32_t signal_index = 0;
+    std::uint64_t symmetric_offset = 0;
+    std::uint64_t value = 0;
+
+    static constexpr RemoteAction none() {
+        return {};
+    }
+
+    static constexpr RemoteAction signal_add(
+        std::uint64_t offset, std::uint64_t addend) {
+        return {RemoteActionKind::kSignalAdd, 0, offset, addend};
+    }
+
+    static constexpr RemoteAction signal_increment(std::uint32_t index) {
+        return {RemoteActionKind::kSignalIncrement, index, 0, 1};
+    }
+};
+
+using SignalValue = std::uint64_t;
 
 struct TransportTopology {
     int world_rank = 0;
@@ -161,5 +194,6 @@ struct alignas(16) DeviceRequest {
 static_assert(std::is_trivially_copyable_v<TransportTopology>);
 static_assert(std::is_trivially_copyable_v<DeviceTransportContext>);
 static_assert(std::is_trivially_copyable_v<DeviceRequest>);
+static_assert(std::is_trivially_copyable_v<RemoteAction>);
 
 }  // namespace deep_ep::ascend::transport

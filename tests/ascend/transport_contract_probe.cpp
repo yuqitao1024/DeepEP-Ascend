@@ -24,10 +24,33 @@ static_assert(std::is_trivially_copyable_v<DeviceTransportContext>);
 static_assert(std::is_trivially_copyable_v<DeviceRequest>);
 static_assert(alignof(DeviceRequest) == 16);
 static_assert(sizeof(DeviceRequest) == 32);
+static_assert(std::is_trivially_copyable_v<RemoteAction>);
+static_assert(kDefaultOptions == 0);
+static_assert((kAggregateRequests & kDefaultOptions) == 0);
 static_assert(kNoCapabilities == 0);
 static_assert(capability_bit(TransportCapability::kDevicePut) != 0);
 static_assert(capability_bit(TransportCapability::kDeviceGet) !=
               capability_bit(TransportCapability::kDevicePut));
+
+using DevicePut = void (*)(
+    const DeviceTransportContext&, device::DeviceChannel, TransportTeam, int,
+    void*, const void*, std::size_t, CooperationScope, MemorySegment,
+    DeviceOptions, const RemoteAction&);
+using DeviceGet = void (*)(
+    const DeviceTransportContext&, device::DeviceChannel, TransportTeam, int,
+    const void*, void*, std::size_t, CooperationScope, MemorySegment,
+    DeviceOptions);
+using ReadSignal = SignalValue (*)(
+    const DeviceTransportContext&, device::DeviceChannel, TransportTeam, int,
+    std::uint32_t);
+using WaitSignal = void (*)(
+    const DeviceTransportContext&, device::DeviceChannel, TransportTeam, int,
+    std::uint32_t, SignalValue, std::uint64_t);
+
+static_assert(std::is_same_v<decltype(&device::put), DevicePut>);
+static_assert(std::is_same_v<decltype(&device::get), DeviceGet>);
+static_assert(std::is_same_v<decltype(&device::read_signal), ReadSignal>);
+static_assert(std::is_same_v<decltype(&device::wait_signal), WaitSignal>);
 
 int main() {
     const auto missing = capability_bit(TransportCapability::kDevicePut) |
@@ -47,6 +70,16 @@ int main() {
     if (context.abi_version != kDeviceTransportAbiVersion ||
         context.struct_size != sizeof(DeviceTransportContext))
         return 3;
+
+    const auto no_action = RemoteAction::none();
+    const auto signal_add = RemoteAction::signal_add(128, 7);
+    const auto signal_increment = RemoteAction::signal_increment(3);
+    if (no_action.kind != RemoteActionKind::kNone ||
+        signal_add.kind != RemoteActionKind::kSignalAdd ||
+        signal_add.symmetric_offset != 128 || signal_add.value != 7 ||
+        signal_increment.kind != RemoteActionKind::kSignalIncrement ||
+        signal_increment.signal_index != 3 || signal_increment.value != 1)
+        return 4;
 
     auto created = make_stub_transport(valid_config());
     if (!created.status.ok() || !created.transport)
