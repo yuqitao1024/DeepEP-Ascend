@@ -18,7 +18,8 @@ def is_cuda() -> bool:
 def require_cuda(operation: str) -> None:
     if not is_cuda():
         raise NotImplementedError(
-            f"DeepEP Ascend backend: {operation} is not implemented in phase 1")
+            f"DeepEP Ascend backend: {operation} is unavailable until the Ascend "
+            "device transport is implemented")
 
 
 def get_comm_handle(group, force_new_comm: bool = False):

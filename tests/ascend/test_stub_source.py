@@ -150,13 +150,13 @@ static_assert(std::is_same_v<decltype(&Buffer::get_comm_stream),
                              pybind11::object (Buffer::*)() const>);
 
 template <typename Call>
-bool raises_phase_error(const char* operation, Call call) {
+bool raises_transport_error(const char* operation, const char* detail, Call call) {
     python_error.clear();
     try {
         call();
     } catch (const pybind11::error_already_set&) {
         return python_error == std::string("DeepEP Ascend backend: ") + operation +
-                                   " is not implemented in phase 1";
+                                   " " + detail;
     }
     return false;
 }
@@ -186,7 +186,8 @@ int main() {
                        false, true, true, 3, 0, 300, 100, true);
         return 1;
     } catch (const std::runtime_error& error) {
-        if (std::string(error.what()).find("comm_handle must be zero") == std::string::npos)
+        if (std::string(error.what()).find(
+                "communicator_handle must be zero in Phase 2A") == std::string::npos)
             return 2;
     }
 
@@ -195,7 +196,8 @@ int main() {
                        false, true, true, 3, 0, 300, 100, true);
         return 3;
     } catch (const std::runtime_error& error) {
-        if (std::string(error.what()).find("num_buffer_bytes must be positive") == std::string::npos)
+        if (std::string(error.what()).find("device_buffer_bytes must be positive") ==
+            std::string::npos)
             return 4;
     }
 
@@ -204,7 +206,7 @@ int main() {
                        false, true, true, 3, 0, 300, 100, true);
         return 5;
     } catch (const std::runtime_error& error) {
-        if (std::string(error.what()).find("num_ranks must be positive") == std::string::npos)
+        if (std::string(error.what()).find("world_size must be positive") == std::string::npos)
             return 6;
     }
 
@@ -213,20 +215,30 @@ int main() {
                        false, true, true, 3, 0, 300, 100, true);
         return 7;
     } catch (const std::runtime_error& error) {
-        if (std::string(error.what()).find("rank_idx must be in [0, num_ranks)") ==
+        if (std::string(error.what()).find("rank must be in [0, world_size)") ==
             std::string::npos)
             return 8;
     }
 
-    if (!raises_phase_error("current_stream_wait", [] { Event().current_stream_wait(); }))
+    if (!raises_transport_error(
+            "current_stream_wait",
+            "is unavailable until the Ascend device transport is implemented",
+            [] { Event().current_stream_wait(); }))
         return 9;
-    if (!raises_phase_error("get_comm_stream", [&] { buffer.get_comm_stream(); }))
+    if (!raises_transport_error(
+            "get_comm_stream",
+            "is unavailable until the Ascend device transport is implemented",
+            [&] { buffer.get_comm_stream(); }))
         return 10;
-    if (!raises_phase_error("get_physical_domain_size",
-                            [&] { buffer.get_physical_domain_size(); }))
+    if (!raises_transport_error(
+            "get_physical_domain_size",
+            "is unavailable until the Ascend device transport is implemented",
+            [&] { buffer.get_physical_domain_size(); }))
         return 11;
-    if (!raises_phase_error("get_logical_domain_size",
-                            [&] { buffer.get_logical_domain_size(); }))
+    if (!raises_transport_error(
+            "get_logical_domain_size",
+            "is unavailable until the Ascend device transport is implemented",
+            [&] { buffer.get_logical_domain_size(); }))
         return 12;
     try {
         Buffer::cpu_comm_t unsupported_cpu_comm{{1, 2}};
@@ -234,7 +246,8 @@ int main() {
                        false, true, true, 3, 0, 300, 100, true);
         return 20;
     } catch (const std::runtime_error& error) {
-        if (std::string(error.what()).find("cpu_comm must be empty") == std::string::npos)
+        if (std::string(error.what()).find(
+                "cpu_communicator must be empty in Phase 2A") == std::string::npos)
             return 21;
     }
 
@@ -243,16 +256,20 @@ int main() {
                        false, true, true, 3, 0, 300, 100, true);
         return 22;
     } catch (const std::runtime_error& error) {
-        if (std::string(error.what()).find("num_cpu_buffer_bytes must be zero") ==
+        if (std::string(error.what()).find("cpu_buffer_bytes must be zero in Phase 2A") ==
             std::string::npos)
             return 23;
     }
 
-    if (!raises_phase_error("barrier", [&] { buffer.barrier(true, false, true); }))
+    if (!raises_transport_error(
+            "barrier", "requires unavailable device transport capabilities: device_barrier",
+            [&] { buffer.barrier(true, false, true); }))
         return 13;
-    if (!raises_phase_error("calculate_elastic_buffer_size", [] {
-            Buffer::calculate_buffer_size(0, 128, 7168, 8, false, true, true);
-        }))
+    if (!raises_transport_error(
+            "calculate_elastic_buffer_size",
+            "is unavailable until the Ascend device transport is implemented", [] {
+                Buffer::calculate_buffer_size(0, 128, 7168, 8, false, true, true);
+            }))
         return 14;
 
     Tensor tensor;
@@ -260,22 +277,29 @@ int main() {
     std::optional<int> optional_int;
     std::optional<std::vector<int>> optional_ints;
     std::optional<Event> optional_event;
-    if (!raises_phase_error("dispatch", [&] {
-            buffer.dispatch(
-                tensor, optional_tensor, tensor, optional_tensor, optional_tensor,
-                optional_int, optional_int, optional_ints,
-                optional_tensor, optional_tensor, optional_tensor, optional_tensor,
-                optional_tensor, optional_tensor, optional_tensor,
-                1, 1, 1, 1, 0, optional_event, optional_event,
-                false, false, true, true, false, false, false);
-        }))
+    if (!raises_transport_error(
+            "dispatch", "requires unavailable device transport capabilities: "
+            "symmetric_window, direct_peer_pointer, device_put, device_put_value, "
+            "remote_atomic_add_release, remote_signal, system_memory_ordering, "
+            "device_barrier", [&] {
+                buffer.dispatch(
+                    tensor, optional_tensor, tensor, optional_tensor, optional_tensor,
+                    optional_int, optional_int, optional_ints,
+                    optional_tensor, optional_tensor, optional_tensor, optional_tensor,
+                    optional_tensor, optional_tensor, optional_tensor,
+                    1, 1, 1, 1, 0, optional_event, optional_event,
+                    false, false, true, true, false, false, false);
+            }))
         return 15;
-    if (!raises_phase_error("combine", [&] {
-            buffer.combine(
-                tensor, optional_tensor, optional_tensor, optional_tensor,
-                tensor, tensor, tensor, optional_tensor, optional_tensor,
-                1, 1, 1, 0, optional_event, optional_event, false, false, false);
-        }))
+    if (!raises_transport_error(
+            "combine", "requires unavailable device transport capabilities: "
+            "symmetric_window, direct_peer_pointer, device_put, remote_atomic_add_release, "
+            "remote_signal, system_memory_ordering, device_barrier", [&] {
+                buffer.combine(
+                    tensor, optional_tensor, optional_tensor, optional_tensor,
+                    tensor, tensor, tensor, optional_tensor, optional_tensor,
+                    1, 1, 1, 0, optional_event, optional_event, false, false, false);
+            }))
         return 16;
     return 0;
 }
@@ -345,11 +369,11 @@ class AscendStubSourceTest(unittest.TestCase):
         self.assertIn("public_names", called_names)
         self.assertNotIn("hasattr", called_names)
 
-    def test_python_phase_error_helper_requires_exact_type_and_message(self):
+    def test_python_transport_error_helper_requires_exact_type_and_message(self):
         tree = ast.parse(STUB_TEST.read_text())
         helper = next(node for node in ast.walk(tree)
                       if isinstance(node, ast.FunctionDef) and
-                      node.name == "assert_phase_error")
+                      node.name == "assert_transport_error")
         calls = {
             node.func.attr: [ast.unparse(argument) for argument in node.args]
             for node in ast.walk(helper)

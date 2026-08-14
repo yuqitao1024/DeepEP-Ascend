@@ -14,7 +14,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 ELASTIC_SOURCE = ROOT / "deep_ep/buffers/elastic.py"
 ENVS_SOURCE = ROOT / "deep_ep/utils/envs.py"
 
-PHASE_ERROR = "DeepEP Ascend backend: {} is not implemented in phase 1"
+TRANSPORT_ERROR = (
+    "DeepEP Ascend backend: {} is unavailable until the Ascend device "
+    "transport is implemented")
 GATED_METHODS = {
     "barrier": "barrier",
     "get_comm_stream": "get_comm_stream",
@@ -110,8 +112,8 @@ class _FakeGroup:
         return types.SimpleNamespace(_comm_ptr=lambda: self.comm_pointer)
 
 
-def _phase_error(operation):
-    return NotImplementedError(PHASE_ERROR.format(operation))
+def _transport_error(operation):
+    return NotImplementedError(TRANSPORT_ERROR.format(operation))
 
 
 def _install_fake_torch(platform, events):
@@ -202,7 +204,7 @@ def _install_fake_extension(platform, events):
     class EventHandle:
         def current_stream_wait(self):
             if platform == "ascend":
-                raise _phase_error("current_stream_wait")
+                raise _transport_error("current_stream_wait")
             events.append("event.current_stream_wait")
 
     class ElasticRuntime:
@@ -251,7 +253,7 @@ def _install_fake_extension(platform, events):
     def calculate_elastic_buffer_size(*args):
         extension.size_calls.append(args)
         if platform == "ascend":
-            raise _phase_error("calculate_elastic_buffer_size")
+            raise _transport_error("calculate_elastic_buffer_size")
         return 8192
 
     extension.EventHandle = EventHandle
@@ -365,12 +367,12 @@ def _load_package(platform, block_accelerator_imports=False):
     return deep_ep, extension, events
 
 
-def _assert_phase_error(operation, call):
+def _assert_transport_error(operation, call):
     try:
         call()
     except Exception as error:
         assert type(error) is NotImplementedError, (operation, type(error), error)
-        assert str(error) == PHASE_ERROR.format(operation), (operation, error)
+        assert str(error) == TRANSPORT_ERROR.format(operation), (operation, error)
     else:
         raise AssertionError(f"{operation} did not raise")
 
@@ -397,11 +399,11 @@ def _scenario_ascend_import():
     assert platform.comm_handle_value(None) == 0
     platform.synchronize()
     assert not any(str(event).startswith("torch.cuda") for event in events)
-    _assert_phase_error("adapter", lambda: platform.require_cuda("adapter"))
-    _assert_phase_error(
+    _assert_transport_error("adapter", lambda: platform.require_cuda("adapter"))
+    _assert_transport_error(
         "validate_device_type",
         lambda: platform.validate_device_type(_Poison(), "validate_device_type"))
-    _assert_phase_error("get_comm_stream", lambda: platform.wrap_stream(_Poison()))
+    _assert_transport_error("get_comm_stream", lambda: platform.wrap_stream(_Poison()))
 
     event = platform.capture_event()
     wrapped = types.SimpleNamespace(event=event)
@@ -409,7 +411,7 @@ def _scenario_ascend_import():
     assert platform.unwrap_event(event) is event
     assert platform.unwrap_event(wrapped) is event
     assert deep_ep.ElasticBuffer.capture().__class__ is extension.EventHandle
-    _assert_phase_error("current_stream_wait", event.current_stream_wait)
+    _assert_transport_error("current_stream_wait", event.current_stream_wait)
 
     for name in _ForbiddenImportFinder.FORBIDDEN:
         assert name not in sys.modules, name
@@ -472,13 +474,13 @@ def _scenario_ascend_construction():
 def _scenario_ascend_implicit_size():
     deep_ep, extension, events = _load_package("ascend", True)
     group = _FakeGroup(events)
-    _assert_phase_error(
+    _assert_transport_error(
         "calculate_elastic_buffer_size",
         lambda: deep_ep.ElasticBuffer(
             group, num_max_tokens_per_rank=1, hidden=16))
     assert extension.size_calls == [(0, 1, 16, 0, False, True, True)]
 
-    _assert_phase_error(
+    _assert_transport_error(
         "calculate_elastic_buffer_size",
         lambda: deep_ep.ElasticBuffer.get_buffer_size_hint(group, 2, 32, 4))
     assert extension.size_calls[-1] == (0, 2, 32, 4, False, True, True)
@@ -521,13 +523,13 @@ def _scenario_ascend_method_gates():
     }
     assert calls.keys() == GATED_METHODS.keys()
     for method, operation in GATED_METHODS.items():
-        _assert_phase_error(operation, calls[method])
+        _assert_transport_error(operation, calls[method])
 
     envs = importlib.import_module("deep_ep.utils.envs")
-    _assert_phase_error(
+    _assert_transport_error(
         "get_physical_domain_size",
         lambda: envs.get_physical_domain_size(poison))
-    _assert_phase_error(
+    _assert_transport_error(
         "get_logical_domain_size",
         lambda: envs.get_logical_domain_size(poison))
     buffer.destroy()
@@ -537,7 +539,7 @@ def _scenario_ascend_contextmanager_gate():
     deep_ep, extension, events = _load_package("ascend", True)
     buffer = deep_ep.ElasticBuffer(
         _FakeGroup(events), num_bytes=4096, explicitly_destroy=True)
-    _assert_phase_error(
+    _assert_transport_error(
         "agrs_new_session", lambda: buffer.agrs_new_session(False))
 
 
@@ -546,7 +548,7 @@ def _scenario_ascend_weak_lru_gate():
     buffer = deep_ep.ElasticBuffer(
         _FakeGroup(events), num_bytes=4096, explicitly_destroy=True)
     poison = _Poison()
-    _assert_phase_error(
+    _assert_transport_error(
         "get_theoretical_num_sms",
         lambda: buffer.get_theoretical_num_sms([poison], [poison]))
 
@@ -739,7 +741,7 @@ class PythonApiIsolationTest(unittest.TestCase):
     def test_explicit_size_constructs_without_cuda_or_topology(self):
         self.run_scenario("ascend_construction")
 
-    def test_implicit_size_reaches_backend_phase_error_without_nccl(self):
+    def test_implicit_size_reaches_backend_transport_error_without_nccl(self):
         self.run_scenario("ascend_implicit_size")
 
     def test_all_runtime_methods_fail_before_argument_or_symbol_access(self):
@@ -834,11 +836,11 @@ class RealAscendPythonApiTest(unittest.TestCase):
             raise AssertionError(
                 "Ascend construction must not enter a CUDA-era barrier")
 
-    def assert_phase_error(self, operation, call):
+    def assert_transport_error(self, operation, call):
         with self.assertRaises(NotImplementedError) as context:
             call()
         self.assertIs(type(context.exception), NotImplementedError)
-        self.assertEqual(str(context.exception), PHASE_ERROR.format(operation))
+        self.assertEqual(str(context.exception), TRANSPORT_ERROR.format(operation))
 
     def test_import_skips_cuda_exports(self):
         self.assertTrue(hasattr(self.deep_ep, "ElasticBuffer"))
@@ -853,8 +855,8 @@ class RealAscendPythonApiTest(unittest.TestCase):
         self.assertIsNone(buffer.num_scaleup_ranks)
         buffer.destroy()
 
-    def test_implicit_size_raises_phase_error(self):
-        self.assert_phase_error(
+    def test_implicit_size_raises_transport_error(self):
+        self.assert_transport_error(
             "calculate_elastic_buffer_size",
             lambda: self.deep_ep.ElasticBuffer(
                 self.FakeGroup(), num_max_tokens_per_rank=1, hidden=16))
@@ -862,13 +864,13 @@ class RealAscendPythonApiTest(unittest.TestCase):
     def test_core_operations_raise_before_cuda_helpers(self):
         buffer = self.deep_ep.ElasticBuffer(
             self.FakeGroup(), num_bytes=4096, explicitly_destroy=True)
-        self.assert_phase_error(
+        self.assert_transport_error(
             "dispatch",
             lambda: buffer.dispatch(
                 self.torch.empty((1, 16), dtype=self.torch.bfloat16),
                 self.torch.zeros((1, 1), dtype=self.torch.int64),
                 num_experts=1))
-        self.assert_phase_error("barrier", buffer.barrier)
+        self.assert_transport_error("barrier", buffer.barrier)
         buffer.destroy()
 
     def test_cuda_only_methods_fail_by_name(self):
@@ -882,7 +884,7 @@ class RealAscendPythonApiTest(unittest.TestCase):
         }
         for operation, call in calls.items():
             with self.subTest(operation=operation):
-                self.assert_phase_error(operation, call)
+                self.assert_transport_error(operation, call)
         buffer.destroy()
 
 

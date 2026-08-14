@@ -23,6 +23,15 @@ class RegistrationBoundaryTest(unittest.TestCase):
         self.assertNotIn('class_<ElasticBuffer>(m, "ElasticBuffer")', source)
         self.assertIn("register_cuda_only_apis", source)
 
+    def test_ascend_transport_is_owned_by_ascend_backend(self):
+        source = self.read("csrc/backends/ascend/elastic_buffer.hpp")
+        self.assertIn('#include "transport/stub_transport.hpp"', source)
+        for cuda_source in (
+                "csrc/elastic/buffer.hpp",
+                "csrc/kernels/backend/api.cuh",
+                "deep_ep/include/deep_ep/common/handle.cuh"):
+            self.assertNotIn("backends/ascend/transport", self.read(cuda_source))
+
 
 if __name__ == "__main__":
     unittest.main()

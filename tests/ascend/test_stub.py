@@ -20,8 +20,8 @@ class AscendStubTest(unittest.TestCase):
         self.assertEqual(_C.get_platform(), "ascend")
         self.buffer = _C.ElasticBuffer(*ARGS)
 
-    def assert_phase_error(self, operation, call):
-        message = f"DeepEP Ascend backend: {operation} is not implemented in phase 1"
+    def assert_transport_error(self, operation, call, detail):
+        message = f"DeepEP Ascend backend: {operation} {detail}"
         with self.assertRaises(NotImplementedError) as context:
             call()
         exception = context.exception
@@ -29,32 +29,42 @@ class AscendStubTest(unittest.TestCase):
         self.assertEqual(str(exception), message)
 
     def test_constructor_validation_and_idempotent_destroy(self):
-        with self.assertRaisesRegex(RuntimeError, "num_ranks must be positive"):
+        with self.assertRaisesRegex(RuntimeError, "world_size must be positive"):
             _C.ElasticBuffer(0, 0, *ARGS[2:])
-        with self.assertRaisesRegex(RuntimeError, "rank_idx must be in"):
+        with self.assertRaisesRegex(RuntimeError, r"rank must be in \[0, world_size\)"):
             _C.ElasticBuffer(1, 1, *ARGS[2:])
-        with self.assertRaisesRegex(RuntimeError, "comm_handle must be zero"):
+        with self.assertRaisesRegex(RuntimeError,
+                                    "communicator_handle must be zero in Phase 2A"):
             _C.ElasticBuffer(0, 1, 7, *ARGS[3:])
-        with self.assertRaisesRegex(RuntimeError, "cpu_comm must be empty"):
+        with self.assertRaisesRegex(RuntimeError,
+                                    "cpu_communicator must be empty in Phase 2A"):
             _C.ElasticBuffer(0, 1, 0, [(1, 2)], *ARGS[4:])
-        with self.assertRaisesRegex(RuntimeError, "num_buffer_bytes must be positive"):
+        with self.assertRaisesRegex(RuntimeError, "device_buffer_bytes must be positive"):
             _C.ElasticBuffer(0, 1, 0, [], 0, *ARGS[5:])
-        with self.assertRaisesRegex(RuntimeError, "num_cpu_buffer_bytes must be zero"):
+        with self.assertRaisesRegex(RuntimeError,
+                                    "cpu_buffer_bytes must be zero in Phase 2A"):
             _C.ElasticBuffer(0, 1, 0, [], 4096, 4096, *ARGS[6:])
         self.buffer.destroy()
         self.buffer.destroy()
 
     def test_runtime_primitives_raise(self):
-        self.assert_phase_error("barrier", lambda: self.buffer.barrier(True, False, True))
-        self.assert_phase_error("get_comm_stream", self.buffer.get_comm_stream)
-        self.assert_phase_error("get_physical_domain_size", self.buffer.get_physical_domain_size)
-        self.assert_phase_error("get_logical_domain_size", self.buffer.get_logical_domain_size)
-        self.assert_phase_error("current_stream_wait", _C.EventHandle().current_stream_wait)
+        unavailable = "is unavailable until the Ascend device transport is implemented"
+        self.assert_transport_error(
+            "barrier", lambda: self.buffer.barrier(True, False, True),
+            "requires unavailable device transport capabilities: device_barrier")
+        self.assert_transport_error("get_comm_stream", self.buffer.get_comm_stream, unavailable)
+        self.assert_transport_error("get_physical_domain_size",
+                                    self.buffer.get_physical_domain_size, unavailable)
+        self.assert_transport_error("get_logical_domain_size",
+                                    self.buffer.get_logical_domain_size, unavailable)
+        self.assert_transport_error("current_stream_wait",
+                                    _C.EventHandle().current_stream_wait, unavailable)
 
     def test_size_calculation_raises(self):
-        self.assert_phase_error(
+        self.assert_transport_error(
             "calculate_elastic_buffer_size",
-            lambda: _C.calculate_elastic_buffer_size(0, 128, 7168, 8, False, True, True))
+            lambda: _C.calculate_elastic_buffer_size(0, 128, 7168, 8, False, True, True),
+            "is unavailable until the Ascend device transport is implemented")
 
     def test_dispatch_and_combine_raise_before_device_validation(self):
         x = torch.empty((1, 16), dtype=torch.bfloat16)
@@ -64,10 +74,19 @@ class AscendStubTest(unittest.TestCase):
                          none, none, none, none, none, none,
                          1, 1, 1, 1, 0, none, none,
                          False, False, True, True, False, False, False)
-        self.assert_phase_error("dispatch", lambda: self.buffer.dispatch(*dispatch_args))
+        self.assert_transport_error(
+            "dispatch", lambda: self.buffer.dispatch(*dispatch_args),
+            "requires unavailable device transport capabilities: symmetric_window, "
+            "direct_peer_pointer, device_put, device_put_value, "
+            "remote_atomic_add_release, remote_signal, system_memory_ordering, "
+            "device_barrier")
         combine_args = (x, none, none, none, topk, topk, topk[:, 0].to(torch.int32),
                         none, none, 1, 1, 1, 0, none, none, False, False, False)
-        self.assert_phase_error("combine", lambda: self.buffer.combine(*combine_args))
+        self.assert_transport_error(
+            "combine", lambda: self.buffer.combine(*combine_args),
+            "requires unavailable device transport capabilities: symmetric_window, "
+            "direct_peer_pointer, device_put, remote_atomic_add_release, remote_signal, "
+            "system_memory_ordering, device_barrier")
 
 
 if __name__ == "__main__":
