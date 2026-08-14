@@ -9,6 +9,7 @@ add_library(deep_ep_ascend_core_operator_probe OBJECT
     ../../../csrc/backends/ascend/elastic/barrier.asc
     ../../../csrc/backends/ascend/elastic/dispatch.asc
     ../../../csrc/backends/ascend/elastic/combine.asc
+    ../../../csrc/backends/ascend/elastic/runtime.cpp
     core_operator_compile_probe.asc)
 
 target_compile_options(deep_ep_ascend_core_operator_probe PRIVATE
@@ -22,6 +23,9 @@ target_include_directories(deep_ep_ascend_core_operator_probe PRIVATE
 add_executable(deep_ep_ascend_core_operator_runner
     core_operator_runner.asc
     $<TARGET_OBJECTS:deep_ep_ascend_core_operator_probe>)
+
+set_target_properties(deep_ep_ascend_core_operator_runner PROPERTIES
+    LINKER_LANGUAGE ASC)
 
 target_compile_options(deep_ep_ascend_core_operator_runner PRIVATE
     $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${CMAKE_ASC_ARCHITECTURES}>)

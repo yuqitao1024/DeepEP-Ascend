@@ -6,6 +6,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PROBE = ROOT / "tests/ascend/core_operator_contract_probe.cpp"
+RUNTIME_PROBE = ROOT / "tests/ascend/core_runtime_contract_probe.cpp"
 ELASTIC = ROOT / "csrc/backends/ascend/elastic"
 CORE_OPS = ROOT / "tests/ascend/core_ops"
 
@@ -37,6 +38,22 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 self.assertFalse(any(token in include for include in includes),
                                  f"{header}: {token}")
 
+    def test_pure_cpp_runtime_contract(self):
+        runtime = ELASTIC / "runtime.cpp"
+        self.assertTrue(runtime.is_file(), str(runtime))
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "core_runtime_contract_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(RUNTIME_PROBE), str(runtime),
+                 "-o", str(binary)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
     def test_aot_kernel_surface_and_build_contract(self):
         header = ELASTIC / "kernels.hpp"
         self.assertTrue(header.is_file(), str(header))
@@ -58,13 +75,14 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         for source in ("barrier.asc", "dispatch.asc", "combine.asc"):
             self.assertIn(source, cmake)
         runner = (CORE_OPS / "core_operator_runner.asc").read_text()
-        for case_name in ("dispatch-normal", "dispatch-expanded",
+        for case_name in ("adapter-launch-error", "dispatch-normal", "dispatch-expanded",
                           "dispatch-cached", "dispatch-zero-padding",
                           "dispatch-empty", "combine-normal",
                           "combine-expanded", "combine-multiple",
                           "combine-single-reduction", "combine-weights",
                           "combine-bias0", "combine-bias01", "round-trip"):
             self.assertIn(case_name, runner)
+        self.assertIn("barrier-local", runner)
         probe = probe_path.read_text()
         self.assertIn("ElementKind", probe)
 
@@ -91,6 +109,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             for token in forbidden:
                 self.assertFalse(any(token in include for include in includes),
                                  f"{path}: {token}")
+
+    def test_production_api_does_not_bypass_transport_gate(self):
+        production = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        self.assertNotIn("launch_internal_", production)
+        for operation in ("barrier", "dispatch", "combine"):
+            marker = f'require_transport("{operation}"'
+            self.assertIn(marker, production)
 
 
 if __name__ == "__main__":

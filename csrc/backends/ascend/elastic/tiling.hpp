@@ -210,10 +210,13 @@ inline TilingStatus build_core_tiling(
     *output = {};
     if (!detail::valid_topology(input.topology))
         return TilingStatus::invalid("invalid topology");
-    if (input.hidden == 0 || input.num_experts == 0 ||
-        input.num_topk == 0 || input.expert_alignment == 0 ||
-        input.num_max_tokens_per_rank == 0 ||
-        input.num_topk > input.num_experts)
+    const bool requires_token_shape =
+        input.operation != OperationKind::kBarrier;
+    if (requires_token_shape &&
+        (input.hidden == 0 || input.num_experts == 0 ||
+         input.num_topk == 0 || input.expert_alignment == 0 ||
+         input.num_max_tokens_per_rank == 0 ||
+         input.num_topk > input.num_experts))
         return TilingStatus::invalid("invalid shape");
     if (input.num_experts %
             static_cast<std::uint64_t>(input.topology.world_size) != 0)
@@ -226,7 +229,8 @@ inline TilingStatus build_core_tiling(
         !input.has_reusable_slots)
         return TilingStatus::invalid_mode(
             "cached mode requires reusable slots");
-    if (input.element_kind == ElementKind::kFloat8E4M3 &&
+    if (requires_token_shape &&
+        input.element_kind == ElementKind::kFloat8E4M3 &&
         (input.num_scale_factor_packs == 0 ||
          input.scale_factor_pack_bytes == 0))
         return TilingStatus::invalid(
