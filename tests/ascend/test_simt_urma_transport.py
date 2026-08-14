@@ -11,6 +11,24 @@ SIMT_URMA = ROOT / "tests/ascend/simt_urma"
 
 
 class AscendSimtUrmaTransportTest(unittest.TestCase):
+    def test_urma_work_request_words_and_queue_arithmetic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = pathlib.Path(directory) / "urma_wqe_probe"
+            compile_probe = subprocess.run(
+                [
+                    "c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                    "-I", str(ROOT),
+                    str(ROOT / "tests/ascend/urma_wqe_probe.cpp"),
+                    "-o", str(executable),
+                ],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(
+                compile_probe.returncode, 0, compile_probe.stderr)
+
+            run_probe = subprocess.run(
+                [str(executable)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_probe.returncode, 0, run_probe.stderr)
+
     def test_cann_92_device_abi_matches_package_layouts(self):
         ascend_home = os.environ.get("ASCEND_HOME_PATH")
         if not ascend_home:
