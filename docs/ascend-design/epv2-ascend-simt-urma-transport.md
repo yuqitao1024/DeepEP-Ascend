@@ -3,9 +3,11 @@
 ## Status
 
 This document defines Phase 2D of the Ascend 950 EPv2 port. It replaces the
-Phase 2B empty device transport stubs with a minimal device-initiated SIMT URMA
+Phase 2B empty device transport stubs with a minimal SIMT-fronted URMA
 implementation for the communication semantics already exercised by the Phase
-2C barrier, dispatch, and combine kernels.
+2C barrier, dispatch, and combine kernels. SIMT records transport commands;
+an AICore service phase submits those commands through the required device
+doorbell instructions.
 
 Phase 2D validates the transport primitives independently. It does not claim
 that the Phase 2C placeholder communication schedules constitute complete
@@ -43,7 +45,7 @@ The first functional transport supports:
 - the public HCCL team, window, and channel resource APIs;
 - UBC_CTP channels owned by the AIV communication engine;
 - one device-visible symmetric window per transport instance;
-- one SIMT producer per selected channel;
+- one SIMT command producer and one AICore queue producer per selected channel;
 - device compilation and two-rank runtime validation on node 20002;
 - structured host errors and device-side diagnostic status;
 - explicit CANN version and ABI compatibility checks.
@@ -97,11 +99,32 @@ URMA work requests in GM. It remains AICore-only, but its structure confirms
 that a small compatibility layer is sufficient and that the full AIN/Hcomm
 class stack is unnecessary.
 
+### CANN 9.2 SIMT feasibility result
+
+The `dav-3510` mixed-language probe on node 20002 established these compiler
+boundaries:
+
+- `asc_threadfence`, non-cacheable SIMT `__ldg`, and non-cacheable SIMT
+  `__stg` compile from `__simt_vf__`;
+- the public `ld_dev` and `st_dev` aliases are not declared in the SIMT API;
+- calling `__builtin_cce_st_dev` directly from `__simt_vf__` consistently
+  crashes Bisheng in the `HiTPE Stall Cycle Refactor` code-generation pass;
+- CANN's Hcomm, PTO URMA, and MoE communication implementations all use
+  `st_dev` for SQ and CQ doorbells; none uses ordinary GM stores for them.
+
+`__stg` and `st_dev` are distinct compiler builtins with different device
+semantics. A compiling non-cacheable `__stg` is therefore not accepted as a
+doorbell substitute. Direct SIMT URMA is blocked with CANN 9.2.0.
+
 ## Chosen Approach
 
-DeepEP owns a minimal SIMT URMA implementation below the existing facade.
-CANN continues to own connection establishment, memory registration, channel
-allocation, authentication tokens, queue allocation, and teardown.
+DeepEP owns a minimal staged transport below the existing facade. SIMT-facing
+facade calls append fixed-size commands to a backend-owned GM command buffer.
+After the VF returns, the enclosing AICore kernel invokes a service routine
+that validates and executes the batch with `st_dev`, `ld_dev`, and the CANN
+9.2 URMA layouts. CANN continues to own connection establishment, memory
+registration, channel allocation, authentication tokens, queue allocation,
+and teardown.
 
 Production kernels do not include CANN internal Hcomm implementation headers.
 The backend defines only the device-visible POD layouts and operations it
@@ -112,9 +135,20 @@ This approach is preferred over the alternatives:
 
 1. Including Hcomm internal implementation headers does not solve the SIMT
    qualifier mismatch and creates an unstable production dependency.
-2. A SIMT command queue serviced later by an AICore AIN phase would require a
-   new execution protocol and substantial operator restructuring. It remains a
-   separate fallback architecture, not an automatic silent fallback.
+2. Treating non-cacheable `__stg` as a doorbell is not supported by CANN's
+   reference code and would risk silent queue failure.
+3. A persistent concurrent AICore service could preserve synchronous facade
+   calls, but adds kernel residency, scheduling, shutdown, and deadlock risks
+   that the current phase does not need.
+4. Waiting for a vendor SIMT communication patch remains a future replacement
+   path. The command ABI isolates that change without blocking current work.
+
+The cost of the staged design is explicit: facade calls enqueue work, and the
+work becomes complete only at the next AICore service boundary. A VF must not
+consume communication results after `flush` or `device_barrier` in the same VF.
+Operator integration splits such consumers into a later VF phase. Current
+Phase 2C communication calls are at VF tails and remain production-gated, so
+Phase 2D can validate the boundary without claiming complete operator support.
 
 ## Layering
 
@@ -123,9 +157,11 @@ Phase 2C Ascend SIMT kernels
             |
 DeviceTransportFacade
             |
-Ascend SIMT transport policy
+SIMT command encoder -- backend-owned GM command buffer
             |
-address/channel resolver -- URMA WQE builder -- SQ/CQ operations
+AICore service boundary
+            |
+address/channel resolver -- URMA WQE builder -- SQ/CQ operations -- st_dev
             |
 CANN-created team, window, channel, SQ, CQ, and memory registration
 ```
@@ -168,28 +204,40 @@ Initialization proceeds in this order:
    signals and barrier session zero.
 3. Register the symmetric device buffer as the team window.
 4. Create at least one AIV UBC_CTP channel per non-local peer.
-5. Export the device team handle, window handle, local window base, topology,
-   and diagnostic buffer through `DeviceTransportContext`.
-6. Keep production capability bits disabled until runtime validation passes.
+5. Allocate and zero the command buffer, service state, and diagnostic buffer.
+6. Export the device team handle, window handle, local window base, topology,
+   and backend service context through `DeviceTransportContext`.
+7. Keep production capability bits disabled until runtime validation passes.
 
 Teardown reverses the resource order and is idempotent. Partial initialization
 uses the same reverse-order cleanup path.
 
-### SIMT primitive layer
+### SIMT command layer
 
-The primitive layer is qualified for use from `__simt_vf__`. It owns:
+The command layer is qualified for use from `__simt_vf__`. It owns:
 
-- channel selection;
-- local-pointer to window-offset conversion;
-- peer-window address resolution;
-- registered-buffer lookup;
-- SQ slot reservation for a single producer;
-- WQE and SGE construction;
-- queue memory publication and doorbell writes;
-- CQE polling, validation, and consumer update;
-- timeout and diagnostic reporting.
+- facade argument capture into fixed-size, trivially-copyable commands;
+- single-producer command reservation;
+- non-cacheable command publication and a release fence;
+- local signal reads that use supported SIMT load and fence primitives;
+- command overflow and unsupported-operation diagnostics.
 
-It does not own connection setup, queue allocation, or memory registration.
+It does not access SQ/CQ doorbells and does not include CANN internal headers.
+
+### AICore service layer
+
+The service layer runs in the enclosing `__global__ __vector__` function after
+an `asc_vf_call` returns. It owns:
+
+- command-buffer reset and cache visibility at phase boundaries;
+- channel and registered-buffer resolution;
+- WQE/SGE construction and SQ slot reservation;
+- SQ publication, `st_dev` doorbell writes, CQ polling, and CQ doorbells;
+- signal and barrier expansion;
+- bounded completion waits and first-error diagnostics.
+
+The service consumes a complete command batch synchronously before the kernel
+enters another VF or returns. It never runs concurrently with its SIMT producer.
 
 ## Device Context
 
@@ -201,11 +249,11 @@ fields are populated as follows for the real transport:
 | `local_window_base` | local symmetric-window base address |
 | `peer_address_table` | device-visible CANN window handle |
 | `channel_table` | device-visible CANN team handle |
-| `backend_context` | backend-owned device diagnostic and version context |
+| `backend_context` | backend-owned command, service, diagnostic, and version context |
 
 The backend context contains its own ABI version, expected CANN compatibility
-version, an error record address, and any transport state not represented by
-the CANN team or window.
+version, command-buffer address and capacity, an error record address, and any
+transport state not represented by the CANN team or window.
 
 ## Address and Channel Resolution
 
@@ -224,17 +272,17 @@ a directly dereferenceable peer pointer, so `kDirectPeerPointer` remains off.
 
 ## URMA Submission
 
-The initial implementation supports UBC_CTP only. A submission performs:
+The initial implementation supports UBC_CTP only. At the service boundary, a
+command submission performs:
 
 1. Resolve and validate the remote registered-buffer entry.
 2. Read SQ head, CQ head, queue depth, WQE size, authentication tokens, TP id,
    and remote EID from the channel.
 3. Poll completions before the queue approaches exhaustion.
 4. Populate the required SQE and optional SGE in the selected SQ slot.
-5. Publish the complete request with the validated SIMT device fence/cache
-   sequence.
+5. Publish the complete request with the CANN AICore fence/cache sequence.
 6. Advance the channel SQ/CQ producer counters.
-7. Ring the SQ device doorbell with the validated device-store primitive.
+7. Ring the SQ device doorbell with `st_dev`.
 
 Write and inline write consume one WQE base block. FAA consumes two base blocks
 and supplies a registered local fetch-result address from the team shadow
@@ -248,22 +296,24 @@ disabled even when the facade receives the aggregate option.
 
 ### `put`
 
-`put` posts an URMA write from a local registered source to the resolved peer
-window address. Phase 2D accepts participant scope, device memory, default
-options, and no remote action. Unsupported variants remain non-production and
-must not be covered by enabled capabilities.
+`put` records an URMA write command from a local registered source to the
+resolved peer window address. The following AICore service boundary posts it.
+Phase 2D accepts participant scope, device memory, default options, and no
+remote action. Unsupported variants remain non-production and must not be
+covered by enabled capabilities.
 
 ### `put_value`
 
-`put_value` posts an inline 64-bit URMA write. The current Phase 2C call site
+`put_value` records an inline 64-bit URMA write. The current Phase 2C call site
 uses exactly eight bytes. Other widths remain stubbed and do not contribute to
 capability enablement.
 
 ### `remote_add_release`
 
-`remote_add_release` posts a 64-bit FAA. A SIMT system fence publishes earlier
-ordinary writes before the FAA is submitted. The FAA completion is generated
-and may be drained by `flush`.
+`remote_add_release` records a 64-bit FAA after a SIMT release fence. The
+AICore service submits the FAA in command order. The FAA completion is
+generated and drained before the service boundary returns when requested by a
+later flush command.
 
 ### `signal`
 
@@ -273,22 +323,25 @@ are checked against the synchronization-memory requirement created by the host.
 
 ### `flush`
 
-`flush` polls every non-local peer channel selected by the facade channel index
-until its consumed CQ count reaches the submitted CQ count. It validates owner,
-status, and substatus, updates the CQ consumer, and rings the CQ doorbell.
+`flush` records a batch-ordering marker. The AICore service polls every
+non-local peer channel selected by the facade channel index until its consumed
+CQ count reaches the submitted CQ count. It validates owner, status, and
+substatus, updates the CQ consumer, and rings the CQ doorbell with `st_dev`.
 
 The initial workgroup and device scopes use the same single-producer channel
 drain because only thread zero issues communication in the Phase 2C kernels.
 
 ### Signal load and wait
 
-Signal reads use a device load that observes remote FAA updates. Wait loops poll
-the local signal address, enforce an optional retry bound, and apply an acquire
-fence after the target is observed.
+Signal reads and waits that occur in a continuation VF use non-cacheable SIMT
+loads, a finite retry bound, and an acquire fence after the target is observed.
+The continuation runs only after the AICore service has completed the preceding
+batch.
 
 ### Device barrier
 
-Barrier session zero follows the AIN algorithm:
+Barrier session zero is one service command and follows the AIN algorithm in
+the AICore service:
 
 1. Apply a release fence.
 2. FAA the calling rank's barrier slot on every peer.
@@ -299,35 +352,30 @@ Barrier session zero follows the AIN algorithm:
 The local shadow memory tracks each peer's expected generation so repeated
 barriers do not require clearing the remote counters.
 
-## SIMT Hardware-Primitive Gate
+## Device Hardware-Primitive Gate
 
-Correct URMA submission requires more than ordinary GM loads and stores. Before
-the implementation is accepted, a minimal `dav-3510` probe must prove that a
-SIMT VF can perform all of the following:
+Correct URMA submission requires more than ordinary GM loads and stores. The
+direct-SIMT probe has proven that CANN 9.2 cannot issue the required doorbell
+from a VF. The replacement mixed-phase probe must prove all of the following:
 
-- publish a fully written SQE before the doorbell;
-- issue the device doorbell store accepted by the URMA queue;
-- observe changing CQE owner and status fields without stale cache data;
-- update the CQ consumer doorbell;
-- provide release and acquire ordering around payload and signal operations.
+- a SIMT VF publishes a complete command before returning;
+- the AICore phase observes the command after cache maintenance;
+- AICore publishes a fully written SQE before an `st_dev` doorbell;
+- AICore observes changing CQE owner and status fields and updates the CQ
+  consumer doorbell;
+- a continuation VF observes service results with acquire ordering.
 
-The probe first tests the compiler-supported `ld_dev`/`st_dev` path and SIMT
-fences. Runtime tests then validate actual queue progress and ordering. A plain
-cached GM assignment is not an acceptable substitute for a device doorbell or
-CQ cache invalidation.
-
-If these primitives cannot be expressed from SIMT with the installed compiler,
-direct SIMT URMA is considered blocked. The code remains capability-gated and
-the separate AICore communication-service architecture must receive a new
-design before use.
+Runtime tests then validate actual queue progress and ordering. No GM store,
+cached or non-cacheable, substitutes for an SQ or CQ device doorbell.
 
 ## Concurrency Model
 
-Phase 2D matches the existing Phase 2C launch contract:
+Phase 2D initially uses this launch contract:
 
 - one block per core operator kernel;
-- only `threadIdx.x == 0` performs communication;
-- facade channel zero is the sole producer channel.
+- only `threadIdx.x == 0` records communication commands;
+- facade channel zero is the sole command and URMA queue producer channel;
+- SIMT command production and AICore service execution are sequential phases.
 
 Under this model, the channel's SQ and CQ counters have one producer and one
 consumer. The implementation does not use an atomic SQ reservation algorithm.
@@ -341,14 +389,16 @@ protocol before relaxing this restriction.
 The required publication sequence is:
 
 ```text
-payload stores
-  -> SIMT release fence
+payload stores / command fields
+  -> SIMT release fence and command publication
+  -> VF return
+  -> AICore cache observation
   -> URMA write or FAA submission
-  -> SQ doorbell
+  -> st_dev SQ doorbell
   -> remote visibility
   -> CQ completion
   -> flush / signal observation
-  -> SIMT acquire fence
+  -> optional continuation VF acquire fence
   -> payload loads
 ```
 
@@ -399,13 +449,15 @@ primitive capability tests pass.
 
 Ascend host code links the CANN ACL and HCCL libraries required by the public
 resource APIs. Ascend device objects compile for `dav-3510` using the existing
-mixed AICore/SIMT mode.
+mixed AICore/SIMT mode. Each production kernel that uses real transport must
+call the service boundary after its command-producing VF and before any
+consuming VF.
 
 Backend selection remains compile-time:
 
 ```text
 DEEP_EP_PLATFORM_CUDA   -> existing CUDA and NCCL Gin implementation
-DEEP_EP_PLATFORM_ASCEND -> Ascend host transport and SIMT URMA implementation
+DEEP_EP_PLATFORM_ASCEND -> Ascend host transport and staged AICore URMA service
 ```
 
 No CUDA source, link option, or runtime behavior changes in Phase 2D.
@@ -421,12 +473,13 @@ No CUDA source, link option, or runtime behavior changes in Phase 2D.
 - partial initialization and repeated destruction release resources once;
 - deferred capability bits remain disabled.
 
-### SIMT compile probes
+### Mixed-phase compile probes
 
-- all required device functions compile from `__simt_vf__` for `dav-3510`;
-- WQE construction compiles without calling `__aicore__` functions;
-- the selected device load, store, fence, and atomic primitives compile without
-  qualifier-loss warnings;
+- all facade command functions compile from `__simt_vf__` for `dav-3510`;
+- the command-producing VF returns before the AICore service is called;
+- WQE construction and `ld_dev`/`st_dev` compile only in the AICore service;
+- the selected command publication, cache, fence, and doorbell primitives
+  compile without qualifier-loss warnings;
 - unsupported facade methods continue to compile as stubs.
 
 ### Single-NPU structural probes
@@ -458,8 +511,8 @@ Phase 2D's minimal transport layer is complete when:
 1. host resources are created and destroyed exclusively through supported CANN
    host APIs;
 2. the backend-owned compatibility layouts pass CANN 9.2.0 ABI checks;
-3. the required SIMT hardware primitives are proven by compile and runtime
-   probes;
+3. the mixed SIMT-command/AICore-service boundary and its required hardware
+   primitives are proven by compile and runtime probes;
 4. put, 64-bit put-value, 64-bit FAA, signal, flush, and barrier pass the
    two-NPU semantic tests on node 20002;
 5. ordering and repeated queue progress are validated, not inferred;
