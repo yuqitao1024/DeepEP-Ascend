@@ -18,3 +18,15 @@ target_include_directories(deep_ep_ascend_core_operator_probe PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../../..
     $ENV{ASCEND_HOME_PATH}/include
     $ENV{ASCEND_HOME_PATH}/x86_64-linux/asc/include)
+
+add_executable(deep_ep_ascend_core_operator_runner
+    core_operator_runner.asc
+    $<TARGET_OBJECTS:deep_ep_ascend_core_operator_probe>)
+
+target_compile_options(deep_ep_ascend_core_operator_runner PRIVATE
+    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${CMAKE_ASC_ARCHITECTURES}>)
+
+target_include_directories(deep_ep_ascend_core_operator_runner PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/../../..
+    $ENV{ASCEND_HOME_PATH}/include
+    $ENV{ASCEND_HOME_PATH}/x86_64-linux/asc/include)

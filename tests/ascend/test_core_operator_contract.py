@@ -57,6 +57,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("--enable-simt", cmake)
         for source in ("barrier.asc", "dispatch.asc", "combine.asc"):
             self.assertIn(source, cmake)
+        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
+        for case_name in ("dispatch-normal", "dispatch-expanded",
+                          "dispatch-cached", "dispatch-zero-padding",
+                          "dispatch-empty"):
+            self.assertIn(case_name, runner)
+        probe = probe_path.read_text()
+        self.assertIn("ElementKind", probe)
 
     def test_kernels_schedule_transport_through_the_facade(self):
         required = {
