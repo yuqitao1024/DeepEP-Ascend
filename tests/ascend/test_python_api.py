@@ -109,7 +109,9 @@ class _FakeGroup:
 
     def _get_backend(self, device):
         self.events.append(("group.backend", device))
-        return types.SimpleNamespace(_comm_ptr=lambda: self.comm_pointer)
+        return types.SimpleNamespace(
+            _comm_ptr=lambda: self.comm_pointer,
+            get_hccl_comm=lambda local_rank: self.comm_pointer)
 
 
 def _transport_error(operation):
@@ -136,7 +138,8 @@ def _install_fake_torch(platform, events):
         return lambda decorated: decorated
 
     torch.compile = compile_decorator
-    torch.device = lambda name: name
+    torch.device = lambda device_type, index=None: (
+        device_type if index is None else f"{device_type}:{index}")
     torch.manual_seed = lambda seed: events.append(("manual_seed", seed))
     torch.set_default_dtype = lambda dtype: events.append(("default_dtype", dtype))
     torch.set_default_device = lambda device: events.append(("default_device", device))
@@ -174,6 +177,14 @@ def _install_fake_torch(platform, events):
             return _FakeStream(**kwargs)
 
     torch.cuda = FakeCuda()
+
+    class FakeNpu:
+        def synchronize(self):
+            if platform != "ascend":
+                raise AssertionError("CUDA import touched torch.npu.synchronize")
+            events.append("torch.npu.synchronize")
+
+    torch.npu = FakeNpu()
 
     distributed = types.ModuleType("torch.distributed")
     distributed.ProcessGroup = _FakeGroup
@@ -395,14 +406,49 @@ def _scenario_ascend_import():
 
     assert platform.COMPILED_PLATFORM == "ascend"
     assert not platform.is_cuda()
-    assert platform.get_comm_handle(_Poison()) is None
+    group = _FakeGroup(events, rank=1, size=2, comm_pointer=0x1234)
+    assert platform.get_comm_handle(group) == 0x1234
+    assert platform.comm_handle_value(0x1234) == 0x1234
     assert platform.comm_handle_value(None) == 0
+
+    for wrapped in ((0x1234,), [0x1234]):
+        wrapped_group = _FakeGroup(
+            events, rank=1, size=2, comm_pointer=wrapped)
+        assert platform.get_comm_handle(wrapped_group) == 0x1234
+
+    for invalid in (0, None, (), (1, 2)):
+        invalid_group = _FakeGroup(
+            events, rank=1, size=2, comm_pointer=invalid)
+        try:
+            platform.get_comm_handle(invalid_group)
+        except RuntimeError as error:
+            assert "HCCL communicator" in str(error), error
+        else:
+            raise AssertionError(f"invalid HCCL communicator accepted: {invalid!r}")
+
+    class MissingAccessorGroup(_FakeGroup):
+        def _get_backend(self, device):
+            return types.SimpleNamespace()
+
+    try:
+        platform.get_comm_handle(MissingAccessorGroup(events, rank=1, size=2))
+    except RuntimeError as error:
+        assert str(error) == "ProcessGroupHCCL.get_hccl_comm is unavailable"
+    else:
+        raise AssertionError("missing HCCL communicator accessor was accepted")
+
     platform.synchronize()
+    assert "torch.npu.synchronize" in events
     assert not any(str(event).startswith("torch.cuda") for event in events)
     _assert_transport_error("adapter", lambda: platform.require_cuda("adapter"))
-    _assert_transport_error(
-        "validate_device_type",
-        lambda: platform.validate_device_type(_Poison(), "validate_device_type"))
+    platform.validate_device_type(_FakeTensor("npu"), "validate_device_type")
+    try:
+        platform.validate_device_type(_FakeTensor("cpu"), "validate_device_type")
+    except ValueError as error:
+        assert str(error) == (
+            "DeepEP Ascend backend: validate_device_type requires an NPU tensor")
+    else:
+        raise AssertionError("CPU tensor was accepted by Ascend validation")
     _assert_transport_error("get_comm_stream", lambda: platform.wrap_stream(_Poison()))
 
     event = platform.capture_event()
@@ -440,7 +486,7 @@ def _scenario_ascend_construction():
     assert buffer.num_ranks == 8
     assert buffer.num_bytes == 4096
     assert buffer.num_allocated_qps == 0
-    assert buffer.comm_handle is None
+    assert buffer.comm_handle == 4242
     assert not hasattr(buffer, "nccl_comm_handle")
     assert buffer.num_scaleout_ranks is None
     assert buffer.num_scaleup_ranks is None
@@ -450,7 +496,7 @@ def _scenario_ascend_construction():
     assert buffer.num_nvlink_ranks is None
     assert len(extension.runtime_args) == 1
     runtime_args = extension.runtime_args[0]
-    assert runtime_args[:6] == (3, 8, 0, [], 4096, 0)
+    assert runtime_args[:6] == (3, 8, 4242, [], 4096, 0)
     assert runtime_args[9:11] == (3, 0)
     assert "group.barrier" not in events
     assert "runtime.get_logical_domain_size" not in events
@@ -478,12 +524,12 @@ def _scenario_ascend_implicit_size():
         "calculate_elastic_buffer_size",
         lambda: deep_ep.ElasticBuffer(
             group, num_max_tokens_per_rank=1, hidden=16))
-    assert extension.size_calls == [(0, 1, 16, 0, False, True, True)]
+    assert extension.size_calls == [(4242, 1, 16, 0, False, True, True)]
 
     _assert_transport_error(
         "calculate_elastic_buffer_size",
         lambda: deep_ep.ElasticBuffer.get_buffer_size_hint(group, 2, 32, 4))
-    assert extension.size_calls[-1] == (0, 2, 32, 4, False, True, True)
+    assert extension.size_calls[-1] == (4242, 2, 32, 4, False, True, True)
 
 
 def _scenario_ascend_method_gates():
@@ -835,6 +881,9 @@ class RealAscendPythonApiTest(unittest.TestCase):
         def barrier(self):
             raise AssertionError(
                 "Ascend construction must not enter a CUDA-era barrier")
+
+        def _get_backend(self, device):
+            return types.SimpleNamespace(get_hccl_comm=lambda local_rank: 0x1234)
 
     def assert_transport_error(self, operation, call):
         with self.assertRaises(NotImplementedError) as context:

@@ -23,14 +23,19 @@ def require_cuda(operation: str) -> None:
 
 
 def get_comm_handle(group, force_new_comm: bool = False):
-    if not is_cuda():
-        return None
-    from .utils.comm import get_nccl_comm_handle
-    return get_nccl_comm_handle(group, force_new_comm=force_new_comm)
+    if is_cuda():
+        from .utils.comm import get_nccl_comm_handle
+        return get_nccl_comm_handle(group, force_new_comm=force_new_comm)
+    from .utils.hccl import get_hccl_comm_handle
+    return get_hccl_comm_handle(group)
 
 
 def comm_handle_value(handle: Optional[object]) -> int:
-    return 0 if handle is None else handle.get()
+    if handle is None:
+        return 0
+    if isinstance(handle, int):
+        return handle
+    return handle.get()
 
 
 def capture_event():
@@ -42,15 +47,20 @@ def unwrap_event(event):
 
 
 def validate_device_type(tensor, operation: str) -> None:
-    require_cuda(operation)
-    if tensor.device.type != "cuda":
+    expected = "cuda" if is_cuda() else "npu"
+    if tensor.device.type != expected:
+        platform_name = "CUDA" if is_cuda() else "Ascend"
+        device_requirement = "a CUDA" if is_cuda() else "an NPU"
         raise ValueError(
-            f"DeepEP CUDA backend: {operation} requires a CUDA tensor")
+            f"DeepEP {platform_name} backend: {operation} requires "
+            f"{device_requirement} tensor")
 
 
 def synchronize() -> None:
     if is_cuda():
         torch.cuda.synchronize()
+    else:
+        torch.npu.synchronize()
 
 
 def wrap_stream(stream):
