@@ -15,6 +15,10 @@ add_library(deep_ep_ascend_core_operator_probe OBJECT
 target_compile_options(deep_ep_ascend_core_operator_probe PRIVATE
     $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${CMAKE_ASC_ARCHITECTURES}>)
 
+target_compile_definitions(deep_ep_ascend_core_operator_probe PRIVATE
+    $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_STAGED_URMA=1>
+    $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1>)
+
 target_include_directories(deep_ep_ascend_core_operator_probe PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../../..
     $ENV{ASCEND_HOME_PATH}/include

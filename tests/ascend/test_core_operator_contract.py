@@ -26,6 +26,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             }.items()
         }
         signatures = {}
+        calls_by_function = {}
         for source_name, source in sources.items():
             matches = re.findall(
                 r"__simt_vf__\s+inline\s+void\s+(\w+)\s*\((.*?)\)\s*\{",
@@ -36,6 +37,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 signatures[function_name] = normalized
                 self.assertNotIn("CoreTiling", normalized, function_name)
                 self.assertNotIn("BarrierArguments", normalized, function_name)
+                self.assertNotIn(
+                    "DeviceTransportContext", normalized, function_name)
                 for argument in arguments.split(","):
                     if "*" in argument:
                         self.assertTrue(
@@ -44,18 +47,75 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                     else:
                         self.assertRegex(
                             " ".join(argument.split()),
-                            r"^(transport::DeviceTransportContext|CoreModeFlags|"
-                            r"ElementKind|std::uint(32|64)_t|int) \w+$",
+                            r"^(CoreModeFlags|ElementKind|"
+                            r"std::uintptr_t|std::uint(32|64)_t|int) \w+$",
                             function_name)
+
+            calls = re.findall(
+                r"asc_vf_call<(\w+)>\s*\((.*?)\);",
+                source, flags=re.DOTALL)
+            self.assertTrue(calls, source_name)
+            for function_name, arguments in calls:
+                calls_by_function[function_name] = arguments
+                self.assertNotRegex(
+                    arguments,
+                    r"(?<![\w.])tiling\.transport_context(?![\w.])",
+                    function_name)
 
         for function_name in (
                 "barrier_producer_vf", "barrier_continuation_vf"):
             signature = signatures[function_name]
             for argument in (
-                    "transport::DeviceTransportContext context",
+                    "std::uint32_t transport_abi_version",
+                    "std::uint32_t transport_struct_size",
+                    "std::uintptr_t transport_local_window_base",
+                    "std::uintptr_t transport_backend_context",
                     "std::uint64_t control_offset", "int world_rank",
                     "std::uint64_t generation"):
                 self.assertIn(argument, signature, function_name)
+        for function_name in ("dispatch_vf", "combine_vf"):
+            signature = signatures[function_name]
+            for argument in (
+                    "std::uint32_t transport_abi_version",
+                    "std::uint32_t transport_struct_size",
+                    "int transport_world_size",
+                    "int transport_scale_up_size",
+                    "std::uintptr_t transport_backend_context"):
+                self.assertIn(argument, signature, function_name)
+
+        expected_transport_arguments = {
+            "barrier_producer_vf": {
+                "tiling.transport_context.abi_version",
+                "tiling.transport_context.struct_size",
+                "tiling.transport_context.local_window_base",
+                "tiling.transport_context.backend_context",
+            },
+            "barrier_continuation_vf": {
+                "tiling.transport_context.abi_version",
+                "tiling.transport_context.struct_size",
+                "tiling.transport_context.local_window_base",
+                "tiling.transport_context.backend_context",
+            },
+            "dispatch_vf": {
+                "tiling.transport_context.abi_version",
+                "tiling.transport_context.struct_size",
+                "tiling.transport_context.topology.world_size",
+                "tiling.transport_context.topology.scale_up_size",
+                "tiling.transport_context.backend_context",
+            },
+            "combine_vf": {
+                "tiling.transport_context.abi_version",
+                "tiling.transport_context.struct_size",
+                "tiling.transport_context.topology.world_size",
+                "tiling.transport_context.topology.scale_up_size",
+                "tiling.transport_context.backend_context",
+            },
+        }
+        for function_name, expected in expected_transport_arguments.items():
+            call = calls_by_function[function_name]
+            observed = set(re.findall(
+                r"tiling\.transport_context(?:\.topology)?\.\w+", call))
+            self.assertEqual(observed, expected, function_name)
         self.assertIn(
             "ElementKind element_kind",
             signatures["core_operator_compile_probe_vf"])
@@ -134,6 +194,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         cmake = cmake_path.read_text()
         self.assertIn("dav-3510", cmake)
         self.assertNotIn("--enable-simt", cmake)
+        for definition in (
+                "DEEP_EP_ASCEND_STAGED_URMA=1",
+                "DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1"):
+            self.assertIn(definition, cmake)
         for source in ("barrier.asc", "dispatch.asc", "combine.asc"):
             self.assertIn(source, cmake)
         runner = (CORE_OPS / "core_operator_runner.asc").read_text()
