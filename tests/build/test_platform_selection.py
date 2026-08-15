@@ -3,7 +3,9 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -52,8 +54,50 @@ class BuildPlatformTest(unittest.TestCase):
         self.assertEqual(extension.name, "deep_ep._C")
         self.assertEqual(extension.cmake_source_dir, str(ROOT))
         self.assertEqual(extension.sources, [])
-        self.assertIn(
-            "DEEP_EP_ASCEND_TESTING", (ROOT / "setup.py").read_text())
+
+    def test_ascend_testing_mode_normalizes_to_a_boolean_build_flag(self):
+        expected = {
+            None: "0",
+            "": "0",
+            "0": "0",
+            "ON": "0",
+            "true": "0",
+            "2": "0",
+            "1": "1",
+        }
+        for value, expected_flag in expected.items():
+            with self.subTest(value=value):
+                environ = {}
+                if value is not None:
+                    environ["DEEP_EP_ASCEND_TESTING"] = value
+                self.assertEqual(
+                    SETUP.get_ascend_testing_mode(environ), expected_flag)
+
+    def test_ascend_configure_passes_the_normalized_testing_flag(self):
+        torch = type("Torch", (), {
+            "utils": type("Utils", (), {"cmake_prefix_path": "/torch"})})()
+        torch_npu = type("TorchNpu", (), {"__file__": "/torch_npu/__init__.py"})()
+        extension = SETUP.make_extension("ascend")
+
+        for value, expected_flag in (("unexpected", "0"), ("1", "1")):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as directory:
+                    build = object.__new__(SETUP.CMakeBuild)
+                    build.build_temp = directory
+                    build.get_ext_fullpath = lambda _: str(
+                        pathlib.Path(directory) / "_C.so")
+                    with mock.patch.dict(
+                            sys.modules, {"torch": torch, "torch_npu": torch_npu}):
+                        with mock.patch.object(
+                                SETUP.subprocess, "check_call") as check_call:
+                            with mock.patch.dict(
+                                    os.environ, {"DEEP_EP_ASCEND_TESTING": value},
+                                    clear=False):
+                                build.build_extension(extension)
+
+                configure = check_call.call_args_list[0].args[0]
+                self.assertIn(
+                    f"-DDEEP_EP_ASCEND_TESTING={expected_flag}", configure)
 
     def test_ascend_cmake_target_has_the_production_source_and_link_graph(self):
         source = (ROOT / "CMakeLists.txt").read_text()
@@ -75,7 +119,7 @@ class BuildPlatformTest(unittest.TestCase):
                 "--npu-arch=dav-3510",
                 "DEEP_EP_PLATFORM_ASCEND=1", "DEEP_EP_ASCEND_STAGED_URMA=1",
                 "DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1",
-                "DEEP_EP_ASCEND_TESTING",
+                "DEEP_EP_ASCEND_TESTING=$<BOOL:${DEEP_EP_ASCEND_TESTING}>",
                 "hcomm", "ascendcl", "c_sec", "torch_npu"):
             self.assertIn(marker, ascend)
         for forbidden in (".cu", "nvshmem", "nccl"):

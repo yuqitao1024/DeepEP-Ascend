@@ -8,6 +8,10 @@ def get_build_platform(environ=os.environ):
     return platform
 
 
+def get_ascend_testing_mode(environ=os.environ):
+    return '1' if environ.get('DEEP_EP_ASCEND_TESTING') == '1' else '0'
+
+
 if __name__ == '__main__':
     build_platform = get_build_platform()
 
@@ -122,8 +126,7 @@ class CMakeBuild(build_ext):
         output_directory = extension_path.parent
         build_directory = Path(self.build_temp) / extension.name
         build_directory.mkdir(parents=True, exist_ok=True)
-        ascend_testing = (
-            '1' if os.environ.get('DEEP_EP_ASCEND_TESTING') == '1' else '0')
+        ascend_testing = get_ascend_testing_mode()
 
         configure = [
             'cmake', extension.cmake_source_dir,

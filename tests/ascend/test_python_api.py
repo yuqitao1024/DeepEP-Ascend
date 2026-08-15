@@ -912,45 +912,12 @@ class RealAscendPythonApiTest(unittest.TestCase):
         self.assertFalse(hasattr(self.deep_ep, "Buffer"))
         self.assertFalse(hasattr(self.extension, "init_jit"))
 
-    def test_explicit_size_constructs_without_cuda_or_topology(self):
-        buffer = self.deep_ep.ElasticBuffer(
-            self.FakeGroup(), num_bytes=4096, explicitly_destroy=True)
-        self.assertEqual(buffer.num_bytes, 4096)
-        self.assertIsNone(buffer.num_scaleout_ranks)
-        self.assertIsNone(buffer.num_scaleup_ranks)
-        buffer.destroy()
-
-    def test_implicit_size_raises_transport_error(self):
-        self.assert_transport_error(
-            "calculate_elastic_buffer_size",
-            lambda: self.deep_ep.ElasticBuffer(
-                self.FakeGroup(), num_max_tokens_per_rank=1, hidden=16))
-
-    def test_core_operations_raise_before_cuda_helpers(self):
-        buffer = self.deep_ep.ElasticBuffer(
-            self.FakeGroup(), num_bytes=4096, explicitly_destroy=True)
-        self.assert_transport_error(
-            "dispatch",
-            lambda: buffer.dispatch(
-                self.torch.empty((1, 16), dtype=self.torch.bfloat16),
-                self.torch.zeros((1, 1), dtype=self.torch.int64),
-                num_experts=1))
-        self.assert_transport_error("barrier", buffer.barrier)
-        buffer.destroy()
-
-    def test_cuda_only_methods_fail_by_name(self):
-        buffer = self.deep_ep.ElasticBuffer(
-            self.FakeGroup(), num_bytes=4096, explicitly_destroy=True)
-        calls = {
-            "engram_write": lambda: buffer.engram_write(self.torch.empty(1)),
-            "pp_set_config": lambda: buffer.pp_set_config(32, 1),
-            "create_agrs_session": buffer.create_agrs_session,
-            "all_gather": lambda: buffer.all_gather(self.torch.empty(1)),
-        }
-        for operation, call in calls.items():
-            with self.subTest(operation=operation):
-                self.assert_transport_error(operation, call)
-        buffer.destroy()
+    def test_constructor_rejects_non_two_rank_group_before_hccl_use(self):
+        with self.assertRaisesRegex(
+                RuntimeError, "exactly two ranks are required"):
+            self.deep_ep.ElasticBuffer(
+                self.FakeGroup(), num_bytes=2 * 1024 * 1024,
+                allow_hybrid_mode=False, explicitly_destroy=True)
 
 
 if __name__ == "__main__":

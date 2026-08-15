@@ -291,8 +291,13 @@ public:
             raise_transport_status(status, rank_idx_);
 #if DEEP_EP_ASCEND_TESTING
         if (std::getenv("DEEP_EP_ASCEND_TEST_DIAGNOSTIC") != nullptr) {
+            diagnostic.abi_version = transport::kTransportCommandAbiVersion;
             diagnostic.error = transport::DeviceTransportError::kCompletionTimeout;
             diagnostic.command_index = 0;
+            diagnostic.opcode = transport::TransportCommandOpcode::kBarrier;
+            diagnostic.peer = static_cast<std::uint32_t>(rank_idx_);
+            diagnostic.channel = 0;
+            diagnostic.backend_status = 0;
             diagnostic.generation = barrier_generation_;
         }
 #endif

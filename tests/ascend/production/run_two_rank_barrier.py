@@ -1,11 +1,17 @@
 import argparse
 import os
+from datetime import timedelta
 
 import torch
 import torch.distributed as dist
 import torch_npu  # noqa: F401
 
 import deep_ep
+
+
+def _check(condition, message):
+    if not condition:
+        raise AssertionError(message)
 
 
 class _Poison:
@@ -36,7 +42,7 @@ def _make_buffer(group):
 def run(inject_diagnostic):
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.npu.set_device(local_rank)
-    dist.init_process_group(backend="hccl")
+    dist.init_process_group(backend="hccl", timeout=timedelta(minutes=5))
     group = dist.group.WORLD
     rank = dist.get_rank(group)
 
@@ -47,9 +53,12 @@ def run(inject_diagnostic):
 
         buffer = _make_buffer(group)
         try:
-            assert buffer.get_logical_domain_size() == (1, 2)
-            assert buffer.get_physical_domain_size() == (1, 2)
-            assert (buffer.scaleout_rank_idx, buffer.scaleup_rank_idx) == (0, rank)
+            _check(buffer.get_logical_domain_size() == (1, 2),
+                   "unexpected logical domain")
+            _check(buffer.get_physical_domain_size() == (1, 2),
+                   "unexpected physical domain")
+            _check((buffer.scaleout_rank_idx, buffer.scaleup_rank_idx) ==
+                   (0, rank), "unexpected rank mapping")
 
             for generation in range(1, 101):
                 buffer.barrier(
@@ -60,7 +69,8 @@ def run(inject_diagnostic):
             try:
                 buffer.barrier(sequential=False)
             except RuntimeError as error:
-                assert "requires sequential=True" in str(error)
+                _check("requires sequential=True" in str(error),
+                       "unexpected non-sequential barrier error")
             else:
                 raise AssertionError("non-sequential barrier was accepted")
 
@@ -75,9 +85,19 @@ def run(inject_diagnostic):
                     buffer.barrier()
                 except RuntimeError as error:
                     message = str(error)
-                    assert f"barrier failed on rank {rank}" in message
-                    assert "completion_timeout" in message
-                    assert "command_index=0" in message
+                    expected_fields = (
+                        f"barrier failed on rank {rank}",
+                        "backend error 0",
+                        "completion_timeout",
+                        "command_index=0",
+                        "opcode=6",
+                        f"peer={rank}",
+                        "channel=0",
+                        "generation=101",
+                    )
+                    for expected in expected_fields:
+                        _check(expected in message,
+                               f"diagnostic omitted {expected!r}: {message}")
                 else:
                     raise AssertionError("injected diagnostic was not reported")
                 finally:

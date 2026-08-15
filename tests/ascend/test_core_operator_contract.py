@@ -155,6 +155,16 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertIn(marker, production)
         self.assertIn("#if DEEP_EP_ASCEND_TESTING", production)
         self.assertIn("DEEP_EP_ASCEND_TEST_DIAGNOSTIC", production)
+        for marker in (
+                "diagnostic.abi_version = transport::kTransportCommandAbiVersion",
+                "DeviceTransportError::kCompletionTimeout",
+                "diagnostic.command_index = 0",
+                "TransportCommandOpcode::kBarrier",
+                "diagnostic.peer = static_cast<std::uint32_t>(rank_idx_)",
+                "diagnostic.channel = 0",
+                "diagnostic.backend_status = 0",
+                "diagnostic.generation = barrier_generation_"):
+            self.assertIn(marker, production)
         for operation in ("barrier", "dispatch", "combine"):
             marker = f'require_transport("{operation}"'
             self.assertIn(marker, production)
