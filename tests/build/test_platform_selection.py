@@ -82,12 +82,19 @@ class BuildPlatformTest(unittest.TestCase):
         for value, expected_flag in (("unexpected", "0"), ("1", "1")):
             with self.subTest(value=value):
                 with tempfile.TemporaryDirectory() as directory:
+                    pybind11_dir = pathlib.Path(directory) / "pybind11" / "cmake"
+                    pybind11 = type("Pybind11", (), {
+                        "get_cmake_dir": staticmethod(lambda: str(pybind11_dir))})()
                     build = object.__new__(SETUP.CMakeBuild)
                     build.build_temp = directory
                     build.get_ext_fullpath = lambda _: str(
                         pathlib.Path(directory) / "_C.so")
                     with mock.patch.dict(
-                            sys.modules, {"torch": torch, "torch_npu": torch_npu}):
+                            sys.modules, {
+                                "torch": torch,
+                                "torch_npu": torch_npu,
+                                "pybind11": pybind11,
+                            }):
                         with mock.patch.object(
                                 SETUP.subprocess, "check_call") as check_call:
                             with mock.patch.dict(
@@ -98,6 +105,28 @@ class BuildPlatformTest(unittest.TestCase):
                 configure = check_call.call_args_list[0].args[0]
                 self.assertIn(
                     f"-DDEEP_EP_ASCEND_TESTING={expected_flag}", configure)
+                self.assertIn(
+                    f"-Dpybind11_DIR={pybind11_dir.resolve()}", configure)
+
+    def test_ascend_build_reports_missing_pybind11(self):
+        torch = type("Torch", (), {
+            "utils": type("Utils", (), {"cmake_prefix_path": "/torch"})})()
+        torch_npu = type("TorchNpu", (), {"__file__": "/torch_npu/__init__.py"})()
+        extension = SETUP.make_extension("ascend")
+
+        with tempfile.TemporaryDirectory() as directory:
+            build = object.__new__(SETUP.CMakeBuild)
+            build.build_temp = directory
+            build.get_ext_fullpath = lambda _: str(pathlib.Path(directory) / "_C.so")
+            with mock.patch.dict(
+                    sys.modules, {
+                        "torch": torch,
+                        "torch_npu": torch_npu,
+                        "pybind11": None,
+                    }):
+                with self.assertRaisesRegex(
+                        RuntimeError, "Ascend builds require pybind11"):
+                    build.build_extension(extension)
 
     def test_ascend_cmake_target_has_the_production_source_and_link_graph(self):
         source = (ROOT / "CMakeLists.txt").read_text()

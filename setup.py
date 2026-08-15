@@ -120,9 +120,16 @@ class CMakeBuild(build_ext):
     def build_extension(self, extension):
         import torch
         import torch_npu
+        try:
+            import pybind11
+        except ModuleNotFoundError as error:
+            raise RuntimeError(
+                'Ascend builds require pybind11; install it with '
+                '`python -m pip install pybind11`.') from error
 
         extension_path = Path(self.get_ext_fullpath(extension.name)).resolve()
         torch_npu_root = Path(torch_npu.__file__).resolve().parent
+        pybind11_dir = Path(pybind11.get_cmake_dir()).resolve()
         output_directory = extension_path.parent
         build_directory = Path(self.build_temp) / extension.name
         build_directory.mkdir(parents=True, exist_ok=True)
@@ -136,6 +143,7 @@ class CMakeBuild(build_ext):
             f'-DPython_EXECUTABLE={sys.executable}',
             f'-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}',
             f'-DTORCH_NPU_ROOT={torch_npu_root}',
+            f'-Dpybind11_DIR={pybind11_dir}',
             '-DCMAKE_BUILD_TYPE=Release',
         ]
         subprocess.check_call(configure, cwd=build_directory)
