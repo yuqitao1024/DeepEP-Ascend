@@ -40,6 +40,31 @@ struct CoreTopology {
     int scale_out_size = 1;
 };
 
+inline constexpr transport::TransportCapabilities
+    kBarrierTransportCapabilities =
+        transport::capability_bit(
+            transport::TransportCapability::kRemoteSignal) |
+        transport::capability_bit(
+            transport::TransportCapability::kSystemMemoryOrdering) |
+        transport::capability_bit(
+            transport::TransportCapability::kDeviceBarrier) |
+        transport::capability_bit(
+            transport::TransportCapability::kScaleUpTeam);
+
+constexpr bool is_single_rank_topology(const CoreTopology& topology) {
+    return topology.world_rank == 0 && topology.world_size == 1 &&
+           topology.scale_up_rank == 0 && topology.scale_up_size == 1 &&
+           topology.scale_out_rank == 0 && topology.scale_out_size == 1;
+}
+
+constexpr bool is_two_rank_scale_up_topology(
+    const CoreTopology& topology) {
+    return topology.world_size == 2 && topology.world_rank >= 0 &&
+           topology.world_rank < 2 && topology.scale_up_size == 2 &&
+           topology.scale_up_rank == topology.world_rank &&
+           topology.scale_out_rank == 0 && topology.scale_out_size == 1;
+}
+
 struct CoreLaunchShape {
     std::uint32_t num_blocks = 1;
     std::uint32_t num_threads = 512;
@@ -301,9 +326,7 @@ inline TilingStatus build_core_tiling(
 }
 
 inline TilingStatus validate_single_rank(const CoreTiling& tiling) {
-    if (tiling.topology.world_size != 1 ||
-        tiling.topology.scale_up_size != 1 ||
-        tiling.topology.scale_out_size != 1)
+    if (!is_single_rank_topology(tiling.topology))
         return {TilingStatusCode::kUnsupportedTopology,
                 "internal launch supports only one rank"};
     return {};

@@ -64,23 +64,71 @@ bool same_workspace_layout(
            lhs.total_bytes == rhs.total_bytes;
 }
 
-bool same_transport_context(
-    const transport::DeviceTransportContext& lhs,
-    const transport::DeviceTransportContext& rhs) {
+bool same_symmetric_window_layout(
+    const SymmetricWindowLayout& lhs,
+    const SymmetricWindowLayout& rhs) {
     return lhs.abi_version == rhs.abi_version &&
            lhs.struct_size == rhs.struct_size &&
-           lhs.capabilities == rhs.capabilities &&
-           lhs.topology.world_rank == rhs.topology.world_rank &&
-           lhs.topology.world_size == rhs.topology.world_size &&
-           lhs.topology.scale_up_rank == rhs.topology.scale_up_rank &&
-           lhs.topology.scale_up_size == rhs.topology.scale_up_size &&
-           lhs.topology.scale_out_rank == rhs.topology.scale_out_rank &&
-           lhs.topology.scale_out_size == rhs.topology.scale_out_size &&
-           lhs.topology.scale_up_direct == rhs.topology.scale_up_direct &&
-           lhs.local_window_base == rhs.local_window_base &&
-           lhs.peer_address_table == rhs.peer_address_table &&
-           lhs.channel_table == rhs.channel_table &&
-           lhs.backend_context == rhs.backend_context;
+           lhs.control_offset == rhs.control_offset &&
+           lhs.control_bytes == rhs.control_bytes &&
+           lhs.dispatch_offset == rhs.dispatch_offset &&
+           lhs.dispatch_record_bytes == rhs.dispatch_record_bytes &&
+           lhs.dispatch_source_shard_bytes ==
+               rhs.dispatch_source_shard_bytes &&
+           lhs.dispatch_source_shard_count ==
+               rhs.dispatch_source_shard_count &&
+           lhs.dispatch_bytes == rhs.dispatch_bytes &&
+           lhs.combine_offset == rhs.combine_offset &&
+           lhs.combine_record_bytes == rhs.combine_record_bytes &&
+           lhs.combine_contributor_shard_bytes ==
+               rhs.combine_contributor_shard_bytes &&
+           lhs.combine_contributor_shard_count ==
+               rhs.combine_contributor_shard_count &&
+           lhs.combine_bytes == rhs.combine_bytes &&
+           lhs.reserve_offset == rhs.reserve_offset &&
+           lhs.reserve_bytes == rhs.reserve_bytes &&
+           lhs.total_bytes == rhs.total_bytes;
+}
+
+bool context_topology_matches(
+    const transport::TransportTopology& context,
+    const CoreTopology& tiling) {
+    return context.world_rank == tiling.world_rank &&
+           context.world_size == tiling.world_size &&
+           context.scale_up_rank == tiling.scale_up_rank &&
+           context.scale_up_size == tiling.scale_up_size &&
+           context.scale_out_rank == tiling.scale_out_rank &&
+           context.scale_out_size == tiling.scale_out_size;
+}
+
+CoreRuntimeStatus validate_operation_topology(const CoreTiling& tiling) {
+    if (tiling.operation == OperationKind::kBarrier) {
+        if (!is_two_rank_scale_up_topology(tiling.topology))
+            return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
+                    "barrier requires exactly two scale-up ranks"};
+        return {};
+    }
+    if (!is_single_rank_topology(tiling.topology))
+        return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
+                "dispatch and combine multi-rank launch is deferred"};
+    return {};
+}
+
+CoreRuntimeStatus validate_transport_context(const CoreTiling& tiling) {
+    const auto& context = tiling.transport_context;
+    if (context.abi_version != transport::kDeviceTransportAbiVersion ||
+        context.struct_size != sizeof(transport::DeviceTransportContext) ||
+        !context_topology_matches(context.topology, tiling.topology))
+        return invalid("transport context does not match tiling topology");
+    if (tiling.operation != OperationKind::kBarrier)
+        return {};
+    if ((context.capabilities & kBarrierTransportCapabilities) !=
+        kBarrierTransportCapabilities)
+        return invalid("transport context lacks barrier capabilities");
+    if (context.local_window_base == 0 || context.peer_address_table == 0 ||
+        context.channel_table == 0 || context.backend_context == 0)
+        return invalid("barrier requires an exported transport context");
+    return {};
 }
 
 bool is_aligned(const void* pointer) {
@@ -93,15 +141,11 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
     if (tiling.abi_version != kCoreTilingAbiVersion ||
         tiling.struct_size != sizeof(CoreTiling))
         return invalid("invalid core tiling ABI");
-    if (tiling.topology.world_size != 1 ||
-        tiling.topology.scale_up_size != 1 ||
-        tiling.topology.scale_out_size != 1)
-        return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
-                "internal launch supports only one rank"};
-    if (tiling.topology.world_rank != 0 ||
-        tiling.topology.scale_up_rank != 0 ||
-        tiling.topology.scale_out_rank != 0)
-        return invalid("single-rank topology requires rank zero");
+    if (!detail::valid_topology(tiling.topology))
+        return invalid("invalid topology");
+    const auto topology_status = validate_operation_topology(tiling);
+    if (!topology_status.ok())
+        return topology_status;
     if (tiling.element_kind == ElementKind::kFloat8E4M3)
         return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
                 "FP8 runtime execution is deferred"};
@@ -164,13 +208,14 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
         !same_token_layout(tiling.token_layout, expected.token_layout) ||
         !same_workspace_layout(
             tiling.workspace_layout, expected.workspace_layout) ||
+        !same_symmetric_window_layout(
+            tiling.symmetric_window_layout,
+            expected.symmetric_window_layout) ||
         tiling.communication_buffer_bytes !=
             expected.communication_buffer_bytes ||
-        tiling.workspace_bytes != expected.workspace_bytes ||
-        !same_transport_context(
-            tiling.transport_context, expected.transport_context))
+        tiling.workspace_bytes != expected.workspace_bytes)
         return invalid("core tiling descriptor is inconsistent");
-    return {};
+    return validate_transport_context(tiling);
 }
 
 }  // namespace
@@ -200,6 +245,8 @@ CoreRuntimeStatus launch_internal_barrier(
         return status;
     if (tiling.operation != OperationKind::kBarrier)
         return invalid("barrier launch requires barrier tiling");
+    if (stream == nullptr)
+        return invalid("barrier stream must not be null");
     if (arguments.workspace == nullptr)
         return invalid("barrier workspace must not be null");
     if (!is_aligned(arguments.workspace))
