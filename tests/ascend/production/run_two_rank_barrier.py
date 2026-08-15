@@ -55,6 +55,7 @@ def run(inject_diagnostic):
             temporary = _make_buffer(group)
             temporary.destroy()
             temporary.destroy()
+            dist.barrier(group)
 
         buffer = _make_buffer(group)
         try:
