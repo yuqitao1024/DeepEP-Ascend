@@ -13,6 +13,12 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 ELASTIC_SOURCE = ROOT / "deep_ep/buffers/elastic.py"
 ENVS_SOURCE = ROOT / "deep_ep/utils/envs.py"
+API_SURFACE_PROBE = ROOT / "tests/ascend/production/api_surface.py"
+
+API_SURFACE_SPEC = importlib.util.spec_from_file_location(
+    "ascend_api_surface", API_SURFACE_PROBE)
+API_SURFACE = importlib.util.module_from_spec(API_SURFACE_SPEC)
+API_SURFACE_SPEC.loader.exec_module(API_SURFACE)
 
 TRANSPORT_ERROR = (
     "DeepEP Ascend backend: {} is unavailable until the Ascend device "
@@ -820,6 +826,32 @@ class PythonApiIsolationTest(unittest.TestCase):
     def test_stale_cuda_extension_skips_before_package_initialization(self):
         self.run_scenario("stale_cuda_extension_guard")
 
+    def test_testing_diagnostic_surface_probe_rejects_injection_attributes(self):
+        class CleanBuffer:
+            pass
+
+        class CleanExtension:
+            ElasticBuffer = CleanBuffer
+
+        API_SURFACE.assert_no_testing_diagnostic_surface(CleanExtension)
+
+        class ModuleDiagnosticExtension:
+            ElasticBuffer = CleanBuffer
+            diagnostic = None
+
+        with self.assertRaisesRegex(AssertionError, "module.diagnostic"):
+            API_SURFACE.assert_no_testing_diagnostic_surface(
+                ModuleDiagnosticExtension)
+
+        class DiagnosticBuffer:
+            diagnostic = None
+
+        class DiagnosticExtension:
+            ElasticBuffer = DiagnosticBuffer
+
+        with self.assertRaisesRegex(AssertionError, "ElasticBuffer.diagnostic"):
+            API_SURFACE.assert_no_testing_diagnostic_surface(DiagnosticExtension)
+
 
 class PythonGateSourceTest(unittest.TestCase):
     @staticmethod
@@ -911,6 +943,7 @@ class RealAscendPythonApiTest(unittest.TestCase):
         self.assertTrue(hasattr(self.deep_ep, "ElasticBuffer"))
         self.assertFalse(hasattr(self.deep_ep, "Buffer"))
         self.assertFalse(hasattr(self.extension, "init_jit"))
+        API_SURFACE.assert_no_testing_diagnostic_surface(self.extension)
 
     def test_constructor_rejects_non_two_rank_group_before_hccl_use(self):
         with self.assertRaisesRegex(

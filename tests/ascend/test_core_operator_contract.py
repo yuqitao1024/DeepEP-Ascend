@@ -147,6 +147,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_production_api_does_not_bypass_transport_gate(self):
         production = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        bindings = (ROOT / "csrc/python_api.cpp").read_text()
+        self.assertNotIn("DEEP_EP_ASCEND_TESTING", bindings)
+        self.assertNotIn("DEEP_EP_ASCEND_TEST_DIAGNOSTIC", bindings)
         self.assertIn("launch_internal_barrier", production)
         self.assertNotIn("launch_internal_dispatch", production)
         self.assertNotIn("launch_internal_combine", production)

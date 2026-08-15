@@ -7,6 +7,9 @@ import torch.distributed as dist
 import torch_npu  # noqa: F401
 
 import deep_ep
+import deep_ep._C as extension
+
+from api_surface import assert_no_testing_diagnostic_surface
 
 
 def _check(condition, message):
@@ -40,6 +43,7 @@ def _make_buffer(group):
 
 
 def run(inject_diagnostic):
+    assert_no_testing_diagnostic_surface(extension)
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.npu.set_device(local_rank)
     dist.init_process_group(backend="hccl", timeout=timedelta(minutes=5))
