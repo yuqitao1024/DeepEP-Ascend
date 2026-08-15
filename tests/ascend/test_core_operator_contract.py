@@ -196,7 +196,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("--enable-simt", cmake)
         for definition in (
                 "DEEP_EP_ASCEND_STAGED_URMA=1",
-                "DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1"):
+                "DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1",
+                "DEEP_EP_ASCEND_AICORE_WQE_CALLEE=__aicore__"):
             self.assertIn(definition, cmake)
         for source in ("barrier.asc", "dispatch.asc", "combine.asc"):
             self.assertIn(source, cmake)

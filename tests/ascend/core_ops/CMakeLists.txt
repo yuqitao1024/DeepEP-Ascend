@@ -17,7 +17,8 @@ target_compile_options(deep_ep_ascend_core_operator_probe PRIVATE
 
 target_compile_definitions(deep_ep_ascend_core_operator_probe PRIVATE
     $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_STAGED_URMA=1>
-    $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1>)
+    $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1>
+    $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_AICORE_WQE_CALLEE=__aicore__>)
 
 target_include_directories(deep_ep_ascend_core_operator_probe PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../../..

@@ -148,6 +148,7 @@ class BuildPlatformTest(unittest.TestCase):
                 "--npu-arch=dav-3510",
                 "DEEP_EP_PLATFORM_ASCEND=1", "DEEP_EP_ASCEND_STAGED_URMA=1",
                 "DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1",
+                "DEEP_EP_ASCEND_AICORE_WQE_CALLEE=__aicore__",
                 "DEEP_EP_ASCEND_TESTING=$<BOOL:${DEEP_EP_ASCEND_TESTING}>",
                 "hcomm", "ascendcl", "c_sec", "torch_npu"):
             self.assertIn(marker, ascend)
