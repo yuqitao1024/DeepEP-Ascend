@@ -2,9 +2,6 @@ import pathlib
 import sys
 import unittest
 
-import torch
-
-
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "platform"))
 from extension_loader import load_extension
 
@@ -12,13 +9,13 @@ from extension_loader import load_extension
 _C = load_extension()
 
 
-ARGS = (0, 1, 0, [], 4096, 0, False, True, True, 3, 0, 300, 100, True)
+ALIGNMENT = 2 * 1024 * 1024
+ARGS = (0, 2, 1, [], ALIGNMENT, 0, False, True, True, 3, 0, 300, 100, True)
 
 
 class AscendStubTest(unittest.TestCase):
     def setUp(self):
         self.assertEqual(_C.get_platform(), "ascend")
-        self.buffer = _C.ElasticBuffer(*ARGS)
 
     def assert_transport_error(self, operation, call, detail):
         message = f"DeepEP Ascend backend: {operation} {detail}"
@@ -28,96 +25,52 @@ class AscendStubTest(unittest.TestCase):
         self.assertIs(type(exception), NotImplementedError)
         self.assertEqual(str(exception), message)
 
-    def test_constructor_validation_and_idempotent_destroy(self):
-        with self.assertRaisesRegex(RuntimeError, "world_size must be positive"):
-            _C.ElasticBuffer(0, 0, *ARGS[2:])
+    def test_constructor_rejects_invalid_production_preconditions(self):
+        with self.assertRaisesRegex(RuntimeError, "exactly two ranks are required"):
+            _C.ElasticBuffer(0, 1, *ARGS[2:])
         with self.assertRaisesRegex(RuntimeError, r"rank must be in \[0, world_size\)"):
-            _C.ElasticBuffer(1, 1, *ARGS[2:])
+            _C.ElasticBuffer(2, 2, *ARGS[2:])
         with self.assertRaisesRegex(RuntimeError,
-                                    "communicator_handle must be zero in Phase 2A"):
-            _C.ElasticBuffer(0, 1, 7, *ARGS[3:])
+                                    "communicator_handle must be nonzero"):
+            _C.ElasticBuffer(0, 2, 0, *ARGS[3:])
         with self.assertRaisesRegex(RuntimeError,
-                                    "cpu_communicator must be empty in Phase 2A"):
-            _C.ElasticBuffer(0, 1, 0, [(1, 2)], *ARGS[4:])
-        with self.assertRaisesRegex(RuntimeError, "device_buffer_bytes must be positive"):
-            _C.ElasticBuffer(0, 1, 0, [], 0, *ARGS[5:])
+                                    "cpu communicator must be empty"):
+            _C.ElasticBuffer(0, 2, 1, [(1, 2)], *ARGS[4:])
+        with self.assertRaisesRegex(
+                RuntimeError, "device buffer must be positive and 2 MiB-aligned"):
+            _C.ElasticBuffer(0, 2, 1, [], 0, *ARGS[5:])
         with self.assertRaisesRegex(RuntimeError,
-                                    "cpu_buffer_bytes must be zero in Phase 2A"):
-            _C.ElasticBuffer(0, 1, 0, [], 4096, 4096, *ARGS[6:])
-        self.buffer.destroy()
-        self.buffer.destroy()
+                                    "cpu_buffer_bytes must be zero"):
+            _C.ElasticBuffer(0, 2, 1, [], ALIGNMENT, 1, *ARGS[6:])
+        with self.assertRaisesRegex(RuntimeError, "hybrid mode is unsupported"):
+            _C.ElasticBuffer(*ARGS[:6], True, *ARGS[7:])
+        with self.assertRaisesRegex(RuntimeError, "CUDA QP count must be zero"):
+            _C.ElasticBuffer(*ARGS[:10], 1, *ARGS[11:])
 
-    def test_runtime_primitives_raise(self):
+    def test_event_wait_remains_unavailable(self):
         unavailable = "is unavailable until the Ascend device transport is implemented"
-        self.assert_transport_error(
-            "barrier", lambda: self.buffer.barrier(True, False, True),
-            "requires unavailable device transport capabilities: remote_signal, "
-            "system_memory_ordering, device_barrier")
-        self.assert_transport_error("get_comm_stream", self.buffer.get_comm_stream, unavailable)
-        self.assert_transport_error("get_physical_domain_size",
-                                    self.buffer.get_physical_domain_size, unavailable)
-        self.assert_transport_error("get_logical_domain_size",
-                                    self.buffer.get_logical_domain_size, unavailable)
         self.assert_transport_error("current_stream_wait",
                                     _C.EventHandle().current_stream_wait, unavailable)
 
-    def test_hybrid_runtime_primitives_raise(self):
-        hybrid_buffer = _C.ElasticBuffer(*ARGS[:6], True, *ARGS[7:])
-        self.assert_transport_error(
-            "barrier", lambda: hybrid_buffer.barrier(True, False, True),
-            "requires unavailable device transport capabilities: remote_signal, "
-            "system_memory_ordering, device_barrier, scale_up_team, scale_out_team")
-
-        x = torch.empty((1, 16), dtype=torch.bfloat16)
-        topk = torch.zeros((1, 1), dtype=torch.int64)
-        none = None
-        dispatch_args = (x, none, topk, none, none, none, none, none, none,
-                         none, none, none, none, none, none,
-                         1, 1, 1, 1, 0, none, none,
-                         False, False, True, True, False, False, False)
-        self.assert_transport_error(
-            "dispatch", lambda: hybrid_buffer.dispatch(*dispatch_args),
-            "requires unavailable device transport capabilities: symmetric_window, "
-            "direct_peer_pointer, device_put, device_put_value, "
-            "remote_atomic_add_release, remote_signal, system_memory_ordering, "
-            "device_barrier, scale_up_team, scale_out_team")
-        combine_args = (x, none, none, none, topk, topk, topk[:, 0].to(torch.int32),
-                        none, none, 1, 1, 1, 0, none, none, False, False, False)
-        self.assert_transport_error(
-            "combine", lambda: hybrid_buffer.combine(*combine_args),
-            "requires unavailable device transport capabilities: symmetric_window, "
-            "direct_peer_pointer, device_put, remote_atomic_add_release, remote_signal, "
-            "async_completion, system_memory_ordering, device_barrier, "
-            "scale_up_team, scale_out_team")
-        hybrid_buffer.destroy()
-
-    def test_size_calculation_returns_aligned_production_window(self):
+    def test_size_calculation_enforces_production_preconditions(self):
         size = _C.calculate_elastic_buffer_size(
             7, 128, 7168, 8, False, False, True)
         self.assertGreater(size, 0)
-        self.assertEqual(size % (2 * 1024 * 1024), 0)
-
-    def test_dispatch_and_combine_raise_before_device_validation(self):
-        x = torch.empty((1, 16), dtype=torch.bfloat16)
-        topk = torch.zeros((1, 1), dtype=torch.int64)
-        none = None
-        dispatch_args = (x, none, topk, none, none, none, none, none, none,
-                         none, none, none, none, none, none,
-                         1, 1, 1, 1, 0, none, none,
-                         False, False, True, True, False, False, False)
+        self.assertEqual(size % ALIGNMENT, 0)
+        with self.assertRaisesRegex(RuntimeError,
+                                    "communicator_handle must be nonzero"):
+            _C.calculate_elastic_buffer_size(
+                0, 128, 7168, 8, False, False, True)
         self.assert_transport_error(
-            "dispatch", lambda: self.buffer.dispatch(*dispatch_args),
-            "requires unavailable device transport capabilities: symmetric_window, "
-            "direct_peer_pointer, device_put, device_put_value, "
-            "remote_atomic_add_release, remote_signal, system_memory_ordering, "
-            "device_barrier")
-        combine_args = (x, none, none, none, topk, topk, topk[:, 0].to(torch.int32),
-                        none, none, 1, 1, 1, 0, none, none, False, False, False)
+            "calculate_elastic_buffer_size",
+            lambda: _C.calculate_elastic_buffer_size(
+                7, 128, 7168, 8, True, False, True),
+            "does not support FP8")
         self.assert_transport_error(
-            "combine", lambda: self.buffer.combine(*combine_args),
-            "requires unavailable device transport capabilities: symmetric_window, "
-            "direct_peer_pointer, device_put, remote_atomic_add_release, remote_signal, "
-            "system_memory_ordering, device_barrier")
+            "calculate_elastic_buffer_size",
+            lambda: _C.calculate_elastic_buffer_size(
+                7, 128, 7168, 8, False, True, True),
+            "does not support hybrid mode")
 
 
 if __name__ == "__main__":

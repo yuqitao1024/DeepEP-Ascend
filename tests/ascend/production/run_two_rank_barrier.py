@@ -54,6 +54,7 @@ def run(inject_diagnostic):
         for _ in range(3):
             temporary = _make_buffer(group)
             temporary.destroy()
+            temporary.destroy()
 
         buffer = _make_buffer(group)
         try:
