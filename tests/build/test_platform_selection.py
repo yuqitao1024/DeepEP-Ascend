@@ -155,6 +155,19 @@ class BuildPlatformTest(unittest.TestCase):
         for forbidden in (".cu", "nvshmem", "nccl"):
             self.assertNotIn(forbidden, ascend.lower())
 
+    def test_ascend_pybind_module_uses_shared_link_kind_only_for_ascend(self):
+        source = (ROOT / "CMakeLists.txt").read_text()
+        cuda_marker = 'if(DEEP_EP_PLATFORM STREQUAL "cuda")'
+        ascend_marker = 'if(DEEP_EP_PLATFORM STREQUAL "ascend")'
+        cuda = source[source.index(cuda_marker):source.index(ascend_marker)]
+        ascend = source[source.rindex(ascend_marker):]
+
+        self.assertIn("pybind11_add_module(_C csrc/python_api.cpp)", cuda)
+        self.assertRegex(
+            ascend,
+            r"pybind11_add_module\(\s*_C\s+SHARED\s+"
+            r"csrc/python_api\.cpp")
+
 
 if __name__ == "__main__":
     unittest.main()
