@@ -82,6 +82,7 @@ struct CoreTiling {
     CoreLaunchShape launch{};
     TokenLayout token_layout{};
     WorkspaceLayout workspace_layout{};
+    SymmetricWindowLayout symmetric_window_layout{};
     std::uint64_t communication_buffer_bytes = 0;
     std::uint64_t workspace_bytes = 0;
     transport::DeviceTransportContext transport_context{};
@@ -244,13 +245,30 @@ inline TilingStatus build_core_tiling(
         !detail::build_workspace_layout(input, &tiling.workspace_layout))
         return TilingStatus::overflow("layout size overflow");
 
-    std::uint64_t token_capacity = input.num_max_tokens_per_rank;
-    if (has_mode(input.mode_flags, CoreMode::kExpanded) &&
-        !checked_multiply(token_capacity, input.num_topk, &token_capacity))
-        return TilingStatus::overflow("token capacity overflow");
-    if (!checked_multiply(token_capacity, tiling.token_layout.stride_bytes,
-                          &tiling.communication_buffer_bytes))
-        return TilingStatus::overflow("communication buffer overflow");
+    if (input.topology.world_size == 2) {
+        SymmetricWindowInput window_input{};
+        window_input.world_size = 2;
+        window_input.num_max_tokens_per_rank = input.num_max_tokens_per_rank;
+        window_input.hidden = input.hidden;
+        window_input.num_topk = input.num_topk;
+        window_input.element_bytes = element_bytes;
+        const auto layout_status = build_symmetric_window_layout(
+            window_input, &tiling.symmetric_window_layout);
+        if (!layout_status.ok())
+            return layout_status.code == LayoutStatusCode::kOverflow ?
+                TilingStatus::overflow(layout_status.message) :
+                TilingStatus::invalid(layout_status.message);
+        tiling.communication_buffer_bytes =
+            tiling.symmetric_window_layout.total_bytes;
+    } else {
+        std::uint64_t token_capacity = input.num_max_tokens_per_rank;
+        if (has_mode(input.mode_flags, CoreMode::kExpanded) &&
+            !checked_multiply(token_capacity, input.num_topk, &token_capacity))
+            return TilingStatus::overflow("token capacity overflow");
+        if (!checked_multiply(token_capacity, tiling.token_layout.stride_bytes,
+                              &tiling.communication_buffer_bytes))
+            return TilingStatus::overflow("communication buffer overflow");
+    }
 
     tiling.abi_version = kCoreTilingAbiVersion;
     tiling.struct_size = sizeof(CoreTiling);

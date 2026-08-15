@@ -1,0 +1,88 @@
+#include <cstdint>
+#include <limits>
+#include <type_traits>
+
+#include "csrc/backends/ascend/elastic/layout.hpp"
+
+using namespace deep_ep::ascend::elastic;
+
+#define CHECK(condition) do { if (!(condition)) return __LINE__; } while (false)
+
+int main() {
+    static_assert(std::is_standard_layout_v<SymmetricWindowLayout>);
+    static_assert(std::is_trivially_copyable_v<SymmetricWindowLayout>);
+
+    SymmetricWindowInput input{};
+    input.world_size = 2;
+    input.num_max_tokens_per_rank = 8;
+    input.hidden = 64;
+    input.num_topk = 2;
+    input.element_bytes = 2;
+
+    SymmetricWindowLayout layout{};
+    CHECK(build_symmetric_window_layout(input, &layout).ok());
+    CHECK(layout.abi_version == kSymmetricWindowAbiVersion);
+    CHECK(layout.struct_size == sizeof(SymmetricWindowLayout));
+    CHECK(layout.dispatch_source_shard_count == 2);
+    CHECK(layout.combine_contributor_shard_count == 2);
+    CHECK(layout.dispatch_source_shard_bytes >=
+          input.num_max_tokens_per_rank * input.num_topk *
+              layout.dispatch_record_bytes);
+    CHECK(layout.combine_contributor_shard_bytes >=
+          input.num_max_tokens_per_rank * layout.combine_record_bytes);
+    CHECK(layout.control_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.dispatch_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.combine_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.reserve_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.control_offset + layout.control_bytes <=
+          layout.dispatch_offset);
+    CHECK(layout.dispatch_offset + layout.dispatch_bytes <=
+          layout.combine_offset);
+    CHECK(layout.combine_offset + layout.combine_bytes <=
+          layout.reserve_offset);
+    CHECK(layout.total_bytes % kPublicElasticBufferAlignment == 0);
+
+    auto larger = input;
+    larger.num_max_tokens_per_rank *= 2;
+    SymmetricWindowLayout larger_layout{};
+    CHECK(build_symmetric_window_layout(larger, &larger_layout).ok());
+    CHECK(larger_layout.dispatch_source_shard_bytes >
+          layout.dispatch_source_shard_bytes);
+    CHECK(larger_layout.combine_contributor_shard_bytes >
+          layout.combine_contributor_shard_bytes);
+    CHECK(larger_layout.total_bytes >= layout.total_bytes);
+
+    auto conservative = input;
+    conservative.num_topk = 0;
+    SymmetricWindowLayout conservative_layout{};
+    CHECK(build_symmetric_window_layout(
+              conservative, &conservative_layout).ok());
+    CHECK(conservative_layout.dispatch_source_shard_bytes > 0);
+
+    auto invalid = input;
+    invalid.world_size = 1;
+    CHECK(build_symmetric_window_layout(invalid, &layout).code ==
+          LayoutStatusCode::kInvalidArgument);
+    CHECK(build_symmetric_window_layout(input, nullptr).code ==
+          LayoutStatusCode::kInvalidArgument);
+
+    auto overflow = input;
+    overflow.hidden = std::numeric_limits<std::uint64_t>::max();
+    CHECK(build_symmetric_window_layout(overflow, &layout).code ==
+          LayoutStatusCode::kOverflow);
+    overflow = input;
+    overflow.num_max_tokens_per_rank =
+        std::numeric_limits<std::uint64_t>::max();
+    CHECK(build_symmetric_window_layout(overflow, &layout).code ==
+          LayoutStatusCode::kOverflow);
+
+    SymmetricWindowInput barrier{};
+    barrier.world_size = 2;
+    SymmetricWindowLayout barrier_layout{};
+    CHECK(build_symmetric_window_layout(barrier, &barrier_layout).ok());
+    CHECK(barrier_layout.control_bytes > 0);
+    CHECK(barrier_layout.dispatch_bytes == 0);
+    CHECK(barrier_layout.combine_bytes == 0);
+    CHECK(barrier_layout.total_bytes % kPublicElasticBufferAlignment == 0);
+    return 0;
+}

@@ -11,6 +11,8 @@ static_assert(std::is_standard_layout_v<TokenLayout>);
 static_assert(std::is_trivially_copyable_v<TokenLayout>);
 static_assert(std::is_standard_layout_v<WorkspaceLayout>);
 static_assert(std::is_trivially_copyable_v<WorkspaceLayout>);
+static_assert(std::is_standard_layout_v<SymmetricWindowLayout>);
+static_assert(std::is_trivially_copyable_v<SymmetricWindowLayout>);
 static_assert(std::is_standard_layout_v<CoreTiling>);
 static_assert(std::is_trivially_copyable_v<CoreTiling>);
 
@@ -131,6 +133,21 @@ int main() {
     if (validate_single_rank(tiling).code !=
         TilingStatusCode::kUnsupportedTopology)
         return 15;
+
+    CoreTilingInput barrier{};
+    barrier.operation = OperationKind::kBarrier;
+    barrier.topology.world_size = 2;
+    barrier.topology.scale_up_size = 2;
+    status = build_core_tiling(barrier, &tiling);
+    if (!status.ok() ||
+        tiling.symmetric_window_layout.abi_version !=
+            kSymmetricWindowAbiVersion ||
+        tiling.symmetric_window_layout.struct_size !=
+            sizeof(SymmetricWindowLayout) ||
+        tiling.communication_buffer_bytes !=
+            tiling.symmetric_window_layout.total_bytes ||
+        tiling.communication_buffer_bytes % kPublicElasticBufferAlignment != 0)
+        return 16;
 
     return 0;
 }

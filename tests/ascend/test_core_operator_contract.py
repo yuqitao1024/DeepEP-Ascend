@@ -7,11 +7,26 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PROBE = ROOT / "tests/ascend/core_operator_contract_probe.cpp"
 RUNTIME_PROBE = ROOT / "tests/ascend/core_runtime_contract_probe.cpp"
+PRODUCTION_LAYOUT_PROBE = ROOT / "tests/ascend/production_layout_probe.cpp"
 ELASTIC = ROOT / "csrc/backends/ascend/elastic"
 CORE_OPS = ROOT / "tests/ascend/core_ops"
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
+    def test_production_symmetric_window_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "production_layout_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(PRODUCTION_LAYOUT_PROBE), "-o", str(binary)],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
     def test_pure_cpp_layout_and_tiling_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = pathlib.Path(directory) / "core_operator_contract_probe"

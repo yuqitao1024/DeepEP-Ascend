@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -11,6 +12,7 @@
 #include <pybind11/pybind11.h>
 #include <torch/python.h>
 
+#include "elastic/layout.hpp"
 #include "transport/stub_transport.hpp"
 
 namespace deep_ep::ascend {
@@ -160,11 +162,44 @@ public:
     }
 
     static int64_t calculate_buffer_size(
-        const int64_t&, const int&, const int&, int, const bool&,
-        const bool&, const bool&) {
-        raise_unsupported(
-            "calculate_elastic_buffer_size",
-            "is unavailable until the Ascend device transport is implemented");
+        const int64_t& comm_handle, const int& num_max_tokens_per_rank,
+        const int& hidden, int num_topk, const bool& use_fp8_dispatch,
+        const bool& allow_hybrid_mode, const bool&) {
+        TORCH_CHECK(
+            comm_handle != 0,
+            "DeepEP Ascend backend: calculate_elastic_buffer_size "
+            "communicator_handle must be nonzero");
+        if (use_fp8_dispatch)
+            raise_unsupported(
+                "calculate_elastic_buffer_size", "does not support FP8");
+        if (allow_hybrid_mode)
+            raise_unsupported(
+                "calculate_elastic_buffer_size",
+                "does not support hybrid mode");
+        TORCH_CHECK(
+            num_max_tokens_per_rank > 0 && hidden > 0 && num_topk >= 0,
+            "DeepEP Ascend backend: calculate_elastic_buffer_size requires "
+            "positive token capacity and hidden size and nonnegative top-k");
+
+        elastic::SymmetricWindowInput input{};
+        input.world_size = 2;
+        input.num_max_tokens_per_rank =
+            static_cast<std::uint64_t>(num_max_tokens_per_rank);
+        input.hidden = static_cast<std::uint64_t>(hidden);
+        input.num_topk = static_cast<std::uint64_t>(num_topk);
+        input.element_bytes = 2;
+        elastic::SymmetricWindowLayout layout{};
+        const auto status =
+            elastic::build_symmetric_window_layout(input, &layout);
+        TORCH_CHECK(
+            status.ok(), "DeepEP Ascend backend: calculate_elastic_buffer_size ",
+            status.message);
+        TORCH_CHECK(
+            layout.total_bytes <=
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int64_t>::max()),
+            "DeepEP Ascend backend: calculate_elastic_buffer_size overflow");
+        return static_cast<std::int64_t>(layout.total_bytes);
     }
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>,

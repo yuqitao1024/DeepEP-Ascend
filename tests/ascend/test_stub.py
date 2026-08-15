@@ -91,11 +91,11 @@ class AscendStubTest(unittest.TestCase):
             "scale_up_team, scale_out_team")
         hybrid_buffer.destroy()
 
-    def test_size_calculation_raises(self):
-        self.assert_transport_error(
-            "calculate_elastic_buffer_size",
-            lambda: _C.calculate_elastic_buffer_size(0, 128, 7168, 8, False, True, True),
-            "is unavailable until the Ascend device transport is implemented")
+    def test_size_calculation_returns_aligned_production_window(self):
+        size = _C.calculate_elastic_buffer_size(
+            7, 128, 7168, 8, False, False, True)
+        self.assertGreater(size, 0)
+        self.assertEqual(size % (2 * 1024 * 1024), 0)
 
     def test_dispatch_and_combine_raise_before_device_validation(self):
         x = torch.empty((1, 16), dtype=torch.bfloat16)

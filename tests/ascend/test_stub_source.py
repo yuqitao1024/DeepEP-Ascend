@@ -266,12 +266,29 @@ int main() {
             "system_memory_ordering, device_barrier",
             [&] { buffer.barrier(true, false, true); }))
         return 13;
-    if (!raises_transport_error(
-            "calculate_elastic_buffer_size",
-            "is unavailable until the Ascend device transport is implemented", [] {
-                Buffer::calculate_buffer_size(0, 128, 7168, 8, false, true, true);
-            }))
+    const auto buffer_bytes = Buffer::calculate_buffer_size(
+        7, 128, 7168, 8, false, false, true);
+    if (buffer_bytes <= 0 ||
+        buffer_bytes % deep_ep::ascend::elastic::kPublicElasticBufferAlignment != 0)
         return 14;
+    try {
+        Buffer::calculate_buffer_size(0, 128, 7168, 8, false, false, true);
+        return 29;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("communicator_handle must be nonzero") ==
+            std::string::npos)
+            return 30;
+    }
+    if (!raises_transport_error(
+            "calculate_elastic_buffer_size", "does not support FP8", [] {
+                Buffer::calculate_buffer_size(7, 128, 7168, 8, true, false, true);
+            }))
+        return 31;
+    if (!raises_transport_error(
+            "calculate_elastic_buffer_size", "does not support hybrid mode", [] {
+                Buffer::calculate_buffer_size(7, 128, 7168, 8, false, true, true);
+            }))
+        return 32;
 
     Tensor tensor;
     std::optional<Tensor> optional_tensor;
