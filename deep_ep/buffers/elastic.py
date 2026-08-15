@@ -360,6 +360,8 @@ class ElasticBuffer:
 
         # Create CPP handle
         self.explicitly_destroy = explicitly_destroy
+        if not is_cuda():
+            synchronize()
         self.runtime = _C.ElasticBuffer(group.rank(), group.size(),
                                         comm_handle, cpu_comm,
                                         num_bytes, num_cpu_bytes,
@@ -384,9 +386,13 @@ class ElasticBuffer:
             group.barrier()
             synchronize()
         else:
-            self.num_scaleout_ranks = self.num_scaleup_ranks = None
-            self.scaleout_rank_idx = self.scaleup_rank_idx = None
-            self.num_rdma_ranks = self.num_nvlink_ranks = None
+            synchronize()
+            self.num_scaleout_ranks, self.num_scaleup_ranks = \
+                self.get_logical_domain_size()
+            self.scaleout_rank_idx = self.rank_idx // self.num_scaleup_ranks
+            self.scaleup_rank_idx = self.rank_idx % self.num_scaleup_ranks
+            self.num_rdma_ranks, self.num_nvlink_ranks = \
+                self.get_physical_domain_size()
 
     def destroy(self) -> None:
         """
@@ -534,7 +540,9 @@ class ElasticBuffer:
                 in parallel across SMs. Sequential mode provides better synchronization guarantees,
                 mainly used for test synchronization.
         """
-        require_cuda("barrier")
+        if not is_cuda() and not sequential:
+            raise RuntimeError(
+                "DeepEP Ascend backend: barrier requires sequential=True")
         self.runtime.barrier(use_comm_stream, with_cpu_sync, sequential)
 
     @staticmethod
@@ -584,7 +592,6 @@ class ElasticBuffer:
             num_rdma_ranks: the number of physical RDMA ranks.
             num_nvlink_ranks: the number of physical NVLink ranks.
         """
-        require_cuda("get_physical_domain_size")
         return self.runtime.get_physical_domain_size()
 
     def get_logical_domain_size(self) -> Tuple[int, int]:
@@ -595,7 +602,6 @@ class ElasticBuffer:
             num_scaleout_ranks: the number of logical scaleout ranks.
             num_scaleup_ranks: the number of logical scaleup ranks.
         """
-        require_cuda("get_logical_domain_size")
         return self.runtime.get_logical_domain_size()
 
     def engram_write(self, storage: torch.Tensor,

@@ -392,6 +392,22 @@ using DispatchResult = std::tuple<
 static_assert(std::is_same_v<decltype(&Buffer::get_comm_stream),
                              pybind11::object (Buffer::*)() const>);
 
+extern "C" int deep_ep_ascend_launch_barrier(
+    deep_ep::ascend::elastic::BarrierArguments,
+    deep_ep::ascend::elastic::CoreTiling, void*) { return 0; }
+extern "C" int deep_ep_ascend_launch_dispatch(
+    deep_ep::ascend::elastic::DispatchArguments,
+    deep_ep::ascend::elastic::CoreTiling, void*) { return 0; }
+extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
+    deep_ep::ascend::elastic::DispatchArguments,
+    deep_ep::ascend::elastic::CoreTiling, void*) { return 0; }
+extern "C" int deep_ep_ascend_launch_combine(
+    deep_ep::ascend::elastic::CombineArguments,
+    deep_ep::ascend::elastic::CoreTiling, void*) { return 0; }
+extern "C" int deep_ep_ascend_launch_combine_epilogue(
+    deep_ep::ascend::elastic::CombineArguments,
+    deep_ep::ascend::elastic::CoreTiling, void*) { return 0; }
+
 template <typename Call>
 bool raises_transport_error(const char* operation, const char* detail, Call call) {
     python_error.clear();
@@ -446,6 +462,7 @@ class AscendStubSourceTest(unittest.TestCase):
                  "-DDEEP_EP_PLATFORM_ASCEND=1",
                  f"-I{include}", f"-I{ROOT}",
                  str(probe),
+                 str(ROOT / "csrc/backends/ascend/elastic/runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
                  "-o", str(binary)],

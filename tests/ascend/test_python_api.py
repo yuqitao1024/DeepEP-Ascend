@@ -18,10 +18,7 @@ TRANSPORT_ERROR = (
     "DeepEP Ascend backend: {} is unavailable until the Ascend device "
     "transport is implemented")
 GATED_METHODS = {
-    "barrier": "barrier",
     "get_comm_stream": "get_comm_stream",
-    "get_physical_domain_size": "get_physical_domain_size",
-    "get_logical_domain_size": "get_logical_domain_size",
     "get_engram_storage_size_hint": "get_engram_storage_size_hint",
     "get_pp_buffer_size_hint": "get_pp_buffer_size_hint",
     "get_agrs_num_max_session_bytes": "get_agrs_num_max_session_bytes",
@@ -235,11 +232,11 @@ def _install_fake_extension(platform, events):
 
         def get_logical_domain_size(self):
             events.append("runtime.get_logical_domain_size")
-            return 2, 4
+            return (1, 2) if platform == "ascend" else (2, 4)
 
         def get_physical_domain_size(self):
             events.append("runtime.get_physical_domain_size")
-            return 2, 4
+            return (1, 2) if platform == "ascend" else (2, 4)
 
         def barrier(self, use_comm_stream, with_cpu_sync, sequential):
             events.append(("runtime.barrier", use_comm_stream, with_cpu_sync, sequential))
@@ -263,9 +260,9 @@ def _install_fake_extension(platform, events):
 
     def calculate_elastic_buffer_size(*args):
         extension.size_calls.append(args)
-        if platform == "ascend":
+        if platform == "ascend" and args[5]:
             raise _transport_error("calculate_elastic_buffer_size")
-        return 8192
+        return 2 * 1024 * 1024 if platform == "ascend" else 8192
 
     extension.EventHandle = EventHandle
     extension.ElasticBuffer = ElasticRuntime
@@ -477,30 +474,31 @@ def _scenario_invalid_platform():
 
 def _scenario_ascend_construction():
     deep_ep, extension, events = _load_package("ascend", True)
-    group = _FakeGroup(events, rank=3, size=8)
+    group = _FakeGroup(events, rank=1, size=2)
     os.environ["EP_OVERRIDE_RDMA_SL"] = "11"
     buffer = deep_ep.ElasticBuffer(
-        group, num_bytes=4096, explicitly_destroy=True, num_allocated_qps=77)
+        group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+        explicitly_destroy=True, num_allocated_qps=77)
 
-    assert buffer.rank_idx == 3
-    assert buffer.num_ranks == 8
-    assert buffer.num_bytes == 4096
+    assert buffer.group is group
+    assert buffer.rank_idx == 1
+    assert buffer.num_ranks == 2
+    assert buffer.num_bytes == 2 * 1024 * 1024
     assert buffer.num_allocated_qps == 0
     assert buffer.comm_handle == 4242
     assert not hasattr(buffer, "nccl_comm_handle")
-    assert buffer.num_scaleout_ranks is None
-    assert buffer.num_scaleup_ranks is None
-    assert buffer.scaleout_rank_idx is None
-    assert buffer.scaleup_rank_idx is None
-    assert buffer.num_rdma_ranks is None
-    assert buffer.num_nvlink_ranks is None
+    assert (buffer.num_scaleout_ranks, buffer.num_scaleup_ranks) == (1, 2)
+    assert (buffer.scaleout_rank_idx, buffer.scaleup_rank_idx) == (0, 1)
+    assert (buffer.num_rdma_ranks, buffer.num_nvlink_ranks) == (1, 2)
     assert len(extension.runtime_args) == 1
     runtime_args = extension.runtime_args[0]
-    assert runtime_args[:6] == (3, 8, 4242, [], 4096, 0)
+    assert runtime_args[:6] == (
+        1, 2, 4242, [], 2 * 1024 * 1024, 0)
     assert runtime_args[9:11] == (3, 0)
     assert "group.barrier" not in events
-    assert "runtime.get_logical_domain_size" not in events
-    assert "runtime.get_physical_domain_size" not in events
+    assert events.count("runtime.get_logical_domain_size") == 1
+    assert events.count("runtime.get_physical_domain_size") == 1
+    assert events.count("torch.npu.synchronize") == 2
     assert not any(isinstance(event, tuple) and str(event[0]).startswith("torch.cuda")
                    for event in events)
 
@@ -510,7 +508,9 @@ def _scenario_ascend_construction():
 
     for num_bytes in (0, -1):
         try:
-            deep_ep.ElasticBuffer(group, num_bytes=num_bytes, explicitly_destroy=True)
+            deep_ep.ElasticBuffer(
+                group, num_bytes=num_bytes, allow_hybrid_mode=False,
+                explicitly_destroy=True)
         except ValueError as error:
             assert str(error) == "num_bytes must be positive"
         else:
@@ -519,12 +519,13 @@ def _scenario_ascend_construction():
 
 def _scenario_ascend_implicit_size():
     deep_ep, extension, events = _load_package("ascend", True)
-    group = _FakeGroup(events)
-    _assert_transport_error(
-        "calculate_elastic_buffer_size",
-        lambda: deep_ep.ElasticBuffer(
-            group, num_max_tokens_per_rank=1, hidden=16))
-    assert extension.size_calls == [(4242, 1, 16, 0, False, True, True)]
+    group = _FakeGroup(events, rank=0, size=2)
+    buffer = deep_ep.ElasticBuffer(
+        group, num_max_tokens_per_rank=1, hidden=16,
+        allow_hybrid_mode=False, explicitly_destroy=True)
+    assert buffer.num_bytes == 2 * 1024 * 1024
+    assert extension.size_calls == [(4242, 1, 16, 0, False, False, True)]
+    buffer.destroy()
 
     _assert_transport_error(
         "calculate_elastic_buffer_size",
@@ -535,13 +536,28 @@ def _scenario_ascend_implicit_size():
 def _scenario_ascend_method_gates():
     deep_ep, extension, events = _load_package("ascend", True)
     buffer = deep_ep.ElasticBuffer(
-        _FakeGroup(events), num_bytes=4096, explicitly_destroy=True)
+        _FakeGroup(events, rank=1, size=2), num_bytes=2 * 1024 * 1024,
+        allow_hybrid_mode=False, explicitly_destroy=True)
+    buffer.barrier(use_comm_stream=False, with_cpu_sync=True, sequential=True)
+    assert events[-1] == ("runtime.barrier", False, True, True)
+    assert buffer.get_logical_domain_size() == (1, 2)
+    assert buffer.get_physical_domain_size() == (1, 2)
+    runtime_barriers = [event for event in events
+                        if isinstance(event, tuple) and
+                        event[0] == "runtime.barrier"]
+    try:
+        buffer.barrier(sequential=False)
+    except RuntimeError as error:
+        assert str(error) == (
+            "DeepEP Ascend backend: barrier requires sequential=True")
+    else:
+        raise AssertionError("non-sequential Ascend barrier was accepted")
+    assert [event for event in events
+            if isinstance(event, tuple) and event[0] == "runtime.barrier"] == \
+        runtime_barriers
     poison = _Poison()
     calls = {
-        "barrier": buffer.barrier,
         "get_comm_stream": buffer.get_comm_stream,
-        "get_physical_domain_size": buffer.get_physical_domain_size,
-        "get_logical_domain_size": buffer.get_logical_domain_size,
         "get_engram_storage_size_hint": lambda: buffer.get_engram_storage_size_hint(
             poison, poison, poison),
         "get_pp_buffer_size_hint": lambda: buffer.get_pp_buffer_size_hint(
@@ -572,19 +588,17 @@ def _scenario_ascend_method_gates():
         _assert_transport_error(operation, calls[method])
 
     envs = importlib.import_module("deep_ep.utils.envs")
-    _assert_transport_error(
-        "get_physical_domain_size",
-        lambda: envs.get_physical_domain_size(poison))
-    _assert_transport_error(
-        "get_logical_domain_size",
-        lambda: envs.get_logical_domain_size(poison))
+    group = _FakeGroup(events, rank=1, size=2)
+    assert envs.get_physical_domain_size(group) == (1, 2)
+    assert envs.get_logical_domain_size(group, False) == (1, 2)
     buffer.destroy()
 
 
 def _scenario_ascend_contextmanager_gate():
     deep_ep, extension, events = _load_package("ascend", True)
     buffer = deep_ep.ElasticBuffer(
-        _FakeGroup(events), num_bytes=4096, explicitly_destroy=True)
+        _FakeGroup(events, size=2), num_bytes=2 * 1024 * 1024,
+        allow_hybrid_mode=False, explicitly_destroy=True)
     _assert_transport_error(
         "agrs_new_session", lambda: buffer.agrs_new_session(False))
 
@@ -592,7 +606,8 @@ def _scenario_ascend_contextmanager_gate():
 def _scenario_ascend_weak_lru_gate():
     deep_ep, extension, events = _load_package("ascend", True)
     buffer = deep_ep.ElasticBuffer(
-        _FakeGroup(events), num_bytes=4096, explicitly_destroy=True)
+        _FakeGroup(events, size=2), num_bytes=2 * 1024 * 1024,
+        allow_hybrid_mode=False, explicitly_destroy=True)
     poison = _Poison()
     _assert_transport_error(
         "get_theoretical_num_sms",
@@ -836,13 +851,14 @@ class PythonGateSourceTest(unittest.TestCase):
             with self.subTest(method=method):
                 self.assert_first_require_cuda(methods[method], operation)
 
-    def test_module_topology_helpers_gate_before_communicator_access(self):
+    def test_module_topology_helpers_select_platform_before_communicator_access(self):
         tree = ast.parse(ENVS_SOURCE.read_text())
         functions = {node.name: node for node in tree.body
                      if isinstance(node, ast.FunctionDef)}
         for name in ("get_physical_domain_size", "get_logical_domain_size"):
             with self.subTest(function=name):
-                self.assert_first_require_cuda(functions[name], name)
+                statement = self.first_executable_statement(functions[name])
+                self.assertIsInstance(statement, ast.If)
 
 
 class RealAscendPythonApiTest(unittest.TestCase):

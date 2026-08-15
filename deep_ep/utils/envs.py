@@ -11,7 +11,7 @@ from typing import Tuple
 # noinspection PyUnresolvedReferences
 import deep_ep._C as _C
 
-from ..platform import comm_handle_value, get_comm_handle, require_cuda
+from ..platform import comm_handle_value, get_comm_handle, is_cuda, require_cuda
 
 _local_rank = None
 _local_seed = 0
@@ -124,7 +124,11 @@ def get_physical_domain_size(group: dist.ProcessGroup) -> Tuple[int, int]:
         num_rdma_ranks: the number of physical RDMA ranks.
         num_nvlink_ranks: the number of physical NVLink ranks.
     """
-    require_cuda("get_physical_domain_size")
+    if not is_cuda():
+        if group.size() != 2:
+            raise RuntimeError(
+                "DeepEP Ascend backend: physical domain requires exactly two ranks")
+        return 1, 2
     return _C.get_physical_domain_size(
         comm_handle_value(get_comm_handle(group)))
 
@@ -141,7 +145,14 @@ def get_logical_domain_size(group: dist.ProcessGroup, allow_hybrid_mode: bool = 
         num_scaleout_ranks: the number of logical scaleout ranks.
         num_scaleup_ranks: the number of logical scaleup ranks.
     """
-    require_cuda("get_logical_domain_size")
+    if not is_cuda():
+        if allow_hybrid_mode:
+            raise NotImplementedError(
+                "DeepEP Ascend backend: logical domain does not support hybrid mode")
+        if group.size() != 2:
+            raise RuntimeError(
+                "DeepEP Ascend backend: logical domain requires exactly two ranks")
+        return 1, 2
     return _C.get_logical_domain_size(
         comm_handle_value(get_comm_handle(group)), allow_hybrid_mode)
 

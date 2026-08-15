@@ -48,6 +48,7 @@ public:
     bool initialized() const noexcept { return initialized_; }
     void* window_base() const noexcept { return window_.aligned; }
     void* workspace() const noexcept { return workspace_.aligned; }
+    std::uint64_t workspace_bytes() const noexcept { return workspace_.bytes; }
     void* stream() const noexcept { return stream_; }
     transport::HostTransport* transport() const noexcept {
         return transport_.get();

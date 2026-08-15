@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -13,6 +14,7 @@
 #include <torch/python.h>
 
 #include "elastic/layout.hpp"
+#include "elastic/runtime.hpp"
 #include "runtime/cann_runtime.hpp"
 
 namespace deep_ep::ascend {
@@ -52,6 +54,7 @@ class ElasticBuffer {
     int64_t num_buffer_bytes_;
     bool allow_hybrid_mode_;
     std::unique_ptr<runtime::CannRuntimeResources> resources_;
+    std::uint64_t barrier_generation_ = 0;
     bool destroyed_ = false;
 
     static constexpr auto kDispatchCapabilities =
@@ -88,18 +91,76 @@ class ElasticBuffer {
         transport::capability_bit(transport::TransportCapability::kScaleUpTeam) |
         transport::capability_bit(transport::TransportCapability::kScaleOutTeam);
 
-    static constexpr auto kBarrierCapabilities =
-        transport::capability_bit(transport::TransportCapability::kRemoteSignal) |
-        transport::capability_bit(
-            transport::TransportCapability::kSystemMemoryOrdering) |
-        transport::capability_bit(transport::TransportCapability::kDeviceBarrier);
-
     void require_transport(
         const char* operation, transport::TransportCapabilities required) const {
         const auto status =
             host_transport()->require_capabilities(required, operation);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
+    }
+
+    static const char* diagnostic_name(
+        transport::DeviceTransportError error) {
+        switch (error) {
+            case transport::DeviceTransportError::kNone: return "none";
+            case transport::DeviceTransportError::kInvalidAbi:
+                return "invalid_abi";
+            case transport::DeviceTransportError::kInvalidRank:
+                return "invalid_rank";
+            case transport::DeviceTransportError::kInvalidChannel:
+                return "invalid_channel";
+            case transport::DeviceTransportError::kInvalidAddress:
+                return "invalid_address";
+            case transport::DeviceTransportError::kInvalidProtocol:
+                return "invalid_protocol";
+            case transport::DeviceTransportError::kInvalidQueue:
+                return "invalid_queue";
+            case transport::DeviceTransportError::kUnsupportedOperation:
+                return "unsupported_operation";
+            case transport::DeviceTransportError::kCommandOverflow:
+                return "command_overflow";
+            case transport::DeviceTransportError::kCompletionTimeout:
+                return "completion_timeout";
+            case transport::DeviceTransportError::kCompletionFailure:
+                return "completion_failure";
+        }
+        return "unknown";
+    }
+
+    [[noreturn]] void raise_barrier_diagnostic(
+        const transport::DeviceTransportDiagnostic& diagnostic,
+        const char* detail) const {
+        auto message = std::string("device diagnostic ") + detail +
+            " error=" + diagnostic_name(diagnostic.error) +
+            " command_index=" + std::to_string(diagnostic.command_index) +
+            " opcode=" + std::to_string(
+                static_cast<std::uint32_t>(diagnostic.opcode)) +
+            " peer=" + std::to_string(diagnostic.peer) +
+            " channel=" + std::to_string(diagnostic.channel) +
+            " generation=" + std::to_string(diagnostic.generation);
+        raise_transport_status(
+            transport::TransportStatus::runtime_failure(
+                "barrier", static_cast<int>(diagnostic.backend_status),
+                std::move(message)),
+            rank_idx_);
+    }
+
+    elastic::CoreTiling build_barrier_tiling() const {
+        const auto& context = resources_->device_context();
+        elastic::CoreTilingInput input{};
+        input.operation = elastic::OperationKind::kBarrier;
+        input.topology.world_rank = context.topology.world_rank;
+        input.topology.world_size = context.topology.world_size;
+        input.topology.scale_up_rank = context.topology.scale_up_rank;
+        input.topology.scale_up_size = context.topology.scale_up_size;
+        input.topology.scale_out_rank = context.topology.scale_out_rank;
+        input.topology.scale_out_size = context.topology.scale_out_size;
+        elastic::CoreTiling tiling{};
+        const auto status = elastic::build_core_tiling(input, &tiling);
+        TORCH_CHECK(status.ok(), "DeepEP Ascend backend: barrier ",
+                    status.message);
+        tiling.transport_context = context;
+        return tiling;
     }
 
 public:
@@ -185,14 +246,75 @@ public:
         return {topology.scale_out_size, topology.scale_up_size};
     }
 
-    void barrier(const bool&, const bool&, const bool&) const {
-        auto required = kBarrierCapabilities;
-        if (allow_hybrid_mode_)
-            required |= kHybridCapabilities;
-        require_transport("barrier", required);
-        raise_unsupported(
-            "barrier",
-            "is unavailable until the Ascend device transport is implemented");
+    void barrier(const bool& use_comm_stream, const bool& with_cpu_sync,
+                 const bool& sequential) {
+        TORCH_CHECK(sequential,
+                    "DeepEP Ascend backend: barrier requires sequential=True");
+        (void)use_comm_stream;
+        require_transport("barrier", elastic::kBarrierTransportCapabilities);
+
+        if (with_cpu_sync) {
+            const auto status = resources_->synchronize_device();
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+        }
+
+        ++barrier_generation_;
+        if (barrier_generation_ == 0)
+            ++barrier_generation_;
+        auto tiling = build_barrier_tiling();
+        const elastic::CoreLaunchStorage storage{
+            static_cast<std::uint64_t>(num_buffer_bytes_),
+            resources_->workspace_bytes()};
+        const elastic::BarrierArguments arguments{
+            resources_->workspace(), barrier_generation_};
+        const auto launch_status = elastic::launch_internal_barrier(
+            arguments, tiling, storage, resources_->stream());
+        if (!launch_status.ok()) {
+            const auto status = launch_status.code ==
+                    elastic::CoreRuntimeStatusCode::kLaunchFailure ?
+                transport::TransportStatus::runtime_failure(
+                    "barrier", launch_status.backend_code,
+                    launch_status.message) :
+                transport::TransportStatus::invalid(
+                    "barrier", launch_status.message);
+            raise_transport_status(status, rank_idx_);
+        }
+
+        auto status = resources_->synchronize_stream();
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        transport::DeviceTransportDiagnostic diagnostic{};
+        status = host_transport()->read_diagnostic(&diagnostic);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+
+        std::uint64_t completion = 0;
+        const auto completion_offset =
+            tiling.symmetric_window_layout.control_offset +
+            offsetof(elastic::SymmetricControlHeader, barrier_completion) +
+            static_cast<std::uint64_t>(rank_idx_) * sizeof(std::uint64_t);
+        const auto* completion_address = reinterpret_cast<const void*>(
+            reinterpret_cast<std::uintptr_t>(resources_->window_base()) +
+            completion_offset);
+        status = resources_->copy_to_host(
+            &completion, completion_address, sizeof(completion));
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        if (with_cpu_sync) {
+            status = resources_->synchronize_device();
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+        }
+
+        if (diagnostic.abi_version !=
+                transport::kTransportCommandAbiVersion ||
+            diagnostic.error != transport::DeviceTransportError::kNone)
+            raise_barrier_diagnostic(diagnostic, "reported failure");
+        if (diagnostic.generation != barrier_generation_)
+            raise_barrier_diagnostic(diagnostic, "generation mismatch");
+        if (completion != barrier_generation_)
+            raise_barrier_diagnostic(diagnostic, "completion mismatch");
     }
 
     static int64_t calculate_buffer_size(

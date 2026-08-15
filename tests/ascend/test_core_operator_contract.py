@@ -147,7 +147,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_production_api_does_not_bypass_transport_gate(self):
         production = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
-        self.assertNotIn("launch_internal_", production)
+        self.assertIn("launch_internal_barrier", production)
+        self.assertNotIn("launch_internal_dispatch", production)
+        self.assertNotIn("launch_internal_combine", production)
+        for marker in ("read_diagnostic", "copy_to_host",
+                       "barrier_completion", "barrier_generation_"):
+            self.assertIn(marker, production)
         for operation in ("barrier", "dispatch", "combine"):
             marker = f'require_transport("{operation}"'
             self.assertIn(marker, production)
