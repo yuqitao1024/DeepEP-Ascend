@@ -109,6 +109,10 @@ public:
         device::system_fence();
     }
 
+    DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t consumed_generation() const {
+        return device::consumed_generation(context_);
+    }
+
     DEEP_EP_ASCEND_SIMT_CALLEE void device_barrier(
         std::uint32_t team_mask, DeviceAddress workspace,
         std::uint64_t timeout_cycles) const {

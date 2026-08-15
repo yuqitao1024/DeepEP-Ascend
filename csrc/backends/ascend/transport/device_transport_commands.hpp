@@ -461,6 +461,19 @@ DEEP_EP_ASCEND_SIMT_CALLEE void system_fence() {
     simt::system_fence();
 }
 
+DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t consumed_generation(
+    const DeviceTransportContext& context) {
+    auto* queue = detail::command_queue(context);
+    if (queue == nullptr)
+        return 0;
+    const auto state_address = simt::load_observed(&queue->service_state);
+    if (state_address == 0)
+        return 0;
+    auto* state = reinterpret_cast<__gm__ TransportServiceState*>(
+        state_address);
+    return simt::load_observed(&state->consumed_generation);
+}
+
 DEEP_EP_ASCEND_SIMT_CALLEE void device_barrier(
     const DeviceTransportContext& context, std::uint32_t team_mask,
     DeviceAddress, std::uint64_t timeout_cycles) {

@@ -247,6 +247,8 @@ CoreRuntimeStatus launch_internal_barrier(
         return invalid("barrier launch requires barrier tiling");
     if (stream == nullptr)
         return invalid("barrier stream must not be null");
+    if (arguments.generation == 0)
+        return invalid("barrier generation must not be zero");
     if (arguments.workspace == nullptr)
         return invalid("barrier workspace must not be null");
     if (!is_aligned(arguments.workspace))

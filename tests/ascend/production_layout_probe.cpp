@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstddef>
 #include <limits>
 #include <type_traits>
 
@@ -11,6 +12,10 @@ using namespace deep_ep::ascend::elastic;
 int main() {
     static_assert(std::is_standard_layout_v<SymmetricWindowLayout>);
     static_assert(std::is_trivially_copyable_v<SymmetricWindowLayout>);
+    static_assert(std::is_standard_layout_v<SymmetricControlHeader>);
+    static_assert(std::is_trivially_copyable_v<SymmetricControlHeader>);
+    static_assert(offsetof(SymmetricControlHeader, barrier_generation) == 16);
+    static_assert(offsetof(SymmetricControlHeader, barrier_completion) == 32);
 
     SymmetricWindowInput input{};
     input.world_size = 2;
@@ -31,6 +36,7 @@ int main() {
     CHECK(layout.combine_contributor_shard_bytes >=
           input.num_max_tokens_per_rank * layout.combine_record_bytes);
     CHECK(layout.control_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.control_bytes >= sizeof(SymmetricControlHeader));
     CHECK(layout.dispatch_offset % kAscendElasticAlignment == 0);
     CHECK(layout.combine_offset % kAscendElasticAlignment == 0);
     CHECK(layout.reserve_offset % kAscendElasticAlignment == 0);

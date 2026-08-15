@@ -61,6 +61,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t load_acquire(
 DEEP_EP_ASCEND_SIMT_CALLEE void store_release(
     DeviceAddress address, std::uint64_t value);
 DEEP_EP_ASCEND_SIMT_CALLEE void system_fence();
+DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t consumed_generation(
+    const DeviceTransportContext&);
 DEEP_EP_ASCEND_SIMT_CALLEE void device_barrier(
     const DeviceTransportContext&, std::uint32_t team_mask,
     DeviceAddress workspace, std::uint64_t timeout_cycles);

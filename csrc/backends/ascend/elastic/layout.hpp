@@ -71,6 +71,16 @@ struct WorkspaceLayout {
     std::uint64_t total_bytes = 0;
 };
 
+struct alignas(32) SymmetricControlHeader {
+    std::uint64_t dispatch_generation = 0;
+    std::uint64_t combine_generation = 0;
+    std::uint64_t barrier_generation[2]{};
+    std::uint64_t barrier_completion[2]{};
+    std::uint64_t reserved[2]{};
+};
+
+static_assert(sizeof(SymmetricControlHeader) == 64);
+
 enum class LayoutStatusCode : std::uint8_t {
     kSuccess,
     kInvalidArgument,
@@ -169,7 +179,7 @@ inline LayoutStatus build_symmetric_window_layout(
     std::uint64_t count_record_bytes = 0;
     if (!checked_multiply(input.world_size, 4 * sizeof(std::uint64_t),
                           &count_record_bytes) ||
-        !checked_add(8 * sizeof(std::uint64_t), count_record_bytes,
+        !checked_add(sizeof(SymmetricControlHeader), count_record_bytes,
                      &layout.control_bytes))
         return LayoutStatus::overflow("control region size overflow");
 

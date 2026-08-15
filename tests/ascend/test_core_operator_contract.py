@@ -125,6 +125,26 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 self.assertFalse(any(token in include for include in includes),
                                  f"{path}: {token}")
 
+    def test_barrier_has_staged_service_boundaries(self):
+        source = (ELASTIC / "barrier.asc").read_text()
+        ordered_markers = (
+            "service::reset",
+            "asc_vf_call<barrier_producer_vf>",
+            "service::execute",
+            "asc_vf_call<barrier_continuation_vf>",
+        )
+        for marker in ordered_markers:
+            self.assertIn(marker, source)
+        positions = [source.index(marker) for marker in ordered_markers]
+        self.assertEqual(positions, sorted(positions))
+        for marker in (
+                "arguments.generation", "tiling.launch.num_blocks",
+                "threadIdx.x != 0", "DeviceTransportFacade transport(",
+                "tiling.transport_context, 0", "transport.device_barrier("):
+            self.assertIn(marker, source)
+        for forbidden in ("HcclBarrier", "HcclAllReduce", "HcclAllGather"):
+            self.assertNotIn(forbidden, source)
+
     def test_production_api_does_not_bypass_transport_gate(self):
         production = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
         self.assertNotIn("launch_internal_", production)

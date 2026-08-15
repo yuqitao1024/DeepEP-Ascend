@@ -19,6 +19,7 @@ int launch_trace[8] = {};
 int launch_trace_size = 0;
 int failing_launch = 0;
 int failing_code = 0;
+std::uint64_t barrier_generation = 0;
 
 int record_launch(LaunchId launch) {
     launch_trace[launch_trace_size++] = launch;
@@ -88,7 +89,8 @@ CoreTiling valid_barrier_tiling(int world_rank) {
 }  // namespace
 
 extern "C" int deep_ep_ascend_launch_barrier(
-    BarrierArguments, CoreTiling, void*) {
+    BarrierArguments arguments, CoreTiling, void*) {
+    barrier_generation = arguments.generation;
     return record_launch(kBarrierLaunch);
 }
 
@@ -346,7 +348,7 @@ int main() {
         return 22;
 
     auto barrier_tiling = valid_barrier_tiling(0);
-    BarrierArguments barrier{bytes};
+    BarrierArguments barrier{bytes, 7};
     reset_launches();
     if (launch_internal_barrier(
             barrier, barrier_tiling,
@@ -355,11 +357,21 @@ int main() {
         launch_trace_size != 0)
         return 38;
     reset_launches();
+    auto zero_generation = barrier;
+    zero_generation.generation = 0;
+    if (launch_internal_barrier(
+            zero_generation, barrier_tiling,
+            required_core_launch_storage(barrier_tiling),
+            reinterpret_cast<void*>(0x6161)).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 41;
+    reset_launches();
     if (!launch_internal_barrier(
              barrier, barrier_tiling,
              required_core_launch_storage(barrier_tiling),
              reinterpret_cast<void*>(0x6161)).ok() ||
-        !trace_is(kBarrierLaunch))
+        !trace_is(kBarrierLaunch) || barrier_generation != 7)
         return 23;
     reset_launches();
     barrier.workspace = bytes + 1;

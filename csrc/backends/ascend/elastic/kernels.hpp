@@ -8,6 +8,7 @@ namespace deep_ep::ascend::elastic {
 
 struct BarrierArguments {
     void* workspace = nullptr;
+    std::uint64_t generation = 0;
 };
 
 struct DispatchArguments {
