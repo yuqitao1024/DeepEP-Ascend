@@ -88,7 +88,7 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
     set(HCOMM_ARCH_ROOT "${HCOMM_ROOT}/${CMAKE_SYSTEM_PROCESSOR}-linux")
     set(ASCEND_ARCH_ROOT "${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux")
 
-    pybind11_add_module(_C SHARED
+    pybind11_add_module(_C SHARED NO_EXTRAS
         csrc/python_api.cpp
         csrc/backends/ascend/elastic/barrier.asc
         csrc/backends/ascend/elastic/dispatch.asc
