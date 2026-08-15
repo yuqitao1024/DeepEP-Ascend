@@ -1,4 +1,5 @@
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -13,6 +14,52 @@ CORE_OPS = ROOT / "tests/ascend/core_ops"
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
+    def test_simt_vf_arguments_have_explicit_device_abi(self):
+        sources = {
+            name: path.read_text()
+            for name, path in {
+                "barrier.asc": ELASTIC / "barrier.asc",
+                "dispatch.asc": ELASTIC / "dispatch.asc",
+                "combine.asc": ELASTIC / "combine.asc",
+                "core_operator_compile_probe.asc":
+                    CORE_OPS / "core_operator_compile_probe.asc",
+            }.items()
+        }
+        signatures = {}
+        for source_name, source in sources.items():
+            matches = re.findall(
+                r"__simt_vf__\s+inline\s+void\s+(\w+)\s*\((.*?)\)\s*\{",
+                source, flags=re.DOTALL)
+            self.assertTrue(matches, source_name)
+            for function_name, arguments in matches:
+                normalized = " ".join(arguments.split())
+                signatures[function_name] = normalized
+                self.assertNotIn("CoreTiling", normalized, function_name)
+                self.assertNotIn("BarrierArguments", normalized, function_name)
+                for argument in arguments.split(","):
+                    if "*" in argument:
+                        self.assertTrue(
+                            "__gm__" in argument or "__ubuf__" in argument,
+                            f"{function_name}: {argument.strip()}")
+                    else:
+                        self.assertRegex(
+                            " ".join(argument.split()),
+                            r"^(transport::DeviceTransportContext|CoreModeFlags|"
+                            r"ElementKind|std::uint(32|64)_t|int) \w+$",
+                            function_name)
+
+        for function_name in (
+                "barrier_producer_vf", "barrier_continuation_vf"):
+            signature = signatures[function_name]
+            for argument in (
+                    "transport::DeviceTransportContext context",
+                    "std::uint64_t control_offset", "int world_rank",
+                    "std::uint64_t generation"):
+                self.assertIn(argument, signature, function_name)
+        self.assertIn(
+            "ElementKind element_kind",
+            signatures["core_operator_compile_probe_vf"])
+
     def test_production_symmetric_window_layout(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = pathlib.Path(directory) / "production_layout_probe"
@@ -140,7 +187,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         for marker in (
                 "arguments.generation", "tiling.launch.num_blocks",
                 "threadIdx.x != 0", "DeviceTransportFacade transport(",
-                "tiling.transport_context, 0", "transport.device_barrier("):
+                "context, 0", "transport.device_barrier("):
             self.assertIn(marker, source)
         for forbidden in ("HcclBarrier", "HcclAllReduce", "HcclAllGather"):
             self.assertNotIn(forbidden, source)
