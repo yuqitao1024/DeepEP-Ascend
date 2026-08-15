@@ -16,6 +16,22 @@ inline constexpr std::uint32_t kStrongOrdering = 5U;
 inline constexpr std::uint32_t kFence = 1U;
 inline constexpr std::uint32_t kCompletionEntry = 1U;
 
+DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline std::uint64_t pack_sq_head(
+    std::uint32_t position, std::uint32_t request_count) {
+    return static_cast<std::uint64_t>(position) |
+           (static_cast<std::uint64_t>(request_count) << 32U);
+}
+
+DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline std::uint32_t sq_position(
+    std::uint64_t head) {
+    return static_cast<std::uint32_t>(head);
+}
+
+DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline std::uint32_t sq_request_count(
+    std::uint64_t head) {
+    return static_cast<std::uint32_t>(head >> 32U);
+}
+
 struct WriteRequest {
     cann_abi::UrmaSqe sqe;
     cann_abi::UrmaSge sge;
@@ -126,14 +142,12 @@ DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline Faa64Request make_faa64(
     const cann_abi::SqContext& sq,
     const cann_abi::RegisteredBuffer& remote_memory,
     std::uint32_t head, std::uint64_t remote_address,
-    std::uint64_t fetch_result_address, std::uint64_t add_value,
-    std::uint32_t local_token_id) {
+    std::uint64_t fetch_result_address, std::uint64_t add_value) {
     Faa64Request result{};
     result.sqe = detail::make_sqe(
         sq, remote_memory, head, remote_address,
         cann_abi::kUrmaFaaOpcode, false);
     result.fetch_result.bytes = sizeof(std::uint64_t);
-    result.fetch_result.token_id = local_token_id;
     result.fetch_result.address = fetch_result_address;
     result.add_value = add_value;
     return result;

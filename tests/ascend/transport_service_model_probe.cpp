@@ -2,9 +2,11 @@
 #include <iostream>
 
 #include "csrc/backends/ascend/transport/aicore_transport_service.hpp"
+#include "csrc/backends/ascend/transport/sync_layout.hpp"
 
 namespace transport = deep_ep::ascend::transport;
 namespace service = deep_ep::ascend::transport::service;
+namespace sync_layout = deep_ep::ascend::transport::sync_layout;
 
 namespace {
 
@@ -20,7 +22,17 @@ int failures = 0;
     } while (false)
 
 void check_order_flush_and_barrier() {
-    CHECK(service::signal_offset(4, 2, 3) == 88);
+    CHECK(sync_layout::kLogicalSignalCount == 4);
+    CHECK(sync_layout::kLogicalBarrierCount == 1);
+    CHECK(sync_layout::kWorldTeamSignalCount == 0);
+    CHECK(sync_layout::kWorldTeamCounterCount == 0);
+    CHECK(sync_layout::kWorldTeamBarrierCount == 5);
+    CHECK(sync_layout::has_required_world_team_layout(0, 0, 5));
+    CHECK(!sync_layout::has_required_world_team_layout(4, 0, 1));
+    CHECK(sync_layout::signal_offset(4, 0, 0) == 0);
+    CHECK(sync_layout::signal_offset(4, 2, 3) == 88);
+    CHECK(sync_layout::barrier_offset(4, 0, 0) == 128);
+    CHECK(sync_layout::barrier_offset(4, 0, 3) == 152);
     CHECK(service::fetch_result_offset(3) == 24);
 
     transport::TransportCommand commands[5]{};

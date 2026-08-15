@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "cann_compat.hpp"
+#include "sync_layout.hpp"
 #include "transport_commands.hpp"
 #include "urma_wqe.hpp"
 
@@ -153,8 +154,8 @@ inline bool execute(
 inline std::uint64_t signal_offset(
     std::uint32_t member_count, std::uint32_t signal_index,
     std::uint32_t source_member) {
-    return (static_cast<std::uint64_t>(signal_index) * member_count +
-            source_member) * sizeof(std::uint64_t);
+    return sync_layout::signal_offset(
+        member_count, signal_index, source_member);
 }
 
 inline std::uint64_t fetch_result_offset(std::uint32_t peer) {
@@ -167,6 +168,7 @@ inline std::uint64_t fetch_result_offset(std::uint32_t peer) {
 namespace detail {
 
 inline constexpr std::uint64_t kDefaultRetryLimit = 1000000;
+inline constexpr std::uint32_t kServiceScratchBytes = 512;
 
 __aicore__ inline __gm__ StagedTransportContext* staged_context(
     const DeviceTransportContext& context) {
@@ -305,32 +307,57 @@ __aicore__ inline ResolvedPeer resolve_context(
 __aicore__ inline bool drain_channel(
     __gm__ TransportCommandQueue* queue, ResolvedPeer peer,
     std::uint32_t command_index, TransportCommandOpcode opcode,
-    std::uint64_t retry_limit) {
-    if (peer.channel == nullptr || peer.cq == nullptr || peer.cq->base == 0 ||
-        peer.cq->doorbell == 0 || peer.cq->depth == 0 ||
+    std::uint64_t retry_limit,
+    const AscendC::LocalTensor<std::uint32_t>& service_scratch) {
+    if (peer.channel == nullptr || peer.sq == nullptr || peer.cq == nullptr ||
+        peer.sq->head == 0 || peer.sq->tail == 0 || peer.cq->base == 0 ||
+        peer.cq->tail == 0 || peer.cq->doorbell == 0 || peer.cq->depth == 0 ||
         peer.cq->entry_bytes != sizeof(cann_abi::UrmaCqe)) {
         record_error(
             queue, DeviceTransportError::kInvalidQueue, command_index,
             opcode, 0, 0);
         return false;
     }
-    while (peer.channel->cq_tail < peer.channel->cq_head) {
-        const std::uint32_t tail = peer.channel->cq_tail;
-        auto* cqe = reinterpret_cast<__gm__ cann_abi::UrmaCqe*>(
+    const auto head_value = aicore::load_device(
+        reinterpret_cast<__gm__ std::uint64_t*>(peer.sq->head));
+    const std::uint32_t expected = urma::sq_request_count(head_value);
+    std::uint32_t tail = aicore::load_device(
+        reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->tail));
+    const auto cqe_scratch = service_scratch[32];
+    while (tail != expected) {
+        auto* cqe = reinterpret_cast<__gm__ std::uint32_t*>(
             peer.cq->base +
             static_cast<std::uint64_t>(tail % peer.cq->depth) *
                 peer.cq->entry_bytes);
+        AscendC::GlobalTensor<std::uint32_t> cqe_global;
+        cqe_global.SetGlobalBuffer(cqe);
         std::uint64_t retry = 0;
         std::uint32_t word0 = 0;
         do {
-            aicore::flush_cacheline(cqe);
-            word0 = cqe->words[0];
+            aicore::sync_event<AscendC::HardEvent::S_MTE2>();
+            AscendC::DataCopy(cqe_scratch, cqe_global, std::uint32_t{16});
+            aicore::sync_event<AscendC::HardEvent::MTE2_S>();
+            word0 = cqe_scratch.GetValue(0);
             if (urma::cqe_owner_valid((word0 >> 2U) & 1U, tail,
                                       peer.cq->depth))
                 break;
             ++retry;
         } while (retry < retry_limit);
         if (retry >= retry_limit) {
+            auto* output = diagnostic(queue);
+            if (output != nullptr) {
+                aicore::flush_cacheline(output);
+                if (output->error == DeviceTransportError::kNone) {
+                    output->sq_head = urma::sq_position(head_value);
+                    output->cq_head = expected;
+                    output->cq_tail = tail;
+                    output->backend_status = word0;
+                    output->reserved[0] = head_value;
+                    output->reserved[1] = aicore::load_device(
+                        reinterpret_cast<__gm__ std::uint32_t*>(
+                            peer.sq->tail));
+                }
+            }
             record_error(
                 queue, DeviceTransportError::kCompletionTimeout,
                 command_index, opcode, 0, 0);
@@ -345,14 +372,15 @@ __aicore__ inline bool drain_channel(
                 (status << 8U) | substatus);
             return false;
         }
-        ++peer.channel->cq_tail;
+        ++tail;
     }
-    peer.channel->sq_tail = peer.channel->sq_head;
-    aicore::system_fence();
-    aicore::flush_cacheline(peer.channel);
+    aicore::store_device(
+        reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->tail), tail);
     aicore::store_device(
         reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->doorbell),
-        peer.channel->cq_tail & 0x00ffffffU);
+        tail & 0x00ffffffU);
+    aicore::store_device(
+        reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->tail), tail);
     return true;
 }
 
@@ -360,50 +388,75 @@ template <typename Request>
 __aicore__ inline void copy_request(
     __gm__ std::uint8_t* queue_base, std::uint32_t depth,
     std::uint32_t entry_bytes, std::uint32_t head,
-    const Request& request) {
-    const auto* source = reinterpret_cast<const std::uint64_t*>(&request);
+    const Request& request,
+    const AscendC::LocalTensor<std::uint32_t>& wqe_scratch) {
+    const auto* source = reinterpret_cast<const std::uint32_t*>(&request);
     constexpr std::uint32_t blocks = sizeof(Request) / 64;
+    constexpr std::uint32_t words = sizeof(Request) / sizeof(std::uint32_t);
+    for (std::uint32_t word = 0; word < words; ++word)
+        wqe_scratch.SetValue(word, source[word]);
+    aicore::sync_event<AscendC::HardEvent::S_MTE3>();
     for (std::uint32_t block = 0; block < blocks; ++block) {
-        auto* destination = reinterpret_cast<__gm__ std::uint64_t*>(
+        AscendC::GlobalTensor<std::uint32_t> sq_global;
+        auto* destination = reinterpret_cast<__gm__ std::uint32_t*>(
             queue_base + static_cast<std::uint64_t>((head + block) % depth) *
                 entry_bytes);
-        for (std::uint32_t word = 0; word < 8; ++word)
-            destination[word] = source[block * 8 + word];
-        aicore::flush_cacheline(destination);
+        sq_global.SetGlobalBuffer(destination);
+        AscendC::DataCopy(sq_global, wqe_scratch[block * 16],
+                          std::uint32_t{16});
     }
+    aicore::sync_event<AscendC::HardEvent::MTE3_S>();
 }
 
 template <typename Request>
 __aicore__ inline bool post_request(
     __gm__ TransportCommandQueue* queue, ResolvedPeer peer,
-    const Request& request, std::uint32_t command_index,
-    TransportCommandOpcode opcode, std::uint64_t retry_limit) {
+    Request request, std::uint32_t command_index,
+    TransportCommandOpcode opcode, std::uint64_t retry_limit,
+    const AscendC::LocalTensor<std::uint32_t>& wqe_scratch) {
     constexpr std::uint32_t blocks = sizeof(Request) / 64;
     if (peer.channel == nullptr || peer.sq == nullptr || peer.cq == nullptr ||
         peer.sq->entry_bytes != 64 || peer.sq->depth == 0 ||
+        peer.sq->head == 0 || peer.sq->tail == 0 ||
         peer.cq->entry_bytes != sizeof(cann_abi::UrmaCqe) ||
-        peer.cq->depth == 0) {
+        peer.cq->depth == 0 || peer.cq->tail == 0) {
         record_error(
             queue, DeviceTransportError::kInvalidQueue, command_index,
             opcode, 0, 0);
         return false;
     }
-    if (peer.channel->sq_head - peer.channel->sq_tail + blocks >
-        peer.sq->depth) {
+    auto head_value = aicore::load_device(
+        reinterpret_cast<__gm__ std::uint64_t*>(peer.sq->head));
+    auto position = urma::sq_position(head_value);
+    auto request_count = urma::sq_request_count(head_value);
+    const auto completed = aicore::load_device(
+        reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->tail));
+    if (request_count - completed + 1 >= peer.cq->depth) {
         if (!drain_channel(
-                queue, peer, command_index, opcode, retry_limit))
+                queue, peer, command_index, opcode, retry_limit,
+                wqe_scratch))
             return false;
+        head_value = aicore::load_device(
+            reinterpret_cast<__gm__ std::uint64_t*>(peer.sq->head));
+        position = urma::sq_position(head_value);
+        request_count = urma::sq_request_count(head_value);
     }
+    request.sqe.word0 =
+        (request.sqe.word0 & 0x7fff0000U) |
+        (urma::sq_slot(position, peer.sq->depth) & 0xffffU) |
+        (urma::owner_for(position, peer.sq->depth) << 31U);
     copy_request(
         reinterpret_cast<__gm__ std::uint8_t*>(peer.sq->base),
-        peer.sq->depth, peer.sq->entry_bytes, peer.channel->sq_head, request);
-    peer.channel->sq_head += blocks;
-    ++peer.channel->cq_head;
-    aicore::system_fence();
-    aicore::flush_cacheline(peer.channel);
+        peer.sq->depth, peer.sq->entry_bytes, position, request,
+        wqe_scratch);
+    position += blocks;
+    ++request_count;
+    aicore::store_device(
+        reinterpret_cast<__gm__ std::uint64_t*>(peer.sq->head),
+        urma::pack_sq_head(position, request_count));
     aicore::store_device(
         reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->doorbell),
-        peer.channel->sq_head);
+        position);
     return true;
 }
 
@@ -432,7 +485,8 @@ __aicore__ inline bool resolve_remote_target(
 __aicore__ inline bool drain_all(
     const DeviceTransportContext& context, __gm__ TransportCommandQueue* queue,
     std::uint32_t command_index, TransportCommandOpcode opcode,
-    std::uint64_t retry_limit) {
+    std::uint64_t retry_limit,
+    const AscendC::LocalTensor<std::uint32_t>& service_scratch) {
     if (context.topology.world_size <= 1)
         return true;
     auto* transport_team = team(context);
@@ -442,7 +496,9 @@ __aicore__ inline bool drain_all(
         if (peer == transport_team->self_member)
             continue;
         auto resolved = resolve_context(context, peer, 0);
-        if (!drain_channel(queue, resolved, command_index, opcode, retry_limit))
+        if (!drain_channel(
+                queue, resolved, command_index, opcode, retry_limit,
+                service_scratch))
             return false;
     }
     return true;
@@ -466,7 +522,8 @@ __aicore__ inline bool post_faa(
     __gm__ TransportCommandQueue* queue, std::uint32_t peer_index,
     std::uint64_t remote_address, std::uint64_t fetch_address,
     std::uint64_t add_value, std::uint32_t command_index,
-    TransportCommandOpcode opcode, std::uint64_t retry_limit) {
+    TransportCommandOpcode opcode, std::uint64_t retry_limit,
+    const AscendC::LocalTensor<std::uint32_t>& wqe_scratch) {
     auto peer = resolve_context(context, peer_index, 0);
     if (peer.channel == nullptr || fetch_address == 0) {
         record_error(
@@ -477,10 +534,7 @@ __aicore__ inline bool post_faa(
     auto* remote = resolve_buffer(
         peer.channel->remote_buffers, peer.channel->remote_buffer_count,
         remote_address, sizeof(std::uint64_t));
-    auto* local = resolve_buffer(
-        peer.channel->local_buffers, peer.channel->local_buffer_count,
-        fetch_address, sizeof(std::uint64_t));
-    if (remote == nullptr || local == nullptr) {
+    if (remote == nullptr) {
         record_error(
             queue, DeviceTransportError::kInvalidAddress, command_index,
             opcode, peer_index, 0);
@@ -489,17 +543,19 @@ __aicore__ inline bool post_faa(
     const auto sq = snapshot_sq(peer.sq);
     const auto remote_buffer = snapshot_buffer(remote);
     const auto request = urma::make_faa64(
-        sq, remote_buffer, peer.channel->sq_head, remote_address,
-        fetch_address, add_value, local->token_id);
+        sq, remote_buffer, 0, remote_address,
+        fetch_address, add_value);
     return post_request(
-        queue, peer, request, command_index, opcode, retry_limit);
+        queue, peer, request, command_index, opcode, retry_limit,
+        wqe_scratch);
 }
 
 __aicore__ inline bool execute_signal(
     const DeviceTransportContext& context,
     __gm__ TransportCommandQueue* queue,
     __gm__ const TransportCommand* current, std::uint32_t command_index,
-    std::uint64_t retry_limit) {
+    std::uint64_t retry_limit,
+    const AscendC::LocalTensor<std::uint32_t>& wqe_scratch) {
     auto* transport_team = team(context);
     if (transport_team == nullptr || current->peer < 0 ||
         static_cast<std::uint32_t>(current->peer) >=
@@ -507,7 +563,13 @@ __aicore__ inline bool execute_signal(
         return false;
     std::uint64_t remote_address = 0;
     if (current->action_kind == RemoteActionKind::kSignalIncrement) {
-        if (current->signal_index >= transport_team->signal_count ||
+        if (transport_team->signal_count !=
+                sync_layout::kWorldTeamSignalCount ||
+            transport_team->counter_count !=
+                sync_layout::kWorldTeamCounterCount ||
+            transport_team->barrier_count <
+                sync_layout::kWorldTeamBarrierCount ||
+            current->signal_index >= sync_layout::kLogicalSignalCount ||
             transport_team->remote_sync_memories == 0)
             return false;
         auto* memories = reinterpret_cast<__gm__ cann_abi::Memory*>(
@@ -531,44 +593,50 @@ __aicore__ inline bool execute_signal(
         context, queue, static_cast<std::uint32_t>(current->peer),
         remote_address,
         default_fetch_result(context, static_cast<std::uint32_t>(current->peer)),
-        current->value, command_index, current->opcode, retry_limit);
+        current->value, command_index, current->opcode, retry_limit,
+        wqe_scratch);
 }
 
 __aicore__ inline bool execute_barrier(
     const DeviceTransportContext& context,
     __gm__ TransportCommandQueue* queue,
     __gm__ const TransportCommand* current, std::uint32_t command_index,
-    __gm__ TransportServiceState* state, std::uint64_t retry_limit) {
+    __gm__ TransportServiceState* state, std::uint64_t retry_limit,
+    const AscendC::LocalTensor<std::uint32_t>& wqe_scratch) {
     if (context.topology.world_size <= 1) {
         ++state->barrier_generation;
         return true;
     }
     auto* transport_team = team(context);
-    if (transport_team == nullptr || transport_team->barrier_count == 0 ||
+    if (transport_team == nullptr ||
+        transport_team->signal_count !=
+            sync_layout::kWorldTeamSignalCount ||
+        transport_team->counter_count !=
+            sync_layout::kWorldTeamCounterCount ||
+        transport_team->barrier_count <
+            sync_layout::kWorldTeamBarrierCount ||
         transport_team->remote_sync_memories == 0)
         return false;
     auto* memories = reinterpret_cast<__gm__ cann_abi::Memory*>(
         transport_team->remote_sync_memories);
-    const std::uint64_t barrier_base =
-        static_cast<std::uint64_t>(transport_team->signal_count +
-                                   transport_team->counter_count) *
-        transport_team->member_count;
     for (std::uint32_t peer = 0; peer < transport_team->member_count; ++peer) {
         if (peer == transport_team->self_member)
             continue;
         const auto offset =
-            (barrier_base + transport_team->self_member) *
-            sizeof(std::uint64_t);
+            (static_cast<std::uint64_t>(sync_layout::kLogicalSignalCount) *
+                 transport_team->member_count +
+             transport_team->self_member) * sizeof(std::uint64_t);
         const auto remote_address = memories[peer].address + offset;
         const auto fetch_address =
             transport_team->shadow_sync_memory.address + offset;
         if (!post_faa(
                 context, queue, peer, remote_address, fetch_address, 1,
-                command_index, current->opcode, retry_limit))
+                command_index, current->opcode, retry_limit, wqe_scratch))
             return false;
     }
     if (!drain_all(
-            context, queue, command_index, current->opcode, retry_limit))
+            context, queue, command_index, current->opcode, retry_limit,
+            wqe_scratch))
         return false;
 
     const auto generation = state->barrier_generation + 1;
@@ -577,13 +645,29 @@ __aicore__ inline bool execute_barrier(
     for (std::uint32_t peer = 0; peer < transport_team->member_count; ++peer) {
         if (peer == transport_team->self_member)
             continue;
-        const auto offset = (barrier_base + peer) * sizeof(std::uint64_t);
+        const auto offset =
+            (static_cast<std::uint64_t>(sync_layout::kLogicalSignalCount) *
+                 transport_team->member_count +
+             peer) * sizeof(std::uint64_t);
         auto* signal = reinterpret_cast<__gm__ std::uint64_t*>(
             memories[transport_team->self_member].address + offset);
+        AscendC::GlobalTensor<std::uint64_t> signal_global;
+        signal_global.SetGlobalBuffer(signal);
+        const auto signal_scratch =
+            wqe_scratch[48].ReinterpretCast<std::uint64_t>();
+        const AscendC::DataCopyExtParams copy_params{
+            1, sizeof(std::uint64_t), 0, 0, 0};
+        const AscendC::DataCopyPadExtParams<std::uint64_t> pad_params{
+            false, 0, 0, 0};
         std::uint64_t retry = 0;
+        std::uint64_t observed = 0;
         while (retry < limit) {
-            aicore::flush_cacheline(signal);
-            if (*signal >= generation)
+            aicore::sync_event<AscendC::HardEvent::S_MTE2>();
+            AscendC::DataCopyPad(signal_scratch, signal_global, copy_params,
+                                 pad_params);
+            aicore::sync_event<AscendC::HardEvent::MTE2_S>();
+            observed = signal_scratch.GetValue(0);
+            if (observed >= generation)
                 break;
             ++retry;
         }
@@ -639,6 +723,15 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
     auto* state = detail::service_state(queue);
     if (state == nullptr)
         return;
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> scratch_buffer;
+    if (!pipe.InitBuffer(scratch_buffer, detail::kServiceScratchBytes)) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidQueue, 0,
+            TransportCommandOpcode::kNone, 0, 0);
+        return;
+    }
+    const auto wqe_scratch = scratch_buffer.Get<std::uint32_t>();
     const std::uint64_t retry_limit = state->default_retry_limit == 0 ?
         detail::kDefaultRetryLimit : state->default_retry_limit;
     state->active = 1;
@@ -652,14 +745,16 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
         bool success = true;
         if (current->opcode == TransportCommandOpcode::kFlush) {
             success = detail::drain_all(
-                context, queue, index, current->opcode, retry_limit);
+                context, queue, index, current->opcode, retry_limit,
+                wqe_scratch);
             if (!success)
                 detail::record_error(
                     queue, DeviceTransportError::kInvalidQueue, index,
                     current->opcode, 0, current->channel);
         } else if (current->opcode == TransportCommandOpcode::kBarrier) {
             success = detail::execute_barrier(
-                context, queue, current, index, state, retry_limit);
+                context, queue, current, index, state, retry_limit,
+                wqe_scratch);
             if (!success)
                 detail::record_error(
                     queue, DeviceTransportError::kInvalidQueue, index,
@@ -672,7 +767,7 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
             success = false;
         } else if (current->opcode == TransportCommandOpcode::kSignal) {
             success = detail::execute_signal(
-                context, queue, current, index, retry_limit);
+                context, queue, current, index, retry_limit, wqe_scratch);
             if (!success)
                 detail::record_error(
                     queue, DeviceTransportError::kInvalidAddress, index,
@@ -713,13 +808,13 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                     const auto remote_buffer =
                         detail::snapshot_buffer(remote);
                     const auto request = urma::make_write(
-                        sq, remote_buffer, peer.channel->sq_head,
+                        sq, remote_buffer, 0,
                         remote_address, current->source,
                         static_cast<std::uint32_t>(current->bytes),
                         local->token_id);
                     success = detail::post_request(
                         queue, peer, request, index, current->opcode,
-                        retry_limit);
+                        retry_limit, wqe_scratch);
                 }
             } else if (current->opcode ==
                        TransportCommandOpcode::kPutValue64) {
@@ -737,11 +832,11 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                     const auto remote_buffer =
                         detail::snapshot_buffer(remote);
                     const auto request = urma::make_inline_write64(
-                        sq, remote_buffer, peer.channel->sq_head,
+                        sq, remote_buffer, 0,
                         remote_address, current->value);
                     success = detail::post_request(
                         queue, peer, request, index, current->opcode,
-                        retry_limit);
+                        retry_limit, wqe_scratch);
                 }
             } else if (current->opcode ==
                        TransportCommandOpcode::kRemoteAdd64) {
@@ -751,7 +846,8 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                     remote_address,
                     detail::default_fetch_result(
                         context, static_cast<std::uint32_t>(current->peer)),
-                    current->value, index, current->opcode, retry_limit);
+                    current->value, index, current->opcode, retry_limit,
+                    wqe_scratch);
             } else {
                 detail::record_error(
                     queue, DeviceTransportError::kUnsupportedOperation,

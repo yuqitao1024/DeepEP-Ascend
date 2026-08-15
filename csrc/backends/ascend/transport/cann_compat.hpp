@@ -80,11 +80,7 @@ struct Channel {
     std::uint64_t remote_buffers;
     std::uint64_t sq_contexts;
     std::uint64_t cq_contexts;
-    std::uint32_t sq_head;
-    std::uint32_t sq_tail;
-    std::uint32_t cq_head;
-    std::uint32_t cq_tail;
-    std::uint8_t reserved[144];
+    std::uint8_t reserved[160];
 };
 
 struct Window {

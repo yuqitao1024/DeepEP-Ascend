@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import pathlib
+import sys
 
 
 TIMEOUT_MS = 30_000
@@ -119,10 +120,78 @@ def selected_cases(value):
     unknown = [name for name in names if name not in known]
     if not names or unknown:
         raise ValueError(f"invalid cases: {unknown or names}")
+    teardown_count = names.count("teardown")
+    if teardown_count == 0:
+        raise ValueError("teardown case is required")
+    if teardown_count != 1 or names[-1] != "teardown":
+        raise ValueError("teardown must be the final selected case")
     return names
 
 
-def run_runtime(args):
+def run_case_sequence(
+        dist, run_case, communicator, rank, world_size, cases, contract):
+    teardown_completed = False
+    primary_error = None
+
+    def invoke_case(case_name):
+        iterations = contract[case_name].get("iterations", 1)
+        error = ctypes.create_string_buffer(2048)
+        status = run_case(
+            communicator, rank, world_size, case_name.encode(),
+            iterations, error, len(error))
+        local_result = {
+            "rank": rank,
+            "status": status,
+            "error": error.value.decode(errors="replace"),
+        }
+        results = [None] * world_size
+        dist.all_gather_object(results, local_result)
+        failures = [result for result in results if result["status"] != 0]
+        if failures:
+            raise RuntimeError(f"case {case_name} failed: {failures}")
+        if rank == 0:
+            print(f"case={case_name} ranks=2 diagnostics=kNone PASS",
+                  flush=True)
+
+    def execute_case(case_name):
+        dist.barrier()
+        invoke_case(case_name)
+
+    def cleanup_teardown():
+        cleanup_error = None
+        try:
+            dist.barrier()
+        except BaseException as error:
+            cleanup_error = error
+        try:
+            invoke_case("teardown")
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        if cleanup_error is not None:
+            raise cleanup_error
+
+    try:
+        for case_name in cases:
+            execute_case(case_name)
+            teardown_completed = case_name == "teardown"
+        return 0
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        if not teardown_completed:
+            try:
+                cleanup_teardown()
+            except BaseException as teardown_error:
+                if primary_error is None:
+                    raise
+                print(
+                    f"teardown after failed runtime case also failed: "
+                    f"{teardown_error}", file=sys.stderr, flush=True)
+
+
+def run_runtime(args, cases):
     import torch
     import torch.distributed as dist
     import torch_npu
@@ -141,28 +210,9 @@ def run_runtime(args):
         process_group = dist.distributed_c10d._get_default_group()
         communicator = hccl_communicator(process_group, local_rank, torch)
         run_case = load_runner(args.runner)
-        contract = runtime_contract()["cases"]
-        for case_name in selected_cases(args.cases):
-            dist.barrier()
-            iterations = contract[case_name].get("iterations", 1)
-            error = ctypes.create_string_buffer(2048)
-            status = run_case(
-                communicator, rank, world_size, case_name.encode(),
-                iterations, error, len(error))
-            local_result = {
-                "rank": rank,
-                "status": status,
-                "error": error.value.decode(errors="replace"),
-            }
-            results = [None] * world_size
-            dist.all_gather_object(results, local_result)
-            failures = [result for result in results if result["status"] != 0]
-            if failures:
-                raise RuntimeError(f"case {case_name} failed: {failures}")
-            if rank == 0:
-                print(f"case={case_name} ranks=2 diagnostics=kNone PASS",
-                      flush=True)
-        return 0
+        return run_case_sequence(
+            dist, run_case, communicator, rank, world_size, cases,
+            runtime_contract()["cases"])
     finally:
         dist.destroy_process_group()
 
@@ -178,7 +228,7 @@ def main():
         return run_local_smoke(args.runner)
     if not args.runner or not args.cases:
         raise SystemExit("--runner and --cases are required for runtime validation")
-    return run_runtime(args)
+    return run_runtime(args, selected_cases(args.cases))
 
 
 if __name__ == "__main__":

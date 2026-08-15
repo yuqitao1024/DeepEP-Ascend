@@ -6,8 +6,10 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "transport_commands.hpp"
+#include "sync_layout.hpp"
 
 #if __has_include(<acl/acl.h>) && __has_include(<hccl/hccl_comm.h>) && \
     __has_include(<hccl/hccl_team.h>)
@@ -22,10 +24,17 @@
 namespace deep_ep::ascend::transport {
 namespace {
 
-constexpr std::uint32_t kSignalCount = 4;
-constexpr std::uint32_t kBarrierCount = 1;
 constexpr std::uint32_t kCommandCapacity = 256;
 constexpr std::uint64_t kDefaultRetryLimit = 1ULL << 20U;
+constexpr TransportCapabilities kValidatedCapabilities =
+    capability_bit(TransportCapability::kSymmetricWindow) |
+    capability_bit(TransportCapability::kDevicePut) |
+    capability_bit(TransportCapability::kDevicePutValue) |
+    capability_bit(TransportCapability::kRemoteAtomicAddRelease) |
+    capability_bit(TransportCapability::kRemoteSignal) |
+    capability_bit(TransportCapability::kSystemMemoryOrdering) |
+    capability_bit(TransportCapability::kDeviceBarrier) |
+    capability_bit(TransportCapability::kScaleUpTeam);
 
 TransportStatus backend_failure(
     const char* operation, int backend_code) {
@@ -92,7 +101,7 @@ public:
     }
 
     TransportCapabilities capabilities() const noexcept override {
-        return kNoCapabilities;
+        return kValidatedCapabilities;
     }
 
     TransportStatus query_topology(TransportTopology* topology) override {
@@ -376,12 +385,13 @@ int cann_get_size(void*, std::int64_t comm, std::uint32_t* size) {
 
 int cann_create_world_team(
     void*, std::int64_t comm, std::uint32_t rank, std::uint32_t size,
-    std::uint32_t signal_count, std::uint32_t barrier_count,
-    std::uintptr_t* team) {
+    const std::uint32_t* rank_ids, std::uint32_t signal_count,
+    std::uint32_t barrier_count, std::uintptr_t* team) {
     HcclTeamCreateDesc desc;
     auto result = HcclTeamCreateDescInit(&desc);
     if (result != HCCL_SUCCESS)
         return result;
+    desc.rankIds = rank_ids;
     desc.rankNum = size;
     desc.selfRankId = rank;
     desc.protocol = COMM_PROTOCOL_UBC_CTP;
@@ -535,10 +545,14 @@ TransportCreateResult make_cann_transport(
                 "communicator rank/size do not match TransportConfig"),
             nullptr};
 
+    std::vector<std::uint32_t> rank_ids(world_size);
+    for (std::uint32_t index = 0; index < world_size; ++index)
+        rank_ids[index] = index;
     std::uintptr_t team = 0;
     result = api.create_world_team(
         api.user_data, config.communicator_handle, rank, world_size,
-        kSignalCount, kBarrierCount, &team);
+        rank_ids.data(), sync_layout::kWorldTeamSignalCount,
+        sync_layout::kWorldTeamBarrierCount, &team);
     if (result != 0)
         return {backend_failure("create_world_team", result), nullptr};
     if (team == 0)

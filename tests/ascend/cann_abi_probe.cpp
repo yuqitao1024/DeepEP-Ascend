@@ -8,7 +8,6 @@
 #include <hcomm/hcomm_res_entity_defs.h>
 #include <hcomm/hcomm_team_entity_defs.h>
 #include <pto/comm/async/urma/urma_types.hpp>
-#include <adv_api/detail/hcomm/common/hcomm_inner_def.h>
 
 namespace cann_abi = deep_ep::ascend::transport::cann_abi;
 namespace cann_urma = pto::comm::urma;
@@ -135,12 +134,6 @@ void check_channel() {
                  remoteBufferAddr);
     CHECK_OFFSET(cann_abi::Channel, sq_contexts, package, sqContextAddr);
     CHECK_OFFSET(cann_abi::Channel, cq_contexts, package, cqContextAddr);
-
-    AscendC::ChannelEntity aicore_package{};
-    CHECK_OFFSET(cann_abi::Channel, sq_head, aicore_package, sqHead);
-    CHECK_OFFSET(cann_abi::Channel, sq_tail, aicore_package, sqTail);
-    CHECK_OFFSET(cann_abi::Channel, cq_head, aicore_package, cqHead);
-    CHECK_OFFSET(cann_abi::Channel, cq_tail, aicore_package, cqTail);
 }
 
 void check_team_and_window() {

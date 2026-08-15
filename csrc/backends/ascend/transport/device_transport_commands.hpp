@@ -2,6 +2,7 @@
 
 #include "cann_compat.hpp"
 #include "simt_intrinsics.hpp"
+#include "sync_layout.hpp"
 #include "transport_commands.hpp"
 
 namespace deep_ep::ascend::transport::device {
@@ -67,10 +68,16 @@ DEEP_EP_ASCEND_SIMT_CALLEE __gm__ std::uint64_t* signal_address(
     const auto members = simt::load_observed(&team->member_count);
     const auto self = simt::load_observed(&team->self_member);
     const auto signals = simt::load_observed(&team->signal_count);
+    const auto counters = simt::load_observed(&team->counter_count);
+    const auto barriers = simt::load_observed(&team->barrier_count);
     const auto memories_address =
         simt::load_observed(&team->remote_sync_memories);
     if (static_cast<std::uint32_t>(source_rank) >= members || self >= members ||
-        signal_index >= signals || memories_address == 0)
+        signals != sync_layout::kWorldTeamSignalCount ||
+        counters != sync_layout::kWorldTeamCounterCount ||
+        barriers < sync_layout::kWorldTeamBarrierCount ||
+        signal_index >= sync_layout::kLogicalSignalCount ||
+        memories_address == 0)
         return nullptr;
     auto* memories = reinterpret_cast<__gm__ cann_abi::Memory*>(
         memories_address);

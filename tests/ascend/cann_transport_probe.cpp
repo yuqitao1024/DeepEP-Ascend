@@ -90,13 +90,18 @@ struct FakeApi {
     }
 
     static int create_team(
-        void* data, std::int64_t, std::uint32_t, std::uint32_t,
-        std::uint32_t signal_count, std::uint32_t barrier_count,
-        std::uintptr_t* team) {
+        void* data, std::int64_t, std::uint32_t rank, std::uint32_t size,
+        const std::uint32_t* rank_ids, std::uint32_t signal_count,
+        std::uint32_t barrier_count, std::uintptr_t* team) {
         auto& fake = self(data);
         fake.record(Event::kCreateTeam);
-        CHECK(signal_count == 4);
-        CHECK(barrier_count == 1);
+        CHECK(rank == 1);
+        CHECK(size == 2);
+        CHECK(rank_ids != nullptr);
+        CHECK(rank_ids[0] == 0);
+        CHECK(rank_ids[1] == 1);
+        CHECK(signal_count == 0);
+        CHECK(barrier_count == 5);
         if (fake.fail_now()) return 73;
         *team = 0x200000;
         return 0;
@@ -195,11 +200,24 @@ transport::TransportConfig valid_config() {
 }
 
 void check_success_and_reverse_cleanup() {
+    constexpr auto kValidatedCapabilities =
+        transport::capability_bit(transport::TransportCapability::kSymmetricWindow) |
+        transport::capability_bit(transport::TransportCapability::kDevicePut) |
+        transport::capability_bit(transport::TransportCapability::kDevicePutValue) |
+        transport::capability_bit(
+            transport::TransportCapability::kRemoteAtomicAddRelease) |
+        transport::capability_bit(transport::TransportCapability::kRemoteSignal) |
+        transport::capability_bit(
+            transport::TransportCapability::kSystemMemoryOrdering) |
+        transport::capability_bit(transport::TransportCapability::kDeviceBarrier) |
+        transport::capability_bit(transport::TransportCapability::kScaleUpTeam);
+    static_assert(kValidatedCapabilities == 0x775);
+
     FakeApi fake;
     auto created = transport::make_cann_transport(valid_config(), fake.api());
     CHECK(created.status.ok());
     CHECK(created.transport != nullptr);
-    CHECK(created.transport->capabilities() == transport::kNoCapabilities);
+    CHECK(created.transport->capabilities() == kValidatedCapabilities);
 
     alignas(64) std::uint8_t window[4096]{};
     CHECK(created.transport->register_symmetric_window(window, sizeof(window)).ok());
@@ -213,7 +231,15 @@ void check_success_and_reverse_cleanup() {
     CHECK(context.peer_address_table == 0x300000);
     CHECK(context.channel_table == 0x200000);
     CHECK(context.backend_context != 0);
-    CHECK(context.capabilities == transport::kNoCapabilities);
+    CHECK(context.capabilities == kValidatedCapabilities);
+    CHECK(!transport::has_capability(
+        context.capabilities, transport::TransportCapability::kDirectPeerPointer));
+    CHECK(!transport::has_capability(
+        context.capabilities, transport::TransportCapability::kDeviceGet));
+    CHECK(!transport::has_capability(
+        context.capabilities, transport::TransportCapability::kAsyncCompletion));
+    CHECK(!transport::has_capability(
+        context.capabilities, transport::TransportCapability::kScaleOutTeam));
     CHECK(context.topology.world_rank == 1);
     CHECK(context.topology.world_size == 2);
     CHECK(fake.first(Event::kCreateTeam) < fake.first(Event::kRegisterWindow));

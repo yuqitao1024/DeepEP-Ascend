@@ -95,13 +95,13 @@ void check_faa64_and_wrap() {
     const auto request = urma::make_faa64(
         make_sq(), make_remote_memory(), 7,
         0x1111222233334444ULL, 0x5555666677778888ULL,
-        0xfffffffffffffff7ULL, 0x2468ace0);
+        0xfffffffffffffff7ULL);
 
     const std::array<std::uint32_t, 32> expected = {
         0xb02d0007, 0x00000b00, 0x01abc123, 0x00054321,
         0x89abcdef, 0x01234567, 0x76543210, 0xfedcba98,
         0x89abcdef, 0x00000000, 0x33334444, 0x11112222,
-        0x00000008, 0x2468ace0, 0x77778888, 0x55556666,
+        0x00000008, 0x00000000, 0x77778888, 0x55556666,
         0xfffffff7, 0xffffffff, 0x00000000, 0x00000000,
         0x00000000, 0x00000000, 0x00000000, 0x00000000,
         0x00000000, 0x00000000, 0x00000000, 0x00000000,
@@ -118,6 +118,11 @@ void check_faa64_and_wrap() {
     CHECK(urma::cqe_owner_valid(1, 7, 8));
     CHECK(urma::cqe_owner_valid(0, 8, 8));
     CHECK(!urma::cqe_owner_valid(1, 8, 8));
+
+    const auto head = urma::pack_sq_head(17, 9);
+    CHECK(head == 0x0000000900000011ULL);
+    CHECK(urma::sq_position(head) == 17);
+    CHECK(urma::sq_request_count(head) == 9);
 }
 
 }  // namespace

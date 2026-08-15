@@ -432,8 +432,8 @@ be enabled.
 Capability bits describe validated end-to-end behavior. Adding code or passing
 a compile test is insufficient.
 
-The implementation initially exports zero production capabilities. Bits may be
-enabled individually only after their two-rank semantic tests pass:
+The implementation exports only the capabilities whose two-rank semantic tests
+have passed:
 
 - `kSymmetricWindow`;
 - `kDevicePut`;
@@ -519,7 +519,7 @@ GPU runtime validation remains deferred by project decision.
 
 ### Validation record
 
-Validation performed on 2026-08-14 against CANN 9.2.0 and `dav-3510` on
+Historical validation on 2026-08-14 against CANN 9.2.0 and `dav-3510` on
 `root@121.41.199.170:20002` established the following:
 
 - all CANN compatibility, WQE, command, service, and host lifecycle probes
@@ -532,18 +532,70 @@ Validation performed on 2026-08-14 against CANN 9.2.0 and `dav-3510` on
 - host lifecycle failure injection covered every team, window, channel,
   allocation, zero, and copy boundary, including idempotent reverse cleanup.
 
-The 20002 execution container currently exposes only `/dev/davinci0`, and
-`torch.npu.device_count()` returns one. A two-process launch therefore failed
-at `torch.npu.set_device(1)` with CANN error `107001` before communicator or
-transport initialization. Port 20001 is a different single-NPU host; using it
-would turn this phase into an unplanned scale-out test rather than the required
-single-host UBC_CTP test.
+At that time the 20002 execution container exposed only `/dev/davinci0`, and
+`torch.npu.device_count()` returned one. Its two-process launch failed at
+`torch.npu.set_device(1)` with CANN error `107001` before communicator or
+transport initialization. That result was an environment limitation, not a
+primitive result.
 
-Consequently, no two-NPU put, put-value, FAA, signal, flush, ordering, barrier,
-or queue-wrap result is recorded yet. The runtime harness for those cases is
-present, but production capabilities remain exactly zero and Phase 2D does not
-meet its completion criteria until the harness passes on a single host exposing
-at least two Ascend 950 devices.
+The required two-rank validation was subsequently run on 2026-08-15 on the
+NPU8P environment using devices 6 and 7, system CANN 9.2.0, target
+`dav-3510`, and
+`/home/pyptouser/yuqitao/Ascend/hcomm-weekly-20260814/cann`. The two-rank
+commands used this reproducible form:
+
+```bash
+task-submit --device 6,7 --max-time 600 --run "\
+cd /home/pyptouser/yuqitao/DeepEP-Ascend && \
+source /usr/local/Ascend/cann-9.2.0/set_env.sh && \
+export HCOMM_ROOT=/home/pyptouser/yuqitao/Ascend/hcomm-weekly-20260814/cann && \
+export PATH=\"\$HCOMM_ROOT/bin:\$PATH\" && \
+export LD_LIBRARY_PATH=\"\$HCOMM_ROOT/lib64:\$LD_LIBRARY_PATH\" && \
+export LIBRARY_PATH=\"\$HCOMM_ROOT/lib64:\$LIBRARY_PATH\" && \
+export CMAKE_LIBRARY_PATH=\"\$HCOMM_ROOT/lib64:\$CMAKE_LIBRARY_PATH\" && \
+export HCOMM_ARCH_INCLUDE=\"\$HCOMM_ROOT/aarch64-linux/pkg_inc:\$HCOMM_ROOT/aarch64-linux/include:\$HCOMM_ROOT/aarch64-linux/include/hcomm\" && \
+export CPLUS_INCLUDE_PATH=\"\$HCOMM_ARCH_INCLUDE:\$HCOMM_ROOT/include:\$CPLUS_INCLUDE_PATH\" && \
+export CPATH=\"\$HCOMM_ARCH_INCLUDE:\$HCOMM_ROOT/include:\$CPATH\" && \
+export CMAKE_INCLUDE_PATH=\"\$HCOMM_ARCH_INCLUDE:\$HCOMM_ROOT/include:\$CMAKE_INCLUDE_PATH\" && \
+export PYTHONPATH=\"\$HCOMM_ROOT/python/site-packages:\$PYTHONPATH\" && \
+/home/pyptouser/yuqitao/venvs/deepep-ascend-py310/bin/python \
+-m torch.distributed.run --standalone --nproc-per-node=2 \
+tests/ascend/simt_urma/run_two_rank_probe.py \
+--runner /tmp/deep_ep_staged_urma_runtime/deep_ep_ascend_urma_runner \
+--cases put,put-value64,faa64,signal,flush,payload-signal-order,barrier-repeat,queue-wrap,phase-boundary,teardown"
+```
+
+TaskQueue locks physical devices 6 and 7 for this task and exposes them to the
+two workers as local device indices 0 and 1, respectively. Those indices match
+each worker's `LOCAL_RANK`.
+
+The recorded task runs were:
+
+- `task_20260815_151309_414174622993`: `put-value64`, `faa64`, and
+  `teardown` passed;
+- `task_20260815_151513_414811220581`: `put-value64`, `faa64`, `signal`,
+  `barrier-repeat`, and `teardown` passed;
+- `task_20260815_151656_415219421221`: `put`, `put-value64`, `faa64`,
+  `signal`, `flush`, `payload-signal-order` (1000 iterations),
+  `barrier-repeat`, `queue-wrap`, `phase-boundary`, and `teardown` passed.
+- `task_20260815_154441_1584928040`: final serialized regression completed
+  with exit code zero. All applicable Ascend tests passed (42 run, 1
+  conditionally skipped), all platform tests passed (9 run, 1 conditionally
+  skipped because `DEEP_EP_EXTENSION_PATH` was not configured), a clean
+  `deep_ep_ascend_urma_runner` build succeeded, and the complete ten-case
+  two-rank runtime matrix passed.
+
+Both ranks reported diagnostic `kNone` for the complete run. This enables the
+exact `0x775` mask: `kSymmetricWindow`, `kDevicePut`, `kDevicePutValue`,
+`kRemoteAtomicAddRelease`, `kRemoteSignal`, `kSystemMemoryOrdering`,
+`kDeviceBarrier`, and `kScaleUpTeam`. Within the defined 12-bit capability
+space, the disabled mask is `0x88a`: `kDirectPeerPointer`, `kDeviceGet`,
+`kAsyncCompletion`, and `kScaleOutTeam`.
+
+This evidence proves the staged transport primitives only. Public EPv2
+multi-rank barrier, dispatch, and combine operators remain gated pending their
+own complete multi-rank correctness tests. The capability evidence is the
+listed runtime and final regression records.
 
 ## Acceptance Criteria
 

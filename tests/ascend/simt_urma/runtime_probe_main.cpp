@@ -1,9 +1,11 @@
 #include "runtime_probe.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 
 #include "acl/acl.h"
@@ -75,6 +77,146 @@ bool copy_from_device(
         operation, error, error_capacity);
 }
 
+void dump_transport_descriptors(
+    const transport::DeviceTransportContext& context, std::uint32_t peer) {
+    char error[256]{};
+    transport::cann_abi::Team team{};
+    transport::cann_abi::Window window{};
+    if (!copy_from_device(
+            &team, reinterpret_cast<const void*>(context.channel_table),
+            sizeof(team), "copy debug team", error, sizeof(error)) ||
+        !copy_from_device(
+            &window, reinterpret_cast<const void*>(context.peer_address_table),
+            sizeof(window), "copy debug window", error, sizeof(error))) {
+        std::fprintf(stderr, "URMA-DESC error=%s\n", error);
+        return;
+    }
+    std::fprintf(
+        stderr,
+        "URMA-DESC team members=%u self=%u signals=%u counters=%u "
+        "barriers=%u sync_bytes=%llu remote_sync_count=%u "
+        "shadow=[0x%llx,+%llu] window_count=%u\n",
+        team.member_count, team.self_member, team.signal_count,
+        team.counter_count, team.barrier_count,
+        static_cast<unsigned long long>(team.sync_memory_bytes),
+        team.remote_sync_memory_count,
+        static_cast<unsigned long long>(team.shadow_sync_memory.address),
+        static_cast<unsigned long long>(team.shadow_sync_memory.bytes),
+        window.memory_count);
+
+    transport::cann_abi::Memory memories[64]{};
+    if (team.remote_sync_memory_count <= 64 &&
+        team.remote_sync_memories != 0 &&
+        copy_from_device(
+            memories, reinterpret_cast<const void*>(team.remote_sync_memories),
+            team.remote_sync_memory_count * sizeof(memories[0]),
+            "copy debug sync memories", error, sizeof(error))) {
+        for (std::uint32_t index = 0;
+             index < team.remote_sync_memory_count; ++index) {
+            std::fprintf(
+                stderr, "URMA-DESC sync[%u]=[0x%llx,+%llu]\n", index,
+                static_cast<unsigned long long>(memories[index].address),
+                static_cast<unsigned long long>(memories[index].bytes));
+        }
+    }
+    if (window.memory_count <= 64 && window.memories != 0 &&
+        copy_from_device(
+            memories, reinterpret_cast<const void*>(window.memories),
+            window.memory_count * sizeof(memories[0]),
+            "copy debug window memories", error, sizeof(error))) {
+        for (std::uint32_t index = 0; index < window.memory_count; ++index) {
+            std::fprintf(
+                stderr, "URMA-DESC window[%u]=[0x%llx,+%llu]\n", index,
+                static_cast<unsigned long long>(memories[index].address),
+                static_cast<unsigned long long>(memories[index].bytes));
+        }
+    }
+
+    std::uint32_t counts[64]{};
+    if (team.member_count > 64 || team.channel_counts == 0 ||
+        !copy_from_device(
+            counts, reinterpret_cast<const void*>(team.channel_counts),
+            team.member_count * sizeof(counts[0]), "copy debug channel counts",
+            error, sizeof(error)))
+        return;
+    std::uint32_t channel_index = 0;
+    for (std::uint32_t member = 0; member < peer; ++member)
+        channel_index += counts[member];
+    transport::cann_abi::Channel channel{};
+    if (peer >= team.member_count || counts[peer] == 0 || team.channels == 0 ||
+        !copy_from_device(
+            &channel,
+            reinterpret_cast<const void*>(
+                team.channels + static_cast<std::uint64_t>(channel_index) *
+                    sizeof(channel)),
+            sizeof(channel), "copy debug channel", error, sizeof(error)))
+        return;
+    std::fprintf(
+        stderr,
+        "URMA-DESC channel peer=%u local_buffers=%u remote_buffers=%u\n",
+        peer, channel.local_buffer_count, channel.remote_buffer_count);
+    if (channel.sq_count != 0 && channel.cq_count != 0 &&
+        channel.sq_contexts != 0 && channel.cq_contexts != 0) {
+        transport::cann_abi::SqContext sq{};
+        transport::cann_abi::CqContext cq{};
+        if (copy_from_device(
+                &sq, reinterpret_cast<const void*>(channel.sq_contexts),
+                sizeof(sq), "copy debug SQ context", error, sizeof(error)) &&
+            copy_from_device(
+                &cq, reinterpret_cast<const void*>(channel.cq_contexts),
+                sizeof(cq), "copy debug CQ context", error, sizeof(error))) {
+            std::fprintf(
+                stderr,
+                "URMA-DESC sq base=0x%llx head_ptr=0x%llx "
+                "tail_ptr=0x%llx db=0x%llx entry=%u depth=%u\n",
+                static_cast<unsigned long long>(sq.base),
+                static_cast<unsigned long long>(sq.head),
+                static_cast<unsigned long long>(sq.tail),
+                static_cast<unsigned long long>(sq.doorbell), sq.entry_bytes,
+                sq.depth);
+            std::fprintf(
+                stderr,
+                "URMA-DESC cq base=0x%llx tail_ptr=0x%llx db=0x%llx "
+                "entry=%u depth=%u\n",
+                static_cast<unsigned long long>(cq.base),
+                static_cast<unsigned long long>(cq.tail),
+                static_cast<unsigned long long>(cq.doorbell), cq.entry_bytes,
+                cq.depth);
+        }
+    }
+    transport::cann_abi::RegisteredBuffer buffers[64]{};
+    if (channel.local_buffer_count <= 64 && channel.local_buffers != 0 &&
+        copy_from_device(
+            buffers, reinterpret_cast<const void*>(channel.local_buffers),
+            channel.local_buffer_count * sizeof(buffers[0]),
+            "copy debug local buffers", error, sizeof(error))) {
+        for (std::uint32_t index = 0; index < channel.local_buffer_count;
+             ++index) {
+            std::fprintf(
+                stderr,
+                "URMA-DESC local[%u]=[0x%llx,+%llu] token=%u value=%u\n",
+                index, static_cast<unsigned long long>(buffers[index].address),
+                static_cast<unsigned long long>(buffers[index].bytes),
+                buffers[index].token_id, buffers[index].token_value);
+        }
+    }
+    if (channel.remote_buffer_count <= 64 && channel.remote_buffers != 0 &&
+        copy_from_device(
+            buffers, reinterpret_cast<const void*>(channel.remote_buffers),
+            channel.remote_buffer_count * sizeof(buffers[0]),
+            "copy debug remote buffers", error, sizeof(error))) {
+        for (std::uint32_t index = 0; index < channel.remote_buffer_count;
+             ++index) {
+            std::fprintf(
+                stderr,
+                "URMA-DESC remote[%u]=[0x%llx,+%llu] token=%u value=%u\n",
+                index, static_cast<unsigned long long>(buffers[index].address),
+                static_cast<unsigned long long>(buffers[index].bytes),
+                buffers[index].token_id, buffers[index].token_value);
+        }
+    }
+}
+
 std::uint32_t inspect_sq_depth(
     const transport::DeviceTransportContext& context, std::uint32_t peer,
     char* error, std::size_t error_capacity) {
@@ -124,18 +266,16 @@ std::uint32_t inspect_sq_depth(
 class RuntimeResources {
 public:
     ~RuntimeResources() {
-        if (transport_ != nullptr)
-            (void)transport_->destroy();
-        if (stream_ != nullptr)
-            (void)aclrtDestroyStream(stream_);
-        if (window_ != nullptr)
-            (void)aclrtFree(window_);
+        (void)shutdown(nullptr, 0);
     }
 
     bool initialize(
         std::int64_t communicator_handle, std::uint32_t rank,
         std::uint32_t world_size, char* error,
         std::size_t error_capacity) {
+        communicator_handle_ = communicator_handle;
+        rank_ = rank;
+        world_size_ = world_size;
         if (!check_acl(
                 aclrtMalloc(
                     &window_, kWindowBytes, ACL_MEM_MALLOC_HUGE_FIRST),
@@ -177,6 +317,8 @@ public:
                 status.message.c_str());
             return false;
         }
+        if (std::getenv("DEEP_EP_ASCEND_URMA_DUMP_DESCRIPTORS") != nullptr)
+            dump_transport_descriptors(context_, (rank + 1) % world_size);
         return true;
     }
 
@@ -229,17 +371,28 @@ public:
                 return false;
             if (state.success != 1 ||
                 state.diagnostic.error != transport::DeviceTransportError::kNone) {
+                if (std::getenv(
+                        "DEEP_EP_ASCEND_URMA_DUMP_DESCRIPTORS") != nullptr)
+                    dump_transport_descriptors(context_, peer);
                 write_error(
                     error, error_capacity,
                     "semantic failure: case=%u generation=%llu success=%u "
-                    "diagnostic=%u opcode=%u peer=%u channel=%u backend=%u "
+                    "diagnostic=%u opcode=%u peer=%u channel=%u "
+                    "sq_position=%u cq_expected=%u cq_tail=%u "
+                    "cqe_word0=0x%08x raw_sq_head=0x%llx sq_tail=%llu "
                     "observed=0x%llx",
                     static_cast<unsigned>(runtime_case),
                     static_cast<unsigned long long>(generation), state.success,
                     static_cast<unsigned>(state.diagnostic.error),
                     static_cast<unsigned>(state.diagnostic.opcode),
                     state.diagnostic.peer, state.diagnostic.channel,
+                    state.diagnostic.sq_head, state.diagnostic.cq_head,
+                    state.diagnostic.cq_tail,
                     state.diagnostic.backend_status,
+                    static_cast<unsigned long long>(
+                        state.diagnostic.reserved[0]),
+                    static_cast<unsigned long long>(
+                        state.diagnostic.reserved[1]),
                     static_cast<unsigned long long>(state.observed));
                 return false;
             }
@@ -247,11 +400,62 @@ public:
         return true;
     }
 
+    bool matches(
+        std::int64_t communicator_handle, std::uint32_t rank,
+        std::uint32_t world_size) const {
+        return communicator_handle_ == communicator_handle && rank_ == rank &&
+            world_size_ == world_size;
+    }
+
+    bool shutdown(char* error, std::size_t error_capacity) {
+        bool success = true;
+        if (transport_ != nullptr) {
+            const auto status = transport_->destroy();
+            if (!status.ok()) {
+                success = false;
+                write_error(
+                    error, error_capacity, "%s failed: backend=%d %s",
+                    status.operation.c_str(), status.backend_code,
+                    status.message.c_str());
+            }
+            transport_.reset();
+        }
+        if (stream_ != nullptr) {
+            const aclrtStream stream = stream_;
+            stream_ = nullptr;
+            const aclError result = aclrtDestroyStream(stream);
+            if (result != ACL_SUCCESS && success) {
+                success = false;
+                write_error(
+                    error, error_capacity,
+                    "destroy stream failed with ACL status %d",
+                    static_cast<int>(result));
+            }
+        }
+        if (window_ != nullptr) {
+            void* window = window_;
+            window_ = nullptr;
+            const aclError result = aclrtFree(window);
+            if (result != ACL_SUCCESS && success) {
+                success = false;
+                write_error(
+                    error, error_capacity,
+                    "free window failed with ACL status %d",
+                    static_cast<int>(result));
+            }
+        }
+        context_ = {};
+        return success;
+    }
+
 private:
     void* window_ = nullptr;
     aclrtStream stream_ = nullptr;
     std::unique_ptr<transport::HostTransport> transport_;
     transport::DeviceTransportContext context_{};
+    std::int64_t communicator_handle_ = 0;
+    std::uint32_t rank_ = 0;
+    std::uint32_t world_size_ = 0;
 };
 
 }  // namespace
@@ -276,11 +480,36 @@ extern "C" int deep_ep_ascend_urma_run_case(
         return 2;
     }
 
-    RuntimeResources resources;
-    if (!resources.initialize(
-            communicator_handle, rank, world_size, error, error_capacity))
-        return 1;
-    if (!teardown && !resources.run(
+    static std::unique_ptr<RuntimeResources> resources;
+    if (teardown) {
+        if (resources != nullptr && !resources->matches(
+                communicator_handle, rank, world_size)) {
+            write_error(
+                error, error_capacity,
+                "persistent runtime resources do not match communicator topology");
+            return 2;
+        }
+        const bool shutdown = resources == nullptr || resources->shutdown(
+            error, error_capacity);
+        resources.reset();
+        return shutdown ? 0 : 1;
+    }
+
+    if (resources != nullptr && !resources->matches(
+            communicator_handle, rank, world_size)) {
+        write_error(
+            error, error_capacity,
+            "persistent runtime resources do not match communicator topology");
+        return 2;
+    }
+    if (resources == nullptr) {
+        auto candidate = std::make_unique<RuntimeResources>();
+        if (!candidate->initialize(
+                communicator_handle, rank, world_size, error, error_capacity))
+            return 1;
+        resources = std::move(candidate);
+    }
+    if (!resources->run(
             runtime_case, rank, world_size, iterations, error,
             error_capacity))
         return 1;

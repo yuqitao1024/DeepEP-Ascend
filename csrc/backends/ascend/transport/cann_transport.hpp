@@ -13,7 +13,8 @@ struct CannHostApi {
     int (*get_size)(void*, std::int64_t, std::uint32_t*) = nullptr;
     int (*create_world_team)(
         void*, std::int64_t, std::uint32_t, std::uint32_t,
-        std::uint32_t, std::uint32_t, std::uintptr_t*) = nullptr;
+        const std::uint32_t*, std::uint32_t, std::uint32_t,
+        std::uintptr_t*) = nullptr;
     int (*register_window)(
         void*, std::int64_t, std::uintptr_t, void*, std::uint64_t,
         std::uintptr_t*) = nullptr;

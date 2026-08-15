@@ -22,6 +22,16 @@ __aicore__ inline void flush_cacheline(__gm__ void* address) {
     pipe_barrier(PIPE_ALL);
 }
 
+template <AscendC::HardEvent Event>
+__aicore__ inline void sync_event() {
+    auto* pipe = GetTPipePtr();
+    AscendC::TEventID event_id = 0;
+    if (pipe != nullptr)
+        event_id = pipe->FetchEventID(Event);
+    AscendC::SetFlag<Event>(event_id);
+    AscendC::WaitFlag<Event>(event_id);
+}
+
 template <typename T>
 __aicore__ inline T load_device(const __gm__ T* address) {
     static_assert(kSupportedDeviceScalar<T>);
