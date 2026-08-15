@@ -122,10 +122,13 @@ class CMakeBuild(build_ext):
         output_directory = extension_path.parent
         build_directory = Path(self.build_temp) / extension.name
         build_directory.mkdir(parents=True, exist_ok=True)
+        ascend_testing = (
+            '1' if os.environ.get('DEEP_EP_ASCEND_TESTING') == '1' else '0')
 
         configure = [
             'cmake', extension.cmake_source_dir,
             '-DDEEP_EP_PLATFORM=ascend',
+            f'-DDEEP_EP_ASCEND_TESTING={ascend_testing}',
             f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={output_directory}',
             f'-DPython_EXECUTABLE={sys.executable}',
             f'-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}',

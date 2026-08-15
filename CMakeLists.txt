@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 set(DEEP_EP_PLATFORM "cuda" CACHE STRING "DeepEP platform: cuda or ascend")
 set_property(CACHE DEEP_EP_PLATFORM PROPERTY STRINGS cuda ascend)
+option(DEEP_EP_ASCEND_TESTING "Enable Ascend validation-only diagnostics" OFF)
 
 if(NOT DEEP_EP_PLATFORM STREQUAL "cuda" AND
    NOT DEEP_EP_PLATFORM STREQUAL "ascend")
@@ -118,6 +119,7 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
         $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>)
     target_compile_definitions(_C PRIVATE
         DEEP_EP_PLATFORM_ASCEND=1
+        DEEP_EP_ASCEND_TESTING=$<BOOL:${DEEP_EP_ASCEND_TESTING}>
         $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_STAGED_URMA=1>
         $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1>)
     target_link_libraries(_C PRIVATE

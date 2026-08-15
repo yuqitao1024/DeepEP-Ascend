@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdlib>
 #include <cstdint>
 #include <cstddef>
 #include <limits>
@@ -288,6 +289,13 @@ public:
         status = host_transport()->read_diagnostic(&diagnostic);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
+#if DEEP_EP_ASCEND_TESTING
+        if (std::getenv("DEEP_EP_ASCEND_TEST_DIAGNOSTIC") != nullptr) {
+            diagnostic.error = transport::DeviceTransportError::kCompletionTimeout;
+            diagnostic.command_index = 0;
+            diagnostic.generation = barrier_generation_;
+        }
+#endif
 
         std::uint64_t completion = 0;
         const auto completion_offset =

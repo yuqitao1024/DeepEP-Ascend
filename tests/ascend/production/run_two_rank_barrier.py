@@ -1,0 +1,109 @@
+import argparse
+import os
+
+import torch
+import torch.distributed as dist
+import torch_npu  # noqa: F401
+
+import deep_ep
+
+
+class _Poison:
+    def __getattr__(self, name):
+        raise AssertionError(f"deferred argument was inspected: {name}")
+
+
+def _expect_gate(operation, call):
+    try:
+        call()
+    except NotImplementedError as error:
+        message = str(error)
+        if not message.startswith(f"DeepEP Ascend backend: {operation} "):
+            raise AssertionError(message) from error
+    else:
+        raise AssertionError(f"{operation} was unexpectedly available")
+
+
+def _make_buffer(group):
+    return deep_ep.ElasticBuffer(
+        group,
+        num_bytes=2 * 1024 * 1024,
+        allow_hybrid_mode=False,
+        explicitly_destroy=True,
+    )
+
+
+def run(inject_diagnostic):
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.npu.set_device(local_rank)
+    dist.init_process_group(backend="hccl")
+    group = dist.group.WORLD
+    rank = dist.get_rank(group)
+
+    try:
+        for _ in range(3):
+            temporary = _make_buffer(group)
+            temporary.destroy()
+
+        buffer = _make_buffer(group)
+        try:
+            assert buffer.get_logical_domain_size() == (1, 2)
+            assert buffer.get_physical_domain_size() == (1, 2)
+            assert (buffer.scaleout_rank_idx, buffer.scaleup_rank_idx) == (0, rank)
+
+            for generation in range(1, 101):
+                buffer.barrier(
+                    with_cpu_sync=generation % 17 == 0,
+                    sequential=True,
+                )
+
+            try:
+                buffer.barrier(sequential=False)
+            except RuntimeError as error:
+                assert "requires sequential=True" in str(error)
+            else:
+                raise AssertionError("non-sequential barrier was accepted")
+
+            poison = _Poison()
+            _expect_gate("dispatch", lambda: buffer.dispatch(poison))
+            _expect_gate("combine", lambda: buffer.combine(poison, poison))
+
+            if inject_diagnostic:
+                os.environ["DEEP_EP_ASCEND_TEST_DIAGNOSTIC"] = \
+                    "completion_timeout"
+                try:
+                    buffer.barrier()
+                except RuntimeError as error:
+                    message = str(error)
+                    assert f"barrier failed on rank {rank}" in message
+                    assert "completion_timeout" in message
+                    assert "command_index=0" in message
+                else:
+                    raise AssertionError("injected diagnostic was not reported")
+                finally:
+                    os.environ.pop("DEEP_EP_ASCEND_TEST_DIAGNOSTIC", None)
+        finally:
+            buffer.destroy()
+
+        gathered = [None] * dist.get_world_size(group)
+        dist.all_gather_object(
+            gathered,
+            {"rank": rank, "barriers": 100, "diagnostic": inject_diagnostic},
+            group=group,
+        )
+        if rank == 0:
+            print(f"Phase 2E two-rank barrier validation passed: {gathered}",
+                  flush=True)
+    finally:
+        dist.destroy_process_group()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--inject-diagnostic", action="store_true")
+    args = parser.parse_args()
+    run(args.inject_diagnostic)
+
+
+if __name__ == "__main__":
+    main()

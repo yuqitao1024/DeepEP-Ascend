@@ -52,6 +52,8 @@ class BuildPlatformTest(unittest.TestCase):
         self.assertEqual(extension.name, "deep_ep._C")
         self.assertEqual(extension.cmake_source_dir, str(ROOT))
         self.assertEqual(extension.sources, [])
+        self.assertIn(
+            "DEEP_EP_ASCEND_TESTING", (ROOT / "setup.py").read_text())
 
     def test_ascend_cmake_target_has_the_production_source_and_link_graph(self):
         source = (ROOT / "CMakeLists.txt").read_text()
@@ -73,6 +75,7 @@ class BuildPlatformTest(unittest.TestCase):
                 "--npu-arch=dav-3510",
                 "DEEP_EP_PLATFORM_ASCEND=1", "DEEP_EP_ASCEND_STAGED_URMA=1",
                 "DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1",
+                "DEEP_EP_ASCEND_TESTING",
                 "hcomm", "ascendcl", "c_sec", "torch_npu"):
             self.assertIn(marker, ascend)
         for forbidden in (".cu", "nvshmem", "nccl"):

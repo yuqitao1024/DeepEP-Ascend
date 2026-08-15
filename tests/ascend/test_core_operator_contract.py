@@ -153,6 +153,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         for marker in ("read_diagnostic", "copy_to_host",
                        "barrier_completion", "barrier_generation_"):
             self.assertIn(marker, production)
+        self.assertIn("#if DEEP_EP_ASCEND_TESTING", production)
+        self.assertIn("DEEP_EP_ASCEND_TEST_DIAGNOSTIC", production)
         for operation in ("barrier", "dispatch", "combine"):
             marker = f'require_transport("{operation}"'
             self.assertIn(marker, production)
