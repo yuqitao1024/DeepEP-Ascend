@@ -32,6 +32,14 @@ class RegistrationBoundaryTest(unittest.TestCase):
                 "deep_ep/include/deep_ep/common/handle.cuh"):
             self.assertNotIn("backends/ascend/transport", self.read(cuda_source))
 
+    def test_ascend_production_target_does_not_import_cuda_sources(self):
+        source = self.read("CMakeLists.txt")
+        marker = 'if(DEEP_EP_PLATFORM STREQUAL "ascend")'
+        self.assertIn(marker, source)
+        ascend = source[source.index(marker):]
+        for forbidden in (".cu", "nvshmem", "nccl", "CUDAToolkit"):
+            self.assertNotIn(forbidden, ascend)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,6 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
 SPEC = importlib.util.spec_from_file_location("deep_ep_setup", ROOT / "setup.py")
 SETUP = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SETUP)
@@ -46,50 +45,37 @@ class BuildPlatformTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "DEEP_EP_PLATFORM must be cuda or ascend"):
             SETUP.get_build_platform({"DEEP_EP_PLATFORM": "rocm"})
 
-    @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is required to construct extensions")
-    def test_ascend_extension_is_pure_and_has_exact_host_build_fields(self):
-        from torch.utils.cpp_extension import CppExtension
-
+    def test_ascend_extension_uses_the_root_cmake_project(self):
+        self.assertTrue(hasattr(SETUP, "CMakeExtension"))
         extension = SETUP.make_extension("ascend")
-        dependency_fields = (
-            "sources", "include_dirs", "libraries", "library_dirs",
-            "extra_compile_args", "extra_link_args", "extra_objects",
-            "define_macros", "runtime_library_dirs", "depends",
-            "export_symbols", "swig_opts", "undef_macros",
-        )
+        self.assertIsInstance(extension, SETUP.CMakeExtension)
+        self.assertEqual(extension.name, "deep_ep._C")
+        self.assertEqual(extension.cmake_source_dir, str(ROOT))
+        self.assertEqual(extension.sources, [])
 
-        # CppExtension adds PyTorch's CPU extension defaults. Remove only the
-        # values from an equivalent dependency-free construction so the
-        # assertions below describe DeepEP's contribution, independently of
-        # the installed PyTorch layout.
-        baseline = CppExtension(name="deep_ep_baseline", sources=[])
+    def test_ascend_cmake_target_has_the_production_source_and_link_graph(self):
+        source = (ROOT / "CMakeLists.txt").read_text()
+        marker = 'if(DEEP_EP_PLATFORM STREQUAL "ascend")'
+        self.assertIn(marker, source)
+        self.assertIn("LANGUAGES ASC CXX", source)
+        ascend = source[source.index(marker):]
 
-        def without_baseline(field):
-            remaining = list(getattr(extension, field, None) or [])
-            for value in getattr(baseline, field, None) or []:
-                remaining.remove(value)
-            return remaining
-
-        normalized = {field: without_baseline(field) for field in dependency_fields}
-        self.assertEqual(normalized["sources"], ["csrc/python_api.cpp"])
-        self.assertEqual(normalized["include_dirs"], [str(ROOT / "deep_ep" / "include")])
-        self.assertEqual(normalized["libraries"], [])
-        self.assertEqual(normalized["library_dirs"], [])
-        self.assertEqual(
-            normalized["extra_compile_args"],
-            ["-O3", "-std=c++17", "-Wno-deprecated-declarations"])
-        for field in ("extra_link_args", "extra_objects", "runtime_library_dirs",
-                      "depends", "export_symbols", "swig_opts", "undef_macros"):
-            self.assertEqual(normalized[field], [], field)
-        self.assertEqual(normalized["define_macros"], [("DEEP_EP_PLATFORM_ASCEND", "1")])
-
-        forbidden = " ".join(
-            str(value)
-            for field in dependency_fields
-            for value in normalized[field]
-        )
-        for name in ("cuda", "nccl", "nvshmem", "cann", "hccl"):
-            self.assertNotIn(name, forbidden.lower())
+        for production_source in (
+                "csrc/python_api.cpp",
+                "csrc/backends/ascend/elastic/barrier.asc",
+                "csrc/backends/ascend/elastic/dispatch.asc",
+                "csrc/backends/ascend/elastic/combine.asc",
+                "csrc/backends/ascend/elastic/runtime.cpp",
+                "csrc/backends/ascend/transport/cann_transport.cpp"):
+            self.assertIn(production_source, ascend)
+        for marker in (
+                "--npu-arch=dav-3510",
+                "DEEP_EP_PLATFORM_ASCEND=1", "DEEP_EP_ASCEND_STAGED_URMA=1",
+                "DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1",
+                "hcomm", "ascendcl", "c_sec"):
+            self.assertIn(marker, ascend)
+        for forbidden in (".cu", "nvshmem", "nccl"):
+            self.assertNotIn(forbidden, ascend.lower())
 
 
 if __name__ == "__main__":

@@ -17,8 +17,10 @@ import re
 import subprocess
 import setuptools
 import importlib
+import sys
 
 from pathlib import Path
+from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 
 current_dir = os.path.dirname(os.path.realpath(__file__))
@@ -102,6 +104,35 @@ class CustomBuildPy(build_py):
         os.makedirs(build_include_dir, exist_ok=True)
         with open(os.path.join(self.build_lib, 'deep_ep', 'envs.py'), 'w') as f:
             f.write(code)
+
+
+class CMakeExtension(setuptools.Extension):
+    def __init__(self, name, cmake_source_dir):
+        super().__init__(name, sources=[])
+        self.cmake_source_dir = str(Path(cmake_source_dir).resolve())
+
+
+class CMakeBuild(build_ext):
+    def build_extension(self, extension):
+        import torch
+
+        extension_path = Path(self.get_ext_fullpath(extension.name)).resolve()
+        output_directory = extension_path.parent
+        build_directory = Path(self.build_temp) / extension.name
+        build_directory.mkdir(parents=True, exist_ok=True)
+
+        configure = [
+            'cmake', extension.cmake_source_dir,
+            '-DDEEP_EP_PLATFORM=ascend',
+            f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={output_directory}',
+            f'-DPython_EXECUTABLE={sys.executable}',
+            f'-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}',
+            '-DCMAKE_BUILD_TYPE=Release',
+        ]
+        subprocess.check_call(configure, cwd=build_directory)
+        subprocess.check_call(
+            ['cmake', '--build', '.', '--target', '_C', '--parallel', '2'],
+            cwd=build_directory)
 
 
 def make_cuda_extension(define_macros=None):
@@ -224,14 +255,7 @@ def make_cuda_extension(define_macros=None):
 
 
 def make_ascend_extension():
-    from torch.utils.cpp_extension import CppExtension
-
-    return CppExtension(
-        name='deep_ep._C',
-        sources=['csrc/python_api.cpp'],
-        include_dirs=[f'{current_dir}/deep_ep/include'],
-        define_macros=[('DEEP_EP_PLATFORM_ASCEND', '1')],
-        extra_compile_args=['-O3', '-std=c++17', '-Wno-deprecated-declarations'])
+    return CMakeExtension('deep_ep._C', current_dir)
 
 
 def make_extension(platform):
@@ -242,9 +266,12 @@ def make_extension(platform):
 
 
 if __name__ == '__main__':
-    from torch.utils.cpp_extension import BuildExtension
-
     extension = make_extension(build_platform)
+    if build_platform == 'cuda':
+        from torch.utils.cpp_extension import BuildExtension
+        build_extension = BuildExtension
+    else:
+        build_extension = CMakeBuild
 
     if build_platform == 'ascend':
         print('Build summary:')
@@ -262,7 +289,7 @@ if __name__ == '__main__':
         },
         ext_modules=[extension],
         cmdclass={
-            'build_ext': BuildExtension,
+            'build_ext': build_extension,
             'build_py': CustomBuildPy
         }
     )
