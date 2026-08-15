@@ -13,7 +13,7 @@
 #include <torch/python.h>
 
 #include "elastic/layout.hpp"
-#include "transport/stub_transport.hpp"
+#include "runtime/cann_runtime.hpp"
 
 namespace deep_ep::ascend {
 
@@ -51,7 +51,7 @@ class ElasticBuffer {
     int num_ranks_;
     int64_t num_buffer_bytes_;
     bool allow_hybrid_mode_;
-    std::unique_ptr<transport::HostTransport> transport_;
+    std::unique_ptr<runtime::CannRuntimeResources> resources_;
     bool destroyed_ = false;
 
     static constexpr auto kDispatchCapabilities =
@@ -64,7 +64,14 @@ class ElasticBuffer {
         transport::capability_bit(transport::TransportCapability::kRemoteSignal) |
         transport::capability_bit(
             transport::TransportCapability::kSystemMemoryOrdering) |
-        transport::capability_bit(transport::TransportCapability::kDeviceBarrier);
+        transport::capability_bit(transport::TransportCapability::kDeviceBarrier) |
+        transport::capability_bit(transport::TransportCapability::kScaleUpTeam);
+
+    transport::HostTransport* host_transport() const {
+        TORCH_CHECK(resources_ != nullptr && resources_->transport() != nullptr,
+                    "DeepEP Ascend backend: runtime is destroyed");
+        return resources_->transport();
+    }
 
     static constexpr auto kCombineCapabilities =
         transport::capability_bit(transport::TransportCapability::kSymmetricWindow) |
@@ -89,7 +96,8 @@ class ElasticBuffer {
 
     void require_transport(
         const char* operation, transport::TransportCapabilities required) const {
-        const auto status = transport_->require_capabilities(required, operation);
+        const auto status =
+            host_transport()->require_capabilities(required, operation);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
     }
@@ -107,22 +115,48 @@ public:
         : rank_idx_(rank_idx), num_ranks_(num_ranks),
           num_buffer_bytes_(num_buffer_bytes),
           allow_hybrid_mode_(allow_hybrid_mode) {
+        TORCH_CHECK(num_ranks == 2,
+                    "DeepEP Ascend backend: exactly two ranks are required");
+        TORCH_CHECK(rank_idx >= 0 && rank_idx < num_ranks,
+                    "DeepEP Ascend backend: rank must be in [0, world_size)");
+        TORCH_CHECK(comm_handle != 0,
+                    "DeepEP Ascend backend: communicator_handle must be nonzero");
+        TORCH_CHECK(cpu_comm.empty(),
+                    "DeepEP Ascend backend: cpu communicator must be empty");
+        TORCH_CHECK(num_cpu_buffer_bytes == 0,
+                    "DeepEP Ascend backend: cpu_buffer_bytes must be zero");
+        TORCH_CHECK(!allow_hybrid_mode,
+                    "DeepEP Ascend backend: hybrid mode is unsupported");
+        TORCH_CHECK(num_allocated_qps == 0,
+                    "DeepEP Ascend backend: CUDA QP count must be zero");
+        TORCH_CHECK(
+            num_buffer_bytes >=
+                    static_cast<std::int64_t>(
+                        elastic::kPublicElasticBufferAlignment) &&
+                num_buffer_bytes % static_cast<std::int64_t>(
+                    elastic::kPublicElasticBufferAlignment) == 0,
+            "DeepEP Ascend backend: device buffer must be positive and "
+            "2 MiB-aligned");
+
         transport::TransportConfig config{
             rank_idx, num_ranks, comm_handle, cpu_comm.empty(), num_buffer_bytes,
-            num_cpu_buffer_bytes, allow_hybrid_mode, sl_idx, num_allocated_qps};
-        auto result = transport::make_stub_transport(config);
-        TORCH_CHECK(result.status.ok(), "DeepEP Ascend backend: ",
-                    result.status.operation, " ", result.status.message);
-        transport_ = std::move(result.transport);
+            num_cpu_buffer_bytes, allow_hybrid_mode, sl_idx, 1};
+        auto resources = std::make_unique<runtime::CannRuntimeResources>();
+        const auto status = resources->initialize(
+            config, 2 * elastic::kPublicElasticBufferAlignment);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        resources_ = std::move(resources);
     }
 
     void destroy() {
         if (destroyed_)
             return;
         destroyed_ = true;
-        const auto status = transport_->destroy();
+        const auto status = resources_->destroy();
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
+        resources_.reset();
     }
 
     pybind11::object get_comm_stream() const {
@@ -133,7 +167,7 @@ public:
 
     std::tuple<int, int> get_physical_domain_size() const {
         transport::TransportTopology topology;
-        auto status = transport_->query_topology(&topology);
+        auto status = host_transport()->query_topology(&topology);
         if (!status.ok()) {
             status.operation = "get_physical_domain_size";
             raise_transport_status(status, rank_idx_);
@@ -143,7 +177,7 @@ public:
 
     std::tuple<int, int> get_logical_domain_size() const {
         transport::TransportTopology topology;
-        auto status = transport_->query_topology(&topology);
+        auto status = host_transport()->query_topology(&topology);
         if (!status.ok()) {
             status.operation = "get_logical_domain_size";
             raise_transport_status(status, rank_idx_);

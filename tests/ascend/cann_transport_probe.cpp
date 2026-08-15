@@ -30,6 +30,7 @@ enum class Event : std::uint32_t {
     kAllocate,
     kZero,
     kCopy,
+    kCopyFromDevice,
     kFree,
     kDeregisterWindow,
     kDestroyTeam,
@@ -161,6 +162,19 @@ struct FakeApi {
         return 0;
     }
 
+    static int copy_from_device(
+        void* data, void* destination, const void*, std::uint64_t bytes) {
+        auto& fake = self(data);
+        fake.record(Event::kCopyFromDevice);
+        if (fake.fail_now()) return 79;
+        CHECK(bytes == sizeof(transport::DeviceTransportDiagnostic));
+        auto* diagnostic =
+            static_cast<transport::DeviceTransportDiagnostic*>(destination);
+        diagnostic->error = transport::DeviceTransportError::kCompletionTimeout;
+        diagnostic->generation = 17;
+        return 0;
+    }
+
     static int free(void* data, void*) {
         auto& fake = self(data);
         fake.record(Event::kFree);
@@ -183,7 +197,7 @@ struct FakeApi {
     transport::CannHostApi api() {
         return {
             this, get_rank, get_size, create_team, register_window,
-            create_channels, allocate, zero, copy, free,
+            create_channels, allocate, zero, copy, copy_from_device, free,
             deregister_window, destroy_team,
         };
     }
@@ -242,6 +256,12 @@ void check_success_and_reverse_cleanup() {
         context.capabilities, transport::TransportCapability::kScaleOutTeam));
     CHECK(context.topology.world_rank == 1);
     CHECK(context.topology.world_size == 2);
+    transport::DeviceTransportDiagnostic diagnostic{};
+    CHECK(created.transport->read_diagnostic(&diagnostic).ok());
+    CHECK(diagnostic.error ==
+          transport::DeviceTransportError::kCompletionTimeout);
+    CHECK(diagnostic.generation == 17);
+    CHECK(fake.count(Event::kCopyFromDevice) == 1);
     CHECK(fake.first(Event::kCreateTeam) < fake.first(Event::kRegisterWindow));
     CHECK(fake.first(Event::kRegisterWindow) < fake.first(Event::kCreateChannels));
     CHECK(fake.first(Event::kCreateChannels) < fake.first(Event::kAllocate));

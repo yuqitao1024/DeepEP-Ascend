@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 
+#include "transport_commands.hpp"
 #include "types.hpp"
 
 namespace deep_ep::ascend::transport {
@@ -35,6 +36,8 @@ public:
     virtual TransportStatus release_channels() = 0;
     virtual TransportStatus export_device_context(
         DeviceTransportContext* context) = 0;
+    virtual TransportStatus read_diagnostic(
+        DeviceTransportDiagnostic* diagnostic) = 0;
     virtual TransportStatus host_barrier() = 0;
     virtual TransportStatus destroy() = 0;
 };

@@ -24,6 +24,7 @@ struct CannHostApi {
     int (*allocate_device)(void*, std::uint64_t, void**) = nullptr;
     int (*zero_device)(void*, void*, std::uint64_t) = nullptr;
     int (*copy_to_device)(void*, void*, const void*, std::uint64_t) = nullptr;
+    int (*copy_from_device)(void*, void*, const void*, std::uint64_t) = nullptr;
     int (*free_device)(void*, void*) = nullptr;
 
     int (*deregister_window)(

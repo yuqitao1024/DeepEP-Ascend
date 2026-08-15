@@ -368,6 +368,67 @@ int main() {
 }
 """
 
+PRODUCTION_PROBE = r"""
+#include <cstdint>
+#include <optional>
+#include <set>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <vector>
+
+#include "csrc/elastic/api.hpp"
+
+using Buffer = deep_ep::ascend::ElasticBuffer;
+using Event = deep_ep::ascend::EventHandle;
+using Tensor = torch::Tensor;
+
+using DispatchResult = std::tuple<
+    Tensor, std::optional<Tensor>, std::optional<Tensor>, std::optional<Tensor>,
+    std::optional<Tensor>, int, int, std::vector<int>, Tensor, Tensor, Tensor,
+    Tensor, Tensor, std::optional<Tensor>, std::optional<Tensor>,
+    std::optional<Event>>;
+
+static_assert(std::is_same_v<decltype(&Buffer::get_comm_stream),
+                             pybind11::object (Buffer::*)() const>);
+
+template <typename Call>
+bool raises_transport_error(const char* operation, const char* detail, Call call) {
+    python_error.clear();
+    try {
+        call();
+    } catch (const pybind11::error_already_set&) {
+        return python_error == std::string("DeepEP Ascend backend: ") + operation +
+                                   " " + detail;
+    }
+    return false;
+}
+
+int main() {
+    pybind11::module_ module;
+    deep_ep::elastic::register_apis(module);
+    if (module.names != std::set<std::string>{
+            "EventHandle", "ElasticBuffer", "calculate_elastic_buffer_size"})
+        return 1;
+    if (module.class_methods["ElasticBuffer"] != std::set<std::string>{
+            "destroy", "get_comm_stream", "get_physical_domain_size",
+            "get_logical_domain_size", "barrier", "dispatch", "combine"})
+        return 2;
+
+    const auto buffer_bytes = Buffer::calculate_buffer_size(
+        7, 128, 7168, 8, false, false, true);
+    if (buffer_bytes <= 0 ||
+        buffer_bytes % deep_ep::ascend::elastic::kPublicElasticBufferAlignment != 0)
+        return 3;
+    if (!raises_transport_error(
+            "calculate_elastic_buffer_size", "does not support FP8", [] {
+                Buffer::calculate_buffer_size(7, 128, 7168, 8, true, false, true);
+            }))
+        return 4;
+    return 0;
+}
+"""
+
 
 class AscendStubSourceTest(unittest.TestCase):
     def test_header_type_checks_and_host_behavior_executes(self):
@@ -378,13 +439,16 @@ class AscendStubSourceTest(unittest.TestCase):
             (include / "pybind11/pybind11.h").write_text(PYBIND11_HEADER)
             (include / "torch/python.h").write_text(TORCH_HEADER)
             probe = include / "probe.cpp"
-            probe.write_text(textwrap.dedent(PROBE))
+            probe.write_text(textwrap.dedent(PRODUCTION_PROBE))
             binary = include / "probe"
             compile_result = subprocess.run(
                 ["c++", "-std=c++17", "-Werror=return-type",
                  "-DDEEP_EP_PLATFORM_ASCEND=1",
                  f"-I{include}", f"-I{ROOT}",
-                 str(probe), "-o", str(binary)],
+                 str(probe),
+                 str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
+                 "-o", str(binary)],
                 capture_output=True, text=True, check=False)
             self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
             run_result = subprocess.run(
@@ -395,7 +459,9 @@ class AscendStubSourceTest(unittest.TestCase):
         source = HEADER.read_text()
         includes = [line.strip().lower() for line in source.splitlines()
                     if line.lstrip().startswith("#include")]
-        for forbidden in ("cuda", "nccl", "nvshmem", "cann", "hccl", "torch_npu"):
+        self.assertIn('"runtime/cann_runtime.hpp"', " ".join(includes))
+        for forbidden in ("cuda", "nccl", "nvshmem", "hccl", "torch_npu",
+                          "acl/", "hcomm"):
             self.assertFalse(any(forbidden in include for include in includes), forbidden)
 
     def test_contract_defines_exact_public_allowlists(self):

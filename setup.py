@@ -115,8 +115,10 @@ class CMakeExtension(setuptools.Extension):
 class CMakeBuild(build_ext):
     def build_extension(self, extension):
         import torch
+        import torch_npu
 
         extension_path = Path(self.get_ext_fullpath(extension.name)).resolve()
+        torch_npu_root = Path(torch_npu.__file__).resolve().parent
         output_directory = extension_path.parent
         build_directory = Path(self.build_temp) / extension.name
         build_directory.mkdir(parents=True, exist_ok=True)
@@ -127,6 +129,7 @@ class CMakeBuild(build_ext):
             f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={output_directory}',
             f'-DPython_EXECUTABLE={sys.executable}',
             f'-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}',
+            f'-DTORCH_NPU_ROOT={torch_npu_root}',
             '-DCMAKE_BUILD_TYPE=Release',
         ]
         subprocess.check_call(configure, cwd=build_directory)

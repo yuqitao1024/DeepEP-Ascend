@@ -25,7 +25,9 @@ class RegistrationBoundaryTest(unittest.TestCase):
 
     def test_ascend_transport_is_owned_by_ascend_backend(self):
         source = self.read("csrc/backends/ascend/elastic_buffer.hpp")
-        self.assertIn('#include "transport/stub_transport.hpp"', source)
+        self.assertIn('#include "runtime/cann_runtime.hpp"', source)
+        self.assertNotIn('stub_transport.hpp', source)
+        self.assertIn("CannRuntimeResources", source)
         for cuda_source in (
                 "csrc/elastic/buffer.hpp",
                 "csrc/kernels/backend/api.cuh",
@@ -39,6 +41,9 @@ class RegistrationBoundaryTest(unittest.TestCase):
         ascend = source[source.index(marker):]
         for forbidden in (".cu", "nvshmem", "nccl", "CUDAToolkit"):
             self.assertNotIn(forbidden, ascend)
+        self.assertIn("runtime/cann_runtime.cpp", ascend)
+        self.assertIn("TORCH_NPU_ROOT", ascend)
+        self.assertIn("torch_npu", ascend)
 
 
 if __name__ == "__main__":

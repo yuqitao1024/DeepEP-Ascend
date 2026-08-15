@@ -80,6 +80,9 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
     if(NOT HCOMM_ROOT)
         message(FATAL_ERROR "HCOMM_ROOT is required for an Ascend build")
     endif()
+    if(NOT TORCH_NPU_ROOT)
+        message(FATAL_ERROR "TORCH_NPU_ROOT is required for an Ascend build")
+    endif()
 
     set(HCOMM_ARCH_ROOT "${HCOMM_ROOT}/${CMAKE_SYSTEM_PROCESSOR}-linux")
     set(ASCEND_ARCH_ROOT "${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux")
@@ -90,6 +93,7 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
         csrc/backends/ascend/elastic/dispatch.asc
         csrc/backends/ascend/elastic/combine.asc
         csrc/backends/ascend/elastic/runtime.cpp
+        csrc/backends/ascend/runtime/cann_runtime.cpp
         csrc/backends/ascend/transport/cann_transport.cpp)
 
     target_include_directories(_C PRIVATE
@@ -99,6 +103,7 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
         ${HCOMM_ROOT}/include
         ${ASCEND_HOME_PATH}/include
         ${ASCEND_ARCH_ROOT}/asc/include
+        ${TORCH_NPU_ROOT}/include
         ${TORCH_INCLUDE_DIRS}
         ${PYTHON_INCLUDE_DIRS}
         ${CMAKE_CURRENT_SOURCE_DIR}/deep_ep/include
@@ -107,6 +112,7 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
         ${HCOMM_ROOT}/lib64
         ${ASCEND_HOME_PATH}/lib64
         ${ASCEND_ARCH_ROOT}/lib64
+        ${TORCH_NPU_ROOT}/lib
         ${TORCH_INSTALL_PREFIX}/lib)
     target_compile_options(_C PRIVATE
         $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>)
@@ -115,6 +121,6 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
         $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_STAGED_URMA=1>
         $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1>)
     target_link_libraries(_C PRIVATE
-        ${TORCH_LIBRARIES} torch_python hcomm ascendcl c_sec)
+        ${TORCH_LIBRARIES} torch_python torch_npu hcomm ascendcl c_sec)
     set_target_properties(_C PROPERTIES LINKER_LANGUAGE ASC)
 endif()

@@ -41,6 +41,11 @@ public:
         return unavailable("export_device_context");
     }
 
+    TransportStatus read_diagnostic(
+        DeviceTransportDiagnostic*) override {
+        return unavailable("read_diagnostic");
+    }
+
     TransportStatus host_barrier() override {
         return unavailable("host_barrier");
     }

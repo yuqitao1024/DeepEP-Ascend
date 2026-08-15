@@ -66,13 +66,14 @@ class BuildPlatformTest(unittest.TestCase):
                 "csrc/backends/ascend/elastic/dispatch.asc",
                 "csrc/backends/ascend/elastic/combine.asc",
                 "csrc/backends/ascend/elastic/runtime.cpp",
+                "csrc/backends/ascend/runtime/cann_runtime.cpp",
                 "csrc/backends/ascend/transport/cann_transport.cpp"):
             self.assertIn(production_source, ascend)
         for marker in (
                 "--npu-arch=dav-3510",
                 "DEEP_EP_PLATFORM_ASCEND=1", "DEEP_EP_ASCEND_STAGED_URMA=1",
                 "DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1",
-                "hcomm", "ascendcl", "c_sec"):
+                "hcomm", "ascendcl", "c_sec", "torch_npu"):
             self.assertIn(marker, ascend)
         for forbidden in (".cu", "nvshmem", "nccl"):
             self.assertNotIn(forbidden, ascend.lower())

@@ -214,6 +214,26 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
                 [str(executable)], capture_output=True, text=True, check=False)
             self.assertEqual(run_probe.returncode, 0, run_probe.stderr)
 
+    def test_production_runtime_resource_lifecycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = pathlib.Path(directory) / "production_lifecycle_probe"
+            compile_probe = subprocess.run(
+                [
+                    "c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                    "-I", str(ROOT),
+                    str(ROOT / "tests/ascend/production_lifecycle_probe.cpp"),
+                    str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
+                    str(TRANSPORT / "cann_transport.cpp"),
+                    "-o", str(executable),
+                ],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(
+                compile_probe.returncode, 0, compile_probe.stderr)
+
+            run_probe = subprocess.run(
+                [str(executable)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_probe.returncode, 0, run_probe.stderr)
+
     def test_aicore_service_ordering_and_timeout_model(self):
         with tempfile.TemporaryDirectory() as directory:
             executable = pathlib.Path(directory) / "transport_service_model"

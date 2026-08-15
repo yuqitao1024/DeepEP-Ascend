@@ -47,8 +47,8 @@ bool valid_api(const CannHostApi& api) {
         api.create_world_team != nullptr && api.register_window != nullptr &&
         api.create_channels != nullptr && api.allocate_device != nullptr &&
         api.zero_device != nullptr && api.copy_to_device != nullptr &&
-        api.free_device != nullptr && api.deregister_window != nullptr &&
-        api.destroy_team != nullptr;
+        api.copy_from_device != nullptr && api.free_device != nullptr &&
+        api.deregister_window != nullptr && api.destroy_team != nullptr;
 }
 
 class CannHostTransport final : public HostTransport {
@@ -230,6 +230,20 @@ public:
         context->channel_table = team_;
         context->backend_context = pointer_value(staged_);
         return TransportStatus::success();
+    }
+
+    TransportStatus read_diagnostic(
+        DeviceTransportDiagnostic* diagnostic) override {
+        if (diagnostic == nullptr)
+            return TransportStatus::invalid(
+                "read_diagnostic", "diagnostic must not be null");
+        if (destroyed_ || diagnostic_ == nullptr)
+            return TransportStatus::invalid(
+                "read_diagnostic", "transport diagnostic is unavailable");
+        const int result = api_.copy_from_device(
+            api_.user_data, diagnostic, diagnostic_, sizeof(*diagnostic));
+        return result == 0 ? TransportStatus::success()
+                           : backend_failure("read_diagnostic", result);
     }
 
     TransportStatus host_barrier() override {
@@ -447,6 +461,13 @@ int cann_copy(void*, void* destination, const void* source,
         static_cast<std::size_t>(bytes), ACL_MEMCPY_HOST_TO_DEVICE);
 }
 
+int cann_copy_from_device(void*, void* destination, const void* source,
+                          std::uint64_t bytes) {
+    return aclrtMemcpy(
+        destination, static_cast<std::size_t>(bytes), source,
+        static_cast<std::size_t>(bytes), ACL_MEMCPY_DEVICE_TO_HOST);
+}
+
 int cann_free(void*, void* pointer) {
     return aclrtFree(pointer);
 }
@@ -476,6 +497,7 @@ CannHostApi default_api() {
         cann_allocate,
         cann_zero,
         cann_copy,
+        cann_copy_from_device,
         cann_free,
         cann_deregister_window,
         cann_destroy_team,
