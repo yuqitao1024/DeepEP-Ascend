@@ -25,6 +25,18 @@ struct CoreRuntimeStatus {
     }
 };
 
+constexpr CoreTopology core_topology_from_transport(
+    const transport::TransportTopology& topology) noexcept {
+    return {
+        topology.world_rank,
+        topology.world_size,
+        topology.scale_up_rank,
+        topology.scale_up_size,
+        topology.scale_out_rank,
+        topology.scale_out_size,
+    };
+}
+
 struct CoreLaunchStorage {
     std::uint64_t communication_buffer_bytes = 0;
     std::uint64_t workspace_bytes = 0;

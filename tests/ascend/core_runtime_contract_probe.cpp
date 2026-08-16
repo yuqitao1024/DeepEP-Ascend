@@ -123,6 +123,54 @@ void export_transport(CoreTiling* tiling) {
     tiling->transport_context.backend_context = 0x500000;
 }
 
+CoreTiling context_derived_combine_tiling(int world_rank) {
+    auto context = transport::make_device_transport_context();
+    context.topology.world_rank = world_rank;
+    context.topology.world_size = 2;
+    context.topology.scale_up_rank = world_rank;
+    context.topology.scale_up_size = 2;
+    context.topology.scale_out_rank = 0;
+    context.topology.scale_out_size = 1;
+
+    CoreTilingInput input{};
+    input.operation = OperationKind::kCombine;
+    input.element_kind = ElementKind::kBFloat16;
+    input.num_tokens = 4;
+    input.hidden = 64;
+    input.num_experts = 4;
+    input.num_topk = 2;
+    input.expert_alignment = 4;
+    input.num_max_tokens_per_rank = 8;
+    input.topology = core_topology_from_transport(context.topology);
+
+    CoreTiling tiling{};
+    if (!build_core_tiling(input, &tiling).ok())
+        return {};
+    tiling.transport_context = context;
+    export_transport(&tiling);
+    return tiling;
+}
+
+bool combine_context_topology_contract_matches() {
+    const auto rank_zero = context_derived_combine_tiling(0);
+    const auto rank_one = context_derived_combine_tiling(1);
+    if (rank_zero.topology.world_rank != 0 ||
+        rank_zero.topology.scale_up_rank != 0 ||
+        rank_one.topology.world_rank != 1 ||
+        rank_one.topology.scale_up_rank != 1 ||
+        !validate_internal_launch(
+            rank_zero, required_core_launch_storage(rank_zero)).ok() ||
+        !validate_internal_launch(
+            rank_one, required_core_launch_storage(rank_one)).ok())
+        return false;
+
+    auto mismatch = rank_one;
+    mismatch.transport_context.topology.world_rank = 0;
+    return validate_internal_launch(
+               mismatch, required_core_launch_storage(mismatch)).code ==
+           CoreRuntimeStatusCode::kInvalidArgument;
+}
+
 bool cached_mixed_rank_prefix_fixture_matches() {
     constexpr int world_rank = 0;
     constexpr int world_size = 2;
@@ -752,6 +800,8 @@ int main() {
         return 54;
     if (!combine_runner_allocation_contract_matches())
         return 58;
+    if (!combine_context_topology_contract_matches())
+        return 59;
 
     return 0;
 }

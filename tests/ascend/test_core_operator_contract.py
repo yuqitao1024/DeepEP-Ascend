@@ -566,21 +566,48 @@ int main() {
         tiling_begin = runner.index("CoreTiling make_combine_tiling")
         tiling_end = runner.index("bool run_combine_case", tiling_begin)
         combine_tiling = runner[tiling_begin:tiling_end]
-        for assignment in (
-                "input.topology.world_rank = 0",
-                "input.topology.world_size = 2",
-                "input.topology.scale_up_rank = 0",
-                "input.topology.scale_up_size = 2",
-                "input.topology.scale_out_rank = 0",
-                "input.topology.scale_out_size = 1"):
-            self.assertIn(assignment, combine_tiling)
+        self.assertIn("core_topology_from_transport(", combine_tiling)
 
         normal_begin = runner.index(
             'else if (std::strcmp(argv[2], "combine-normal") == 0)')
         normal_end = runner.index("else if", normal_begin + 1)
         normal_case = runner[normal_begin:normal_end]
         self.assertIn(
-            "run_combine_case(stream, false, false, 0)", normal_case)
+            "run_combine_cli_case(stream, false, false, 0)", normal_case)
+
+    def test_combine_runner_uses_real_context_and_defers_standalone_cli(self):
+        """Catches rank-0 tiling and context-free remote launches."""
+        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
+        tiling_begin = runner.index("CoreTiling make_combine_tiling")
+        tiling_end = runner.index("bool run_combine_case", tiling_begin)
+        combine_tiling = runner[tiling_begin:tiling_end]
+        topology_marker = "input.topology = core_topology_from_transport("
+        self.assertIn(topology_marker, combine_tiling)
+        topology_position = combine_tiling.index(topology_marker)
+        build_position = combine_tiling.index("build_core_tiling(input")
+        self.assertLess(topology_position, build_position)
+        self.assertIn("tiling.transport_context = transport_context",
+                      combine_tiling)
+
+        combine_begin = runner.index("bool run_combine_case")
+        cli_wrapper_begin = runner.index("bool run_combine_cli_case")
+        combine_case = runner[combine_begin:cli_wrapper_begin]
+        self.assertIn(
+            "const transport::DeviceTransportContext& transport_context",
+            combine_case)
+        self.assertIn("launch_internal_combine(", combine_case)
+
+        wrapper_end = runner.index("bool run_barrier_local", cli_wrapper_begin)
+        cli_wrapper = runner[cli_wrapper_begin:wrapper_end]
+        self.assertIn("transport_context != nullptr", cli_wrapper)
+        self.assertIn("run_combine_case(", cli_wrapper)
+        self.assertIn("run_combine_state_probe(stream)", cli_wrapper)
+        self.assertIn("hardware-deferred", cli_wrapper)
+        self.assertNotIn("make_device_transport_context", cli_wrapper)
+
+        main = runner[runner.index("int main("):]
+        self.assertNotIn("run_combine_case(stream", main)
+        self.assertEqual(main.count("run_combine_cli_case(stream"), 6)
 
     def test_combine_device_capacity_gate_and_runner_allocation(self):
         """Catches device output overflow and undersized shared buffers."""
@@ -624,7 +651,7 @@ int main() {
             "static_cast<std::uint64_t>(combine_tiling.topology.world_size)",
             combine_case)
         self.assertIn(
-            "const transport::DeviceTransportContext* transport_context",
+            "const transport::DeviceTransportContext& transport_context",
             combine_case)
         self.assertIn(
             "combine_tiling.transport_context.local_window_base",
