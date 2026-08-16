@@ -455,6 +455,27 @@ production dependency audit found no CUDA, NCCL, or NVSHMEM dependency. The
 source archive used for final acceptance has SHA256
 `94e894fc728c68051ad14329362a2b6ca2ab1b80cf50c8c452717dda74aacbbb`.
 
+A final-review correction made aligned expanded output capacity a checked
+`CoreTiling` ABI field shared by host allocation and AICore prefix/destination
+bounds. Final serialized task `task_20260817_004736_25120404459` on NPU8P
+devices 6 and 7 clean-built testing and production `dav-3510` extensions from
+source commit `5855b606c0da0e4f225d18e0729782beb7087dda`, passed 61 Ascend tests,
+15 platform tests, 11 build tests, and all 14 two-rank reference cases, and
+printed `PHASE2F_ACCEPTANCE=PASS`. The added `aligned-near-capacity` and
+`cached-aligned-near-capacity` cases exercise capacity 4, top-k 1, two local
+experts, alignment 4, and aligned output beyond the eight-row raw lane count.
+
+The final-review testing extension SHA256 is
+`a2c77dcfc36f9f297ba59551ab4f49842584f87e18beac7764d14898fca765a0`;
+the production extension SHA256 is
+`edddedf364abfe50f85c932d65495b0dd298ad084805fa9bb9628dc5174dcf07`;
+and the source archive SHA256 is
+`2cb18d1a58efbdd5a7af858643851023e2e901832ca33370d00f40553b66afb0`.
+The production dependency audit again found no CUDA, NCCL, or NVSHMEM
+dependency. The same task passed cached handle reuse, 100 sequential
+generations per rank, bounded invalid-expert diagnostics, and the Phase 2G
+combine gate.
+
 The accepted descriptor protocol uses fixed source-owned inbox shards plus a
 generation-tagged count, signal, and barrier. Cached dispatch carries
 `DispatchHandleDescriptor` ABI version 1, including the generation family,
