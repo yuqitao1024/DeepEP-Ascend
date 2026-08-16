@@ -249,6 +249,44 @@ int main() {
                 source.index("#define DEEP_EP_ASCEND_SIMT_DEVICE 1"),
                 source.index(state_include), str(path))
 
+    def test_dispatch_public_identity_helpers_execute_on_host(self):
+        """Catches receiver-ranked slots, local metadata, and global routes."""
+        probe_source = r'''
+#include <cstdint>
+
+#include "csrc/backends/ascend/elastic/dispatch_state.hpp"
+
+using namespace deep_ep::ascend::elastic;
+
+int main() {
+    return encode_dispatch_source_index(1, 4, 3) == 7 &&
+        decode_dispatch_source_rank(7, 4) == 1 &&
+        decode_dispatch_local_index(7, 4) == 3 &&
+        encode_dispatch_source_index(1, 2, 1) == 3 &&
+        localize_dispatch_expert(2, 2, 2) == 0 &&
+        localize_dispatch_expert(3, 2, 2) == 1 &&
+        localize_dispatch_expert(0, 2, 2) == -1 &&
+        localize_dispatch_expert(-1, 2, 2) == -1 &&
+        is_dispatch_local_index(3, 4) &&
+        !is_dispatch_local_index(4, 4) &&
+        !is_dispatch_local_index(-1, 4) ? 0 : 1;
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            source = directory / "dispatch_public_identity_probe.cpp"
+            binary = directory / "dispatch_public_identity_probe"
+            source.write_text(probe_source)
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(source), "-o", str(binary)],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
     def test_pure_cpp_runtime_contract(self):
         runtime = ELASTIC / "runtime.cpp"
         self.assertTrue(runtime.is_file(), str(runtime))
@@ -293,6 +331,7 @@ int main() {
         runner = (CORE_OPS / "core_operator_runner.asc").read_text()
         for case_name in ("adapter-launch-error", "dispatch-normal", "dispatch-expanded",
                           "dispatch-cached", "dispatch-zero-padding",
+                          "dispatch-public-identity",
                           "dispatch-empty", "combine-normal",
                           "combine-expanded", "combine-multiple",
                           "combine-single-reduction", "combine-weights",
@@ -458,6 +497,30 @@ int main() {
         self.assertIn("kMixedRankWorldSize", runner)
         self.assertIn("kMixedRankWorldRank", runner)
 
+    def test_dispatch_kernel_uses_public_source_identity_contract(self):
+        """Catches receiver-ranked slots, receiver token bounds, and global routes."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        producer_begin = source.index(
+            "__simt_vf__ inline void dispatch_producer_vf")
+        epilogue_begin = source.index(
+            "__simt_vf__ inline void dispatch_epilogue_vf")
+        producer = source[:epilogue_begin]
+        epilogue = source[epilogue_begin:]
+        self.assertIn("encode_dispatch_source_index(", producer)
+        self.assertIn("decode_dispatch_source_rank(", producer)
+        self.assertIn("decode_dispatch_local_index(", producer)
+        self.assertIn("is_dispatch_local_index(", epilogue)
+        self.assertIn("encode_dispatch_source_index(", epilogue)
+        self.assertIn("localize_dispatch_expert(", epilogue)
+
+        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
+        self.assertIn("dispatch-public-identity", runner)
+        for mutation in (
+                "Mutation caught: destination-ranked cached slots.",
+                "Mutation caught: receiver-local source token bounds.",
+                "Mutation caught: global normal-mode receive routes."):
+            self.assertIn(mutation, runner)
+
     def test_production_api_does_not_bypass_transport_gate(self):
         production = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
         bindings = (ROOT / "csrc/python_api.cpp").read_text()
@@ -545,6 +608,14 @@ int main() {
             json.loads(result.stdout),
             {
                 "case_names": expected_cases,
+                "contract_checks": [
+                    "literal-gather",
+                    "independent-reference",
+                    "cached-handle-reuse",
+                    "rank-barriers",
+                    "distributed-failure-reduction",
+                    "buffer-cleanup",
+                ],
                 "dispatch_surface": "Buffer.dispatch",
                 "expected_world_size": 2,
                 "reference": "gathered-literal-inputs",

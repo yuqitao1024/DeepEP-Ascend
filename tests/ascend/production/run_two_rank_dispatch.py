@@ -1,4 +1,5 @@
 import argparse
+import ast
 import json
 import os
 import re
@@ -170,6 +171,35 @@ def _case_specs():
     }
 
 
+def _attribute_name(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _contract_methods():
+    with open(__file__, encoding="utf-8") as source_file:
+        tree = ast.parse(source_file.read(), filename=__file__)
+    matrix = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "DispatchMatrix")
+    return {
+        node.name: node for node in matrix.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _method_calls(method):
+    return [
+        _attribute_name(node.func) for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+    ]
+
+
 def _contract():
     specs = _case_specs()
     required_specs = set(REGULAR_CASES) | {
@@ -180,8 +210,46 @@ def _contract():
         "cached-reuse", "sequential-100-generations", "combine-gated",
         "invalid-expert-diagnostics"),
         "dispatch special-case registry is incomplete")
+    methods = _contract_methods()
+    gather_calls = _method_calls(methods["_gather_literals"])
+    dispatch_calls = _method_calls(methods["_dispatch_spec"])
+    cached_calls = _method_calls(methods["_run_cached"])
+    boundary_calls = _method_calls(methods["_case_boundary"])
+    run_calls = _method_calls(methods["run"])
+    _check(gather_calls.count("self.dist.all_gather") >= 2,
+           "literal gather coverage is missing")
+    for call in ("self._gather_literals", "self._reference",
+                 "self.buffer.dispatch", "self._verify_result"):
+        _check(call in dispatch_calls,
+               f"dispatch/reference path is missing {call}")
+    for call in ("self._dispatch_spec", "self._gather_literals",
+                 "self._reference", "self.buffer.dispatch"):
+        _check(call in cached_calls, f"cached path is missing {call}")
+    cached_dispatches = [
+        node for node in ast.walk(methods["_run_cached"])
+        if isinstance(node, ast.Call) and
+        _attribute_name(node.func) == "self.buffer.dispatch"]
+    _check(any(any(keyword.arg == "handle" for keyword in call.keywords)
+               for call in cached_dispatches),
+           "cached dispatch does not reuse a handle")
+    _check(boundary_calls.count("self.dist.barrier") >= 2,
+           "rank case barriers are missing")
+    _check("self.dist.all_reduce" in boundary_calls,
+           "distributed failure reduction is missing")
+    _check("self.buffer.destroy" in run_calls and any(
+               isinstance(node, ast.Try) and node.finalbody
+               for node in ast.walk(methods["run"])),
+           "buffer cleanup is not protected by finally")
     return {
         "case_names": list(CASE_NAMES),
+        "contract_checks": [
+            "literal-gather",
+            "independent-reference",
+            "cached-handle-reuse",
+            "rank-barriers",
+            "distributed-failure-reduction",
+            "buffer-cleanup",
+        ],
         "dispatch_surface": "Buffer.dispatch",
         "expected_world_size": WORLD_SIZE,
         "reference": "gathered-literal-inputs",
@@ -353,13 +421,21 @@ class DispatchMatrix:
                 if first_local_expert <= expert < last_local_expert:
                     expert_counts[expert] += 1
 
-        expert_prefix = []
+        expanded_starts = []
+        public_expert_prefix = []
         running = 0
-        for expert in range(NUM_EXPERTS):
-            expert_prefix.append(running)
-            running += self._aligned(
-                expert_counts[expert], spec.expert_alignment)
-        expert_prefix.append(running)
+        local_actual_counts = expert_counts[
+            first_local_expert:last_local_expert]
+        local_padded_counts = []
+        for actual_count in local_actual_counts:
+            expanded_starts.append(running)
+            padded_count = self._aligned(
+                actual_count, spec.expert_alignment)
+            local_padded_counts.append(padded_count)
+            public_expert_prefix.append(
+                running + actual_count if spec.do_expand else
+                running + padded_count)
+            running += padded_count
 
         local_routes = gathered["routes"][self.rank]
         destination_slots = self.torch.full(
@@ -381,21 +457,31 @@ class DispatchMatrix:
                     expert = int(route[lane].item())
                     if expert >= 0 and expert // local_experts == destination:
                         destination_slots[token, lane] = \
-                            destination * CAPACITY + slot
+                            self.rank * CAPACITY + slot
 
         source_metadata = self.torch.full(
             (len(incoming), NUM_TOPK + 2), -1, dtype=self.torch.int32)
         for record_index, record in enumerate(incoming):
-            source_metadata[record_index, 0] = record["source_token"]
-            source_metadata[record_index, 1] = record["master_lane"]
+            source_metadata[record_index, 0] = \
+                record["source_rank"] * CAPACITY + record["source_token"]
+            source_metadata[record_index, 1] = \
+                record["source_rank"] * NUM_TOPK + record["master_lane"]
 
         if not spec.do_expand:
             recv_x = self.torch.stack(
                 [record["x"] for record in incoming]) if incoming else \
                 self.torch.empty((0, HIDDEN), dtype=self.torch.bfloat16)
-            recv_topk_idx = self.torch.stack(
-                [record["route"] for record in incoming]) if incoming else \
-                self.torch.empty((0, NUM_TOPK), dtype=self.torch.int64)
+            if incoming:
+                recv_topk_idx = self.torch.stack(
+                    [record["route"] for record in incoming])
+                local_mask = (recv_topk_idx >= first_local_expert) & \
+                    (recv_topk_idx < last_local_expert)
+                recv_topk_idx = self.torch.where(
+                    local_mask, recv_topk_idx - first_local_expert,
+                    self.torch.full_like(recv_topk_idx, -1))
+            else:
+                recv_topk_idx = self.torch.empty(
+                    (0, NUM_TOPK), dtype=self.torch.int64)
             recv_weights = None
             if gathered["weights"] is not None:
                 recv_weights = self.torch.stack(
@@ -414,7 +500,8 @@ class DispatchMatrix:
                     expert = int(record["route"][lane].item())
                     if not first_local_expert <= expert < last_local_expert:
                         continue
-                    destination = expert_prefix[expert] + occurrences[expert]
+                    destination = expanded_starts[
+                        expert - first_local_expert] + occurrences[expert]
                     occurrences[expert] += 1
                     source_metadata[record_index, 2 + lane] = destination
                     recv_x[destination].copy_(record["x"])
@@ -431,11 +518,10 @@ class DispatchMatrix:
             "rank_prefix": self.torch.tensor(
                 rank_prefix, dtype=self.torch.int32),
             "expert_prefix": self.torch.tensor(
-                expert_prefix, dtype=self.torch.int32),
+                public_expert_prefix, dtype=self.torch.int32),
             "unaligned": self.torch.tensor(
-                expert_counts, dtype=self.torch.int32),
-            "per_expert": expert_counts[
-                first_local_expert:last_local_expert],
+                local_actual_counts, dtype=self.torch.int32),
+            "per_expert": local_padded_counts,
             "destination_slots": destination_slots,
             "source_metadata": source_metadata,
             "num_recv_tokens": len(incoming),
@@ -502,9 +588,11 @@ class DispatchMatrix:
 
         self._assert_tensor(
             handle.topk_idx, reference["local_routes"], "handle.topk_idx")
-        _check(handle.topk_idx is not local_routes and
-               handle.topk_idx.data_ptr() != local_routes.data_ptr(),
+        _check(handle.topk_idx is not local_routes,
                "handle.topk_idx was not copied")
+        if handle.topk_idx.numel() > 0:
+            _check(handle.topk_idx.data_ptr() != local_routes.data_ptr(),
+                   "handle.topk_idx shares nonempty storage")
         self._assert_tensor(
             handle.psum_num_recv_tokens_per_scaleup_rank,
             reference["rank_prefix"], "handle.rank_prefix")
@@ -696,8 +784,9 @@ class DispatchMatrix:
                 _check(expected in message,
                        f"invalid expert diagnostic omitted {expected!r}: "
                        f"{message}")
-            _check(re.search(r"peer=[01](?:\D|$)", message) is not None,
-                   f"invalid expert diagnostic omitted peer: {message}")
+            _check(re.search(
+                       rf"peer={self.rank}(?:\D|$)", message) is not None,
+                   f"invalid expert diagnostic peer mismatch: {message}")
             _check(re.search(r"generation=[1-9][0-9]*", message) is not None,
                    f"invalid expert diagnostic omitted generation: {message}")
             _check(elapsed < 30,

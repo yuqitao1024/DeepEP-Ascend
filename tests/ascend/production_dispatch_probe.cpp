@@ -20,6 +20,9 @@ struct Trace {
     int device = 0;
     std::uint64_t generation = 0;
     std::vector<std::uint64_t> generations;
+    std::vector<const void*> kernel_expert_prefixes;
+    std::vector<const void*> kernel_unaligned_counts;
+    bool cached_private_contract = true;
     bool bad_diagnostic = false;
     bool fail_d2h = false;
     bool fail_h2d = false;
@@ -81,27 +84,56 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
     ++trace.launches;
     trace.generation = a.generation;
     trace.generations.push_back(a.generation);
+    trace.kernel_expert_prefixes.push_back(a.prefix_per_expert);
+    trace.kernel_unaligned_counts.push_back(a.unaligned_per_expert);
     if (trace.fail_launch) return 73;
-    if (t.num_tokens == 0) return 0;
+    const bool cached = elastic::has_mode(t.mode_flags, elastic::CoreMode::kCached);
+    const bool expanded = elastic::has_mode(t.mode_flags, elastic::CoreMode::kExpanded);
+    const std::array<std::int32_t, 3> private_expert_prefix{0, 4, 4};
+    const std::array<std::int32_t, 2> private_unaligned{2, 0};
+    if (t.num_tokens == 0) {
+        a.prefix_per_rank[0] = 0;
+        a.prefix_per_rank[1] = 0;
+        std::memset(a.prefix_per_expert, 0,
+                    private_expert_prefix.size() * sizeof(std::int32_t));
+        std::memset(a.unaligned_per_expert, 0,
+                    private_unaligned.size() * sizeof(std::int32_t));
+        return 0;
+    }
+    if (cached &&
+        (std::memcmp(a.prefix_per_expert, private_expert_prefix.data(),
+                     sizeof(private_expert_prefix)) != 0 ||
+         std::memcmp(a.unaligned_per_expert, private_unaligned.data(),
+                     sizeof(private_unaligned)) != 0))
+        trace.cached_private_contract = false;
     const std::array<std::uint16_t, 16> payload{
         0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108,
         0x0201, 0x0202, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207, 0x0208};
+    std::memset(a.recv_x, 0, (expanded ? 4 : 2) * 8 * sizeof(std::uint16_t));
     std::memcpy(a.recv_x, payload.data(), payload.size() * sizeof(payload[0]));
-    a.recv_topk_indices[0] = 101;
-    a.recv_topk_indices[1] = 103;
+    a.recv_topk_indices[0] = 0;
+    a.recv_topk_indices[1] = -1;
+    a.recv_topk_indices[2] = 0;
+    a.recv_topk_indices[3] = -1;
     if (a.recv_topk_weights != nullptr) {
         a.recv_topk_weights[0] = 0.25F;
-        a.recv_topk_weights[1] = 0.75F;
+        a.recv_topk_weights[1] = expanded ? 0.5F : 0.75F;
+        a.recv_topk_weights[2] = expanded ? 0.0F : 0.5F;
+        a.recv_topk_weights[3] = expanded ? 0.0F : 1.0F;
     }
     a.prefix_per_rank[0] = 1;
     a.prefix_per_rank[1] = 2;
-    a.prefix_per_expert[0] = 0;
-    a.prefix_per_expert[1] = 1;
-    a.prefix_per_expert[2] = 2;
-    a.unaligned_per_expert[0] = 1;
-    a.unaligned_per_expert[1] = 1;
-    a.destination_slots[0] = 5;
-    const std::array<std::int32_t, 6> metadata{0, 101, 901, 1, 103, 903};
+    std::memcpy(a.prefix_per_expert, private_expert_prefix.data(),
+                sizeof(private_expert_prefix));
+    std::memcpy(a.unaligned_per_expert, private_unaligned.data(),
+                sizeof(private_unaligned));
+    a.destination_slots[0] = 0;
+    a.destination_slots[1] = 0;
+    const std::array<std::int32_t, 8> normal_metadata{
+        1, 0, -1, -1, 7, 2, -1, -1};
+    const std::array<std::int32_t, 8> expanded_metadata{
+        1, 0, 0, -1, 7, 2, 1, -1};
+    const auto& metadata = expanded ? expanded_metadata : normal_metadata;
     std::memcpy(
         a.source_metadata, metadata.data(), metadata.size() * sizeof(metadata[0]));
     return 0;
@@ -116,46 +148,51 @@ struct Inputs {
     Tensor x = torch::empty(
         {1, 8}, torch::TensorOptions().dtype(torch::kBFloat16));
     Tensor idx = torch::empty(
-        {1, 1}, torch::TensorOptions().dtype(torch::kLong));
+        {1, 2}, torch::TensorOptions().dtype(torch::kLong));
     Tensor weights = torch::empty(
-        {1, 1}, torch::TensorOptions().dtype(torch::kFloat));
+        {1, 2}, torch::TensorOptions().dtype(torch::kFloat));
 
     Inputs() {
         const std::array<std::uint16_t, 8> payload{
             0x1001, 0x1002, 0x1003, 0x1004,
             0x1005, 0x1006, 0x1007, 0x1008};
         std::memcpy(x.data_ptr(), payload.data(), payload.size() * sizeof(payload[0]));
-        idx.data_ptr<std::int64_t>()[0] = 17;
+        idx.data_ptr<std::int64_t>()[0] = 0;
+        idx.data_ptr<std::int64_t>()[1] = 1;
         weights.data_ptr<float>()[0] = 0.5F;
+        weights.data_ptr<float>()[1] = 0.75F;
     }
 };
 
 auto uncached_dispatch(
     Buffer& buffer, const Inputs& inputs,
-    const std::optional<Tensor>& weights, bool copy_handle = true) {
+    const std::optional<Tensor>& weights, bool copy_handle = true,
+    bool expanded = false) {
     const std::optional<torch::Tensor> none;
     const std::optional<int> no_int;
     const std::optional<std::vector<int>> no_list;
     const std::optional<deep_ep::ascend::EventHandle> no_event;
     return buffer.dispatch(
         inputs.x, none, inputs.idx, weights, none, no_int, no_int, no_list,
-        none, none, none, none, none, none, none, 4, 2, 1, 1, 0, no_event, no_event,
-        false, false, copy_handle, true, false, false, false);
+        none, none, none, none, none, none, none, 4, 2, 4, 1, 0, no_event, no_event,
+        false, false, copy_handle, true, expanded, false, false);
 }
 
 template <typename Result>
 auto cached_dispatch(
     Buffer& buffer, const Inputs& inputs, const Result& handle,
-    const Tensor& rank_prefix) {
+    const Tensor& rank_prefix, bool expanded = false,
+    const std::optional<std::vector<int>>& per_expert = std::nullopt) {
     const std::optional<Tensor> none;
     const std::optional<deep_ep::ascend::EventHandle> no_event;
     return buffer.dispatch(
         inputs.x, none, inputs.idx, inputs.weights, none,
-        std::get<5>(handle), std::get<6>(handle), std::get<7>(handle),
+        std::get<5>(handle), std::get<6>(handle),
+        per_expert.has_value() ? *per_expert : std::get<7>(handle),
         rank_prefix, std::get<9>(handle), std::get<10>(handle),
         std::get<12>(handle), std::get<13>(handle), std::get<11>(handle), none,
-        4, 2, 1, 1, 0, no_event, no_event,
-        false, false, false, false, false, false, false);
+        4, 2, 4, 1, 0, no_event, no_event,
+        false, false, false, false, expanded, false, false);
 }
 
 bool has_shape(const Tensor& tensor, std::initializer_list<std::int64_t> shape) {
@@ -173,43 +210,59 @@ bool has_values(const Tensor& tensor, const std::array<Value, Size>& expected) {
 
 template <typename Result>
 bool has_exact_result(
-    const Result& result, bool expect_weights, bool expect_copied_index) {
+    const Result& result, bool expect_weights, bool expect_copied_index,
+    bool expanded = false) {
     const std::array<std::uint16_t, 16> payload{
         0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108,
         0x0201, 0x0202, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207, 0x0208};
-    const std::array<std::int64_t, 2> indices{101, 103};
-    const std::array<float, 2> weights{0.25F, 0.75F};
-    const std::array<std::int64_t, 1> copied_index{17};
+    const std::array<std::uint16_t, 32> expanded_payload{
+        0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108,
+        0x0201, 0x0202, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207, 0x0208,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const std::array<std::int64_t, 4> indices{0, -1, 0, -1};
+    const std::array<float, 4> weights{0.25F, 0.75F, 0.5F, 1.0F};
+    const std::array<float, 4> expanded_weights{0.25F, 0.5F, 0.0F, 0.0F};
+    const std::array<std::int64_t, 2> copied_index{0, 1};
     const std::array<std::int32_t, 2> rank_prefix{1, 2};
-    const std::array<std::int32_t, 3> expert_prefix{0, 1, 2};
-    const std::array<std::int32_t, 2> unaligned{1, 1};
-    const std::array<std::int32_t, 6> metadata{0, 101, 901, 1, 103, 903};
-    const std::array<std::int32_t, 1> slots{5};
-    if (!has_shape(std::get<0>(result), {2, 8}) ||
+    const std::array<std::int32_t, 1> normal_prefix{4};
+    const std::array<std::int32_t, 1> expanded_prefix{2};
+    const std::array<std::int32_t, 1> unaligned{2};
+    const std::array<std::int32_t, 8> normal_metadata{
+        1, 0, -1, -1, 7, 2, -1, -1};
+    const std::array<std::int32_t, 8> expanded_metadata{
+        1, 0, 0, -1, 7, 2, 1, -1};
+    const std::array<std::int32_t, 2> slots{0, 0};
+    if (!has_shape(std::get<0>(result), {expanded ? 4 : 2, 8}) ||
         std::get<0>(result).scalar_type() != torch::kBFloat16 ||
-        !has_values(std::get<0>(result), payload) ||
+        (expanded ? !has_values(std::get<0>(result), expanded_payload) :
+                    !has_values(std::get<0>(result), payload)) ||
         std::get<1>(result).has_value() ||
-        !std::get<2>(result).has_value() ||
-        !has_shape(*std::get<2>(result), {2, 1}) ||
-        !has_values(*std::get<2>(result), indices) ||
+        std::get<2>(result).has_value() == expanded ||
+        (!expanded && (!has_shape(*std::get<2>(result), {2, 2}) ||
+                       !has_values(*std::get<2>(result), indices))) ||
         std::get<3>(result).has_value() != expect_weights ||
-        (expect_weights && (!has_shape(*std::get<3>(result), {2, 1}) ||
-                            !has_values(*std::get<3>(result), weights))) ||
+        (expect_weights &&
+         ((expanded ? !has_shape(*std::get<3>(result), {4}) :
+                      !has_shape(*std::get<3>(result), {2, 2})) ||
+          (expanded ? !has_values(*std::get<3>(result), expanded_weights) :
+                      !has_values(*std::get<3>(result), weights)))) ||
         std::get<4>(result).has_value() != expect_copied_index ||
         (expect_copied_index &&
-         (!has_shape(*std::get<4>(result), {1, 1}) ||
+         (!has_shape(*std::get<4>(result), {1, 2}) ||
           !has_values(*std::get<4>(result), copied_index))) ||
-        std::get<5>(result) != 2 || std::get<6>(result) != 2 ||
-        std::get<7>(result) != std::vector<int>{1} ||
+        std::get<5>(result) != 2 || std::get<6>(result) != 4 ||
+        std::get<7>(result) != std::vector<int>{4} ||
         !has_shape(std::get<8>(result), {2}) ||
         !has_values(std::get<8>(result), rank_prefix) ||
-        !has_shape(std::get<9>(result), {3}) ||
-        !has_values(std::get<9>(result), expert_prefix) ||
-        !has_shape(std::get<10>(result), {2}) ||
+        !has_shape(std::get<9>(result), {1}) ||
+        (expanded ? !has_values(std::get<9>(result), expanded_prefix) :
+                    !has_values(std::get<9>(result), normal_prefix)) ||
+        !has_shape(std::get<10>(result), {1}) ||
         !has_values(std::get<10>(result), unaligned) ||
-        !has_shape(std::get<11>(result), {2, 3}) ||
-        !has_values(std::get<11>(result), metadata) ||
-        !has_shape(std::get<12>(result), {1, 1}) ||
+        !has_shape(std::get<11>(result), {2, 4}) ||
+        (expanded ? !has_values(std::get<11>(result), expanded_metadata) :
+                    !has_values(std::get<11>(result), normal_metadata)) ||
+        !has_shape(std::get<12>(result), {1, 2}) ||
         !has_values(std::get<12>(result), slots) ||
         !std::get<13>(result).has_value() ||
         !has_shape(*std::get<13>(result), {96}) ||
@@ -227,8 +280,10 @@ bool has_exact_result(
         descriptor.topology.scale_out_rank == 0 &&
         descriptor.topology.scale_out_size == 1 && descriptor.num_tokens == 1 &&
         descriptor.hidden == 8 && descriptor.num_experts == 2 &&
-        descriptor.num_topk == 1 && descriptor.expert_alignment == 1 &&
-        descriptor.num_max_tokens_per_rank == 4 && descriptor.mode_flags == 0;
+        descriptor.num_topk == 2 && descriptor.expert_alignment == 4 &&
+        descriptor.num_max_tokens_per_rank == 4 &&
+        descriptor.mode_flags == (expanded ?
+            elastic::mode_bit(elastic::CoreMode::kExpanded) : 0);
 }
 
 bool exact_and_cached_probe() {
@@ -241,7 +296,9 @@ bool exact_and_cached_probe() {
     const std::optional<Tensor> weights = inputs.weights;
     auto result = uncached_dispatch(*buffer, inputs, weights);
     if (!has_exact_result(result, true, true) || trace.launches != 1 ||
-        trace.generations != std::vector<std::uint64_t>{1})
+        trace.generations != std::vector<std::uint64_t>{1} ||
+        trace.kernel_expert_prefixes[0] == std::get<9>(result).data_ptr() ||
+        trace.kernel_unaligned_counts[0] == std::get<10>(result).data_ptr())
         return false;
 
     auto malformed_rank_prefix = std::get<8>(result).clone();
@@ -258,8 +315,23 @@ bool exact_and_cached_probe() {
 
     auto cached = cached_dispatch(*buffer, inputs, result, std::get<8>(result));
     if (!has_exact_result(cached, true, false) || trace.launches != 2 ||
-        trace.generations != std::vector<std::uint64_t>({1, 2}))
+        trace.generations != std::vector<std::uint64_t>({1, 2}) ||
+        !trace.cached_private_contract ||
+        trace.kernel_expert_prefixes[1] == std::get<9>(result).data_ptr() ||
+        trace.kernel_unaligned_counts[1] == std::get<10>(result).data_ptr())
         return false;
+
+    try {
+        (void)cached_dispatch(
+            *buffer, inputs, result, std::get<8>(result), false,
+            std::vector<int>{2});
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("cached expert counts mismatch") ==
+                std::string::npos ||
+            trace.launches != 2)
+            return false;
+    }
 
     auto wrong_device_rank_prefix = torch::empty(
         {2}, torch::TensorOptions().dtype(torch::kInt).device(1));
@@ -281,6 +353,27 @@ bool exact_and_cached_probe() {
     return has_exact_result(no_weight_result, false, true) &&
         trace.launches == 3 &&
         trace.generations == std::vector<std::uint64_t>({1, 2, 3});
+}
+
+bool expanded_public_contract_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources) return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> weights = inputs.weights;
+    auto result = uncached_dispatch(*buffer, inputs, weights, true, true);
+    if (!has_exact_result(result, true, true, true) || trace.launches != 1 ||
+        trace.kernel_expert_prefixes[0] == std::get<9>(result).data_ptr() ||
+        trace.kernel_unaligned_counts[0] == std::get<10>(result).data_ptr())
+        return false;
+    auto cached = cached_dispatch(
+        *buffer, inputs, result, std::get<8>(result), true);
+    return has_exact_result(cached, true, false, true) &&
+        trace.launches == 2 && trace.cached_private_contract &&
+        trace.kernel_expert_prefixes[1] != std::get<9>(result).data_ptr() &&
+        trace.kernel_unaligned_counts[1] != std::get<10>(result).data_ptr();
 }
 
 bool descriptor_copy_retry_probe() {
@@ -415,6 +508,7 @@ int main() {
         }
     };
     check(exact_and_cached_probe(), "exact outputs and cached preflight retry");
+    check(expanded_public_contract_probe(), "expanded public expert prefix");
     check(descriptor_copy_retry_probe(), "descriptor copy retry");
     check(stream_retry_probe(), "stream acquisition retry");
     check(launch_poison_probe(), "launch failure poisoning");

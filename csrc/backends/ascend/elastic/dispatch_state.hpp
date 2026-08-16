@@ -155,6 +155,45 @@ is_dispatch_expert_local(
            unsigned_expert - first_local_expert < num_local_experts;
 }
 
+DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr bool
+is_dispatch_local_index(
+    std::int32_t local_index, std::uint64_t extent) noexcept {
+    return local_index >= 0 &&
+           static_cast<std::uint64_t>(local_index) < extent;
+}
+
+DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr std::int32_t
+encode_dispatch_source_index(
+    std::uint64_t source_rank, std::uint64_t extent,
+    std::uint64_t local_index) noexcept {
+    return static_cast<std::int32_t>(source_rank * extent + local_index);
+}
+
+DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr int
+decode_dispatch_source_rank(
+    std::int32_t encoded_index, std::uint64_t extent) noexcept {
+    return encoded_index < 0 || extent == 0 ? -1 :
+        static_cast<int>(
+            static_cast<std::uint64_t>(encoded_index) / extent);
+}
+
+DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr std::int32_t
+decode_dispatch_local_index(
+    std::int32_t encoded_index, std::uint64_t extent) noexcept {
+    return encoded_index < 0 || extent == 0 ? -1 :
+        static_cast<std::int32_t>(
+            static_cast<std::uint64_t>(encoded_index) % extent);
+}
+
+DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr std::int64_t
+localize_dispatch_expert(
+    std::int64_t expert, std::uint64_t first_local_expert,
+    std::uint64_t num_local_experts) noexcept {
+    return is_dispatch_expert_local(
+               expert, first_local_expert, num_local_experts) ?
+        expert - static_cast<std::int64_t>(first_local_expert) : -1;
+}
+
 inline DispatchHandleStatus validate_dispatch_handle(
     const DispatchHandleDescriptor& expected,
     const DispatchHandleDescriptor& actual) {

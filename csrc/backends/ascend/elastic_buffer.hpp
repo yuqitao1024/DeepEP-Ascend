@@ -646,9 +646,19 @@ public:
         torch::Tensor unaligned;
         torch::Tensor destination_slots;
         torch::Tensor source_metadata;
+        auto kernel_expert_prefix = torch::empty(
+            {num_experts + 1}, int_options);
+        auto kernel_unaligned = torch::empty(
+            {num_experts}, int_options);
         std::vector<std::int32_t> host_rank_prefix(num_ranks_);
-        std::vector<std::int32_t> host_expert_prefix(num_experts + 1);
-        std::vector<std::int32_t> host_unaligned(num_experts);
+        std::vector<std::int32_t> host_kernel_expert_prefix(num_experts + 1);
+        std::vector<std::int32_t> host_kernel_unaligned(num_experts);
+        std::vector<std::int32_t> host_expert_prefix(local_experts);
+        std::vector<std::int32_t> host_unaligned(local_experts);
+        std::vector<int> per_expert_list;
+        int num_expanded_tokens = 0;
+        const int first_local_expert =
+            rank_idx_ * static_cast<int>(local_experts);
         if (cached_mode) {
             TORCH_CHECK(cached_num_expanded_tokens.has_value() &&
                             cached_num_recv_tokens_per_expert_list.has_value() &&
@@ -680,9 +690,9 @@ public:
             TORCH_CHECK(cached_psum_num_recv_tokens_per_scaleup_rank->size(0) ==
                                 static_cast<int64_t>(num_ranks_) &&
                             cached_psum_num_recv_tokens_per_expert->size(0) ==
-                                static_cast<int64_t>(experts + 1) &&
+                                static_cast<int64_t>(local_experts) &&
                             cached_num_unaligned_recv_tokens_per_expert->size(0) ==
-                                static_cast<int64_t>(experts) &&
+                                static_cast<int64_t>(local_experts) &&
                             cached_dst_buffer_slot_idx->sizes() == topk_idx.sizes() &&
                             cached_recv_src_metadata->size(0) == *cached_num_recv_tokens &&
                             cached_recv_src_metadata->size(1) ==
@@ -720,30 +730,64 @@ public:
                 host_unaligned.size() * sizeof(std::int32_t));
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
-            TORCH_CHECK(host_rank_prefix.back() == *cached_num_recv_tokens &&
-                            host_expert_prefix.back() == *cached_num_expanded_tokens,
+            TORCH_CHECK(host_rank_prefix.back() == *cached_num_recv_tokens,
                         "DeepEP Ascend backend: dispatch cached prefix tail mismatch");
             for (std::size_t index = 0; index < host_rank_prefix.size(); ++index)
                 TORCH_CHECK(host_rank_prefix[index] >= 0 &&
                                 (index == 0 || host_rank_prefix[index] >=
                                                     host_rank_prefix[index - 1]),
                             "DeepEP Ascend backend: dispatch cached rank prefix is invalid");
-            for (std::size_t index = 0; index < host_expert_prefix.size(); ++index)
-                TORCH_CHECK(host_expert_prefix[index] >= 0 &&
-                                (index == 0 || host_expert_prefix[index] >=
-                                                    host_expert_prefix[index - 1]),
-                            "DeepEP Ascend backend: dispatch cached expert prefix is invalid");
-            const int first_local_expert =
-                rank_idx_ * static_cast<int>(local_experts);
-            for (int expert = 0; expert < static_cast<int>(local_experts); ++expert)
-                TORCH_CHECK(host_unaligned[first_local_expert + expert] >= 0 &&
-                                host_unaligned[first_local_expert + expert] ==
-                                    (*cached_num_recv_tokens_per_expert_list)[expert],
+            std::int32_t expanded_tail = 0;
+            for (int expert = 0; expert < num_experts; ++expert) {
+                host_kernel_expert_prefix[expert] = expanded_tail;
+                if (expert < first_local_expert ||
+                    expert >= first_local_expert +
+                                  static_cast<int>(local_experts))
+                    continue;
+                const int local_expert = expert - first_local_expert;
+                const std::int32_t actual = host_unaligned[local_expert];
+                std::uint64_t aligned_actual = 0;
+                TORCH_CHECK(actual >= 0 && align_without_overflow(
+                                static_cast<std::uint64_t>(actual), alignment,
+                                &aligned_actual) &&
+                                aligned_actual <= static_cast<std::uint64_t>(
+                                    std::numeric_limits<int>::max()) &&
+                                (*cached_num_recv_tokens_per_expert_list)[local_expert] ==
+                                    static_cast<int>(aligned_actual),
                             "DeepEP Ascend backend: dispatch cached expert counts mismatch");
+                TORCH_CHECK(aligned_actual <= static_cast<std::uint64_t>(
+                                std::numeric_limits<int>::max() - expanded_tail),
+                            "DeepEP Ascend backend: dispatch cached expert counts mismatch");
+                const std::int32_t expected_public_prefix = do_expand ?
+                    expanded_tail + actual :
+                    expanded_tail + static_cast<std::int32_t>(aligned_actual);
+                TORCH_CHECK(host_expert_prefix[local_expert] ==
+                                expected_public_prefix,
+                            "DeepEP Ascend backend: dispatch cached expert prefix is invalid");
+                host_kernel_unaligned[expert] = actual;
+                expanded_tail += static_cast<std::int32_t>(aligned_actual);
+            }
+            host_kernel_expert_prefix[num_experts] = expanded_tail;
+            TORCH_CHECK(expanded_tail == *cached_num_expanded_tokens,
+                        "DeepEP Ascend backend: dispatch cached prefix tail mismatch");
+            status = resources_->copy_from_host(
+                kernel_expert_prefix.data_ptr(), host_kernel_expert_prefix.data(),
+                host_kernel_expert_prefix.size() * sizeof(std::int32_t));
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            status = resources_->copy_from_host(
+                kernel_unaligned.data_ptr(), host_kernel_unaligned.data(),
+                host_kernel_unaligned.size() * sizeof(std::int32_t));
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            per_expert_list = *cached_num_recv_tokens_per_expert_list;
+            num_expanded_tokens = *cached_num_expanded_tokens;
         } else {
             rank_prefix = torch::empty({num_ranks_}, int_options);
-            expert_prefix = torch::empty({num_experts + 1}, int_options);
-            unaligned = torch::empty({num_experts}, int_options);
+            expert_prefix = torch::empty(
+                {static_cast<int64_t>(local_experts)}, int_options);
+            unaligned = torch::empty(
+                {static_cast<int64_t>(local_experts)}, int_options);
             destination_slots = torch::empty({x.size(0), topk_idx.size(1)}, int_options);
             source_metadata = torch::empty(
                 {static_cast<int64_t>(max_recv_tokens), topk_idx.size(1) + 2},
@@ -769,14 +813,19 @@ public:
         auto copied_topk_idx = !cached_mode && do_handle_copy ?
             std::optional<torch::Tensor>(topk_idx.clone()) :
             std::optional<torch::Tensor>();
-        auto descriptor_tensor = torch::empty(
-            {static_cast<int64_t>(sizeof(elastic::DispatchHandleDescriptor))},
-            metadata_options);
-        auto status = resources_->copy_from_host(
-            descriptor_tensor.data_ptr(), &expected_descriptor,
-            sizeof(expected_descriptor));
-        if (!status.ok())
-            raise_transport_status(status, rank_idx_);
+        auto descriptor_tensor = cached_mode ?
+            *cached_token_metadata_at_forward :
+            torch::empty(
+                {static_cast<int64_t>(sizeof(elastic::DispatchHandleDescriptor))},
+                metadata_options);
+        auto status = transport::TransportStatus{};
+        if (!cached_mode) {
+            status = resources_->copy_from_host(
+                descriptor_tensor.data_ptr(), &expected_descriptor,
+                sizeof(expected_descriptor));
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+        }
 
         elastic::DispatchArguments arguments{};
         arguments.x = x.data_ptr();
@@ -790,8 +839,10 @@ public:
         arguments.recv_topk_weights = recv_topk_weights.has_value() ?
             recv_topk_weights->data_ptr<float>() : nullptr;
         arguments.prefix_per_rank = rank_prefix.data_ptr<std::int32_t>();
-        arguments.prefix_per_expert = expert_prefix.data_ptr<std::int32_t>();
-        arguments.unaligned_per_expert = unaligned.data_ptr<std::int32_t>();
+        arguments.prefix_per_expert =
+            kernel_expert_prefix.data_ptr<std::int32_t>();
+        arguments.unaligned_per_expert =
+            kernel_unaligned.data_ptr<std::int32_t>();
         arguments.destination_slots = destination_slots.data_ptr<std::int32_t>();
         arguments.source_metadata = source_metadata.data_ptr<std::int32_t>();
         arguments.timeout_cycles = barrier_timeout_cycles_;
@@ -827,34 +878,74 @@ public:
             diagnostic.error != transport::DeviceTransportError::kNone ||
             diagnostic.generation != attempt.generation())
             raise_dispatch_diagnostic(diagnostic, "reported failure");
-        if (do_cpu_sync) {
+        if (!cached_mode) {
             status = resources_->copy_to_host(
                 host_rank_prefix.data(), rank_prefix.data_ptr(),
                 host_rank_prefix.size() * sizeof(std::int32_t));
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
             status = resources_->copy_to_host(
-                host_expert_prefix.data(), expert_prefix.data_ptr(),
-                host_expert_prefix.size() * sizeof(std::int32_t));
+                host_kernel_expert_prefix.data(),
+                kernel_expert_prefix.data_ptr(),
+                host_kernel_expert_prefix.size() * sizeof(std::int32_t));
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
             status = resources_->copy_to_host(
-                host_unaligned.data(), unaligned.data_ptr(),
+                host_kernel_unaligned.data(), kernel_unaligned.data_ptr(),
+                host_kernel_unaligned.size() * sizeof(std::int32_t));
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            std::int32_t expanded_tail = 0;
+            for (int expert = 0; expert < num_experts; ++expert) {
+                const std::int32_t actual = host_kernel_unaligned[expert];
+                const bool local = expert >= first_local_expert &&
+                    expert < first_local_expert +
+                                 static_cast<int>(local_experts);
+                std::uint64_t aligned_actual = 0;
+                TORCH_CHECK(actual >= 0 &&
+                                (local || actual == 0) &&
+                                host_kernel_expert_prefix[expert] ==
+                                    expanded_tail &&
+                                align_without_overflow(
+                                    static_cast<std::uint64_t>(actual),
+                                    alignment, &aligned_actual) &&
+                                aligned_actual <= static_cast<std::uint64_t>(
+                                    std::numeric_limits<int>::max() -
+                                    expanded_tail),
+                            "DeepEP Ascend backend: dispatch returned invalid expert counts");
+                if (local) {
+                    const int local_expert = expert - first_local_expert;
+                    host_unaligned[local_expert] = actual;
+                    host_expert_prefix[local_expert] = do_expand ?
+                        expanded_tail + actual :
+                        expanded_tail +
+                            static_cast<std::int32_t>(aligned_actual);
+                    per_expert_list.push_back(
+                        static_cast<int>(aligned_actual));
+                }
+                expanded_tail += static_cast<std::int32_t>(aligned_actual);
+            }
+            TORCH_CHECK(host_kernel_expert_prefix[num_experts] ==
+                            expanded_tail,
+                        "DeepEP Ascend backend: dispatch returned invalid expert counts");
+            num_expanded_tokens = expanded_tail;
+            status = resources_->copy_from_host(
+                expert_prefix.data_ptr(), host_expert_prefix.data(),
+                host_expert_prefix.size() * sizeof(std::int32_t));
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            status = resources_->copy_from_host(
+                unaligned.data_ptr(), host_unaligned.data(),
                 host_unaligned.size() * sizeof(std::int32_t));
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
         }
         const int num_recv_tokens = host_rank_prefix.back();
-        const int num_expanded_tokens = host_expert_prefix.back();
         TORCH_CHECK(num_recv_tokens >= 0 &&
                         num_recv_tokens <= static_cast<int>(max_recv_tokens) &&
                         num_expanded_tokens >= 0 &&
                         num_expanded_tokens <= static_cast<int>(expanded_records),
                     "DeepEP Ascend backend: dispatch returned invalid output counts");
-        std::vector<int> per_expert_list;
-        const int first_local_expert = rank_idx_ * static_cast<int>(local_experts);
-        for (int expert = 0; expert < static_cast<int>(local_experts); ++expert)
-            per_expert_list.push_back(host_unaligned[first_local_expert + expert]);
         attempt.complete();
         const int output_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
         auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
