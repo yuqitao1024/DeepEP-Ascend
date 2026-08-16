@@ -16,6 +16,8 @@ NUM_TOPK = 2
 CAPACITY = 4
 BF16_TOLERANCE = 1 / 128
 PADDING_SENTINEL = -64.0
+ORDER_VARIANT = "order-sensitive"
+ORDER_BOUNDARY = float(1 << 24)
 
 CASE_NAMES = (
     "normal",
@@ -54,6 +56,9 @@ class CaseSpec:
     do_zero_padding: bool = False
     expert_alignment: int = 1
     allow_multiple_reduction: bool = True
+    num_topk: int = NUM_TOPK
+    require_padding: bool = False
+    transform_variant: object = 0
 
 
 def _payloads(counts, offset):
@@ -78,9 +83,10 @@ def _case_specs():
             (((0, 1), (2, 0)), ((3, 2), (1, 3))),
             do_expand=True),
         "expanded-single-reduction": CaseSpec(
-            "expanded-single-reduction", _payloads((2, 2), 5),
-            (((0, 1), (2, -1)), ((3, 2), (0, 3))),
-            do_expand=True, allow_multiple_reduction=False),
+            "expanded-single-reduction", _payloads((1, 1), 5),
+            (((0, 2, 3),), ((0, 2, 3),)),
+            do_expand=True, allow_multiple_reduction=False, num_topk=3,
+            transform_variant=ORDER_VARIANT),
         "weights": CaseSpec(
             "weights", _payloads((2, 2), 7),
             (((0, 2), (1, -1)), ((2, -1), (3, 0))),
@@ -108,7 +114,8 @@ def _case_specs():
         "aligned-padding": CaseSpec(
             "aligned-padding", _payloads((2, 1), 21),
             (((0, 2), (0, -1)), ((1, 3),)),
-            do_expand=True, do_zero_padding=True, expert_alignment=4),
+            do_expand=True, do_zero_padding=True, expert_alignment=4,
+            require_padding=True),
         "aligned-near-capacity": CaseSpec(
             "aligned-near-capacity", _payloads((4, 4), 23),
             (((0, 2), (0, 3), (1, 2), (1, 3)),
@@ -133,6 +140,15 @@ def _case_specs():
 
 
 def _synthetic_transform(origin_rank, origin_token, lane, variant=0):
+    if variant == ORDER_VARIANT:
+        order_columns = (
+            (ORDER_BOUNDARY, 0.5),
+            (0.5, -ORDER_BOUNDARY),
+            (-ORDER_BOUNDARY, ORDER_BOUNDARY),
+        )
+        first, second = order_columns[lane]
+        identity = 1 + origin_rank * 16 + origin_token * 4 + lane * 2
+        return [first, second, float(identity), float(identity + 1)]
     base = 1 + origin_rank * 16 + origin_token * 4 + lane * 2 + variant
     return [float(base + column) for column in range(HIDDEN)]
 
@@ -141,13 +157,23 @@ def _float32_add(left, right):
     return struct.unpack("<f", struct.pack("<f", left + right))[0]
 
 
-def _reference_values(routes, origin_rank, variant=0):
+def _integer(value):
+    return int(value.item()) if hasattr(value, "item") else int(value)
+
+
+def _reference_values(routes, origin_rank, variant=0,
+                      contributor_order=None, lane_order=None):
     local_experts = NUM_EXPERTS // WORLD_SIZE
+    contributor_order = tuple(range(WORLD_SIZE)) if contributor_order is None \
+        else tuple(contributor_order)
     result = []
     for origin_token, token_routes in enumerate(routes):
+        lane_order_for_token = tuple(range(len(token_routes))) \
+            if lane_order is None else tuple(lane_order)
         values = [0.0] * HIDDEN
-        for contributor_rank in range(WORLD_SIZE):
-            for lane, expert in enumerate(token_routes):
+        for contributor_rank in contributor_order:
+            for lane in lane_order_for_token:
+                expert = _integer(token_routes[lane])
                 if expert < 0 or expert // local_experts != contributor_rank:
                     continue
                 transform = _synthetic_transform(
@@ -157,6 +183,51 @@ def _reference_values(routes, origin_rank, variant=0):
                         values[column], transform[column])
         result.append(values)
     return result
+
+
+def _masked_weight_values(routes, weights):
+    return [
+        [float(weight) if _integer(expert) >= 0 else 0.0
+         for expert, weight in zip(token_routes, token_weights)]
+        for token_routes, token_weights in zip(routes, weights)
+    ]
+
+
+def _apply_biases_once(values, biases):
+    result = [list(row) for row in values]
+    for bias in biases:
+        for row, bias_row in zip(result, bias):
+            for column in range(HIDDEN):
+                row[column] = _float32_add(row[column], bias_row[column])
+    return result
+
+
+def _expanded_reference_rows(num_rows, metadata, gathered_routes,
+                             contributor_rank, variant):
+    rows = [[PADDING_SENTINEL] * HIDDEN for _ in range(num_rows)]
+    mapped = set()
+    for metadata_row in metadata:
+        encoded_source = _integer(metadata_row[0])
+        source_rank, source_token = divmod(encoded_source, CAPACITY)
+        num_topk = len(metadata_row) - 2
+        for lane in range(num_topk):
+            destination = _integer(metadata_row[2 + lane])
+            if destination < 0:
+                continue
+            expert = _integer(gathered_routes[source_rank][source_token][lane])
+            local_experts = NUM_EXPERTS // WORLD_SIZE
+            if expert // local_experts != contributor_rank:
+                raise AssertionError("expanded metadata names a nonlocal lane")
+            if destination in mapped or not 0 <= destination < num_rows:
+                raise AssertionError("expanded metadata names an invalid row")
+            mapped.add(destination)
+            rows[destination] = _synthetic_transform(
+                source_rank, source_token, lane, variant)
+    return {
+        "rows": rows,
+        "mapped_rows": sorted(mapped),
+        "padding_rows": [row for row in range(num_rows) if row not in mapped],
+    }
 
 
 def _reference_matrix(routes, origin_rank, variant=0):
@@ -214,6 +285,259 @@ def _check(condition, message):
         raise AssertionError(message)
 
 
+def _is_local_npu_tensor(tensor, device_index):
+    device = getattr(tensor, "device", None)
+    return device is not None and device.type == "npu" and \
+        device.index == device_index
+
+
+def _validate_expansion_mode(actual, expected):
+    _check(actual == expected,
+           "dispatch handle expansion mode does not match the case")
+
+
+class CleanupFailures(RuntimeError):
+    def __init__(self, failures):
+        self.failures = tuple(failures)
+        super().__init__("; ".join(str(failure) for failure in self.failures))
+
+
+class FailureSynchronizationError(RuntimeError):
+    pass
+
+
+def _cleanup_runtime(matrix, destroy_process_group):
+    failures = []
+    if matrix is not None:
+        try:
+            matrix.destroy()
+        except CleanupFailures as error:
+            failures.extend(error.failures)
+        except BaseException as error:
+            failures.append(error)
+    try:
+        destroy_process_group()
+    except BaseException as error:
+        failures.append(error)
+    if failures:
+        raise CleanupFailures(failures)
+
+
+def _behavior_fixtures():
+    order_spec = _case_specs()["expanded-single-reduction"]
+    _check(order_spec.do_expand and
+           not order_spec.allow_multiple_reduction and
+           order_spec.num_topk == 3 and
+           order_spec.transform_variant == ORDER_VARIANT,
+           "the public order-sensitive case is not registered")
+    order_routes = order_spec.routes[0]
+    canonical = _reference_values(
+        order_routes, 0, ORDER_VARIANT)[0]
+    lane_reversed = _reference_values(
+        order_routes, 0, ORDER_VARIANT, lane_order=(2, 1, 0))[0]
+    rank_reversed = _reference_values(
+        order_routes, 0, ORDER_VARIANT, contributor_order=(1, 0))[0]
+
+    weight_routes = ((0, -1),)
+    activation_ignores_weight = _reference_values(weight_routes, 0)[0]
+    restored_weights = _masked_weight_values(
+        weight_routes, ((0.25, 0.75),))[0]
+    bias_base = _reference_values(((0, 2),), 0)
+    biases = (
+        ((2.0, 2.0, 2.0, 2.0),),
+        ((3.0, 3.0, 3.0, 3.0),),
+    )
+    bias_once = _apply_biases_once(bias_base, biases)[0]
+
+    expanded = _expanded_reference_rows(
+        4, ((0, 0, 2, -1),), (((0, 2),), ()), 0, 0)
+
+    class FakeDevice:
+        def __init__(self, device_type, index):
+            self.type = device_type
+            self.index = index
+
+    class FakePlacedTensor:
+        def __init__(self, device_type, index):
+            self.device = FakeDevice(device_type, index)
+
+    class FakeFlag:
+        def __init__(self, value):
+            self.value = value
+
+        def item(self):
+            return self.value
+
+    class FakeTorch:
+        int32 = "int32"
+
+        @staticmethod
+        def tensor(values, dtype, device):
+            del dtype, device
+            return FakeFlag(values[0])
+
+    class FakeDist:
+        def __init__(self, peer_failure=False, sync_failure=False):
+            self.peer_failure = peer_failure
+            self.sync_failure = sync_failure
+            self.reductions = 0
+
+        def all_reduce(self, flag, group):
+            del group
+            self.reductions += 1
+            if self.sync_failure:
+                raise RuntimeError("all_reduce failed")
+            if self.peer_failure:
+                flag.value = 1
+
+    local_matrix = object.__new__(CombineMatrix)
+    local_matrix.torch = FakeTorch()
+    local_matrix.dist = FakeDist()
+    local_matrix.group = object()
+    local_matrix.device = FakeDevice("npu", 0)
+    local_matrix.collectives_usable = True
+    try:
+        local_matrix._run_step(
+            lambda: (_ for _ in ()).throw(ValueError("local failure")),
+            "local-fixture")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("local synchronized failure was accepted")
+
+    peer_matrix = object.__new__(CombineMatrix)
+    peer_matrix.torch = FakeTorch()
+    peer_matrix.dist = FakeDist(peer_failure=True)
+    peer_matrix.group = object()
+    peer_matrix.device = FakeDevice("npu", 0)
+    peer_matrix.collectives_usable = True
+    peer_result_rejected = False
+    try:
+        peer_matrix._run_step(lambda: "must not escape", "peer-fixture")
+    except RuntimeError:
+        peer_result_rejected = True
+
+    sync_matrix = object.__new__(CombineMatrix)
+    sync_matrix.torch = FakeTorch()
+    sync_matrix.dist = FakeDist(sync_failure=True)
+    sync_matrix.group = object()
+    sync_matrix.device = FakeDevice("npu", 0)
+    sync_matrix.collectives_usable = True
+    blocked_operation_calls = 0
+    try:
+        sync_matrix._run_step(lambda: None, "sync-fixture")
+    except FailureSynchronizationError:
+        pass
+    try:
+        def blocked_operation():
+            nonlocal blocked_operation_calls
+            blocked_operation_calls += 1
+
+        sync_matrix._run_step(blocked_operation, "blocked-fixture")
+    except FailureSynchronizationError:
+        pass
+
+    cleanup_calls = []
+
+    class FakeBuffer:
+        def __init__(self, name, fails):
+            self.name = name
+            self.fails = fails
+
+        def destroy(self):
+            cleanup_calls.append(self.name)
+            if self.fails:
+                raise RuntimeError(f"{self.name} failed")
+
+    cleanup_matrix = object.__new__(CombineMatrix)
+    cleanup_matrix.live_buffers = [
+        FakeBuffer("buffer-c", True),
+        FakeBuffer("buffer-b", False),
+        FakeBuffer("buffer-a", True),
+    ]
+    cleanup_matrix.buffer = None
+    cleanup_matrix.buffer_mode = None
+
+    def destroy_group():
+        cleanup_calls.append("process-group")
+        raise RuntimeError("process-group failed")
+
+    cleanup_failures = []
+    try:
+        _cleanup_runtime(cleanup_matrix, destroy_group)
+    except CleanupFailures as error:
+        cleanup_failures = [str(failure) for failure in error.failures]
+
+    multiplied_activation = [
+        _float32_add(0.0, value * 0.25)
+        for value in activation_ignores_weight]
+    bias_per_contributor = _apply_biases_once(
+        _apply_biases_once(bias_base, biases), biases)[0]
+    sentinel_read = [
+        _float32_add(value, PADDING_SENTINEL)
+        for value in activation_ignores_weight]
+    handle_mode_rejected = False
+    try:
+        _validate_expansion_mode(False, True)
+    except AssertionError:
+        handle_mode_rejected = True
+
+    def mutation_rejected(expected, mutant):
+        try:
+            _check(mutant == expected, "oracle mutation survived")
+        except AssertionError:
+            return True
+        return False
+
+    return {
+        "cleanup": {
+            "calls": cleanup_calls,
+            "failures": cleanup_failures,
+        },
+        "expanded": {
+            "mapped_rows": expanded["mapped_rows"],
+            "padding_rows": expanded["padding_rows"],
+            "row_2": expanded["rows"][2],
+        },
+        "mutations_rejected": {
+            "bias_per_contributor": mutation_rejected(
+                bias_once, bias_per_contributor),
+            "expanded_reads_sentinel": mutation_rejected(
+                activation_ignores_weight, sentinel_read),
+            "handle_expansion_mode": handle_mode_rejected,
+            "lane_order": mutation_rejected(canonical, lane_reversed),
+            "rank_order": mutation_rejected(canonical, rank_reversed),
+            "weight_multiplies_activation": mutation_rejected(
+                activation_ignores_weight, multiplied_activation),
+        },
+        "ordering": {
+            "canonical": canonical,
+            "lane_reversed": lane_reversed,
+            "rank_reversed": rank_reversed,
+        },
+        "placement": {
+            "cpu": _is_local_npu_tensor(FakePlacedTensor("cpu", None), 0),
+            "local_npu": _is_local_npu_tensor(
+                FakePlacedTensor("npu", 0), 0),
+            "wrong_npu": _is_local_npu_tensor(
+                FakePlacedTensor("npu", 1), 0),
+        },
+        "synchronization": {
+            "local_failure_reductions": local_matrix.dist.reductions,
+            "peer_failure_reductions": peer_matrix.dist.reductions,
+            "peer_result_rejected": peer_result_rejected,
+            "post_sync_failure_operation_blocked":
+                blocked_operation_calls == 0,
+            "sync_failure_reductions": sync_matrix.dist.reductions,
+        },
+        "weight_bias": {
+            "activation_ignores_weight": activation_ignores_weight,
+            "bias_once": bias_once,
+            "restored_weights": restored_weights,
+        },
+    }
+
+
 def _contract():
     specs = _case_specs()
     _check(set(specs) == set(CASE_NAMES) - {"sequential-100-generations"},
@@ -239,6 +563,18 @@ def _contract():
            "original literal routes are not gathered")
     _check("self._replace_buffer" in _calls(methods["_ensure_buffer"]),
            "reduction mode changes do not recreate the buffer")
+    _check("self.dist.all_reduce" in _calls(methods["_run_step"]),
+           "sub-operations do not synchronize failures")
+    _check(_calls(methods["_round_trip"]).count("self._run_step") >= 6,
+           "round-trip phases do not synchronize failures")
+    _check(_calls(methods["_run_bounded_peer_diagnostics"]).count(
+               "self._run_step") >= 3,
+           "bounded diagnostics phases do not synchronize failures")
+    _check("_is_local_npu_tensor" in _calls(methods["_verify"]),
+           "combine outputs do not enforce local NPU placement")
+    _check("_validate_expansion_mode" in
+           _calls(methods["_expert_outputs"]),
+           "expert outputs trust the returned handle mode")
 
     boundary_calls = _calls(methods["_case_boundary"])
     _check(boundary_calls.count("self.dist.barrier") == 2,
@@ -257,21 +593,15 @@ def _contract():
     _check(runtime_calls.count("dist.init_process_group") == 1 and
            "dist.new_group" not in runtime_calls,
            "runtime must use exactly one HCCL process group")
-    _check("matrix.destroy" in runtime_calls and
-           "dist.destroy_process_group" in runtime_calls,
+    _check("_cleanup_runtime" in runtime_calls,
            "buffer/group teardown is incomplete")
-    runtime_try = next(
-        node for node in runtime.body if isinstance(node, ast.Try))
-    final_calls = [
-        _attribute_name(node.value.func)
-        for node in runtime_try.finalbody
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)]
-    guarded_calls = [
-        _attribute_name(child.func)
-        for node in runtime_try.finalbody if isinstance(node, ast.If)
-        for child in ast.walk(node) if isinstance(child, ast.Call)]
-    _check("matrix.destroy" in guarded_calls and
-           final_calls == ["dist.destroy_process_group"],
+    cleanup = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and
+        node.name == "_cleanup_runtime")
+    cleanup_calls = _calls(cleanup)
+    _check("matrix.destroy" in cleanup_calls and
+           "destroy_process_group" in cleanup_calls,
            "buffers must be destroyed before the process group")
 
     return {
@@ -290,7 +620,13 @@ def _contract():
             "bounded-peer-diagnostics",
             "public-handle-mutations",
             "one-hccl-group",
+            "sub-operation-failure-synchronization",
+            "order-sensitive-public-case",
+            "oracle-behavior-mutations",
+            "local-npu-output-placement",
+            "best-effort-cleanup",
         ],
+        "behavior_fixtures": _behavior_fixtures(),
         "expected_world_size": WORLD_SIZE,
         "empty_reference_shape": _reference_matrix((), 0)["shape"],
         "float32_order_fixture": _float32_add(
@@ -313,6 +649,37 @@ class CombineMatrix:
         self.buffer = None
         self.buffer_mode = None
         self.live_buffers = []
+        self.collectives_usable = True
+
+    def _run_step(self, operation, label):
+        if not self.collectives_usable:
+            raise FailureSynchronizationError(
+                f"{label} cannot start after synchronization failure")
+        local_error = None
+        result = None
+        try:
+            result = operation()
+        except BaseException as error:
+            local_error = error
+        failed = self.torch.tensor(
+            [int(local_error is not None)], dtype=self.torch.int32,
+            device=self.device)
+        try:
+            self.dist.all_reduce(failed, group=self.group)
+        except BaseException as sync_error:
+            self.collectives_usable = False
+            if local_error is not None:
+                raise FailureSynchronizationError(
+                    f"{label} failed locally and failure synchronization "
+                    f"failed: {sync_error}") from local_error
+            raise FailureSynchronizationError(
+                f"{label} failure synchronization failed: {sync_error}") \
+                from sync_error
+        if int(failed.item()) != 0:
+            if local_error is not None:
+                raise local_error
+            raise RuntimeError(f"{label} failed on the peer rank")
+        return result
 
     def _make_buffer(self, allow_multiple_reduction):
         buffer = self.deep_ep.ElasticBuffer(
@@ -329,11 +696,13 @@ class CombineMatrix:
 
     def _destroy_buffer(self, buffer):
         if buffer in self.live_buffers:
-            buffer.destroy()
-            self.live_buffers.remove(buffer)
-        if self.buffer is buffer:
-            self.buffer = None
-            self.buffer_mode = None
+            try:
+                buffer.destroy()
+            finally:
+                self.live_buffers.remove(buffer)
+                if self.buffer is buffer:
+                    self.buffer = None
+                    self.buffer_mode = None
 
     def _replace_buffer(self, allow_multiple_reduction):
         if self.buffer is not None:
@@ -357,24 +726,26 @@ class CombineMatrix:
             for row in spec.payloads[self.rank])
         x = self._tensor(payloads, HIDDEN, self.torch.bfloat16)
         routes = self._tensor(
-            spec.routes[self.rank], NUM_TOPK, self.torch.int64)
+            spec.routes[self.rank], spec.num_topk, self.torch.int64)
         weights = None
         if spec.weights is not None:
             scaled = tuple(
                 tuple(float(value * weight_scale) for value in row)
                 for row in spec.weights[self.rank])
-            weights = self._tensor(scaled, NUM_TOPK, self.torch.float32)
+            weights = self._tensor(
+                scaled, spec.num_topk, self.torch.float32)
         return x, routes, weights
 
     def _gather_routes(self, routes):
         count = routes.shape[0]
+        num_topk = routes.shape[1]
         _check(0 <= count <= CAPACITY, "route count exceeds capacity")
         packed = self.torch.full(
-            (1 + CAPACITY * NUM_TOPK,), -1,
+            (1 + CAPACITY * num_topk,), -1,
             dtype=self.torch.int64, device=self.device)
         packed[0] = count
         if count:
-            packed[1:1 + count * NUM_TOPK] = routes.reshape(-1)
+            packed[1:1 + count * num_topk] = routes.reshape(-1)
         gathered = [self.torch.empty_like(packed) for _ in range(WORLD_SIZE)]
         self.dist.all_gather(gathered, packed, group=self.group)
         result = []
@@ -383,8 +754,8 @@ class CombineMatrix:
             source_count = int(host[0].item())
             _check(0 <= source_count <= CAPACITY,
                    f"rank {source_rank} gathered invalid route count")
-            result.append(host[1:1 + source_count * NUM_TOPK].reshape(
-                source_count, NUM_TOPK).clone())
+            result.append(host[1:1 + source_count * num_topk].reshape(
+                source_count, num_topk).clone())
         return result
 
     def _dispatch(self, buffer, spec, x, routes, weights, handle=None):
@@ -409,7 +780,8 @@ class CombineMatrix:
             do_zero_padding=spec.do_zero_padding,
         )
 
-    def _expert_outputs(self, recv_x, handle, gathered_routes, variant):
+    def _expert_outputs(self, recv_x, handle, gathered_routes, spec, variant):
+        _validate_expansion_mode(handle.do_expand, spec.do_expand)
         metadata = handle.recv_src_metadata.detach().cpu()
         local_experts = NUM_EXPERTS // WORLD_SIZE
         first_expert = self.rank * local_experts
@@ -427,34 +799,25 @@ class CombineMatrix:
                         lane_value = _synthetic_transform(
                             source_rank, source_token, lane, variant)
                         for column in range(HIDDEN):
-                            value[column] += lane_value[column]
+                            value[column] = _float32_add(
+                                value[column], lane_value[column])
                 rows.append(value)
             return self._tensor(rows, HIDDEN, self.torch.bfloat16)
 
-        rows = [[PADDING_SENTINEL] * HIDDEN for _ in range(recv_x.shape[0])]
-        written = set()
-        for metadata_row in metadata:
-            encoded_source = int(metadata_row[0].item())
-            source_rank, source_token = divmod(encoded_source, CAPACITY)
-            for lane in range(NUM_TOPK):
-                destination = int(metadata_row[2 + lane].item())
-                if destination < 0:
-                    continue
-                _check(destination not in written,
-                       "expanded metadata names one row more than once")
-                written.add(destination)
-                rows[destination] = _synthetic_transform(
-                    source_rank, source_token, lane, variant)
-        output = self._tensor(rows, HIDDEN, self.torch.bfloat16)
+        expanded = _expanded_reference_rows(
+            recv_x.shape[0], metadata, gathered_routes, self.rank, variant)
+        _check(not spec.require_padding or expanded["padding_rows"],
+               f"{spec.name} did not produce an unmapped sentinel row")
+        output = self._tensor(
+            expanded["rows"], HIDDEN, self.torch.bfloat16)
         host = output.cpu()
-        for row in range(len(rows)):
-            if row not in written:
-                _check(self.torch.equal(
-                    host[row],
-                    self.torch.full(
-                        (HIDDEN,), PADDING_SENTINEL,
-                        dtype=self.torch.bfloat16)),
-                    "expanded padding sentinel was overwritten")
+        for row in expanded["padding_rows"]:
+            _check(self.torch.equal(
+                host[row],
+                self.torch.full(
+                    (HIDDEN,), PADDING_SENTINEL,
+                    dtype=self.torch.bfloat16)),
+                "expanded padding sentinel was overwritten")
         return output
 
     def _biases(self, spec, count):
@@ -472,25 +835,27 @@ class CombineMatrix:
     def _expected(self, gathered_routes, variant, weights, biases):
         reference = _reference_matrix(
             gathered_routes[self.rank], self.rank, variant)
-        expected_x = self.torch.tensor(
-            reference["values"], dtype=self.torch.float32).reshape(
-                reference["shape"])
+        values = reference["values"]
         if biases is not None:
-            bias_values = (biases,) if isinstance(
+            bias_tensors = (biases,) if isinstance(
                 biases, self.torch.Tensor) else biases
-            for bias in bias_values:
-                expected_x += bias.detach().cpu().float()
+            bias_values = tuple(
+                bias.detach().cpu().float().tolist()
+                for bias in bias_tensors)
+            values = _apply_biases_once(values, bias_values)
+        expected_x = self.torch.tensor(
+            values, dtype=self.torch.float32).reshape(
+                reference["shape"])
         expected_x = expected_x.to(self.torch.bfloat16)
 
         expected_weights = None
         if weights is not None:
-            expected_weights = self.torch.zeros_like(weights, device="cpu")
             local_routes = gathered_routes[self.rank]
-            for token in range(local_routes.shape[0]):
-                for lane in range(NUM_TOPK):
-                    if int(local_routes[token, lane].item()) >= 0:
-                        expected_weights[token, lane] = weights[
-                            token, lane].detach().cpu()
+            masked = _masked_weight_values(
+                local_routes, weights.detach().cpu().tolist())
+            expected_weights = self.torch.tensor(
+                masked, dtype=self.torch.float32).reshape(
+                    local_routes.shape)
         return expected_x, expected_weights
 
     def _combine(self, buffer, expert_x, handle, expert_weights, biases):
@@ -502,6 +867,8 @@ class CombineMatrix:
         _check(isinstance(result, tuple) and len(result) == 3,
                "combine did not return the public three-field tuple")
         combined_x, combined_weights, event = result
+        _check(_is_local_npu_tensor(combined_x, self.device.index),
+               "combine activation is not on the local NPU")
         _check(combined_x.dtype == self.torch.bfloat16,
                "combine activation dtype is not BF16")
         _check(tuple(combined_x.shape) == tuple(expected_x.shape),
@@ -516,6 +883,9 @@ class CombineMatrix:
             _check(combined_weights is not None and
                    combined_weights.dtype == self.torch.float32,
                    "combine weights are missing or not float32")
+            _check(_is_local_npu_tensor(
+                combined_weights, self.device.index),
+                "combine weights are not on the local NPU")
             _check(self.torch.equal(
                 combined_weights.detach().cpu(), expected_weights),
                 "combine did not restore the exact original weights")
@@ -524,31 +894,55 @@ class CombineMatrix:
                "synchronous combine returned deferred event state")
         return combined_x, combined_weights
 
-    def _round_trip(self, spec, variant=0, handle=None, payload_delta=0,
+    def _round_trip(self, spec, variant=None, handle=None, payload_delta=0,
                     weight_scale=1.0, buffer=None):
-        buffer = self._ensure_buffer(
-            spec.allow_multiple_reduction) if buffer is None else buffer
-        x, routes, weights = self._materialize(
-            spec, payload_delta=payload_delta, weight_scale=weight_scale)
-        gathered_routes = self._gather_routes(routes)
-        dispatch_result = self._dispatch(
-            buffer, spec, x, routes, weights, handle=handle)
+        variant = spec.transform_variant if variant is None else variant
+
+        def prepare():
+            selected_buffer = self._ensure_buffer(
+                spec.allow_multiple_reduction) if buffer is None else buffer
+            tensors = self._materialize(
+                spec, payload_delta=payload_delta,
+                weight_scale=weight_scale)
+            return (selected_buffer,) + tensors
+
+        selected_buffer, x, routes, weights = self._run_step(
+            prepare, f"{spec.name}: prepare")
+        gathered_routes = self._run_step(
+            lambda: self._gather_routes(routes),
+            f"{spec.name}: gather routes")
+        dispatch_result = self._run_step(
+            lambda: self._dispatch(
+                selected_buffer, spec, x, routes, weights, handle=handle),
+            f"{spec.name}: dispatch")
         recv_x, _, recv_weights, returned_handle, dispatch_event = \
             dispatch_result
-        _check(dispatch_event.event is None,
-               "synchronous dispatch returned an event")
-        if handle is not None:
-            _check(returned_handle is handle,
-                   "cached dispatch replaced its public handle")
-        expert_x = self._expert_outputs(
-            recv_x, returned_handle, gathered_routes, variant)
-        biases = self._biases(spec, routes.shape[0])
-        expected_x, expected_weights = self._expected(
-            gathered_routes, variant, weights, biases)
-        result = self._combine(
-            buffer, expert_x, returned_handle, recv_weights, biases)
-        combined_x, combined_weights = self._verify(
-            result, expected_x, expected_weights)
+
+        def prepare_combine():
+            _check(dispatch_event.event is None,
+                   "synchronous dispatch returned an event")
+            _validate_expansion_mode(
+                returned_handle.do_expand, spec.do_expand)
+            if handle is not None:
+                _check(returned_handle is handle,
+                       "cached dispatch replaced its public handle")
+            expert_x = self._expert_outputs(
+                recv_x, returned_handle, gathered_routes, spec, variant)
+            biases = self._biases(spec, routes.shape[0])
+            expected = self._expected(
+                gathered_routes, variant, weights, biases)
+            return expert_x, biases, expected
+
+        expert_x, biases, expected = self._run_step(
+            prepare_combine, f"{spec.name}: prepare combine")
+        result = self._run_step(
+            lambda: self._combine(
+                selected_buffer, expert_x, returned_handle,
+                recv_weights, biases),
+            f"{spec.name}: combine")
+        combined_x, combined_weights = self._run_step(
+            lambda: self._verify(result, *expected),
+            f"{spec.name}: verify")
         return {
             "combined_x": combined_x,
             "combined_weights": combined_weights,
@@ -603,84 +997,139 @@ class CombineMatrix:
 
     def _run_cross_buffer(self):
         spec = self.specs["cross-buffer-handle"]
-        source = self._ensure_buffer(True)
-        x, routes, weights = self._materialize(spec)
-        gathered_routes = self._gather_routes(routes)
-        recv_x, _, recv_weights, handle, _ = self._dispatch(
-            source, spec, x, routes, weights)
-        expert_x = self._expert_outputs(recv_x, handle, gathered_routes, 0)
-        target = self._make_buffer(True)
+        source, x, routes, weights = self._run_step(
+            lambda: (self._ensure_buffer(True),) + self._materialize(spec),
+            "cross-buffer: prepare")
+        gathered_routes = self._run_step(
+            lambda: self._gather_routes(routes),
+            "cross-buffer: gather routes")
+        recv_x, _, recv_weights, handle, _ = self._run_step(
+            lambda: self._dispatch(source, spec, x, routes, weights),
+            "cross-buffer: dispatch")
+        expert_x = self._run_step(
+            lambda: self._expert_outputs(
+                recv_x, handle, gathered_routes, spec, 0),
+            "cross-buffer: expert outputs")
+        target = self._run_step(
+            lambda: self._make_buffer(True),
+            "cross-buffer: target construction")
         try:
-            self._expect_rejection(
+            self._run_step(lambda: self._expect_rejection(
                 lambda: self._combine(
                     target, expert_x, handle, recv_weights, None),
-                "dispatch handle")
+                "dispatch handle"), "cross-buffer: reject foreign handle")
             self._round_trip(spec, variant=2, buffer=target)
         finally:
-            self._destroy_buffer(target)
+            if target in self.live_buffers:
+                if self.collectives_usable:
+                    self._run_step(
+                        lambda: self._destroy_buffer(target),
+                        "cross-buffer: target teardown")
+                else:
+                    self._destroy_buffer(target)
 
     def _run_malformed_handle(self):
         spec = self.specs["malformed-handle"]
-        buffer = self._ensure_buffer(True)
-        x, routes, weights = self._materialize(spec)
-        gathered_routes = self._gather_routes(routes)
-        recv_x, _, recv_weights, handle, _ = self._dispatch(
-            buffer, spec, x, routes, weights)
-        expert_x = self._expert_outputs(recv_x, handle, gathered_routes, 0)
-        original_descriptor = handle.token_metadata_at_forward
-        malformed_descriptor = original_descriptor.clone()
-        malformed_descriptor[0] = malformed_descriptor[0] ^ 1
-        handle.token_metadata_at_forward = malformed_descriptor
+        buffer, x, routes, weights = self._run_step(
+            lambda: (self._ensure_buffer(True),) + self._materialize(spec),
+            "malformed-handle: prepare")
+        gathered_routes = self._run_step(
+            lambda: self._gather_routes(routes),
+            "malformed-handle: gather routes")
+        recv_x, _, recv_weights, handle, _ = self._run_step(
+            lambda: self._dispatch(buffer, spec, x, routes, weights),
+            "malformed-handle: dispatch")
+        expert_x = self._run_step(
+            lambda: self._expert_outputs(
+                recv_x, handle, gathered_routes, spec, 0),
+            "malformed-handle: expert outputs")
+
+        def mutate_handle():
+            original = handle.token_metadata_at_forward
+            malformed = original.clone()
+            malformed[0] = malformed[0] ^ 1
+            handle.token_metadata_at_forward = malformed
+            return original
+
+        original_descriptor = self._run_step(
+            mutate_handle, "malformed-handle: mutate")
         try:
-            self._expect_rejection(
+            self._run_step(lambda: self._expect_rejection(
                 lambda: self._combine(
                     buffer, expert_x, handle, recv_weights, None),
-                "dispatch handle")
+                "dispatch handle"), "malformed-handle: reject")
         finally:
             handle.token_metadata_at_forward = original_descriptor
-        expected_x, expected_weights = self._expected(
-            gathered_routes, 0, weights, None)
-        self._verify(
-            self._combine(buffer, expert_x, handle, recv_weights, None),
-            expected_x, expected_weights)
+        self._run_step(
+            lambda: None, "malformed-handle: restored")
+        expected = self._run_step(
+            lambda: self._expected(gathered_routes, 0, weights, None),
+            "malformed-handle: expected")
+        result = self._run_step(
+            lambda: self._combine(
+                buffer, expert_x, handle, recv_weights, None),
+            "malformed-handle: retry combine")
+        self._run_step(
+            lambda: self._verify(result, *expected),
+            "malformed-handle: verify retry")
 
     def _run_bounded_peer_diagnostics(self):
         spec = self.specs["bounded-peer-diagnostics"]
-        buffer = self._ensure_buffer(True)
-        x, routes, _ = self._materialize(spec)
-        gathered_routes = self._gather_routes(routes)
-        _check(all(int(rank_routes[0, 0].item()) == NUM_EXPERTS
-                   for rank_routes in gathered_routes),
-               "invalid peer route changed during literal gather")
-        started = time.monotonic()
-        try:
-            self._dispatch(buffer, spec, x, routes, None)
-        except RuntimeError as error:
-            message = str(error)
-            for marker in (
-                    f"dispatch failed on rank {self.rank}",
-                    "command_index=", "opcode=", "peer=", "channel=",
-                    "generation="):
-                _check(marker in message,
-                       f"peer diagnostic omitted {marker!r}: {message}")
-            _check(re.search(r"generation=[1-9][0-9]*", message) is not None,
-                   f"peer diagnostic has no positive generation: {message}")
-            _check(time.monotonic() - started < 30,
-                   "invalid peer path exceeded 30 seconds")
-        else:
-            raise AssertionError("invalid peer route was accepted")
+        buffer, x, routes, _ = self._run_step(
+            lambda: (self._ensure_buffer(True),) + self._materialize(spec),
+            "bounded-peer-diagnostics: prepare")
+        gathered_routes = self._run_step(
+            lambda: self._gather_routes(routes),
+            "bounded-peer-diagnostics: gather routes")
+
+        def expect_diagnostic():
+            _check(all(int(rank_routes[0, 0].item()) == NUM_EXPERTS
+                       for rank_routes in gathered_routes),
+                   "invalid peer route changed during literal gather")
+            started = time.monotonic()
+            try:
+                self._dispatch(buffer, spec, x, routes, None)
+            except RuntimeError as error:
+                message = str(error)
+                for field in ("command_index", "opcode", "peer", "channel"):
+                    _check(re.search(rf"{field}=[0-9]+", message) is not None,
+                           f"peer diagnostic omitted numeric {field}: "
+                           f"{message}")
+                _check(f"dispatch failed on rank {self.rank}" in message,
+                       f"peer diagnostic omitted local rank: {message}")
+                _check(re.search(
+                           r"generation=[1-9][0-9]*", message) is not None,
+                       f"peer diagnostic has no positive generation: "
+                       f"{message}")
+                _check(time.monotonic() - started < 30,
+                       "invalid peer path exceeded 30 seconds")
+            else:
+                raise AssertionError("invalid peer route was accepted")
+
+        self._run_step(
+            expect_diagnostic, "bounded-peer-diagnostics: invalid dispatch")
 
     def _run_repeated_teardown(self):
         spec = self.specs["repeated-teardown"]
         if self.buffer is not None:
-            self._destroy_buffer(self.buffer)
+            self._run_step(
+                lambda: self._destroy_buffer(self.buffer),
+                "repeated-teardown: initial teardown")
         for generation in range(3):
-            temporary = self._make_buffer(True)
+            temporary = self._run_step(
+                lambda: self._make_buffer(True),
+                f"repeated-teardown {generation}: construction")
             try:
                 self._round_trip(
                     spec, variant=generation, buffer=temporary)
             finally:
-                self._destroy_buffer(temporary)
+                if temporary in self.live_buffers:
+                    if self.collectives_usable:
+                        self._run_step(
+                            lambda: self._destroy_buffer(temporary),
+                            f"repeated-teardown {generation}: teardown")
+                    else:
+                        self._destroy_buffer(temporary)
 
     def _run_named_case(self, name):
         if name in REGULAR_CASES:
@@ -707,6 +1156,11 @@ class CombineMatrix:
             self._run_named_case(name)
         except BaseException as error:
             local_error = error
+        if not self.collectives_usable:
+            if local_error is not None:
+                raise local_error
+            raise FailureSynchronizationError(
+                f"{name} cannot complete after synchronization failure")
         failed = self.torch.tensor(
             [int(local_error is not None)], dtype=self.torch.int32,
             device=self.device)
@@ -724,8 +1178,14 @@ class CombineMatrix:
             self._case_boundary(name)
 
     def destroy(self):
+        failures = []
         for buffer in tuple(reversed(self.live_buffers)):
-            self._destroy_buffer(buffer)
+            try:
+                self._destroy_buffer(buffer)
+            except BaseException as error:
+                failures.append(error)
+        if failures:
+            raise CleanupFailures(failures)
 
 
 def _parse_cases(value):
@@ -763,6 +1223,7 @@ def _run_runtime(selected_cases):
         backend="hccl", timeout=timedelta(minutes=5))
     group = dist.group.WORLD
     matrix = None
+    runtime_error = None
     try:
         device = torch.device("npu", local_rank)
         matrix = CombineMatrix(torch, dist, deep_ep, group, device)
@@ -771,10 +1232,22 @@ def _run_runtime(selected_cases):
             print(
                 f"Phase 2G two-rank combine matrix passed "
                 f"({len(selected_cases)} cases)", flush=True)
+    except BaseException as error:
+        runtime_error = error
     finally:
-        if matrix is not None:
-            matrix.destroy()
-        dist.destroy_process_group()
+        cleanup_error = None
+        try:
+            _cleanup_runtime(matrix, dist.destroy_process_group)
+        except BaseException as error:
+            cleanup_error = error
+        if runtime_error is not None:
+            if cleanup_error is not None:
+                raise RuntimeError(
+                    f"runtime failed: {runtime_error}; cleanup failed: "
+                    f"{cleanup_error}") from runtime_error
+            raise runtime_error
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 def main():
