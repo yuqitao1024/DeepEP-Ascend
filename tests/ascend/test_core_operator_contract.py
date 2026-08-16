@@ -22,6 +22,8 @@ PRODUCTION_BARRIER_STATE_PROBE = \
     ROOT / "tests/ascend/production_barrier_state_probe.cpp"
 TWO_RANK_DISPATCH = \
     ROOT / "tests/ascend/production/run_two_rank_dispatch.py"
+TWO_RANK_COMBINE = \
+    ROOT / "tests/ascend/production/run_two_rank_combine.py"
 ELASTIC = ROOT / "csrc/backends/ascend/elastic"
 CORE_OPS = ROOT / "tests/ascend/core_ops"
 
@@ -899,7 +901,7 @@ int main() {
             "cached-reuse",
             "cached-aligned-near-capacity",
             "sequential-100-generations",
-            "combine-gated",
+            "round-trip-smoke",
             "invalid-expert-diagnostics",
         ]
         result = subprocess.run(
@@ -921,6 +923,63 @@ int main() {
                 "dispatch_surface": "Buffer.dispatch",
                 "expected_world_size": 2,
                 "reference": "gathered-literal-inputs",
+            })
+
+    def test_two_rank_combine_harness_contract(self):
+        expected_cases = [
+            "normal",
+            "expanded-multiple-reduction",
+            "expanded-single-reduction",
+            "weights",
+            "zero-bias",
+            "one-bias",
+            "two-bias",
+            "duplicate-same-rank-experts",
+            "negative-one-route",
+            "empty-input",
+            "asymmetric-routing",
+            "aligned-padding",
+            "aligned-near-capacity",
+            "cached-dispatch-changed-outputs",
+            "sequential-100-generations",
+            "cross-buffer-handle",
+            "malformed-handle",
+            "bounded-peer-diagnostics",
+            "repeated-teardown",
+        ]
+        result = subprocess.run(
+            ["python3", str(TWO_RANK_COMBINE), "--contract"],
+            cwd=ROOT, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "case_names": expected_cases,
+                "contract_checks": [
+                    "public-dispatch-combine",
+                    "literal-route-reference",
+                    "synthetic-origin-transform",
+                    "expanded-metadata-writes",
+                    "bf16-tolerance",
+                    "exact-float32-weights",
+                    "case-boundary-barriers",
+                    "distributed-failure-aggregation",
+                    "buffer-before-group-teardown",
+                    "reduction-mode-buffer-recreation",
+                    "bounded-peer-diagnostics",
+                    "public-handle-mutations",
+                    "one-hccl-group",
+                ],
+                "expected_world_size": 2,
+                "empty_reference_shape": [0, 4],
+                "float32_order_fixture": 0.0,
+                "reference": "gathered-original-routes",
+                "reference_fixture": {
+                    "rank0": [[4.0, 6.0, 8.0, 10.0],
+                              [5.0, 6.0, 7.0, 8.0]],
+                    "rank1": [[36.0, 38.0, 40.0, 42.0]],
+                },
+                "system_under_test": ["Buffer.dispatch", "Buffer.combine"],
             })
 
 

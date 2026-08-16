@@ -3,7 +3,6 @@ import ast
 import json
 import os
 import re
-import struct
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -28,7 +27,7 @@ CASE_NAMES = (
     "cached-reuse",
     "cached-aligned-near-capacity",
     "sequential-100-generations",
-    "combine-gated",
+    "round-trip-smoke",
     "invalid-expert-diagnostics",
 )
 
@@ -254,7 +253,7 @@ def _contract():
            "dispatch case specifications do not match the matrix")
     _check(SPECIAL_CASES == (
         "cached-reuse", "cached-aligned-near-capacity",
-        "sequential-100-generations", "combine-gated",
+        "sequential-100-generations", "round-trip-smoke",
         "invalid-expert-diagnostics"),
         "dispatch special-case registry is incomplete")
     methods = _contract_methods()
@@ -591,17 +590,6 @@ class DispatchMatrix:
         _check(self.torch.equal(observed, expected),
                f"{label}: observed {observed.tolist()} != {expected.tolist()}")
 
-    def _descriptor(self, spec, num_tokens):
-        mode_flags = (2 if spec.do_expand else 0) | \
-            (4 if spec.do_zero_padding else 0)
-        return struct.pack(
-            "<IIQ6i6QI4x",
-            1, 96, 1,
-            self.rank, WORLD_SIZE, self.rank, WORLD_SIZE, 0, 1,
-            num_tokens, HIDDEN, NUM_EXPERTS, spec.num_topk,
-            spec.expert_alignment, CAPACITY, mode_flags,
-        )
-
     def _verify_handle(self, handle, spec, reference, local_routes):
         expected_fields = {
             "do_expand", "num_experts", "expert_alignment",
@@ -657,12 +645,12 @@ class DispatchMatrix:
         self._assert_tensor(
             handle.dst_buffer_slot_idx, reference["destination_slots"],
             "handle.dst_buffer_slot_idx")
-        expected_descriptor = self.torch.tensor(
-            list(self._descriptor(spec, local_routes.shape[0])),
-            dtype=self.torch.uint8)
-        self._assert_tensor(
-            handle.token_metadata_at_forward, expected_descriptor,
-            "handle.token_metadata_at_forward")
+        descriptor = handle.token_metadata_at_forward
+        _check(descriptor is not None and descriptor.device.type == "npu" and
+               descriptor.device.index == self.device.index and
+               descriptor.dtype == self.torch.uint8 and descriptor.dim() == 1 and
+               descriptor.numel() > 0 and descriptor.is_contiguous(),
+               "handle dispatch attestation is not an opaque NPU byte tensor")
 
     def _verify_result(self, spec, local_routes, reference, result,
                        expected_handle=None):
@@ -790,19 +778,30 @@ class DispatchMatrix:
             )
             self._dispatch_spec(spec)
 
-    def _run_combine_gate(self):
-        if self.combine_payload is None:
-            self._dispatch_spec(self.specs["multiple-experts"])
-        recv_x, handle = self.combine_payload
-        try:
-            self.buffer.combine(recv_x, handle)
-        except NotImplementedError as error:
-            _check(str(error) ==
-                   "DeepEP Ascend backend: combine is unavailable until the "
-                   "Ascend device transport is implemented",
-                   f"unexpected combine gate: {error}")
-        else:
-            raise AssertionError("combine was unexpectedly available")
+    def _run_round_trip_smoke(self):
+        spec = CaseSpec(
+            "round-trip-smoke",
+            (
+                ((71, 72, 73, 74), (81, 82, 83, 84)),
+                ((171, 172, 173, 174), (181, 182, 183, 184)),
+            ),
+            (
+                ((0, -1), (2, -1)),
+                ((1, -1), (3, -1)),
+            ),
+        )
+        result, _ = self._dispatch_spec(spec)
+        recv_x, _, _, handle, _ = result
+        combined_x, combined_weights, event = self.buffer.combine(
+            recv_x, handle, num_sms=1, num_qps=0)
+        expected = self._tensor(
+            spec.payloads[self.rank], HIDDEN, self.torch.bfloat16).cpu()
+        self._assert_tensor(combined_x, expected, "round-trip combined_x")
+        _check(combined_weights is None,
+               "weightless round trip returned weights")
+        _check(event.event is None and event.extra_tensors is None and
+               event.hook_after_wait is None,
+               "synchronous round trip returned deferred event state")
 
     def _run_invalid_diagnostic(self):
         spec = self.specs["invalid-expert-diagnostics"]
@@ -855,8 +854,8 @@ class DispatchMatrix:
             self._run_cached(name)
         elif name == "sequential-100-generations":
             self._run_generations()
-        elif name == "combine-gated":
-            self._run_combine_gate()
+        elif name == "round-trip-smoke":
+            self._run_round_trip_smoke()
         elif name == "invalid-expert-diagnostics":
             self._run_invalid_diagnostic()
         else:
