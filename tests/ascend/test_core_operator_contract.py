@@ -390,6 +390,7 @@ int main() {
                           "dispatch-cached", "dispatch-zero-padding",
                           "dispatch-public-identity",
                           "dispatch-empty", "combine-normal",
+                          "combine-state-probe",
                           "combine-expanded", "combine-multiple",
                           "combine-single-reduction", "combine-weights",
                           "combine-bias0", "combine-bias01", "round-trip"):
@@ -532,6 +533,54 @@ int main() {
         epilogue_position = source.index(
             "asc_vf_call<combine_epilogue_vf>")
         self.assertLess(execute_position, epilogue_position)
+
+    def test_combine_completion_gate_and_runner_probe(self):
+        """Catches output publication after failed transport execution."""
+        source = (ELASTIC / "combine.asc").read_text()
+        epilogue_begin = source.index(
+            "__simt_vf__ inline void combine_epilogue_vf")
+        epilogue = source[epilogue_begin:]
+        self.assertIn("is_clean_combine_transport_completion(", epilogue)
+        gate_position = epilogue.index(
+            "is_clean_combine_transport_completion(")
+        output_position = epilogue.index(
+            "for (std::uint64_t token = 0; token < num_tokens; ++token)")
+        completion_position = epilogue.index("&control->combine_generation")
+        self.assertLess(gate_position, output_position)
+        self.assertLess(gate_position, completion_position)
+        for marker in (
+                "transport::device::detail::command_queue(context)",
+                "transport::device::detail::diagnostic(queue)",
+                "diagnostic->abi_version", "diagnostic->generation",
+                "diagnostic->error"):
+            self.assertIn(marker, epilogue)
+
+        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
+        for marker in (
+                "combine-state-probe", "combine_state_probe_kernel<<<",
+                "is_clean_combine_transport_completion(",
+                "combine_receive_shard_address(",
+                "combine_staging_shard_address("):
+            self.assertIn(marker, runner)
+
+        tiling_begin = runner.index("CoreTiling make_combine_tiling")
+        tiling_end = runner.index("bool run_combine_case", tiling_begin)
+        combine_tiling = runner[tiling_begin:tiling_end]
+        for assignment in (
+                "input.topology.world_rank = 0",
+                "input.topology.world_size = 2",
+                "input.topology.scale_up_rank = 0",
+                "input.topology.scale_up_size = 2",
+                "input.topology.scale_out_rank = 0",
+                "input.topology.scale_out_size = 1"):
+            self.assertIn(assignment, combine_tiling)
+
+        normal_begin = runner.index(
+            'else if (std::strcmp(argv[2], "combine-normal") == 0)')
+        normal_end = runner.index("else if", normal_begin + 1)
+        normal_case = runner[normal_begin:normal_end]
+        self.assertIn(
+            "run_combine_case(stream, false, false, 0)", normal_case)
 
     def test_dispatch_preflights_protocol_state_before_publication(self):
         source = (ELASTIC / "dispatch.asc").read_text()

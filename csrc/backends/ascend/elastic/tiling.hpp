@@ -235,6 +235,10 @@ inline TilingStatus build_core_tiling(
         input.num_tokens > input.num_max_tokens_per_rank)
         return TilingStatus::invalid(
             "dispatch token count exceeds shard capacity");
+    if (input.operation == OperationKind::kCombine &&
+        input.num_tokens > input.num_max_tokens_per_rank)
+        return TilingStatus::invalid(
+            "combine token count exceeds shard capacity");
     if (input.num_experts %
             static_cast<std::uint64_t>(input.topology.world_size) != 0)
         return TilingStatus::invalid("experts must divide ranks");

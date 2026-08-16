@@ -198,84 +198,46 @@ bool padded_dispatch_capacity_fixture_matches() {
            tiling.dispatch_output_capacity == 16;
 }
 
-struct CombineModelRecord {
-    CombineRecordHeader header{};
-    float payload[2]{};
-};
+bool combine_state_helpers_match() {
+    constexpr std::uint64_t generation = 13;
+    if (!is_clean_combine_transport_completion(
+            generation, generation, transport::kTransportCommandAbiVersion,
+            generation, transport::DeviceTransportError::kNone) ||
+        is_clean_combine_transport_completion(
+            generation, generation - 1,
+            transport::kTransportCommandAbiVersion, generation,
+            transport::DeviceTransportError::kNone) ||
+        is_clean_combine_transport_completion(
+            generation, generation,
+            transport::kTransportCommandAbiVersion + 1, generation,
+            transport::DeviceTransportError::kNone) ||
+        is_clean_combine_transport_completion(
+            generation, generation,
+            transport::kTransportCommandAbiVersion, generation - 1,
+            transport::DeviceTransportError::kNone) ||
+        is_clean_combine_transport_completion(
+            generation, generation,
+            transport::kTransportCommandAbiVersion, generation,
+            transport::DeviceTransportError::kCompletionFailure))
+        return false;
 
-bool combine_model_matches(
-    const CombineModelRecord records[2][2], const std::uint64_t counts[2],
-    const float expected[3][2]) {
-    float output[3][2]{};
-    for (int contributor_rank = 0; contributor_rank < 2;
-         ++contributor_rank) {
-        if (counts[contributor_rank] > 2)
-            return false;
-        for (std::uint64_t slot = 0; slot < counts[contributor_rank]; ++slot) {
-            const auto& record = records[contributor_rank][slot];
-            if (record.header.abi_version != kCombineRecordAbiVersion ||
-                record.header.struct_size != sizeof(CombineRecordHeader) ||
-                record.header.contributor_rank != contributor_rank ||
-                record.header.origin_token < 0 ||
-                record.header.origin_token >= 3 ||
-                record.header.master_lane < 0 ||
-                record.header.master_lane >= 2 ||
-                record.header.contribution_lane != record.header.master_lane)
-                return false;
-            for (std::uint64_t hidden = 0; hidden < 2; ++hidden)
-                output[record.header.origin_token][hidden] +=
-                    record.payload[hidden];
-        }
-    }
-    for (std::uint64_t token = 0; token < 3; ++token) {
-        for (std::uint64_t hidden = 0; hidden < 2; ++hidden) {
-            if (output[token][hidden] != expected[token][hidden])
-                return false;
-        }
-    }
-    return true;
-}
-
-bool normal_combine_model_matches() {
-    CombineModelRecord records[2][2]{};
-    records[0][0].header = {
-        kCombineRecordAbiVersion, sizeof(CombineRecordHeader), 0, 0, 0, 0};
-    records[0][0].payload[0] = 1.0F;
-    records[0][0].payload[1] = 2.0F;
-    records[0][1].header = {
-        kCombineRecordAbiVersion, sizeof(CombineRecordHeader), 1, 0, 1, 1};
-    records[0][1].payload[0] = 3.0F;
-    records[0][1].payload[1] = 4.0F;
-    records[1][0].header = {
-        kCombineRecordAbiVersion, sizeof(CombineRecordHeader), 0, 1, 1, 1};
-    records[1][0].payload[0] = 10.0F;
-    records[1][0].payload[1] = 20.0F;
-    constexpr std::uint64_t counts[2] = {2, 1};
-    constexpr float expected[3][2] = {{11.0F, 22.0F},
-                                      {3.0F, 4.0F},
-                                      {0.0F, 0.0F}};
-    return combine_model_matches(records, counts, expected);
-}
-
-bool asymmetric_combine_model_matches() {
-    CombineModelRecord records[2][2]{};
-    records[1][0].header = {
-        kCombineRecordAbiVersion, sizeof(CombineRecordHeader), 1, 1, 0, 0};
-    records[1][0].payload[0] = 5.0F;
-    records[1][0].payload[1] = 6.0F;
-    records[1][1].header = {
-        kCombineRecordAbiVersion, sizeof(CombineRecordHeader), 2, 1, 1, 1};
-    records[1][1].payload[0] = 7.0F;
-    records[1][1].payload[1] = 8.0F;
-    constexpr std::uint64_t counts[2] = {0, 2};
-    constexpr float expected[3][2] = {{0.0F, 0.0F},
-                                      {5.0F, 6.0F},
-                                      {7.0F, 8.0F}};
-    return decode_dispatch_source_rank(
-               encode_dispatch_source_index(1, 4, 2), 4) == 1 &&
-           decode_dispatch_local_index(
-               encode_dispatch_source_index(1, 4, 2), 4) == 2 &&
-           combine_model_matches(records, counts, expected);
+    constexpr std::uintptr_t base = 0x100000;
+    constexpr std::uint64_t receive_offset = 0x2000;
+    constexpr std::uint64_t receive_shard_bytes = 0x400;
+    constexpr std::uint64_t staging_offset = 0x3000;
+    constexpr std::uint64_t staging_shard_bytes = 0x800;
+    return combine_receive_shard_address(
+               base, receive_offset, 0, receive_shard_bytes) == 0x102000 &&
+           combine_receive_shard_address(
+               base, receive_offset, 1, receive_shard_bytes) == 0x102400 &&
+           combine_staging_shard_address(
+               base, staging_offset, 0, staging_shard_bytes) == 0x103000 &&
+           combine_staging_shard_address(
+               base, staging_offset, 1, staging_shard_bytes) == 0x103800 &&
+           is_valid_combine_origin_token(3, 4, 8) &&
+           !is_valid_combine_origin_token(4, 4, 8) &&
+           !is_valid_combine_origin_token(8, 16, 8) &&
+           !is_valid_combine_origin_token(-1, 4, 8);
 }
 
 }  // namespace
@@ -433,6 +395,14 @@ int main() {
     if (build_core_tiling(excessive_input, &excessive_tiling).code !=
         TilingStatusCode::kInvalidArgument)
         return 44;
+    auto excessive_combine_input = excessive_input;
+    excessive_combine_input.operation = OperationKind::kCombine;
+    excessive_combine_input.topology.world_size = 2;
+    excessive_combine_input.topology.scale_up_size = 2;
+    if (build_core_tiling(
+            excessive_combine_input, &excessive_tiling).code !=
+        TilingStatusCode::kInvalidArgument)
+        return 56;
     auto excessive_descriptor = dispatch_tiling;
     excessive_descriptor.num_tokens =
         excessive_descriptor.num_max_tokens_per_rank + 1;
@@ -608,6 +578,15 @@ int main() {
     combine.num_input_rows = 3;
     combine.local_window_base =
         combine_tiling.transport_context.local_window_base;
+    auto excessive_combine_tiling = combine_tiling;
+    excessive_combine_tiling.num_tokens =
+        excessive_combine_tiling.num_max_tokens_per_rank + 1;
+    reset_launches();
+    status = launch_internal_combine(
+        combine, excessive_combine_tiling, combine_storage, nullptr);
+    if (status.code != CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 57;
     reset_launches();
     if (!launch_internal_combine(
              combine, combine_tiling, combine_storage, nullptr).ok() ||
@@ -730,10 +709,8 @@ int main() {
         return 46;
     if (!padded_dispatch_capacity_fixture_matches())
         return 47;
-    if (!normal_combine_model_matches())
+    if (!combine_state_helpers_match())
         return 54;
-    if (!asymmetric_combine_model_matches())
-        return 55;
 
     return 0;
 }

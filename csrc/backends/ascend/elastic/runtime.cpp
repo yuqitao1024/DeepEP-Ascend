@@ -358,6 +358,9 @@ CoreRuntimeStatus launch_internal_dispatch(
 CoreRuntimeStatus launch_internal_combine(
     const CombineArguments& arguments, const CoreTiling& tiling,
     const CoreLaunchStorage& storage, void* stream) {
+    if (tiling.operation == OperationKind::kCombine &&
+        tiling.num_tokens > tiling.num_max_tokens_per_rank)
+        return invalid("combine token count exceeds shard capacity");
     const auto status = validate_internal_launch(tiling, storage);
     if (!status.ok())
         return status;
