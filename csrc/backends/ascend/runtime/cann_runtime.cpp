@@ -21,7 +21,8 @@ using transport::TransportStatus;
 
 bool valid_api(const CannRuntimeApi& api) {
     return api.allocate_device != nullptr && api.zero_device != nullptr &&
-           api.free_device != nullptr && api.current_stream != nullptr &&
+           api.free_device != nullptr && api.current_device != nullptr &&
+           api.current_stream != nullptr &&
            api.synchronize_stream != nullptr &&
            api.synchronize_device != nullptr && api.copy_from_host != nullptr &&
            api.copy_to_host != nullptr;
@@ -53,6 +54,10 @@ int runtime_zero(void*, void* pointer, std::uint64_t bytes) {
 
 int runtime_free(void*, void* pointer) {
     return aclrtFree(pointer);
+}
+
+int runtime_current_device(void*, int* device) {
+    return aclrtGetDevice(device);
 }
 
 void* runtime_current_stream(void*) {
@@ -88,7 +93,7 @@ int runtime_copy_to_host(
 CannRuntimeApi make_cann_runtime_api() {
 #if DEEP_EP_ASCEND_HAS_CANN_RUNTIME
     return {nullptr, runtime_allocate, runtime_zero, runtime_free,
-            runtime_current_stream, runtime_synchronize_stream,
+            runtime_current_device, runtime_current_stream, runtime_synchronize_stream,
             runtime_synchronize_device, runtime_copy_from_host,
             runtime_copy_to_host};
 #else
@@ -136,7 +141,18 @@ TransportStatus CannRuntimeResources::initialize_impl(
 
     runtime_api_ = runtime_api;
     owns_resources_ = true;
-    auto status = allocate(
+    TransportStatus status = TransportStatus::success();
+    int device = -1;
+    int result = runtime_api_.current_device(runtime_api_.user_data, &device);
+    if (result != 0 || device < 0) {
+        status = result == 0 ? TransportStatus::runtime_failure(
+            "current_device", 0, "Torch NPU returned an invalid current device") :
+            backend_failure("current_device", result);
+        (void)destroy();
+        return status;
+    }
+    owning_device_ = device;
+    status = allocate(
         static_cast<std::uint64_t>(config.device_buffer_bytes),
         elastic::kPublicElasticBufferAlignment, &window_, "allocate_window");
     if (!status.ok()) {
@@ -238,6 +254,7 @@ TransportStatus CannRuntimeResources::destroy() {
 
     initialized_ = false;
     device_context_ = {};
+    owning_device_ = -1;
     TransportStatus first_error = TransportStatus::success();
     free_allocation(workspace_, "free_workspace", first_error);
     if (transport_ != nullptr) {
@@ -263,6 +280,17 @@ TransportStatus CannRuntimeResources::current_stream(void** stream) {
     return *stream != nullptr ? TransportStatus::success() :
         TransportStatus::runtime_failure(
             "current_stream", 0, "Torch NPU returned a null current stream");
+}
+
+TransportStatus CannRuntimeResources::current_device(int* device) {
+    if (!initialized_ || device == nullptr)
+        return TransportStatus::invalid(
+            "current_device", "invalid runtime device request");
+    const int result = runtime_api_.current_device(runtime_api_.user_data, device);
+    return result == 0 && *device >= 0 ? TransportStatus::success() :
+        result == 0 ? TransportStatus::runtime_failure(
+            "current_device", 0, "Torch NPU returned an invalid current device") :
+        backend_failure("current_device", result);
 }
 
 TransportStatus CannRuntimeResources::synchronize_stream(void* stream) {

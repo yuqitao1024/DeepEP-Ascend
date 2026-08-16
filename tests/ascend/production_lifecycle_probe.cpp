@@ -85,6 +85,8 @@ int runtime_free(void* data, void*) {
     return 0;
 }
 
+int runtime_current_device(void*, int* device) { *device = 0; return 0; }
+
 void* runtime_current_stream(void* data) {
     auto& trace = self(data);
     trace.events.emplace_back("current_stream");
@@ -122,7 +124,7 @@ int runtime_copy_to_host(
 
 runtime::CannRuntimeApi runtime_api(Trace& trace) {
     return {&trace, runtime_allocate, runtime_zero, runtime_free,
-            runtime_current_stream, runtime_synchronize_stream,
+            runtime_current_device, runtime_current_stream, runtime_synchronize_stream,
             runtime_synchronize_device, runtime_copy_from_host,
             runtime_copy_to_host};
 }

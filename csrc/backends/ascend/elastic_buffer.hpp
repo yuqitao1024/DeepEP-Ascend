@@ -558,6 +558,14 @@ public:
                     "DeepEP Ascend backend: dispatch requires positive, two-rank "
                     "expert-aligned capacity");
         const auto device = x.device();
+        int current_device = -1;
+        auto device_status = resources_->current_device(&current_device);
+        if (!device_status.ok())
+            raise_transport_status(device_status, rank_idx_);
+        TORCH_CHECK(device.index() == resources_->owning_device() &&
+                        current_device == resources_->owning_device(),
+                    "DeepEP Ascend backend: dispatch tensors and current NPU "
+                    "must match the buffer device");
         validate_npu_tensor(x, 2, torch::kBFloat16, device, "BF16 x");
         validate_npu_tensor(topk_idx, 2, torch::kLong, device, "int64 topk_idx");
         TORCH_CHECK(x.size(0) == topk_idx.size(0) && x.size(0) >= 0 &&

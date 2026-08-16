@@ -112,6 +112,7 @@ public:
     Device() = default;
     explicit Device(int index) : index_(index) {}
     c10::DeviceType type() const { return c10::DeviceType::PrivateUse1; }
+    int index() const { return index_; }
     bool operator==(const Device& other) const { return index_ == other.index_; }
 };
 

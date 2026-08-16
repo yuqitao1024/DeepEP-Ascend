@@ -8,10 +8,11 @@ namespace runtime = deep_ep::ascend::runtime;
 namespace transport = deep_ep::ascend::transport;
 namespace elastic = deep_ep::ascend::elastic;
 
-struct Trace { int launches = 0, copies = 0; std::uint64_t generation = 0; bool bad_diagnostic = false, fail_copy = false, fail_launch = false; } trace;
+struct Trace { int launches = 0, copies = 0, device = 0; std::uint64_t generation = 0; bool bad_diagnostic = false, fail_copy = false, fail_launch = false; } trace;
 int alloc(void*, std::uint64_t n, void** p) { *p = std::malloc(n); return *p ? 0 : 1; }
 int zero(void*, void* p, std::uint64_t n) { std::memset(p, 0, n); return 0; }
 int free_(void*, void* p) { std::free(p); return 0; }
+int current_device(void*, int* device) { *device = trace.device; return 0; }
 void* stream(void*) { return &trace; }
 int sync(void*, void*) { return 0; }
 int sync_device(void*) { return 0; }
@@ -44,7 +45,7 @@ int noop1(void*, std::uintptr_t) { return 0; }
 
 std::unique_ptr<runtime::CannRuntimeResources> resources() {
     auto result = std::make_unique<runtime::CannRuntimeResources>();
-    runtime::CannRuntimeApi r{nullptr,alloc,zero,free_,stream,sync,sync_device,h2d,d2h};
+    runtime::CannRuntimeApi r{nullptr,alloc,zero,free_,current_device,stream,sync,sync_device,h2d,d2h};
     transport::CannHostApi h{nullptr,rank_,size_,team,window,channels,ha,hz,hd,dh,hf,noop2,noop1};
     transport::TransportConfig c{}; c.rank=0; c.world_size=2; c.communicator_handle=1;
     c.device_buffer_bytes=2*1024*1024; c.requested_channels=1;
@@ -78,15 +79,22 @@ int main() {
     auto result = buffer->dispatch(x, none, idx, weights, none, no_int, no_int, no_list,
         none, none, none, none, none, none, none, 4, 2, 1, 1, 0, no_event, no_event,
         false, false, true, true, false, false, false);
-    if (trace.launches != 1 || std::get<5>(result) != 2 || std::get<0>(result).size(0) != 2 ||
-        !std::get<3>(result).has_value() || !std::get<13>(result).has_value()) return 1;
+    if (trace.launches != 1 || trace.generation != 1 || std::get<0>(result).size(0) != 2 ||
+        std::get<1>(result).has_value() || !std::get<2>(result).has_value() ||
+        !std::get<3>(result).has_value() || !std::get<4>(result).has_value() ||
+        std::get<5>(result) != 2 || std::get<6>(result) != 1 ||
+        std::get<7>(result).size() != 1 || std::get<8>(result).size(0) != 2 ||
+        std::get<9>(result).size(0) != 3 || std::get<10>(result).size(0) != 2 ||
+        std::get<11>(result).size(0) != 2 || std::get<11>(result).size(1) != 3 ||
+        std::get<12>(result).size(0) != 1 || !std::get<13>(result).has_value() ||
+        std::get<14>(result).has_value() || std::get<15>(result).has_value()) return 1;
     auto cached = buffer->dispatch(x, none, idx, weights, none,
         std::get<5>(result), std::get<6>(result), std::get<7>(result),
         std::get<8>(result), std::get<9>(result), std::get<10>(result),
         std::get<12>(result), std::get<13>(result), std::get<11>(result), none,
         4, 2, 1, 1, 0, no_event, no_event,
         false, false, false, false, false, false, false);
-    if (trace.launches != 2 || std::get<5>(cached) != 2) return 3;
+    if (trace.launches != 2 || trace.generation != 2 || std::get<5>(cached) != 2) return 3;
     try {
         (void)buffer->dispatch(x, none, idx, weights, none,
             1, std::get<6>(result), std::get<7>(result), std::get<8>(result),
@@ -109,6 +117,16 @@ int main() {
     } catch (const std::runtime_error&) {
         if (trace.launches != 2) return 7;
     }
+    trace.device = 1;
+    try {
+        (void)buffer->dispatch(x, none, idx, none, none, no_int, no_int, no_list,
+            none, none, none, none, none, none, none, 4, 2, 1, 1, 0,
+            no_event, no_event, false, false, false, true, false, false, false);
+        return 13;
+    } catch (const std::runtime_error&) {
+        if (trace.launches != 2) return 14;
+    }
+    trace.device = 0;
     trace.fail_launch = true;
     try {
         (void)buffer->dispatch(x, none, idx, none, none, no_int, no_int, no_list,

@@ -13,6 +13,7 @@ struct CannRuntimeApi {
     int (*allocate_device)(void*, std::uint64_t, void**) = nullptr;
     int (*zero_device)(void*, void*, std::uint64_t) = nullptr;
     int (*free_device)(void*, void*) = nullptr;
+    int (*current_device)(void*, int*) = nullptr;
     void* (*current_stream)(void*) = nullptr;
     int (*synchronize_stream)(void*, void*) = nullptr;
     int (*synchronize_device)(void*) = nullptr;
@@ -56,7 +57,9 @@ public:
     const transport::DeviceTransportContext& device_context() const noexcept {
         return device_context_;
     }
+    int owning_device() const noexcept { return owning_device_; }
 
+    transport::TransportStatus current_device(int* device);
     transport::TransportStatus current_stream(void** stream);
     transport::TransportStatus synchronize_stream(void* stream);
     transport::TransportStatus synchronize_device();
@@ -82,6 +85,7 @@ private:
     CannRuntimeAllocation workspace_{};
     std::unique_ptr<transport::HostTransport> transport_;
     transport::DeviceTransportContext device_context_{};
+    int owning_device_ = -1;
     bool owns_resources_ = false;
     bool initialized_ = false;
 };
