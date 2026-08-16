@@ -272,8 +272,11 @@ bool has_exact_result(
 
     elastic::DispatchHandleDescriptor descriptor{};
     std::memcpy(&descriptor, std::get<13>(result)->data_ptr(), 96);
+    const std::uint64_t expected_family = expanded ?
+        0x7324d91615b33c39ULL : 0xae1c4b7d7735a758ULL;
     return descriptor.abi_version == 1 && descriptor.struct_size == 96 &&
-        descriptor.family == 7 && descriptor.topology.world_rank == 0 &&
+        descriptor.family == expected_family &&
+        descriptor.topology.world_rank == 0 &&
         descriptor.topology.world_size == 2 &&
         descriptor.topology.scale_up_rank == 0 &&
         descriptor.topology.scale_up_size == 2 &&

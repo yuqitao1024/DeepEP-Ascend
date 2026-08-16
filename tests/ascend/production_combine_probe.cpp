@@ -114,12 +114,23 @@ extern "C" int deep_ep_ascend_launch_barrier(
 extern "C" int deep_ep_ascend_launch_dispatch(
     elastic::DispatchArguments arguments, elastic::CoreTiling tiling, void*) {
     trace.generation = arguments.generation;
-    arguments.prefix_per_rank[0] = 0;
-    arguments.prefix_per_rank[1] = 0;
-    std::memset(arguments.prefix_per_expert, 0,
-                (tiling.num_experts + 1) * sizeof(std::int32_t));
-    std::memset(arguments.unaligned_per_expert, 0,
-                tiling.num_experts * sizeof(std::int32_t));
+    arguments.prefix_per_rank[0] = 1;
+    arguments.prefix_per_rank[1] = 2;
+    const auto aligned = static_cast<std::int32_t>(
+        ((2 + tiling.expert_alignment - 1) / tiling.expert_alignment) *
+        tiling.expert_alignment);
+    arguments.prefix_per_expert[0] = 0;
+    arguments.prefix_per_expert[1] = aligned;
+    arguments.prefix_per_expert[2] = aligned;
+    arguments.unaligned_per_expert[0] = 2;
+    arguments.unaligned_per_expert[1] = 0;
+    arguments.destination_slots[0] = 0;
+    arguments.destination_slots[1] = 0;
+    const std::array<std::int32_t, 8> metadata{
+        0, 0, -1, -1,
+        static_cast<std::int32_t>(tiling.num_max_tokens_per_rank),
+        3, -1, -1};
+    std::memcpy(arguments.source_metadata, metadata.data(), sizeof(metadata));
     return 0;
 }
 extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
@@ -191,7 +202,7 @@ struct Inputs {
             0, 0, 0, -1, 4, 3, -1, 1};
         const auto& metadata = expanded ? expanded_metadata : normal;
         std::memcpy(source.data_ptr(), metadata.data(), sizeof(metadata));
-        descriptor_value = elastic::make_dispatch_handle_descriptor(
+        descriptor_value = elastic::make_attested_dispatch_handle_descriptor(
             7, {0, 2, 0, 2, 0, 1}, 1, 8, 2, 2, 4, 4,
             expanded ? elastic::mode_bit(elastic::CoreMode::kExpanded) : 0);
         write_descriptor();
@@ -224,37 +235,48 @@ std::unique_ptr<Buffer> buffer(bool allow_multiple_reduction = true) {
     auto owned = resources();
     if (!owned)
         return {};
-    const auto topology = elastic::CoreTopology{0, 2, 0, 2, 0, 1};
-    std::vector<elastic::DispatchHandleDescriptor> issued_descriptors{
-        elastic::make_dispatch_handle_descriptor(
-            7, topology, 1, 8, 2, 2, 4, 4, 0),
-        elastic::make_dispatch_handle_descriptor(
-            7, topology, 1, 8, 2, 2, 4, 4,
-            elastic::mode_bit(elastic::CoreMode::kExpanded)),
-    };
     return Buffer::make_testing_buffer(
         0, std::move(owned), 2 * 1024 * 1024, 1,
-        allow_multiple_reduction, std::move(issued_descriptors));
+        allow_multiple_reduction);
 }
 
-std::unique_ptr<Buffer> empty_registry_buffer() {
+std::unique_ptr<Buffer> stateless_buffer(std::uint64_t dispatch_family = 7) {
     auto owned = resources();
     if (!owned)
         return {};
     return Buffer::make_testing_buffer(
-        0, std::move(owned), 2 * 1024 * 1024, 1, true);
+        0, std::move(owned), 2 * 1024 * 1024, 1, true,
+        dispatch_family);
 }
 
-void register_dispatch_descriptor(Buffer& target, Inputs& inputs) {
+auto run_uncached_dispatch(
+    Buffer& target, Inputs& inputs, int capacity = 4, int alignment = 4) {
     const std::optional<Tensor> no_tensor;
     const std::optional<int> no_int;
     const std::optional<std::vector<int>> no_list;
     const std::optional<Event> no_event;
     auto dispatch_x = inputs.x.narrow(0, 0, 1);
-    (void)target.dispatch(
+    return target.dispatch(
         dispatch_x, no_tensor, inputs.indices, no_tensor, no_tensor,
         no_int, no_int, no_list, no_tensor, no_tensor, no_tensor, no_tensor,
-        no_tensor, no_tensor, no_tensor, 4, 2, 4, 1, 0, no_event, no_event,
+        no_tensor, no_tensor, no_tensor, capacity, 2, alignment, 1, 0,
+        no_event, no_event,
+        false, false, true, true, false, false, false);
+}
+
+template <typename DispatchResult>
+auto run_cached_dispatch(
+    Buffer& target, Inputs& inputs, const DispatchResult& cached,
+    int capacity, int alignment) {
+    const std::optional<Tensor> no_tensor;
+    const std::optional<Event> no_event;
+    auto dispatch_x = inputs.x.narrow(0, 0, 1);
+    return target.dispatch(
+        dispatch_x, no_tensor, inputs.indices, no_tensor, no_tensor,
+        std::get<5>(cached), std::get<6>(cached), std::get<7>(cached),
+        std::get<8>(cached), std::get<9>(cached), std::get<10>(cached),
+        std::get<12>(cached), std::get<13>(cached), std::get<11>(cached),
+        no_tensor, capacity, 2, alignment, 1, 0, no_event, no_event,
         false, false, true, true, false, false, false);
 }
 
@@ -322,13 +344,62 @@ bool normal_and_expanded_success() {
         trace.bias_0 == expanded.bias0.data_ptr() && trace.bias_1 == nullptr;
 }
 
-bool successful_dispatch_registers_descriptor() {
+bool successful_dispatch_handle_is_statelessly_valid() {
     trace = {};
-    auto target = empty_registry_buffer();
+    auto target = stateless_buffer();
     if (!target)
         return false;
     Inputs inputs;
-    register_dispatch_descriptor(*target, inputs);
+    auto dispatched = run_uncached_dispatch(*target, inputs);
+    inputs.descriptor = *std::get<13>(dispatched);
+    const auto result = call(*target, inputs);
+    return !std::get<2>(result).has_value() && trace.launches == 1 &&
+        trace.generations == std::vector<std::uint64_t>{1};
+}
+
+bool long_lived_dispatch_validation_state_is_constant() {
+    trace = {};
+    auto target = stateless_buffer();
+    if (!target)
+        return false;
+    Inputs inputs;
+    const auto validation_state_bytes =
+        target->testing_dispatch_validation_state_bytes();
+    if (validation_state_bytes != sizeof(std::uint64_t))
+        return false;
+    auto oldest = run_uncached_dispatch(*target, inputs, 4, 1);
+    for (int iteration = 0; iteration < 64; ++iteration)
+        (void)run_uncached_dispatch(
+            *target, inputs, 4 + iteration % 2,
+            iteration % 2 == 0 ? 1 : 4);
+    if (target->testing_dispatch_validation_state_bytes() !=
+            validation_state_bytes)
+        return false;
+    auto cached = run_cached_dispatch(*target, inputs, oldest, 4, 1);
+    if (target->testing_dispatch_validation_state_bytes() !=
+            validation_state_bytes)
+        return false;
+    inputs.descriptor = *std::get<13>(cached);
+    const auto result = call(*target, inputs);
+    return !std::get<2>(result).has_value() && trace.launches == 1 &&
+        trace.generations == std::vector<std::uint64_t>{1};
+}
+
+bool cross_buffer_dispatch_handle_is_retryable() {
+    trace = {};
+    auto source = stateless_buffer(7);
+    auto target = stateless_buffer(8);
+    if (!source || !target)
+        return false;
+    Inputs inputs;
+    auto foreign = run_uncached_dispatch(*source, inputs);
+    inputs.descriptor = *std::get<13>(foreign);
+    if (!error_contains(
+            [&] { (void)call(*target, inputs); }, "dispatch handle") ||
+        trace.launches != 0)
+        return false;
+    auto local = run_uncached_dispatch(*target, inputs);
+    inputs.descriptor = *std::get<13>(local);
     const auto result = call(*target, inputs);
     return !std::get<2>(result).has_value() && trace.launches == 1 &&
         trace.generations == std::vector<std::uint64_t>{1};
@@ -546,8 +617,12 @@ int main() {
         }
     };
     check(normal_and_expanded_success(), "normal and expanded outputs");
-    check(successful_dispatch_registers_descriptor(),
-          "successful dispatch registers descriptor");
+    check(successful_dispatch_handle_is_statelessly_valid(),
+          "successful dispatch handle is statelessly valid");
+    check(long_lived_dispatch_validation_state_is_constant(),
+          "long-lived dispatch validation state is constant");
+    check(cross_buffer_dispatch_handle_is_retryable(),
+          "cross-buffer dispatch handle retry");
     check(preflight_is_retryable(), "descriptor and metadata preflight retry");
     check(interior_origin_extent_is_retryable(), "interior origin extent retry");
     check(positive_alignment_mutation_is_retryable(),

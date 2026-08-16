@@ -63,8 +63,6 @@ class ElasticBuffer {
     elastic::BarrierSequence barrier_sequence_;
     mutable elastic::DispatchSequence dispatch_sequence_;
     mutable elastic::CombineSequence combine_sequence_;
-    mutable std::vector<elastic::DispatchHandleDescriptor>
-        issued_dispatch_descriptors_;
     std::uint64_t dispatch_family_ = 0;
     std::uint64_t barrier_timeout_cycles_ = 0;
     bool destroyed_ = false;
@@ -311,16 +309,13 @@ class ElasticBuffer {
     ElasticBuffer(TestingTag, int rank, std::unique_ptr<runtime::CannRuntimeResources> resources,
                   std::int64_t buffer_bytes, std::uint64_t timeout_cycles,
                   bool allow_multiple_reduction,
-                  std::vector<elastic::DispatchHandleDescriptor>
-                      issued_dispatch_descriptors)
+                  std::uint64_t dispatch_family)
         : rank_idx_(rank), num_ranks_(2), num_buffer_bytes_(buffer_bytes),
           allow_hybrid_mode_(false),
           allow_multiple_reduction_(allow_multiple_reduction),
           resources_(std::move(resources)),
-          issued_dispatch_descriptors_(
-              std::move(issued_dispatch_descriptors)),
           barrier_timeout_cycles_(timeout_cycles) {
-        dispatch_family_ = 7;
+        dispatch_family_ = dispatch_family;
     }
 #endif
 
@@ -387,12 +382,14 @@ public:
         int rank, std::unique_ptr<runtime::CannRuntimeResources> resources,
         std::int64_t buffer_bytes, std::uint64_t timeout_cycles,
         bool allow_multiple_reduction = true,
-        std::vector<elastic::DispatchHandleDescriptor>
-            issued_dispatch_descriptors = {}) {
+        std::uint64_t dispatch_family = 7) {
         return std::unique_ptr<ElasticBuffer>(new ElasticBuffer(
             TestingTag{}, rank, std::move(resources), buffer_bytes,
-            timeout_cycles, allow_multiple_reduction,
-            std::move(issued_dispatch_descriptors)));
+            timeout_cycles, allow_multiple_reduction, dispatch_family));
+    }
+
+    std::size_t testing_dispatch_validation_state_bytes() const noexcept {
+        return sizeof(dispatch_family_);
     }
 #endif
 
@@ -677,7 +674,8 @@ public:
 
         const auto descriptor_mode_flags = mode_flags & ~elastic::mode_bit(
             elastic::CoreMode::kCached);
-        const auto expected_descriptor = elastic::make_dispatch_handle_descriptor(
+        const auto expected_descriptor =
+            elastic::make_attested_dispatch_handle_descriptor(
             dispatch_family_, tiling.topology, num_tokens, hidden, experts,
             num_topk, alignment, capacity, descriptor_mode_flags);
         const auto int_options = x.options().dtype(torch::kInt);
@@ -996,8 +994,6 @@ public:
                         num_expanded_tokens >= 0 &&
                         num_expanded_tokens <= static_cast<int>(expanded_records),
                     "DeepEP Ascend backend: dispatch returned invalid output counts");
-        if (!cached_mode)
-            issued_dispatch_descriptors_.push_back(expected_descriptor);
         attempt.complete();
         const int output_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
         auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
@@ -1144,24 +1140,14 @@ public:
         const auto& context = resources_->device_context();
         const elastic::CoreModeFlags dispatch_mode = use_expanded_layout ?
             elastic::mode_bit(elastic::CoreMode::kExpanded) : 0;
-        const elastic::DispatchHandleDescriptor* issued_descriptor = nullptr;
-        for (const auto& candidate : issued_dispatch_descriptors_) {
-            if (elastic::validate_dispatch_handle(candidate, descriptor).ok()) {
-                issued_descriptor = &candidate;
-                break;
-            }
-        }
-        TORCH_CHECK(issued_descriptor != nullptr,
-                    "DeepEP Ascend backend: combine dispatch handle was not "
-                    "issued by this buffer");
         const auto expected_descriptor =
-            elastic::make_dispatch_handle_descriptor(
+            elastic::make_attested_dispatch_handle_descriptor(
                 dispatch_family_,
                 elastic::core_topology_from_transport(context.topology),
                 static_cast<std::uint64_t>(combined_topk_idx.size(0)),
                 static_cast<std::uint64_t>(x.size(1)),
                 static_cast<std::uint64_t>(num_experts), num_topk,
-                issued_descriptor->expert_alignment, capacity, dispatch_mode);
+                descriptor.expert_alignment, capacity, dispatch_mode);
         const auto descriptor_status = elastic::validate_dispatch_handle(
             expected_descriptor, descriptor);
         TORCH_CHECK(descriptor_status.ok(), "DeepEP Ascend backend: combine ",

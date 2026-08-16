@@ -134,6 +134,62 @@ inline DispatchHandleDescriptor make_dispatch_handle_descriptor(
     return descriptor;
 }
 
+constexpr std::uint64_t mix_dispatch_handle_attestation(
+    std::uint64_t state, std::uint64_t value) noexcept {
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
+    value ^= value >> 31U;
+    return state ^ (value + 0x9e3779b97f4a7c15ULL +
+                    (state << 6U) + (state >> 2U));
+}
+
+// Bind public descriptor geometry to its buffer without retaining handles.
+constexpr std::uint64_t attest_dispatch_handle_family(
+    std::uint64_t buffer_family, const CoreTopology& topology,
+    std::uint64_t num_tokens, std::uint64_t hidden,
+    std::uint64_t num_experts, std::uint64_t num_topk,
+    std::uint64_t expert_alignment,
+    std::uint64_t num_max_tokens_per_rank,
+    CoreModeFlags mode_flags) noexcept {
+    std::uint64_t state = mix_dispatch_handle_attestation(
+        buffer_family, kDispatchHandleDescriptorAbiVersion);
+    state = mix_dispatch_handle_attestation(
+        state, static_cast<std::uint32_t>(topology.world_rank));
+    state = mix_dispatch_handle_attestation(
+        state, static_cast<std::uint32_t>(topology.world_size));
+    state = mix_dispatch_handle_attestation(
+        state, static_cast<std::uint32_t>(topology.scale_up_rank));
+    state = mix_dispatch_handle_attestation(
+        state, static_cast<std::uint32_t>(topology.scale_up_size));
+    state = mix_dispatch_handle_attestation(
+        state, static_cast<std::uint32_t>(topology.scale_out_rank));
+    state = mix_dispatch_handle_attestation(
+        state, static_cast<std::uint32_t>(topology.scale_out_size));
+    state = mix_dispatch_handle_attestation(state, num_tokens);
+    state = mix_dispatch_handle_attestation(state, hidden);
+    state = mix_dispatch_handle_attestation(state, num_experts);
+    state = mix_dispatch_handle_attestation(state, num_topk);
+    state = mix_dispatch_handle_attestation(state, expert_alignment);
+    state = mix_dispatch_handle_attestation(
+        state, num_max_tokens_per_rank);
+    return mix_dispatch_handle_attestation(state, mode_flags);
+}
+
+inline DispatchHandleDescriptor make_attested_dispatch_handle_descriptor(
+    std::uint64_t buffer_family, const CoreTopology& topology,
+    std::uint64_t num_tokens, std::uint64_t hidden,
+    std::uint64_t num_experts, std::uint64_t num_topk,
+    std::uint64_t expert_alignment,
+    std::uint64_t num_max_tokens_per_rank, CoreModeFlags mode_flags) {
+    return make_dispatch_handle_descriptor(
+        attest_dispatch_handle_family(
+            buffer_family, topology, num_tokens, hidden, num_experts,
+            num_topk, expert_alignment, num_max_tokens_per_rank, mode_flags),
+        topology, num_tokens, hidden, num_experts, num_topk,
+        expert_alignment, num_max_tokens_per_rank, mode_flags);
+}
+
 constexpr bool same_topology(
     const CoreTopology& lhs, const CoreTopology& rhs) {
     return lhs.world_rank == rhs.world_rank &&
