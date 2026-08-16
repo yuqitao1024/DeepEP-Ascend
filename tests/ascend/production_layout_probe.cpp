@@ -3,7 +3,7 @@
 #include <limits>
 #include <type_traits>
 
-#include "csrc/backends/ascend/elastic/layout.hpp"
+#include "csrc/backends/ascend/elastic/dispatch_state.hpp"
 
 using namespace deep_ep::ascend::elastic;
 
@@ -29,19 +29,33 @@ int main() {
     CHECK(layout.abi_version == kSymmetricWindowAbiVersion);
     CHECK(layout.struct_size == sizeof(SymmetricWindowLayout));
     CHECK(layout.dispatch_source_shard_count == 2);
+    CHECK(layout.dispatch_receive_shard_count == 2);
+    CHECK(layout.dispatch_staging_shard_count == 2);
     CHECK(layout.combine_contributor_shard_count == 2);
-    CHECK(layout.dispatch_source_shard_bytes >=
-          input.num_max_tokens_per_rank * input.num_topk *
+    CHECK(layout.dispatch_receive_shard_bytes >=
+          input.num_max_tokens_per_rank *
               layout.dispatch_record_bytes);
+    CHECK(layout.dispatch_staging_shard_bytes >=
+          input.num_max_tokens_per_rank *
+              layout.dispatch_record_bytes);
+    CHECK(layout.dispatch_control_bytes ==
+          input.world_size * sizeof(DispatchControlSlot));
     CHECK(layout.combine_contributor_shard_bytes >=
           input.num_max_tokens_per_rank * layout.combine_record_bytes);
     CHECK(layout.control_offset % kAscendElasticAlignment == 0);
     CHECK(layout.control_bytes >= sizeof(SymmetricControlHeader));
     CHECK(layout.dispatch_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.dispatch_receive_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.dispatch_staging_offset % kAscendElasticAlignment == 0);
     CHECK(layout.combine_offset % kAscendElasticAlignment == 0);
     CHECK(layout.reserve_offset % kAscendElasticAlignment == 0);
     CHECK(layout.control_offset + layout.control_bytes <=
           layout.dispatch_offset);
+    CHECK(layout.dispatch_offset <= layout.dispatch_receive_offset);
+    CHECK(layout.dispatch_receive_offset + layout.dispatch_receive_bytes <=
+          layout.dispatch_staging_offset);
+    CHECK(layout.dispatch_staging_offset + layout.dispatch_staging_bytes <=
+          layout.dispatch_offset + layout.dispatch_bytes);
     CHECK(layout.dispatch_offset + layout.dispatch_bytes <=
           layout.combine_offset);
     CHECK(layout.combine_offset + layout.combine_bytes <=
@@ -52,8 +66,10 @@ int main() {
     larger.num_max_tokens_per_rank *= 2;
     SymmetricWindowLayout larger_layout{};
     CHECK(build_symmetric_window_layout(larger, &larger_layout).ok());
-    CHECK(larger_layout.dispatch_source_shard_bytes >
-          layout.dispatch_source_shard_bytes);
+    CHECK(larger_layout.dispatch_receive_shard_bytes >
+          layout.dispatch_receive_shard_bytes);
+    CHECK(larger_layout.dispatch_staging_shard_bytes >
+          layout.dispatch_staging_shard_bytes);
     CHECK(larger_layout.combine_contributor_shard_bytes >
           layout.combine_contributor_shard_bytes);
     CHECK(larger_layout.total_bytes >= layout.total_bytes);

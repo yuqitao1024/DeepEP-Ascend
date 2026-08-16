@@ -9,37 +9,6 @@ namespace deep_ep::ascend::elastic {
 
 enum class OperationKind : std::uint8_t { kBarrier, kDispatch, kCombine };
 enum class ElementKind : std::uint8_t { kBFloat16, kFloat8E4M3 };
-enum class CoreMode : std::uint8_t {
-    kCached,
-    kExpanded,
-    kZeroPadding,
-    kAllowMultipleReduction,
-    kAsyncEvent,
-    kCpuSync,
-    kHybrid,
-    kPipeline,
-    kEngram,
-};
-
-using CoreModeFlags = std::uint32_t;
-
-constexpr CoreModeFlags mode_bit(CoreMode mode) {
-    return CoreModeFlags{1} << static_cast<std::uint8_t>(mode);
-}
-
-constexpr bool has_mode(CoreModeFlags flags, CoreMode mode) {
-    return (flags & mode_bit(mode)) != 0;
-}
-
-struct CoreTopology {
-    int world_rank = 0;
-    int world_size = 1;
-    int scale_up_rank = 0;
-    int scale_up_size = 1;
-    int scale_out_rank = 0;
-    int scale_out_size = 1;
-};
-
 inline constexpr transport::TransportCapabilities
     kBarrierTransportCapabilities =
         transport::capability_bit(
@@ -50,20 +19,6 @@ inline constexpr transport::TransportCapabilities
             transport::TransportCapability::kDeviceBarrier) |
         transport::capability_bit(
             transport::TransportCapability::kScaleUpTeam);
-
-constexpr bool is_single_rank_topology(const CoreTopology& topology) {
-    return topology.world_rank == 0 && topology.world_size == 1 &&
-           topology.scale_up_rank == 0 && topology.scale_up_size == 1 &&
-           topology.scale_out_rank == 0 && topology.scale_out_size == 1;
-}
-
-constexpr bool is_two_rank_scale_up_topology(
-    const CoreTopology& topology) {
-    return topology.world_size == 2 && topology.world_rank >= 0 &&
-           topology.world_rank < 2 && topology.scale_up_size == 2 &&
-           topology.scale_up_rank == topology.world_rank &&
-           topology.scale_out_rank == 0 && topology.scale_out_size == 1;
-}
 
 struct CoreLaunchShape {
     std::uint32_t num_blocks = 1;

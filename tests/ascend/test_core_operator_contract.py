@@ -9,6 +9,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 PROBE = ROOT / "tests/ascend/core_operator_contract_probe.cpp"
 RUNTIME_PROBE = ROOT / "tests/ascend/core_runtime_contract_probe.cpp"
 PRODUCTION_LAYOUT_PROBE = ROOT / "tests/ascend/production_layout_probe.cpp"
+PRODUCTION_DISPATCH_STATE_PROBE = \
+    ROOT / "tests/ascend/production_dispatch_state_probe.cpp"
 PRODUCTION_BARRIER_STATE_PROBE = \
     ROOT / "tests/ascend/production_barrier_state_probe.cpp"
 ELASTIC = ROOT / "csrc/backends/ascend/elastic"
@@ -139,6 +141,20 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
+    def test_production_dispatch_state_and_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "production_dispatch_state_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(PRODUCTION_DISPATCH_STATE_PROBE),
+                 "-o", str(binary)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
     def test_production_barrier_sequence_and_timeout(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = pathlib.Path(directory) / "production_barrier_state_probe"
@@ -169,7 +185,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
     def test_contract_headers_are_vendor_neutral(self):
         forbidden = ("cuda", "nccl", "nvshmem", "acl/", "ain", "hcomm",
                      "hccl", "urma", "torch_npu", "kernel_operator")
-        headers = [ELASTIC / "layout.hpp", ELASTIC / "tiling.hpp"]
+        headers = [ELASTIC / "dispatch_state.hpp", ELASTIC / "layout.hpp",
+                   ELASTIC / "tiling.hpp"]
         for header in headers:
             self.assertTrue(header.is_file(), str(header))
             includes = [line.strip().lower()

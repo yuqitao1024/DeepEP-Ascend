@@ -9,6 +9,51 @@ inline constexpr std::uint64_t kAscendElasticAlignment = 32;
 inline constexpr std::uint64_t kPublicElasticBufferAlignment = 2ULL << 20U;
 inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 1;
 
+enum class CoreMode : std::uint8_t {
+    kCached,
+    kExpanded,
+    kZeroPadding,
+    kAllowMultipleReduction,
+    kAsyncEvent,
+    kCpuSync,
+    kHybrid,
+    kPipeline,
+    kEngram,
+};
+
+using CoreModeFlags = std::uint32_t;
+
+constexpr CoreModeFlags mode_bit(CoreMode mode) {
+    return CoreModeFlags{1} << static_cast<std::uint8_t>(mode);
+}
+
+constexpr bool has_mode(CoreModeFlags flags, CoreMode mode) {
+    return (flags & mode_bit(mode)) != 0;
+}
+
+struct CoreTopology {
+    int world_rank = 0;
+    int world_size = 1;
+    int scale_up_rank = 0;
+    int scale_up_size = 1;
+    int scale_out_rank = 0;
+    int scale_out_size = 1;
+};
+
+constexpr bool is_single_rank_topology(const CoreTopology& topology) {
+    return topology.world_rank == 0 && topology.world_size == 1 &&
+           topology.scale_up_rank == 0 && topology.scale_up_size == 1 &&
+           topology.scale_out_rank == 0 && topology.scale_out_size == 1;
+}
+
+constexpr bool is_two_rank_scale_up_topology(
+    const CoreTopology& topology) {
+    return topology.world_size == 2 && topology.world_rank >= 0 &&
+           topology.world_rank < 2 && topology.scale_up_size == 2 &&
+           topology.scale_up_rank == topology.world_rank &&
+           topology.scale_out_rank == 0 && topology.scale_out_size == 1;
+}
+
 constexpr bool checked_add(
     std::uint64_t lhs, std::uint64_t rhs, std::uint64_t* result) {
     if (result == nullptr ||
@@ -81,6 +126,13 @@ struct alignas(32) SymmetricControlHeader {
 
 static_assert(sizeof(SymmetricControlHeader) == 64);
 
+struct alignas(16) DispatchControlSlot {
+    std::uint64_t generation = 0;
+    std::uint64_t count = 0;
+};
+
+static_assert(sizeof(DispatchControlSlot) == 16);
+
 enum class LayoutStatusCode : std::uint8_t {
     kSuccess,
     kInvalidArgument,
@@ -115,8 +167,19 @@ struct SymmetricWindowLayout {
     std::uint32_t struct_size = 0;
     std::uint64_t control_offset = 0;
     std::uint64_t control_bytes = 0;
+    std::uint64_t dispatch_control_offset = 0;
+    std::uint64_t dispatch_control_bytes = 0;
     std::uint64_t dispatch_offset = 0;
     std::uint64_t dispatch_record_bytes = 0;
+    std::uint64_t dispatch_receive_offset = 0;
+    std::uint64_t dispatch_receive_shard_bytes = 0;
+    std::uint64_t dispatch_receive_shard_count = 0;
+    std::uint64_t dispatch_receive_bytes = 0;
+    std::uint64_t dispatch_staging_offset = 0;
+    std::uint64_t dispatch_staging_shard_bytes = 0;
+    std::uint64_t dispatch_staging_shard_count = 0;
+    std::uint64_t dispatch_staging_bytes = 0;
+    // Retained for callers compiled against the initial window layout.
     std::uint64_t dispatch_source_shard_bytes = 0;
     std::uint64_t dispatch_source_shard_count = 0;
     std::uint64_t dispatch_bytes = 0;
@@ -176,10 +239,10 @@ inline LayoutStatus build_symmetric_window_layout(
     layout.dispatch_source_shard_count = input.world_size;
     layout.combine_contributor_shard_count = input.world_size;
 
-    std::uint64_t count_record_bytes = 0;
-    if (!checked_multiply(input.world_size, 4 * sizeof(std::uint64_t),
-                          &count_record_bytes) ||
-        !checked_add(sizeof(SymmetricControlHeader), count_record_bytes,
+    if (!checked_multiply(input.world_size, sizeof(DispatchControlSlot),
+                          &layout.dispatch_control_bytes) ||
+        !checked_add(sizeof(SymmetricControlHeader),
+                     layout.dispatch_control_bytes,
                      &layout.control_bytes))
         return LayoutStatus::overflow("control region size overflow");
 
@@ -211,17 +274,32 @@ inline LayoutStatus build_symmetric_window_layout(
             !dispatch_record.finish(&layout.dispatch_record_bytes))
             return LayoutStatus::overflow("dispatch record layout overflow");
 
-        std::uint64_t dispatch_slots = 0;
-        if (!checked_multiply(input.num_max_tokens_per_rank, effective_topk,
-                              &dispatch_slots) ||
-            !checked_multiply(dispatch_slots, layout.dispatch_record_bytes,
-                              &layout.dispatch_source_shard_bytes) ||
-            !checked_align(layout.dispatch_source_shard_bytes,
+        if (!checked_multiply(input.num_max_tokens_per_rank,
+                              layout.dispatch_record_bytes,
+                              &layout.dispatch_receive_shard_bytes) ||
+            !checked_align(layout.dispatch_receive_shard_bytes,
                            kAscendElasticAlignment,
-                           &layout.dispatch_source_shard_bytes) ||
-            !checked_multiply(layout.dispatch_source_shard_bytes,
-                              input.world_size, &layout.dispatch_bytes))
+                           &layout.dispatch_receive_shard_bytes) ||
+            !checked_multiply(layout.dispatch_receive_shard_bytes,
+                              input.world_size,
+                              &layout.dispatch_receive_bytes) ||
+            !checked_multiply(input.num_max_tokens_per_rank,
+                              layout.dispatch_record_bytes,
+                              &layout.dispatch_staging_shard_bytes) ||
+            !checked_align(layout.dispatch_staging_shard_bytes,
+                           kAscendElasticAlignment,
+                           &layout.dispatch_staging_shard_bytes) ||
+            !checked_multiply(layout.dispatch_staging_shard_bytes,
+                              input.world_size,
+                              &layout.dispatch_staging_bytes) ||
+            !checked_add(layout.dispatch_receive_bytes,
+                         layout.dispatch_staging_bytes,
+                         &layout.dispatch_bytes))
             return LayoutStatus::overflow("dispatch region size overflow");
+        layout.dispatch_receive_shard_count = input.world_size;
+        layout.dispatch_staging_shard_count = input.world_size;
+        layout.dispatch_source_shard_bytes =
+            layout.dispatch_staging_shard_bytes;
 
         LayoutBuilder combine_record;
         if (!combine_record.append(hidden_bytes, &ignored) ||
@@ -247,6 +325,12 @@ inline LayoutStatus build_symmetric_window_layout(
         !window.append(layout.reserve_bytes, &layout.reserve_offset) ||
         !window.finish(&layout.total_bytes, kPublicElasticBufferAlignment))
         return LayoutStatus::overflow("symmetric window size overflow");
+    if (!checked_add(layout.control_offset, sizeof(SymmetricControlHeader),
+                     &layout.dispatch_control_offset) ||
+        !checked_add(layout.dispatch_offset, layout.dispatch_receive_bytes,
+                     &layout.dispatch_staging_offset))
+        return LayoutStatus::overflow("symmetric window offset overflow");
+    layout.dispatch_receive_offset = layout.dispatch_offset;
 
     *output = layout;
     return {};
