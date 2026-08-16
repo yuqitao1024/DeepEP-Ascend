@@ -110,7 +110,9 @@ def _case_specs():
             bias_count=2),
         "duplicate-same-rank-experts": CaseSpec(
             "duplicate-same-rank-experts", _payloads((2, 2), 15),
-            (((0, 1), (2, 3)), ((1, 0), (3, 2)))),
+            (((0, 1), (2, 3)), ((1, 0), (3, 2))),
+            (((0.125, 0.25), (0.375, 0.5)),
+             ((0.625, 0.75), (0.875, 1.0)))),
         "negative-one-route": CaseSpec(
             "negative-one-route", _payloads((2, 2), 17),
             (((-1, -1), (2, -1)), ((-1, 0), (3, -1)))),
@@ -404,6 +406,25 @@ def _behavior_fixtures():
     rank_reversed = _reference_values(
         order_routes, 0, ORDER_VARIANT, contributor_order=(1, 0))[0]
 
+    same_contributor_spec = _case_specs()["duplicate-same-rank-experts"]
+    same_contributor_routes = (
+        ((0, 1), (2, 3)),
+        ((1, 0), (3, 2)),
+    )
+    same_contributor_weights = (
+        ((0.125, 0.25), (0.375, 0.5)),
+        ((0.625, 0.75), (0.875, 1.0)),
+    )
+    _check(same_contributor_spec.routes == same_contributor_routes and
+           same_contributor_spec.weights == same_contributor_weights,
+           "the public same-contributor case is not weighted")
+    local_experts = NUM_EXPERTS // WORLD_SIZE
+    _check(all(
+        len({_integer(expert) // local_experts for expert in token_routes}) == 1
+        for rank_routes in same_contributor_spec.routes
+        for token_routes in rank_routes),
+        "same-contributor case routes a token across contributors")
+
     weight_routes = ((0, -1),)
     activation_ignores_weight = _reference_values(weight_routes, 0)[0]
     restored_weights = _masked_weight_values(
@@ -678,6 +699,10 @@ def _behavior_fixtures():
             "wrong_npu": _is_local_npu_tensor(
                 FakePlacedTensor("npu", 1), 0),
         },
+        "same_contributor_weights": {
+            "routes": same_contributor_spec.routes,
+            "weights": same_contributor_spec.weights,
+        },
         "synchronization": {
             "local_failure_reductions": local_matrix.dist.reductions,
             "peer_failure_reductions": peer_matrix.dist.reductions,
@@ -778,6 +803,7 @@ def _contract():
             "expanded-metadata-writes",
             "bf16-tolerance",
             "exact-float32-weights",
+            "weighted-same-contributor-lanes",
             "case-boundary-barriers",
             "distributed-failure-aggregation",
             "buffer-before-group-teardown",

@@ -185,6 +185,25 @@ combine_normal_record_routing_weight(
         weights, source_row * num_topk + static_cast<std::uint64_t>(lane));
 }
 
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE inline void
+combine_fill_normal_record_routing_weights(
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const float* weights,
+    std::uint64_t source_row, std::int32_t master_lane,
+    std::uint64_t num_topk,
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL std::uint8_t* record,
+    std::uint64_t hidden_bytes) noexcept {
+    if (record == nullptr)
+        return;
+    auto* record_weights =
+        reinterpret_cast<DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL float*>(
+            record + hidden_bytes);
+    for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
+        record_weights[lane] = combine_normal_record_routing_weight(
+            weights, source_row, static_cast<std::int32_t>(lane),
+            master_lane, num_topk);
+    }
+}
+
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE inline CombineRecordHeader
 load_combine_record_header(
     DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const CombineRecordHeader* header)

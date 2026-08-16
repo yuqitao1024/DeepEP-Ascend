@@ -203,6 +203,102 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn(
             "ElementKind element_kind",
             signatures["core_operator_compile_probe_vf"])
+        expected_combine_producer_parameters = [
+            "__gm__ const bfloat16_t* x",
+            "__gm__ const float* topk_weights",
+            "__gm__ const std::int32_t* source_metadata",
+            "__gm__ const std::int32_t* prefix_per_rank",
+            "__gm__ std::uint8_t* workspace",
+            "std::uint32_t transport_abi_version",
+            "std::uint32_t transport_struct_size",
+            "std::uintptr_t transport_local_window_base",
+            "int transport_world_rank",
+            "int transport_world_size",
+            "int transport_scale_up_size",
+            "std::uintptr_t transport_backend_context",
+            "CoreModeFlags mode_flags",
+            "std::uint64_t generation",
+            "std::uint64_t timeout_cycles",
+            "std::uint64_t num_source_rows",
+            "std::uint64_t num_input_rows",
+            "std::uint64_t num_tokens",
+            "std::uint64_t num_topk",
+            "std::uint64_t shard_capacity",
+            "std::uint64_t combine_record_bytes",
+            "std::uint64_t combine_control_offset",
+            "std::uint64_t combine_control_bytes",
+            "std::uint64_t combine_receive_offset",
+            "std::uint64_t combine_receive_shard_bytes",
+            "std::uint64_t combine_receive_shard_count",
+            "std::uint64_t combine_receive_bytes",
+            "std::uint64_t combine_staging_offset",
+            "std::uint64_t combine_staging_shard_bytes",
+            "std::uint64_t combine_staging_shard_count",
+            "std::uint64_t combine_staging_bytes",
+            "std::uint64_t workspace_scratch_offset",
+            "std::uint64_t hidden_elements",
+        ]
+        self.assertEqual(
+            [" ".join(argument.split()) for argument in
+             signature_arguments["combine_producer_vf"]],
+            expected_combine_producer_parameters)
+        expected_combine_producer_call = [
+            "dim3(tiling.launch.num_threads)",
+            "reinterpret_cast<__gm__ const bfloat16_t*>(x)",
+            "topk_weights",
+            "source_metadata",
+            "prefix_per_rank",
+            "workspace",
+            "tiling.transport_context.abi_version",
+            "tiling.transport_context.struct_size",
+            "local_window_base",
+            "tiling.transport_context.topology.world_rank",
+            "tiling.transport_context.topology.world_size",
+            "tiling.transport_context.topology.scale_up_size",
+            "tiling.transport_context.backend_context",
+            "tiling.mode_flags",
+            "generation",
+            "timeout_cycles",
+            "num_source_rows",
+            "num_input_rows",
+            "tiling.num_tokens",
+            "tiling.num_topk",
+            "tiling.num_max_tokens_per_rank",
+            "tiling.symmetric_window_layout.combine_record_bytes",
+            "tiling.symmetric_window_layout.combine_control_offset",
+            "tiling.symmetric_window_layout.combine_control_bytes",
+            "tiling.symmetric_window_layout.combine_receive_offset",
+            "tiling.symmetric_window_layout.combine_receive_shard_bytes",
+            "tiling.symmetric_window_layout.combine_receive_shard_count",
+            "tiling.symmetric_window_layout.combine_receive_bytes",
+            "tiling.symmetric_window_layout.combine_staging_offset",
+            "tiling.symmetric_window_layout.combine_staging_shard_bytes",
+            "tiling.symmetric_window_layout.combine_staging_shard_count",
+            "tiling.symmetric_window_layout.combine_staging_bytes",
+            "tiling.workspace_layout.scratch_offset",
+            "tiling.hidden",
+        ]
+        self.assertEqual(
+            [" ".join(argument.split()) for argument in
+             split_arguments(calls_by_function["combine_producer_vf"])],
+            expected_combine_producer_call)
+        producer_begin = sources["combine.asc"].index(
+            "__simt_vf__ inline void combine_producer_vf")
+        producer_end = sources["combine.asc"].index(
+            "__simt_vf__ inline void combine_epilogue_vf", producer_begin)
+        producer = sources["combine.asc"][producer_begin:producer_end]
+        fill_calls = re.findall(
+            r"combine_fill_normal_record_routing_weights\s*"
+            r"\((.*?)\);", producer, flags=re.DOTALL)
+        self.assertEqual(len(fill_calls), 1, producer)
+        self.assertEqual(
+            [" ".join(argument.split()) for argument in
+             split_arguments(fill_calls[0])],
+            ["topk_weights", "row", "master_lane", "num_topk",
+             "record", "hidden_bytes"])
+        self.assertNotIn(
+            "combine_normal_record_routing_weight(", producer)
+        self.assertNotIn("combined_topk_indices", producer)
         dispatch_kernel_match = re.search(
             r"__global__\s+__vector__\s+void\s+dispatch_kernel\s*"
             r"\((.*?)\)\s*\{", sources["dispatch.asc"], flags=re.DOTALL)
@@ -263,9 +359,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         producer = source[producer_begin:producer_end]
         identity_check = producer.index(
             "is_valid_combine_source_identity(")
-        normal_weight_load = producer.index(
-            "combine_normal_record_routing_weight(")
-        self.assertLess(identity_check, normal_weight_load)
+        normal_weight_fill = producer.index(
+            "combine_fill_normal_record_routing_weights(")
+        self.assertLess(identity_check, normal_weight_fill)
         self.assertNotIn("combined_topk_indices", producer)
 
     def test_production_combine_semantics(self):
@@ -996,6 +1092,7 @@ int main() {
                     "expanded-metadata-writes",
                     "bf16-tolerance",
                     "exact-float32-weights",
+                    "weighted-same-contributor-lanes",
                     "case-boundary-barriers",
                     "distributed-failure-aggregation",
                     "buffer-before-group-teardown",
@@ -1075,6 +1172,16 @@ int main() {
                         "cpu": False,
                         "local_npu": True,
                         "wrong_npu": False,
+                    },
+                    "same_contributor_weights": {
+                        "routes": [
+                            [[0, 1], [2, 3]],
+                            [[1, 0], [3, 2]],
+                        ],
+                        "weights": [
+                            [[0.125, 0.25], [0.375, 0.5]],
+                            [[0.625, 0.75], [0.875, 1.0]],
+                        ],
                     },
                     "synchronization": {
                         "local_failure_reductions": 1,
