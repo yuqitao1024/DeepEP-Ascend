@@ -248,6 +248,8 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
         !same_symmetric_window_layout(
             tiling.symmetric_window_layout,
             expected.symmetric_window_layout) ||
+        tiling.dispatch_output_capacity !=
+            expected.dispatch_output_capacity ||
         tiling.communication_buffer_bytes !=
             expected.communication_buffer_bytes ||
         tiling.workspace_bytes != expected.workspace_bytes)

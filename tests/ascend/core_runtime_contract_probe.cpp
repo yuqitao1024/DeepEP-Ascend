@@ -156,6 +156,39 @@ bool cached_mixed_rank_prefix_fixture_matches() {
     return derived_prefix == cached_prefix[num_experts];
 }
 
+bool padded_dispatch_capacity_fixture_matches() {
+    CoreTilingInput input{};
+    input.operation = OperationKind::kDispatch;
+    input.element_kind = ElementKind::kBFloat16;
+    input.mode_flags = mode_bit(CoreMode::kExpanded) |
+                       mode_bit(CoreMode::kZeroPadding);
+    input.num_tokens = 4;
+    input.hidden = 64;
+    input.num_experts = 4;
+    input.num_topk = 1;
+    input.expert_alignment = 4;
+    input.num_max_tokens_per_rank = 4;
+    input.topology.world_rank = 0;
+    input.topology.world_size = 2;
+    input.topology.scale_up_rank = 0;
+    input.topology.scale_up_size = 2;
+    input.topology.scale_out_rank = 0;
+    input.topology.scale_out_size = 1;
+
+    CoreTiling tiling{};
+    if (!build_core_tiling(input, &tiling).ok())
+        return false;
+
+    constexpr std::uint64_t raw_lane_count = 4 * 2 * 1;
+    constexpr std::uint64_t aligned_expert_zero = 8;
+    constexpr std::uint64_t aligned_expert_one = 4;
+    constexpr std::uint64_t required_rows =
+        aligned_expert_zero + aligned_expert_one;
+    return raw_lane_count == 8 && required_rows == 12 &&
+           required_rows > raw_lane_count &&
+           tiling.dispatch_output_capacity == 16;
+}
+
 }  // namespace
 
 extern "C" int deep_ep_ascend_launch_barrier(
@@ -524,6 +557,8 @@ int main() {
 
     if (!cached_mixed_rank_prefix_fixture_matches())
         return 46;
+    if (!padded_dispatch_capacity_fixture_matches())
+        return 47;
 
     return 0;
 }

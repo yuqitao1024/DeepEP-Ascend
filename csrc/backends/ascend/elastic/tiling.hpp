@@ -42,7 +42,7 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 1;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 2;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -56,6 +56,7 @@ struct CoreTiling {
     std::uint64_t num_topk = 0;
     std::uint64_t expert_alignment = 1;
     std::uint64_t num_max_tokens_per_rank = 0;
+    std::uint64_t dispatch_output_capacity = 0;
     std::uint64_t num_scale_factor_packs = 0;
     std::uint64_t scale_factor_pack_bytes = 0;
     CoreTopology topology{};
@@ -182,6 +183,37 @@ inline bool build_workspace_layout(
     return true;
 }
 
+inline bool build_dispatch_output_capacity(
+    const CoreTilingInput& input, std::uint64_t* output) {
+    if (output == nullptr)
+        return false;
+    *output = 0;
+    if (input.operation != OperationKind::kDispatch)
+        return true;
+
+    std::uint64_t raw_lane_count = 0;
+    const std::uint64_t padding_per_expert = input.expert_alignment - 1;
+    std::uint64_t total_padding = 0;
+    std::uint64_t padded_lane_count = 0;
+    std::uint64_t adjusted_lane_count = 0;
+    const auto local_experts = input.num_experts /
+        static_cast<std::uint64_t>(input.topology.world_size);
+    if (!checked_multiply(
+            input.num_max_tokens_per_rank,
+            static_cast<std::uint64_t>(input.topology.world_size),
+            &raw_lane_count) ||
+        !checked_multiply(raw_lane_count, input.num_topk, &raw_lane_count) ||
+        !checked_multiply(
+            padding_per_expert, local_experts, &total_padding) ||
+        !checked_add(raw_lane_count, total_padding, &padded_lane_count) ||
+        !checked_add(
+            padded_lane_count, padding_per_expert, &adjusted_lane_count))
+        return false;
+    *output = (adjusted_lane_count / input.expert_alignment) *
+        input.expert_alignment;
+    return true;
+}
+
 }  // namespace detail
 
 inline TilingStatus build_core_tiling(
@@ -226,7 +258,9 @@ inline TilingStatus build_core_tiling(
     CoreTiling tiling{};
     if (!detail::build_token_layout(
             input, element_bytes, &tiling.token_layout) ||
-        !detail::build_workspace_layout(input, &tiling.workspace_layout))
+        !detail::build_workspace_layout(input, &tiling.workspace_layout) ||
+        !detail::build_dispatch_output_capacity(
+            input, &tiling.dispatch_output_capacity))
         return TilingStatus::overflow("layout size overflow");
 
     if (input.topology.world_size == 2) {

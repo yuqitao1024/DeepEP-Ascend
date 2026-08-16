@@ -24,14 +24,16 @@ CASE_NAMES = (
     "optional-weights",
     "expanded",
     "aligned-zero-padding",
+    "aligned-near-capacity",
     "cached-reuse",
+    "cached-aligned-near-capacity",
     "sequential-100-generations",
     "combine-gated",
     "invalid-expert-diagnostics",
 )
 
-REGULAR_CASES = CASE_NAMES[:8]
-SPECIAL_CASES = CASE_NAMES[8:]
+REGULAR_CASES = CASE_NAMES[:9]
+SPECIAL_CASES = CASE_NAMES[9:]
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,7 @@ class CaseSpec:
     payloads: tuple
     routes: tuple
     weights: object = None
+    num_topk: int = NUM_TOPK
     expert_alignment: int = 1
     do_expand: bool = False
     do_zero_padding: bool = False
@@ -142,6 +145,27 @@ def _case_specs():
             do_expand=True,
             do_zero_padding=True,
         ),
+        "aligned-near-capacity": CaseSpec(
+            "aligned-near-capacity",
+            (
+                ((21, 22, 23, 24), (31, 32, 33, 34),
+                 (41, 42, 43, 44), (51, 52, 53, 54)),
+                ((121, 122, 123, 124), (131, 132, 133, 134),
+                 (141, 142, 143, 144), (151, 152, 153, 154)),
+            ),
+            (
+                ((0,), (0,), (0,), (0,)),
+                ((0,), (1,), (2,), (3,)),
+            ),
+            (
+                ((0.11,), (0.21,), (0.31,), (0.41,)),
+                ((0.51,), (0.61,), (0.71,), (0.81,)),
+            ),
+            num_topk=1,
+            expert_alignment=4,
+            do_expand=True,
+            do_zero_padding=True,
+        ),
         "cached-reuse": CaseSpec(
             "cached-reuse",
             (
@@ -156,6 +180,27 @@ def _case_specs():
                 ((0.11, 0.21), (0.31, 0.41)),
                 ((0.51, 0.61), (0.71, 0.81)),
             ),
+        ),
+        "cached-aligned-near-capacity": CaseSpec(
+            "cached-aligned-near-capacity",
+            (
+                ((61, 62, 63, 64), (71, 72, 73, 74),
+                 (81, 82, 83, 84), (91, 92, 93, 94)),
+                ((161, 162, 163, 164), (171, 172, 173, 174),
+                 (181, 182, 183, 184), (191, 192, 193, 194)),
+            ),
+            (
+                ((0,), (0,), (0,), (0,)),
+                ((0,), (1,), (2,), (3,)),
+            ),
+            (
+                ((-0.11,), (-0.21,), (-0.31,), (-0.41,)),
+                ((-0.51,), (-0.61,), (-0.71,), (-0.81,)),
+            ),
+            num_topk=1,
+            expert_alignment=4,
+            do_expand=True,
+            do_zero_padding=True,
         ),
         "invalid-expert-diagnostics": CaseSpec(
             "invalid-expert-diagnostics",
@@ -203,11 +248,13 @@ def _method_calls(method):
 def _contract():
     specs = _case_specs()
     required_specs = set(REGULAR_CASES) | {
-        "cached-reuse", "invalid-expert-diagnostics"}
+        "cached-reuse", "cached-aligned-near-capacity",
+        "invalid-expert-diagnostics"}
     _check(set(specs) == required_specs,
            "dispatch case specifications do not match the matrix")
     _check(SPECIAL_CASES == (
-        "cached-reuse", "sequential-100-generations", "combine-gated",
+        "cached-reuse", "cached-aligned-near-capacity",
+        "sequential-100-generations", "combine-gated",
         "invalid-expert-diagnostics"),
         "dispatch special-case registry is incomplete")
     methods = _contract_methods()
@@ -299,24 +346,25 @@ class DispatchMatrix:
     def _materialize(self, spec):
         x = self._tensor(spec.payloads[self.rank], HIDDEN,
                          self.torch.bfloat16)
-        routes = self._tensor(spec.routes[self.rank], NUM_TOPK,
+        routes = self._tensor(spec.routes[self.rank], spec.num_topk,
                               self.torch.int64)
         weights = None
         if spec.weights is not None:
-            weights = self._tensor(spec.weights[self.rank], NUM_TOPK,
+            weights = self._tensor(spec.weights[self.rank], spec.num_topk,
                                    self.torch.float32)
         return x, routes, weights
 
     def _gather_literals(self, x, routes, weights):
         count = x.shape[0]
         _check(0 <= count <= CAPACITY, "literal token count exceeds capacity")
+        num_topk = routes.shape[1]
         metadata = self.torch.full(
-            (2 + CAPACITY * NUM_TOPK,), -1,
+            (2 + CAPACITY * num_topk,), -1,
             dtype=self.torch.int64, device=self.device)
         metadata[0] = count
         metadata[1] = int(weights is not None)
         if count:
-            metadata[2:2 + count * NUM_TOPK] = routes.reshape(-1)
+            metadata[2:2 + count * num_topk] = routes.reshape(-1)
 
         padded_x = self.torch.zeros(
             (CAPACITY, HIDDEN), dtype=self.torch.bfloat16,
@@ -334,7 +382,7 @@ class DispatchMatrix:
         gathered_weights = None
         if weights is not None:
             padded_weights = self.torch.zeros(
-                (CAPACITY, NUM_TOPK), dtype=self.torch.float32,
+                (CAPACITY, num_topk), dtype=self.torch.float32,
                 device=self.device)
             if count:
                 padded_weights[:count].copy_(weights)
@@ -357,8 +405,8 @@ class DispatchMatrix:
             result["x"].append(
                 gathered_x[source_rank][:source_count].cpu().clone())
             route_values = host_metadata[
-                2:2 + source_count * NUM_TOPK].reshape(
-                    source_count, NUM_TOPK).clone()
+                2:2 + source_count * num_topk].reshape(
+                    source_count, num_topk).clone()
             result["routes"].append(route_values)
             if weights is not None:
                 result["weights"].append(
@@ -382,7 +430,7 @@ class DispatchMatrix:
             for token in range(gathered["counts"][source_rank]):
                 route = gathered["routes"][source_rank][token]
                 destinations = []
-                for lane in range(NUM_TOPK):
+                for lane in range(spec.num_topk):
                     expert = int(route[lane].item())
                     _check(expert == -1 or 0 <= expert < NUM_EXPERTS,
                            f"reference received invalid expert {expert}")
@@ -393,7 +441,7 @@ class DispatchMatrix:
                 if self.rank not in destinations:
                     continue
                 master_lane = next(
-                    lane for lane in range(NUM_TOPK)
+                    lane for lane in range(spec.num_topk)
                     if first_local_expert <= int(route[lane].item()) <
                     last_local_expert)
                 incoming.append({
@@ -444,7 +492,7 @@ class DispatchMatrix:
         for token in range(gathered["counts"][self.rank]):
             route = local_routes[token]
             destinations = []
-            for lane in range(NUM_TOPK):
+            for lane in range(spec.num_topk):
                 expert = int(route[lane].item())
                 if expert >= 0:
                     destination = expert // local_experts
@@ -453,19 +501,20 @@ class DispatchMatrix:
             for destination in destinations:
                 slot = next_slots[destination]
                 next_slots[destination] += 1
-                for lane in range(NUM_TOPK):
+                for lane in range(spec.num_topk):
                     expert = int(route[lane].item())
                     if expert >= 0 and expert // local_experts == destination:
                         destination_slots[token, lane] = \
                             self.rank * CAPACITY + slot
 
         source_metadata = self.torch.full(
-            (len(incoming), NUM_TOPK + 2), -1, dtype=self.torch.int32)
+            (len(incoming), spec.num_topk + 2), -1,
+            dtype=self.torch.int32)
         for record_index, record in enumerate(incoming):
             source_metadata[record_index, 0] = \
                 record["source_rank"] * CAPACITY + record["source_token"]
             source_metadata[record_index, 1] = \
-                record["source_rank"] * NUM_TOPK + record["master_lane"]
+                record["source_rank"] * spec.num_topk + record["master_lane"]
 
         if not spec.do_expand:
             recv_x = self.torch.stack(
@@ -481,13 +530,13 @@ class DispatchMatrix:
                     self.torch.full_like(recv_topk_idx, -1))
             else:
                 recv_topk_idx = self.torch.empty(
-                    (0, NUM_TOPK), dtype=self.torch.int64)
+                    (0, spec.num_topk), dtype=self.torch.int64)
             recv_weights = None
             if gathered["weights"] is not None:
                 recv_weights = self.torch.stack(
                     [record["weights"] for record in incoming]) \
                     if incoming else self.torch.empty(
-                        (0, NUM_TOPK), dtype=self.torch.float32)
+                        (0, spec.num_topk), dtype=self.torch.float32)
         else:
             recv_x = self.torch.zeros(
                 (running, HIDDEN), dtype=self.torch.bfloat16)
@@ -496,7 +545,7 @@ class DispatchMatrix:
                 self.torch.zeros((running,), dtype=self.torch.float32)
             occurrences = [0] * NUM_EXPERTS
             for record_index, record in enumerate(incoming):
-                for lane in range(NUM_TOPK):
+                for lane in range(spec.num_topk):
                     expert = int(record["route"][lane].item())
                     if not first_local_expert <= expert < last_local_expert:
                         continue
@@ -549,7 +598,7 @@ class DispatchMatrix:
             "<IIQ6i6QI4x",
             1, 96, 1,
             self.rank, WORLD_SIZE, self.rank, WORLD_SIZE, 0, 1,
-            num_tokens, HIDDEN, NUM_EXPERTS, NUM_TOPK,
+            num_tokens, HIDDEN, NUM_EXPERTS, spec.num_topk,
             spec.expert_alignment, CAPACITY, mode_flags,
         )
 
@@ -667,21 +716,22 @@ class DispatchMatrix:
         self.combine_payload = (recv_x, handle)
         return result, reference
 
-    def _run_cached(self):
-        spec = self.specs["cached-reuse"]
+    def _run_cached(self, case_name="cached-reuse"):
+        spec = self.specs[case_name]
         first_result, _ = self._dispatch_spec(spec)
         first_x, _, first_weights, handle, _ = first_result
+        changed_payloads = tuple(
+            tuple(tuple(value + 300 for value in row) for row in rank_rows)
+            for rank_rows in spec.payloads)
+        changed_weights = None if spec.weights is None else tuple(
+            tuple(tuple(-value for value in row) for row in rank_rows)
+            for rank_rows in spec.weights)
         changed_spec = CaseSpec(
-            spec.name,
-            (
-                ((70, 71, 72, 73), (80, 81, 82, 83)),
-                ((170, 171, 172, 173), (180, 181, 182, 183)),
-            ),
-            spec.routes,
-            (
-                ((-0.11, -0.21), (-0.31, -0.41)),
-                ((-0.51, -0.61), (-0.71, -0.81)),
-            ),
+            spec.name, changed_payloads, spec.routes, changed_weights,
+            num_topk=spec.num_topk,
+            expert_alignment=spec.expert_alignment,
+            do_expand=spec.do_expand,
+            do_zero_padding=spec.do_zero_padding,
         )
         x, routes, weights = self._materialize(changed_spec)
         gathered = self._gather_literals(x, routes, weights)
@@ -692,6 +742,8 @@ class DispatchMatrix:
             handle=handle,
             num_sms=1,
             num_qps=0,
+            do_expand=spec.do_expand,
+            do_zero_padding=spec.do_zero_padding,
         )
         recv_x, recv_weights, cached_handle = self._verify_result(
             changed_spec, routes, reference, cached_result,
@@ -798,7 +850,9 @@ class DispatchMatrix:
         if name in REGULAR_CASES:
             self._dispatch_spec(self.specs[name])
         elif name == "cached-reuse":
-            self._run_cached()
+            self._run_cached(name)
+        elif name == "cached-aligned-near-capacity":
+            self._run_cached(name)
         elif name == "sequential-100-generations":
             self._run_generations()
         elif name == "combine-gated":

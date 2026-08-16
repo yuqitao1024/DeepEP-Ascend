@@ -234,11 +234,6 @@ class ElasticBuffer {
                     name, " with the expected rank and dtype");
     }
 
-    static bool multiply_without_overflow(
-        std::uint64_t lhs, std::uint64_t rhs, std::uint64_t* output) {
-        return elastic::checked_multiply(lhs, rhs, output);
-    }
-
     static bool align_without_overflow(
         std::uint64_t value, std::uint64_t alignment,
         std::uint64_t* output) {
@@ -620,21 +615,8 @@ public:
         const auto int_options = x.options().dtype(torch::kInt);
         const auto metadata_options = x.options().dtype(torch::kByte);
         const auto max_recv_tokens = capacity * static_cast<std::uint64_t>(num_ranks_);
-        std::uint64_t expanded_records = 0;
-        TORCH_CHECK(multiply_without_overflow(
-                        max_recv_tokens, num_topk,
-                        &expanded_records),
-                    "DeepEP Ascend backend: dispatch output capacity overflow");
         const auto local_experts = experts / static_cast<std::uint64_t>(num_ranks_);
-        std::uint64_t alignment_padding = 0;
-        TORCH_CHECK(multiply_without_overflow(
-                        alignment - 1, local_experts, &alignment_padding) &&
-                        expanded_records <= std::numeric_limits<std::uint64_t>::max() -
-                            alignment_padding &&
-                        align_without_overflow(
-                            expanded_records + alignment_padding, alignment,
-                            &expanded_records),
-                    "DeepEP Ascend backend: dispatch output capacity overflow");
+        const auto expanded_records = tiling.dispatch_output_capacity;
         TORCH_CHECK(max_recv_tokens <= static_cast<std::uint64_t>(
                         std::numeric_limits<int>::max()) &&
                         expanded_records <= static_cast<std::uint64_t>(
