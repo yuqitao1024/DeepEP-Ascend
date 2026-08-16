@@ -108,6 +108,36 @@ class BuildPlatformTest(unittest.TestCase):
                 self.assertIn(
                     f"-Dpybind11_DIR={pybind11_dir.resolve()}", configure)
 
+    def test_ascend_configure_pins_pybind_to_build_python(self):
+        torch = type("Torch", (), {
+            "utils": type("Utils", (), {"cmake_prefix_path": "/torch"})})()
+        torch_npu = type(
+            "TorchNpu", (), {"__file__": "/torch_npu/__init__.py"})()
+        pybind11 = type("Pybind11", (), {
+            "get_cmake_dir": staticmethod(lambda: "/pybind11/cmake")})()
+        extension = SETUP.make_extension("ascend")
+
+        with tempfile.TemporaryDirectory() as directory:
+            build = object.__new__(SETUP.CMakeBuild)
+            build.build_temp = directory
+            build.get_ext_fullpath = lambda _: str(
+                pathlib.Path(directory) / "_C.so")
+            with mock.patch.dict(
+                    sys.modules, {
+                        "torch": torch,
+                        "torch_npu": torch_npu,
+                        "pybind11": pybind11,
+                    }):
+                with mock.patch.object(
+                        SETUP.subprocess, "check_call") as check_call:
+                    with mock.patch.object(
+                            SETUP.sys, "executable", "/venv/bin/python"):
+                        build.build_extension(extension)
+
+        configure = check_call.call_args_list[0].args[0]
+        self.assertIn("-DPYTHON_EXECUTABLE=/venv/bin/python", configure)
+        self.assertNotIn("-DPython_EXECUTABLE=/venv/bin/python", configure)
+
     def test_ascend_build_reports_missing_pybind11(self):
         torch = type("Torch", (), {
             "utils": type("Utils", (), {"cmake_prefix_path": "/torch"})})()

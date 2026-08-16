@@ -140,7 +140,7 @@ class CMakeBuild(build_ext):
             '-DDEEP_EP_PLATFORM=ascend',
             f'-DDEEP_EP_ASCEND_TESTING={ascend_testing}',
             f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={output_directory}',
-            f'-DPython_EXECUTABLE={sys.executable}',
+            f'-DPYTHON_EXECUTABLE={sys.executable}',
             f'-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}',
             f'-DTORCH_NPU_ROOT={torch_npu_root}',
             f'-Dpybind11_DIR={pybind11_dir}',
