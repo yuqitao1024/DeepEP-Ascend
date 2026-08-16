@@ -150,6 +150,18 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn(
             "ElementKind element_kind",
             signatures["core_operator_compile_probe_vf"])
+        dispatch_kernel_match = re.search(
+            r"__global__\s+__vector__\s+void\s+dispatch_kernel\s*"
+            r"\((.*?)\)\s*\{", sources["dispatch.asc"], flags=re.DOTALL)
+        self.assertIsNotNone(dispatch_kernel_match)
+        kernel_parameters = split_arguments(dispatch_kernel_match.group(1))
+        self.assertNotIn("DispatchArguments", dispatch_kernel_match.group(1))
+        kernel_pointer_names = set()
+        for parameter in kernel_parameters:
+            if "*" not in parameter:
+                continue
+            self.assertIn("__gm__", parameter, parameter)
+            kernel_pointer_names.add(parameter.rsplit(maxsplit=1)[-1])
         for function_name in (
                 "dispatch_producer_vf", "dispatch_epilogue_vf"):
             parameters = signature_arguments[function_name]
@@ -159,7 +171,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                     parameters, call_arguments[1:]):
                 if "*" in parameter:
                     self.assertIn(
-                        "__gm__", call_argument,
+                        call_argument, kernel_pointer_names,
                         f"{function_name}: {call_argument}")
 
     def test_production_symmetric_window_layout(self):
