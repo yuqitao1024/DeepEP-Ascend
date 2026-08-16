@@ -104,7 +104,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn(
             "std::uint64_t timeout_cycles",
             signatures["barrier_producer_vf"])
-        for function_name in ("dispatch_producer_vf", "combine_vf"):
+        for function_name in ("dispatch_producer_vf", "combine_producer_vf"):
             signature = signatures[function_name]
             for argument in (
                     "std::uint32_t transport_abi_version",
@@ -136,9 +136,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "tiling.transport_context.topology.scale_up_size",
                 "tiling.transport_context.backend_context",
             },
-            "combine_vf": {
+            "combine_producer_vf": {
                 "tiling.transport_context.abi_version",
                 "tiling.transport_context.struct_size",
+                "tiling.transport_context.topology.world_rank",
                 "tiling.transport_context.topology.world_size",
                 "tiling.transport_context.topology.scale_up_size",
                 "tiling.transport_context.backend_context",
@@ -403,9 +404,8 @@ int main() {
                             "device_barrier"),
             "dispatch.asc": ("DeviceTransportFacade", "put(", "put_value(",
                              "signal(", "device_barrier("),
-            "combine.asc": ("DeviceTransportFacade", "put(",
-                            "remote_add_release(", "flush(",
-                            "device_barrier("),
+            "combine.asc": ("DeviceTransportFacade", "put(", "put_value(",
+                            "signal(", "device_barrier("),
         }
         forbidden = ("nccl", "nvshmem", "cuda", "ain", "hcomm", "hccl",
                      "urma")
@@ -475,6 +475,63 @@ int main() {
         for legacy in ("dispatch_source_shard_bytes",
                        "dispatch_source_shard_count"):
             self.assertNotIn(legacy, source)
+
+    def test_combine_has_fixed_shard_service_boundaries(self):
+        """Catches local-only combine and publication before service execute."""
+        source = (ELASTIC / "combine.asc").read_text()
+        ordered_markers = (
+            "service::reset",
+            "asc_vf_call<combine_producer_vf>",
+            "service::execute",
+            "asc_vf_call<combine_epilogue_vf>",
+        )
+        for marker in ordered_markers:
+            self.assertIn(marker, source)
+        positions = [source.index(marker) for marker in ordered_markers]
+        self.assertEqual(positions, sorted(positions))
+
+        for marker in (
+                "transport_world_rank", "transport_local_window_base",
+                "arguments.generation", "arguments.timeout_cycles",
+                "arguments.num_source_rows", "arguments.num_input_rows",
+                "arguments.local_window_base",
+                "combine_control_offset", "combine_control_bytes",
+                "combine_receive_offset", "combine_receive_shard_bytes",
+                "combine_receive_shard_count", "combine_receive_bytes",
+                "combine_staging_offset", "combine_staging_shard_bytes",
+                "combine_staging_shard_count", "combine_staging_bytes",
+                "decode_dispatch_source_rank(",
+                "decode_dispatch_local_index(", "destination_rank",
+                "CombineRecordHeader", "CombineControlSlot",
+                "CombineProtocolError::kInvalidPrefix",
+                "CombineProtocolError::kDuplicateRecord",
+                "raw_record_capacity", "count * combine_record_bytes",
+                "header->origin_token", "header->contributor_rank",
+                "header->contribution_lane != header->master_lane",
+                "record_count", "remote_count, count",
+                "remote_generation, generation", "transport.signal(",
+                "transport.device_barrier(",
+                "transport.consumed_generation()",
+                "float value = 0.0F",
+                "value += static_cast<float>(payload[hidden])",
+                "combined_topk_weights[index] = 0.0F"):
+            self.assertIn(marker, source)
+
+        self.assertNotRegex(
+            source,
+            r"transport\.(?:put|put_value|signal)\(\s*"
+            r"transport::TransportTeam::k(?:World|ScaleUp),\s*0,")
+        for forbidden in (
+                "transport.remote_add_release(",
+                "transport.get_symmetric_pointer(", "peer_address_table"):
+            self.assertNotIn(forbidden, source)
+        self.assertNotRegex(
+            source, r"transport\.device_barrier\([^;]*,\s*0\s*\)")
+
+        execute_position = source.index("service::execute")
+        epilogue_position = source.index(
+            "asc_vf_call<combine_epilogue_vf>")
+        self.assertLess(execute_position, epilogue_position)
 
     def test_dispatch_preflights_protocol_state_before_publication(self):
         source = (ELASTIC / "dispatch.asc").read_text()

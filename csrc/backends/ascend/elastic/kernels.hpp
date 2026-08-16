@@ -44,6 +44,11 @@ struct CombineArguments {
     void* workspace = nullptr;
     void* combined_x = nullptr;
     float* combined_topk_weights = nullptr;
+    std::uint64_t generation = 0;
+    std::uint64_t timeout_cycles = 0;
+    std::uint64_t num_source_rows = 0;
+    std::uint64_t num_input_rows = 0;
+    std::uintptr_t local_window_base = 0;
 };
 
 }  // namespace deep_ep::ascend::elastic

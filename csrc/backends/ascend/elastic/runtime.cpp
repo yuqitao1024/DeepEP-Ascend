@@ -20,6 +20,9 @@ constexpr transport::TransportCapabilities kDispatchTransportCapabilities =
     transport::capability_bit(
         transport::TransportCapability::kScaleUpTeam);
 
+constexpr transport::TransportCapabilities kCombineTransportCapabilities =
+    kDispatchTransportCapabilities;
+
 CoreRuntimeStatus invalid(const char* message) {
     return {CoreRuntimeStatusCode::kInvalidArgument, 0, message};
 }
@@ -156,10 +159,14 @@ CoreRuntimeStatus validate_operation_topology(const CoreTiling& tiling) {
         (is_single_rank_topology(tiling.topology) ||
          is_two_rank_scale_up_topology(tiling.topology)))
         return {};
-    if (!is_single_rank_topology(tiling.topology))
+    if (tiling.operation == OperationKind::kCombine &&
+        is_two_rank_scale_up_topology(tiling.topology))
+        return {};
+    if (tiling.operation == OperationKind::kCombine)
         return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
-                "dispatch and combine multi-rank launch is deferred"};
-    return {};
+                "combine requires exactly two scale-up ranks"};
+    return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
+            "unsupported operation topology"};
 }
 
 CoreRuntimeStatus validate_transport_context(const CoreTiling& tiling) {
@@ -168,12 +175,17 @@ CoreRuntimeStatus validate_transport_context(const CoreTiling& tiling) {
         context.struct_size != sizeof(transport::DeviceTransportContext) ||
         !context_topology_matches(context.topology, tiling.topology))
         return invalid("transport context does not match tiling topology");
+    const bool fixed_shard_operation =
+        (tiling.operation == OperationKind::kDispatch ||
+         tiling.operation == OperationKind::kCombine) &&
+        is_two_rank_scale_up_topology(tiling.topology);
     if (tiling.operation != OperationKind::kBarrier &&
-        !(tiling.operation == OperationKind::kDispatch &&
-          is_two_rank_scale_up_topology(tiling.topology)))
+        !fixed_shard_operation)
         return {};
     const auto required = tiling.operation == OperationKind::kDispatch ?
-        kDispatchTransportCapabilities : kBarrierTransportCapabilities;
+        kDispatchTransportCapabilities :
+        (tiling.operation == OperationKind::kCombine ?
+             kCombineTransportCapabilities : kBarrierTransportCapabilities);
     if ((context.capabilities & required) != required)
         return invalid("transport context lacks required capabilities");
     if (context.local_window_base == 0 || context.peer_address_table == 0 ||
@@ -226,8 +238,6 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
                               mode_bit(CoreMode::kZeroPadding);
             break;
         case OperationKind::kCombine:
-            operation_modes = mode_bit(CoreMode::kExpanded) |
-                              mode_bit(CoreMode::kAllowMultipleReduction);
             break;
         default:
             return invalid("invalid operation kind");
@@ -353,22 +363,43 @@ CoreRuntimeStatus launch_internal_combine(
         return status;
     if (tiling.operation != OperationKind::kCombine)
         return invalid("combine launch requires combine tiling");
-    if (arguments.x == nullptr || arguments.source_metadata == nullptr ||
+    if (arguments.generation == 0)
+        return invalid("combine generation must not be zero");
+    if (arguments.timeout_cycles == 0)
+        return invalid("combine timeout must not be zero");
+    if (arguments.local_window_base == 0 ||
+        arguments.local_window_base !=
+            tiling.transport_context.local_window_base)
+        return invalid("combine local window does not match transport");
+    if (arguments.num_source_rows != arguments.num_input_rows)
+        return invalid("combine source and input row counts must match");
+    if (tiling.num_max_tokens_per_rank >
+        static_cast<std::uint64_t>(0x7fffffff) /
+            static_cast<std::uint64_t>(tiling.topology.world_size))
+        return invalid("combine shard capacity is not encodable");
+    const std::uint64_t maximum_source_rows =
+        tiling.num_max_tokens_per_rank *
+        static_cast<std::uint64_t>(tiling.topology.world_size);
+    if (arguments.num_source_rows > maximum_source_rows)
+        return invalid("combine source row count exceeds fixed shards");
+    if ((arguments.num_source_rows != 0 &&
+         (arguments.x == nullptr || arguments.source_metadata == nullptr)) ||
         arguments.combined_topk_indices == nullptr ||
         arguments.prefix_per_rank == nullptr ||
         arguments.communication_buffer == nullptr ||
         arguments.workspace == nullptr || arguments.combined_x == nullptr)
         return invalid("combine required argument is null");
+    if (arguments.topk_weights != nullptr ||
+        arguments.combined_topk_weights != nullptr ||
+        arguments.bias_0 != nullptr || arguments.bias_1 != nullptr)
+        return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
+                "weighted or biased combine is deferred"};
     if (!is_aligned(arguments.communication_buffer) ||
         !is_aligned(arguments.workspace))
         return invalid("combine storage is misaligned");
-    int result = deep_ep_ascend_launch_combine(arguments, tiling, stream);
-    if (result != 0)
-        return launch_failure(result, "combine kernel launch failed");
-    result = deep_ep_ascend_launch_combine_epilogue(
-        arguments, tiling, stream);
+    const int result = deep_ep_ascend_launch_combine(arguments, tiling, stream);
     return result == 0 ? CoreRuntimeStatus{} :
-        launch_failure(result, "combine epilogue launch failed");
+        launch_failure(result, "combine kernel launch failed");
 }
 
 }  // namespace deep_ep::ascend::elastic
