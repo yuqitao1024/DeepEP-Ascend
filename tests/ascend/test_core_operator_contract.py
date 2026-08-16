@@ -198,6 +198,52 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 self.assertFalse(any(token in include for include in includes),
                                  f"{header}: {token}")
 
+    def test_dispatch_locality_helper_is_device_callable(self):
+        """Catches a host-only helper call from dispatch SIMT functions."""
+        probe_source = r'''
+#include <cstdint>
+
+#define DEEP_EP_ASCEND_SIMT_DEVICE 1
+#define __SIMT_DEVICE_FUNCTIONS_DECL__ extern "C"
+#include "csrc/backends/ascend/elastic/dispatch_state.hpp"
+
+auto* dispatch_locality_definition =
+    &deep_ep::ascend::elastic::is_dispatch_expert_local;
+
+extern "C" bool is_dispatch_expert_local(
+    std::int64_t, std::uint64_t, std::uint64_t) noexcept;
+
+int main() {
+    return dispatch_locality_definition(1, 0, 2) &&
+        is_dispatch_expert_local(1, 0, 2) ? 0 : 1;
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            source = directory / "dispatch_state_device_probe.cpp"
+            binary = directory / "dispatch_state_device_probe"
+            source.write_text(probe_source)
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(source), "-o", str(binary)],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+        include_contracts = (
+            (ELASTIC / "dispatch.asc", '#include "dispatch_state.hpp"'),
+            (CORE_OPS / "core_operator_runner.asc",
+             '#include "csrc/backends/ascend/elastic/dispatch_state.hpp"'),
+        )
+        for path, state_include in include_contracts:
+            source = path.read_text()
+            self.assertLess(
+                source.index("#define DEEP_EP_ASCEND_SIMT_DEVICE 1"),
+                source.index(state_include), str(path))
+
     def test_pure_cpp_runtime_contract(self):
         runtime = ELASTIC / "runtime.cpp"
         self.assertTrue(runtime.is_file(), str(runtime))

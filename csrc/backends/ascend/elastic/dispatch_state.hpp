@@ -5,6 +5,13 @@
 
 #include "layout.hpp"
 
+#if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
+#define DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE \
+    __SIMT_DEVICE_FUNCTIONS_DECL__
+#else
+#define DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE
+#endif
+
 namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint32_t kDispatchHandleDescriptorAbiVersion = 1;
@@ -137,7 +144,8 @@ constexpr bool same_topology(
            lhs.scale_out_size == rhs.scale_out_size;
 }
 
-constexpr bool is_dispatch_expert_local(
+DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr bool
+is_dispatch_expert_local(
     std::int64_t expert, std::uint64_t first_local_expert,
     std::uint64_t num_local_experts) noexcept {
     if (expert < 0)
@@ -171,3 +179,5 @@ inline DispatchHandleStatus validate_dispatch_handle(
 }
 
 }  // namespace deep_ep::ascend::elastic
+
+#undef DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE
