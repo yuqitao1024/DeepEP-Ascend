@@ -491,21 +491,72 @@ Combine consumes only metadata produced by a compatible Phase 2F dispatch.
 Each expert rank uses source rank and source token metadata to return expert
 outputs to the originating rank.
 
+The Ascend public path decodes and validates the Phase 2F
+`DispatchHandleDescriptor` before allocating outputs or publishing transport
+commands. The descriptor must belong to the current buffer family and match
+the two-rank topology, original token count, hidden size, global expert count,
+top-k width, expert alignment, capacity, and expanded mode. Source metadata,
+rank prefixes, expanded slots, and all encoded source ranks, token indices,
+and lanes are validated against those descriptor bounds. A handle from a
+different buffer, topology, shape, or mode is rejected before launch.
+
+The symmetric combine region contains two kinds of fixed shards and a control
+array:
+
+- one receive shard per contributor rank, owned by the origin rank;
+- one registered staging shard per destination origin rank, owned by the
+  contributor; and
+- one `CombineControlSlot {generation, count}` per contributor rank.
+
+A packed combine record contains a BF16 hidden payload, optional float32
+weights for all top-k lanes, and a versioned header containing the origin
+token, contributor rank, master lane, and contribution lane. Normal layout
+uses at most one record per origin token and contributor rank. Expanded layout
+with `allow_multiple_reduction=true` reduces valid local expert slots for one
+origin token in ascending top-k lane order using float32 and publishes one
+record. Expanded layout with `allow_multiple_reduction=false` retains one
+record per valid lane; its shard capacity is therefore
+`num_max_tokens_per_rank * num_topk`. Alignment padding is never published or
+read. Expanded top-k weights remain unsupported when multiple reduction is
+disabled, matching the upstream CUDA contract.
+
 For each original token, contributions from experts on the same contributor
 rank are either retained separately or reduced locally according to
-`allow_multiple_reduction`. A contributor writes its record into the origin's
-combine inbox shard indexed by contributor rank and original token. It then
-publishes a generation-tagged count/signal and enters the service barrier.
+`allow_multiple_reduction`. A contributor writes its record into its local
+staging shard indexed by destination origin rank, then publishes one
+contiguous payload put into the origin's receive shard indexed by contributor
+rank. The payload is followed by
+a generation-tagged count put, a signal, and the finite-timeout scale-up
+barrier. Self-bound records use the same receive-shard and control semantics
+without a remote put. The AICore service executes the batch before the origin
+reads any receive record.
 
 After remote completion, the origin scans contributor shards, validates the
-generation and metadata, accumulates BF16 contributions in float32, combines
-optional top-k weights, applies each optional BF16 bias exactly once, and
-writes one BF16 output token.
+generation, record count, contributor identity, token, and lane metadata, then
+accumulates BF16 contributions in contributor-rank and lane order using
+float32. Optional top-k weights are routing values returned to their original
+top-k lanes; they are not multiplied into the expert output. Each optional
+BF16 bias is applied exactly once after all contributor payloads have been
+accumulated, and the result is cast once to one BF16 output token.
 
 The layout prevents two remote ranks from writing the same record. The final
 reduction is local to the origin rank, so no remote atomic floating-point
 reduction is required. Phase 2D FAA remains available for control publication,
 not payload reduction.
+
+Combine owns a monotonic generation sequence independent of dispatch and
+barrier. Every attempted device launch consumes one generation; an incomplete
+launch, synchronization, copy, or diagnostic boundary poisons the sequence so
+later calls cannot accept stale records. All retryable tensor, handle, mode,
+capacity, and device-ownership validation happens before the attempt begins.
+Diagnostics retain operation, rank, command index, opcode, peer, channel, and
+generation.
+
+The public Python and C++ signatures remain unchanged. Ascend accepts exactly
+one AICore block and zero QPs, synchronizes before returning, returns no native
+event, and rejects previous events, asynchronous compute-stream overlap,
+communication-stream allocation, hybrid mode, scale-out, FP8, and every other
+deferred mode before launch. CUDA defaults and behavior remain unchanged.
 
 ### Combine feature order
 
@@ -532,6 +583,22 @@ Phase 2G is complete when:
    queue corruption;
 7. failures tear down the transport before ProcessGroupHCCL destruction; and
 8. the existing public Python dispatch/combine signatures remain unchanged.
+
+The Phase 2G reference accumulates in the deterministic order above. Combined
+BF16 payloads use `rtol=1/128` and `atol=1/128`; returned float32 top-k weights
+must match exactly, including zeroes for `-1` lanes. Both reduction modes must
+select the same contributors and satisfy the same reference tolerance even
+when their BF16 staging changes rounding.
+
+Acceptance includes normal and expanded inputs, aligned and near-capacity
+expanded inputs, cached dispatch handles with changed expert outputs, optional
+weights, zero/one/two biases, both reduction modes, duplicate same-rank
+experts, `-1` lanes, empty and asymmetric ranks, malformed and cross-buffer
+handles, bounded peer-failure diagnostics, repeated construct/destroy, and at
+least 100 dispatch/combine generations. The terminal NPU8P task clean-builds
+testing and production extensions, audits out CUDA/NCCL/NVSHMEM dependencies,
+and prints `PHASE2G_ACCEPTANCE=PASS` only after every case passes on both
+ranks.
 
 ## Error Handling
 
