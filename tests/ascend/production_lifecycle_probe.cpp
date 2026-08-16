@@ -36,6 +36,7 @@ struct Trace {
     int destroy_team_failures_remaining = 0;
     int runtime_free_fail_call = -1;
     int runtime_free_calls = 0;
+    int runtime_copy_from_host_failures_remaining = 0;
     bool null_stream = false;
 
     bool runtime_fail() {
@@ -103,6 +104,16 @@ int runtime_synchronize_device(void* data) {
     return 0;
 }
 
+int runtime_copy_from_host(void* data, void*, const void*, std::uint64_t) {
+    auto& trace = self(data);
+    trace.events.emplace_back("runtime_copy_from_host");
+    if (trace.runtime_copy_from_host_failures_remaining > 0) {
+        --trace.runtime_copy_from_host_failures_remaining;
+        return 64;
+    }
+    return 0;
+}
+
 int runtime_copy_to_host(
     void* data, void*, const void*, std::uint64_t) {
     self(data).events.emplace_back("runtime_copy_to_host");
@@ -112,7 +123,8 @@ int runtime_copy_to_host(
 runtime::CannRuntimeApi runtime_api(Trace& trace) {
     return {&trace, runtime_allocate, runtime_zero, runtime_free,
             runtime_current_stream, runtime_synchronize_stream,
-            runtime_synchronize_device, runtime_copy_to_host};
+            runtime_synchronize_device, runtime_copy_from_host,
+            runtime_copy_to_host};
 }
 
 int get_rank(void* data, std::int64_t, std::uint32_t* rank) {
@@ -256,6 +268,9 @@ void check_success_and_idempotent_cleanup() {
     CHECK(current_stream == reinterpret_cast<void*>(0x6161));
     CHECK(resources.synchronize_stream(current_stream).ok());
     CHECK(trace.synchronized_stream == 0x6161);
+    std::uint64_t source = 3;
+    CHECK(resources.copy_from_host(resources.workspace(), &source, sizeof(source)).ok());
+    CHECK(trace.count("runtime_copy_from_host") == 1);
 
     CHECK(resources.destroy().ok());
     const auto after_destroy = trace.events.size();
@@ -264,6 +279,25 @@ void check_success_and_idempotent_cleanup() {
     CHECK(trace.count("runtime_free") == 2);
     CHECK(trace.first("deregister_window") < trace.first("destroy_team"));
     CHECK(trace.events.back() == "runtime_free");
+}
+
+void check_copy_failure_preserves_resources_for_retry() {
+    Trace trace;
+    runtime::CannRuntimeResources resources;
+    CHECK(resources.initialize(
+        config(), 4096, runtime_api(trace), host_api(trace)).ok());
+    std::uint64_t source = 3;
+    trace.runtime_copy_from_host_failures_remaining = 1;
+    const auto first = resources.copy_from_host(
+        resources.workspace(), &source, sizeof(source));
+    CHECK(!first.ok());
+    CHECK(first.operation == "copy_from_host");
+    CHECK(first.backend_code == 64);
+    CHECK(resources.initialized());
+    CHECK(resources.workspace() != nullptr);
+    CHECK(resources.copy_from_host(
+        resources.workspace(), &source, sizeof(source)).ok());
+    CHECK(resources.destroy().ok());
 }
 
 void check_runtime_failures_cleanup() {
@@ -393,5 +427,6 @@ int main() {
     check_deregister_failure_preserves_outer_window();
     check_team_destroy_failure_preserves_outer_window();
     check_runtime_free_failure_is_retryable();
+    check_copy_failure_preserves_resources_for_retry();
     return failures == 0 ? 0 : 1;
 }

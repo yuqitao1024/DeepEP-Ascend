@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <limits>
@@ -16,6 +17,7 @@
 
 #include "elastic/layout.hpp"
 #include "elastic/barrier_state.hpp"
+#include "elastic/dispatch_state.hpp"
 #include "elastic/runtime.hpp"
 #include "runtime/cann_runtime.hpp"
 
@@ -57,16 +59,17 @@ class ElasticBuffer {
     bool allow_hybrid_mode_;
     std::unique_ptr<runtime::CannRuntimeResources> resources_;
     elastic::BarrierSequence barrier_sequence_;
+    mutable elastic::DispatchSequence dispatch_sequence_;
+    std::uint64_t dispatch_family_ = 0;
     std::uint64_t barrier_timeout_cycles_ = 0;
     bool destroyed_ = false;
 
+    inline static std::atomic_uint64_t next_dispatch_family_{0};
+
     static constexpr auto kDispatchCapabilities =
         transport::capability_bit(transport::TransportCapability::kSymmetricWindow) |
-        transport::capability_bit(transport::TransportCapability::kDirectPeerPointer) |
         transport::capability_bit(transport::TransportCapability::kDevicePut) |
         transport::capability_bit(transport::TransportCapability::kDevicePutValue) |
-        transport::capability_bit(
-            transport::TransportCapability::kRemoteAtomicAddRelease) |
         transport::capability_bit(transport::TransportCapability::kRemoteSignal) |
         transport::capability_bit(
             transport::TransportCapability::kSystemMemoryOrdering) |
@@ -149,6 +152,24 @@ class ElasticBuffer {
             rank_idx_);
     }
 
+    [[noreturn]] void raise_dispatch_diagnostic(
+        const transport::DeviceTransportDiagnostic& diagnostic,
+        const char* detail) const {
+        auto message = std::string("device diagnostic ") + detail +
+            " error=" + diagnostic_name(diagnostic.error) +
+            " command_index=" + std::to_string(diagnostic.command_index) +
+            " opcode=" + std::to_string(
+                static_cast<std::uint32_t>(diagnostic.opcode)) +
+            " peer=" + std::to_string(diagnostic.peer) +
+            " channel=" + std::to_string(diagnostic.channel) +
+            " generation=" + std::to_string(diagnostic.generation);
+        raise_transport_status(
+            transport::TransportStatus::runtime_failure(
+                "dispatch", static_cast<int>(diagnostic.backend_status),
+                std::move(message)),
+            rank_idx_);
+    }
+
     elastic::CoreTiling build_barrier_tiling() const {
         const auto& context = resources_->device_context();
         elastic::CoreTilingInput input{};
@@ -165,6 +186,76 @@ class ElasticBuffer {
                     status.message);
         tiling.transport_context = context;
         return tiling;
+    }
+
+    elastic::CoreTiling build_dispatch_tiling(
+        std::uint64_t num_tokens, std::uint64_t hidden,
+        std::uint64_t num_experts, std::uint64_t num_topk,
+        std::uint64_t expert_alignment,
+        std::uint64_t num_max_tokens_per_rank,
+        elastic::CoreModeFlags mode_flags) const {
+        const auto& context = resources_->device_context();
+        elastic::CoreTilingInput input{};
+        input.operation = elastic::OperationKind::kDispatch;
+        input.element_kind = elastic::ElementKind::kBFloat16;
+        input.mode_flags = mode_flags;
+        input.num_tokens = num_tokens;
+        input.hidden = hidden;
+        input.num_experts = num_experts;
+        input.num_topk = num_topk;
+        input.expert_alignment = expert_alignment;
+        input.num_max_tokens_per_rank = num_max_tokens_per_rank;
+        input.has_reusable_slots =
+            elastic::has_mode(mode_flags, elastic::CoreMode::kCached);
+        input.topology.world_rank = context.topology.world_rank;
+        input.topology.world_size = context.topology.world_size;
+        input.topology.scale_up_rank = context.topology.scale_up_rank;
+        input.topology.scale_up_size = context.topology.scale_up_size;
+        input.topology.scale_out_rank = context.topology.scale_out_rank;
+        input.topology.scale_out_size = context.topology.scale_out_size;
+        elastic::CoreTiling tiling{};
+        const auto status = elastic::build_core_tiling(input, &tiling);
+        TORCH_CHECK(status.ok(), "DeepEP Ascend backend: dispatch ",
+                    status.message);
+        tiling.transport_context = context;
+        return tiling;
+    }
+
+    static void validate_npu_tensor(
+        const torch::Tensor& tensor, int64_t dimensions,
+        torch::ScalarType type, const char* name) {
+        TORCH_CHECK(tensor.device().type() == c10::DeviceType::PrivateUse1 &&
+                        tensor.is_contiguous() &&
+                        tensor.dim() == dimensions &&
+                        tensor.scalar_type() == type,
+                    "DeepEP Ascend backend: dispatch requires contiguous NPU ",
+                    name, " with the expected rank and dtype");
+    }
+
+    static bool multiply_without_overflow(
+        std::uint64_t lhs, std::uint64_t rhs, std::uint64_t* output) {
+        return elastic::checked_multiply(lhs, rhs, output);
+    }
+
+    static bool align_without_overflow(
+        std::uint64_t value, std::uint64_t alignment,
+        std::uint64_t* output) {
+        if (alignment == 0 ||
+            value > std::numeric_limits<std::uint64_t>::max() -
+                        (alignment - 1))
+            return false;
+        *output = ((value + alignment - 1) / alignment) * alignment;
+        return true;
+    }
+
+    static void raise_launch_status(
+        const elastic::CoreRuntimeStatus& status, int rank) {
+        const auto transport_status = status.code ==
+                elastic::CoreRuntimeStatusCode::kLaunchFailure ?
+            transport::TransportStatus::runtime_failure(
+                "dispatch", status.backend_code, status.message) :
+            transport::TransportStatus::invalid("dispatch", status.message);
+        raise_transport_status(transport_status, rank);
     }
 
 public:
@@ -206,6 +297,11 @@ public:
                     elastic::kPublicElasticBufferAlignment) == 0,
             "DeepEP Ascend backend: device buffer must be positive and "
             "2 MiB-aligned");
+        const auto previous_family = next_dispatch_family_.fetch_add(
+            1, std::memory_order_relaxed);
+        TORCH_CHECK(previous_family != std::numeric_limits<std::uint64_t>::max(),
+                    "DeepEP Ascend backend: dispatch family space is exhausted");
+        dispatch_family_ = previous_family + 1;
 
         transport::TransportConfig config{
             rank_idx, num_ranks, comm_handle, cpu_comm.empty(), num_buffer_bytes,
@@ -393,30 +489,312 @@ public:
                torch::Tensor, torch::Tensor,
                std::optional<torch::Tensor>, std::optional<torch::Tensor>,
                std::optional<EventHandle>>
-    dispatch(const torch::Tensor&, const std::optional<torch::Tensor>&,
-             const torch::Tensor&, const std::optional<torch::Tensor>&,
-             const std::optional<torch::Tensor>&, const std::optional<int>&,
-             const std::optional<int>&,
-             const std::optional<std::vector<int>>&,
-             const std::optional<torch::Tensor>&,
-             const std::optional<torch::Tensor>&,
-             const std::optional<torch::Tensor>&,
-             const std::optional<torch::Tensor>&,
-             const std::optional<torch::Tensor>&,
-             const std::optional<torch::Tensor>&,
-             const std::optional<torch::Tensor>&,
-             const int&, const int&, const int&, const int&, const int&,
-             const std::optional<EventHandle>&,
-             const std::optional<EventHandle>&,
-             const bool&, const bool&, const bool&, const bool&, const bool&,
-             const bool&, const bool&) const {
-        auto required = kDispatchCapabilities;
-        if (allow_hybrid_mode_)
-            required |= kHybridCapabilities;
-        require_transport("dispatch", required);
-        raise_unsupported(
-            "dispatch",
-            "is unavailable until the Ascend device transport is implemented");
+    dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>& sf,
+             const torch::Tensor& topk_idx,
+             const std::optional<torch::Tensor>& topk_weights,
+             const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
+             const std::optional<int>& cached_num_recv_tokens,
+             const std::optional<int>& cached_num_expanded_tokens,
+             const std::optional<std::vector<int>>& cached_num_recv_tokens_per_expert_list,
+             const std::optional<torch::Tensor>& cached_psum_num_recv_tokens_per_scaleup_rank,
+             const std::optional<torch::Tensor>& cached_psum_num_recv_tokens_per_expert,
+             const std::optional<torch::Tensor>& cached_num_unaligned_recv_tokens_per_expert,
+             const std::optional<torch::Tensor>& cached_dst_buffer_slot_idx,
+             const std::optional<torch::Tensor>& cached_token_metadata_at_forward,
+             const std::optional<torch::Tensor>& cached_recv_src_metadata,
+             const std::optional<torch::Tensor>& cached_channel_linked_list,
+             const int& num_max_tokens_per_rank, const int& num_experts,
+             const int& expert_alignment, const int& num_sms, const int& num_qps,
+             const std::optional<EventHandle>& previous_event,
+             const std::optional<EventHandle>& previous_event_before_epilogue,
+             const bool& async_with_compute_stream,
+             const bool& allocate_on_comm_stream, const bool& do_handle_copy,
+             const bool& do_cpu_sync, const bool& do_expand,
+             const bool& do_zero_padding,
+             const bool& use_tma_aligned_col_major_sf) const {
+        require_transport("dispatch", kDispatchCapabilities);
+        TORCH_CHECK(!destroyed_ && !allow_hybrid_mode_,
+                    "DeepEP Ascend backend: dispatch does not support hybrid mode");
+        TORCH_CHECK(!sf.has_value() && !cumulative_local_expert_recv_stats.has_value(),
+                    "DeepEP Ascend backend: dispatch does not support scale factors "
+                    "or cumulative expert stats");
+        TORCH_CHECK(!previous_event.has_value() &&
+                        !previous_event_before_epilogue.has_value() &&
+                        !async_with_compute_stream && !allocate_on_comm_stream,
+                    "DeepEP Ascend backend: dispatch is synchronous");
+        TORCH_CHECK(!use_tma_aligned_col_major_sf,
+                    "DeepEP Ascend backend: dispatch does not support TMA mode");
+        (void)do_cpu_sync;
+        TORCH_CHECK(num_sms == 1 && num_qps == 0,
+                    "DeepEP Ascend backend: dispatch requires num_sms=1 and num_qps=0");
+        TORCH_CHECK(!do_zero_padding || do_expand,
+                    "DeepEP Ascend backend: dispatch zero padding requires expansion");
+        TORCH_CHECK(num_max_tokens_per_rank > 0 && num_experts > 0 &&
+                        expert_alignment > 0 && num_experts % 2 == 0,
+                    "DeepEP Ascend backend: dispatch requires positive, two-rank "
+                    "expert-aligned capacity");
+        validate_npu_tensor(x, 2, torch::kBFloat16, "BF16 x");
+        validate_npu_tensor(topk_idx, 2, torch::kLong, "int64 topk_idx");
+        TORCH_CHECK(x.size(0) == topk_idx.size(0) && x.size(0) >= 0 &&
+                        x.size(0) <= num_max_tokens_per_rank && x.size(1) > 0 &&
+                        topk_idx.size(1) > 0 && topk_idx.size(1) <= num_experts,
+                    "DeepEP Ascend backend: dispatch input shapes exceed capacity");
+        if (topk_weights.has_value()) {
+            validate_npu_tensor(
+                *topk_weights, 2, torch::kFloat, "float32 topk_weights");
+            TORCH_CHECK(topk_weights->sizes() == topk_idx.sizes(),
+                        "DeepEP Ascend backend: dispatch topk_weights shape mismatch");
+        }
+
+        const bool cached_mode = cached_num_recv_tokens.has_value();
+        const bool any_cached_tensor = cached_num_expanded_tokens.has_value() ||
+            cached_num_recv_tokens_per_expert_list.has_value() ||
+            cached_psum_num_recv_tokens_per_scaleup_rank.has_value() ||
+            cached_psum_num_recv_tokens_per_expert.has_value() ||
+            cached_num_unaligned_recv_tokens_per_expert.has_value() ||
+            cached_dst_buffer_slot_idx.has_value() ||
+            cached_token_metadata_at_forward.has_value() ||
+            cached_recv_src_metadata.has_value();
+        TORCH_CHECK(cached_mode || !any_cached_tensor,
+                    "DeepEP Ascend backend: dispatch cached handles require cached counts");
+        TORCH_CHECK(!cached_channel_linked_list.has_value(),
+                    "DeepEP Ascend backend: dispatch does not support channel handles");
+
+        elastic::CoreModeFlags mode_flags = 0;
+        if (cached_mode)
+            mode_flags |= elastic::mode_bit(elastic::CoreMode::kCached);
+        if (do_expand)
+            mode_flags |= elastic::mode_bit(elastic::CoreMode::kExpanded);
+        if (do_zero_padding)
+            mode_flags |= elastic::mode_bit(elastic::CoreMode::kZeroPadding);
+        const auto num_tokens = static_cast<std::uint64_t>(x.size(0));
+        const auto hidden = static_cast<std::uint64_t>(x.size(1));
+        const auto num_topk = static_cast<std::uint64_t>(topk_idx.size(1));
+        const auto capacity = static_cast<std::uint64_t>(num_max_tokens_per_rank);
+        const auto experts = static_cast<std::uint64_t>(num_experts);
+        const auto alignment = static_cast<std::uint64_t>(expert_alignment);
+        const auto tiling = build_dispatch_tiling(
+            num_tokens, hidden, experts, num_topk, alignment, capacity, mode_flags);
+        TORCH_CHECK(tiling.communication_buffer_bytes <=
+                        static_cast<std::uint64_t>(num_buffer_bytes_) &&
+                        tiling.workspace_bytes <= resources_->workspace_bytes(),
+                    "DeepEP Ascend backend: dispatch capacity exceeds runtime storage");
+
+        const auto expected_descriptor = elastic::make_dispatch_handle_descriptor(
+            dispatch_family_, tiling.topology, num_tokens, hidden, experts,
+            num_topk, alignment, capacity, mode_flags);
+        const auto int_options = x.options().dtype(torch::kInt);
+        const auto metadata_options = x.options().dtype(torch::kByte);
+        const auto max_recv_tokens = capacity * static_cast<std::uint64_t>(num_ranks_);
+        std::uint64_t expanded_records = 0;
+        TORCH_CHECK(multiply_without_overflow(
+                        max_recv_tokens, num_topk,
+                        &expanded_records),
+                    "DeepEP Ascend backend: dispatch output capacity overflow");
+        const auto local_experts = experts / static_cast<std::uint64_t>(num_ranks_);
+        std::uint64_t alignment_padding = 0;
+        TORCH_CHECK(multiply_without_overflow(
+                        alignment - 1, local_experts, &alignment_padding) &&
+                        expanded_records <= std::numeric_limits<std::uint64_t>::max() -
+                            alignment_padding &&
+                        align_without_overflow(
+                            expanded_records + alignment_padding, alignment,
+                            &expanded_records),
+                    "DeepEP Ascend backend: dispatch output capacity overflow");
+        TORCH_CHECK(max_recv_tokens <= static_cast<std::uint64_t>(
+                        std::numeric_limits<int>::max()) &&
+                        expanded_records <= static_cast<std::uint64_t>(
+                            std::numeric_limits<int>::max()),
+                    "DeepEP Ascend backend: dispatch output count overflow");
+
+        torch::Tensor rank_prefix;
+        torch::Tensor expert_prefix;
+        torch::Tensor unaligned;
+        torch::Tensor destination_slots;
+        torch::Tensor source_metadata;
+        if (cached_mode) {
+            TORCH_CHECK(cached_num_expanded_tokens.has_value() &&
+                            cached_num_recv_tokens_per_expert_list.has_value() &&
+                            cached_psum_num_recv_tokens_per_scaleup_rank.has_value() &&
+                            cached_psum_num_recv_tokens_per_expert.has_value() &&
+                            cached_num_unaligned_recv_tokens_per_expert.has_value() &&
+                            cached_dst_buffer_slot_idx.has_value() &&
+                            cached_token_metadata_at_forward.has_value() &&
+                            cached_recv_src_metadata.has_value(),
+                        "DeepEP Ascend backend: dispatch cached mode requires all handles");
+            TORCH_CHECK(*cached_num_recv_tokens >= 0 &&
+                            *cached_num_expanded_tokens >= 0 &&
+                            *cached_num_recv_tokens <= static_cast<int>(max_recv_tokens) &&
+                            *cached_num_expanded_tokens <= static_cast<int>(expanded_records) &&
+                            cached_num_recv_tokens_per_expert_list->size() == local_experts,
+                        "DeepEP Ascend backend: dispatch cached counts are invalid");
+            validate_npu_tensor(*cached_psum_num_recv_tokens_per_scaleup_rank,
+                                1, torch::kInt, "cached rank prefix");
+            validate_npu_tensor(*cached_psum_num_recv_tokens_per_expert,
+                                1, torch::kInt, "cached expert prefix");
+            validate_npu_tensor(*cached_num_unaligned_recv_tokens_per_expert,
+                                1, torch::kInt, "cached unaligned counts");
+            validate_npu_tensor(*cached_dst_buffer_slot_idx,
+                                2, torch::kInt, "cached destination slots");
+            validate_npu_tensor(*cached_recv_src_metadata,
+                                2, torch::kInt, "cached source metadata");
+            validate_npu_tensor(*cached_token_metadata_at_forward,
+                                1, torch::kByte, "cached descriptor");
+            TORCH_CHECK(cached_psum_num_recv_tokens_per_scaleup_rank->size(0) == num_ranks_ &&
+                            cached_psum_num_recv_tokens_per_expert->size(0) == experts + 1 &&
+                            cached_num_unaligned_recv_tokens_per_expert->size(0) == experts &&
+                            cached_dst_buffer_slot_idx->sizes() == topk_idx.sizes() &&
+                            cached_recv_src_metadata->size(0) == *cached_num_recv_tokens &&
+                            cached_recv_src_metadata->size(1) == num_topk + 2 &&
+                            cached_token_metadata_at_forward->numel() ==
+                                static_cast<int64_t>(sizeof(elastic::DispatchHandleDescriptor)),
+                        "DeepEP Ascend backend: dispatch cached handle shape mismatch");
+            elastic::DispatchHandleDescriptor descriptor{};
+            auto status = resources_->copy_to_host(
+                &descriptor, cached_token_metadata_at_forward->data_ptr(),
+                sizeof(descriptor));
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            const auto descriptor_status = elastic::validate_dispatch_handle(
+                expected_descriptor, descriptor);
+            TORCH_CHECK(descriptor_status.ok(), "DeepEP Ascend backend: dispatch ",
+                        descriptor_status.message);
+            rank_prefix = *cached_psum_num_recv_tokens_per_scaleup_rank;
+            expert_prefix = *cached_psum_num_recv_tokens_per_expert;
+            unaligned = *cached_num_unaligned_recv_tokens_per_expert;
+            destination_slots = *cached_dst_buffer_slot_idx;
+            source_metadata = *cached_recv_src_metadata;
+        } else {
+            rank_prefix = torch::empty({num_ranks_}, int_options);
+            expert_prefix = torch::empty({num_experts + 1}, int_options);
+            unaligned = torch::empty({num_experts}, int_options);
+            destination_slots = torch::empty({x.size(0), topk_idx.size(1)}, int_options);
+            source_metadata = torch::empty(
+                {static_cast<int64_t>(max_recv_tokens), topk_idx.size(1) + 2},
+                int_options);
+        }
+
+        elastic::DispatchAttempt attempt(dispatch_sequence_);
+        TORCH_CHECK(attempt.valid(), "DeepEP Ascend backend: dispatch cannot continue "
+                    "after a failed or concurrent attempt");
+        auto recv_x = torch::empty(
+            {static_cast<int64_t>(do_expand ? expanded_records : max_recv_tokens),
+             x.size(1)}, x.options());
+        auto recv_topk_indices = torch::empty(
+            {static_cast<int64_t>(max_recv_tokens), topk_idx.size(1)},
+            topk_idx.options());
+        auto recv_topk_weights = std::optional<torch::Tensor>();
+        if (topk_weights.has_value()) {
+            recv_topk_weights = do_expand ?
+                torch::empty(
+                    {static_cast<int64_t>(expanded_records)},
+                    topk_weights->options()) :
+                torch::empty(
+                    {static_cast<int64_t>(max_recv_tokens), topk_idx.size(1)},
+                    topk_weights->options());
+        }
+        auto copied_topk_idx = !cached_mode && do_handle_copy ?
+            std::optional<torch::Tensor>(topk_idx.clone()) :
+            std::optional<torch::Tensor>();
+        auto descriptor_tensor = torch::empty(
+            {static_cast<int64_t>(sizeof(elastic::DispatchHandleDescriptor))},
+            metadata_options);
+        auto status = resources_->copy_from_host(
+            descriptor_tensor.data_ptr(), &expected_descriptor,
+            sizeof(expected_descriptor));
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+
+        elastic::DispatchArguments arguments{};
+        arguments.x = x.data_ptr();
+        arguments.topk_indices = topk_idx.data_ptr<std::int64_t>();
+        arguments.topk_weights = topk_weights.has_value() ?
+            topk_weights->data_ptr<float>() : nullptr;
+        arguments.communication_buffer = resources_->window_base();
+        arguments.workspace = resources_->workspace();
+        arguments.recv_x = recv_x.data_ptr();
+        arguments.recv_topk_indices = recv_topk_indices.data_ptr<std::int64_t>();
+        arguments.recv_topk_weights = recv_topk_weights.has_value() ?
+            recv_topk_weights->data_ptr<float>() : nullptr;
+        arguments.prefix_per_rank = rank_prefix.data_ptr<std::int32_t>();
+        arguments.prefix_per_expert = expert_prefix.data_ptr<std::int32_t>();
+        arguments.unaligned_per_expert = unaligned.data_ptr<std::int32_t>();
+        arguments.destination_slots = destination_slots.data_ptr<std::int32_t>();
+        arguments.source_metadata = source_metadata.data_ptr<std::int32_t>();
+        arguments.generation = attempt.generation();
+        arguments.timeout_cycles = barrier_timeout_cycles_;
+        void* stream = nullptr;
+        status = resources_->current_stream(&stream);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        const elastic::CoreLaunchStorage storage{
+            static_cast<std::uint64_t>(num_buffer_bytes_), resources_->workspace_bytes()};
+        const auto launch_status = elastic::launch_internal_dispatch(
+            arguments, tiling, storage, stream);
+        if (!launch_status.ok())
+            raise_launch_status(launch_status, rank_idx_);
+        status = resources_->synchronize_stream(stream);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        transport::DeviceTransportDiagnostic diagnostic{};
+        status = host_transport()->read_diagnostic(&diagnostic);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+#if DEEP_EP_ASCEND_TESTING
+        if (std::getenv("DEEP_EP_ASCEND_TEST_DISPATCH_DIAGNOSTIC") != nullptr) {
+            diagnostic.abi_version = transport::kTransportCommandAbiVersion;
+            diagnostic.error = transport::DeviceTransportError::kCompletionTimeout;
+            diagnostic.generation = attempt.generation();
+        }
+#endif
+        std::vector<std::int32_t> host_rank_prefix(num_ranks_);
+        std::vector<std::int32_t> host_expert_prefix(num_experts + 1);
+        std::vector<std::int32_t> host_unaligned(num_experts);
+        status = resources_->copy_to_host(
+            host_rank_prefix.data(), rank_prefix.data_ptr(),
+            host_rank_prefix.size() * sizeof(std::int32_t));
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        status = resources_->copy_to_host(
+            host_expert_prefix.data(), expert_prefix.data_ptr(),
+            host_expert_prefix.size() * sizeof(std::int32_t));
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        status = resources_->copy_to_host(
+            host_unaligned.data(), unaligned.data_ptr(),
+            host_unaligned.size() * sizeof(std::int32_t));
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        if (diagnostic.abi_version != transport::kTransportCommandAbiVersion ||
+            diagnostic.error != transport::DeviceTransportError::kNone ||
+            diagnostic.generation != attempt.generation())
+            raise_dispatch_diagnostic(diagnostic, "reported failure");
+        const int num_recv_tokens = host_rank_prefix.back();
+        const int num_expanded_tokens = host_expert_prefix.back();
+        TORCH_CHECK(num_recv_tokens >= 0 &&
+                        num_recv_tokens <= static_cast<int>(max_recv_tokens) &&
+                        num_expanded_tokens >= 0 &&
+                        num_expanded_tokens <= static_cast<int>(expanded_records),
+                    "DeepEP Ascend backend: dispatch returned invalid output counts");
+        std::vector<int> per_expert_list;
+        const int first_local_expert = rank_idx_ * static_cast<int>(local_experts);
+        for (int expert = 0; expert < static_cast<int>(local_experts); ++expert)
+            per_expert_list.push_back(host_unaligned[first_local_expert + expert]);
+        attempt.complete();
+        const int output_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
+        auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
+        auto narrowed_topk_idx = do_expand ? std::optional<torch::Tensor>() :
+            std::optional<torch::Tensor>(recv_topk_indices.narrow(0, 0, output_tokens));
+        auto narrowed_topk_weights = recv_topk_weights.has_value() ?
+            std::optional<torch::Tensor>(
+                recv_topk_weights->narrow(0, 0, output_tokens)) :
+            std::optional<torch::Tensor>();
+        auto narrowed_metadata = source_metadata.narrow(0, 0, num_recv_tokens);
+        return {narrowed_x, std::nullopt, narrowed_topk_idx,
+                narrowed_topk_weights, copied_topk_idx, num_recv_tokens,
+                num_expanded_tokens, per_expert_list, rank_prefix,
+                expert_prefix, unaligned, narrowed_metadata,
+                destination_slots, descriptor_tensor, std::nullopt, std::nullopt};
     }
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>,

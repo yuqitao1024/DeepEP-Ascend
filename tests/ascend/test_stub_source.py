@@ -76,13 +76,58 @@ public:
 
 TORCH_HEADER = r"""
 #pragma once
+#include <array>
 #include <cstdint>
+#include <initializer_list>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 
+namespace c10 {
+enum class DeviceType { PrivateUse1 };
+}
 namespace torch {
-class Tensor {};
+using ScalarType = int;
+inline constexpr ScalarType kBFloat16 = 1;
+inline constexpr ScalarType kLong = 2;
+inline constexpr ScalarType kFloat = 3;
+inline constexpr ScalarType kInt = 4;
+inline constexpr ScalarType kByte = 5;
+
+class TensorOptions {
+public:
+    TensorOptions dtype(ScalarType) const { return {}; }
+};
+
+class Device {
+public:
+    c10::DeviceType type() const { return c10::DeviceType::PrivateUse1; }
+};
+
+class Tensor {
+public:
+    bool is_contiguous() const { return true; }
+    Device device() const { return {}; }
+    std::int64_t dim() const { return 2; }
+    ScalarType scalar_type() const { return kBFloat16; }
+    std::int64_t size(std::int64_t dimension) const {
+        return dimension == 0 ? 1 : 1;
+    }
+    std::array<std::int64_t, 2> sizes() const { return {1, 1}; }
+    std::int64_t numel() const { return 1; }
+    TensorOptions options() const { return {}; }
+    void* data_ptr() const { return nullptr; }
+    template <typename T>
+    T* data_ptr() const { return nullptr; }
+    Tensor narrow(std::int64_t, std::int64_t, std::int64_t) const { return {}; }
+    Tensor clone() const { return {}; }
+};
+
+inline Tensor empty(std::initializer_list<std::int64_t>, const TensorOptions&) {
+    return {};
+}
+
+inline Tensor empty_like(const Tensor&) { return {}; }
 namespace detail {
 template <typename... Args>
 std::string torch_check_message(Args&&... args) {
@@ -297,8 +342,8 @@ int main() {
     std::optional<Event> optional_event;
     if (!raises_transport_error(
             "dispatch", "requires unavailable device transport capabilities: "
-            "symmetric_window, direct_peer_pointer, device_put, device_put_value, "
-            "remote_atomic_add_release, remote_signal, system_memory_ordering, "
+            "symmetric_window, device_put, device_put_value, remote_signal, "
+            "system_memory_ordering, "
             "device_barrier", [&] {
                 buffer.dispatch(
                     tensor, optional_tensor, tensor, optional_tensor, optional_tensor,
@@ -329,8 +374,8 @@ int main() {
         return 24;
     if (!raises_transport_error(
             "dispatch", "requires unavailable device transport capabilities: "
-            "symmetric_window, direct_peer_pointer, device_put, device_put_value, "
-            "remote_atomic_add_release, remote_signal, system_memory_ordering, "
+            "symmetric_window, device_put, device_put_value, remote_signal, "
+            "system_memory_ordering, "
             "device_barrier, scale_up_team, scale_out_team", [&] {
                 hybrid_buffer.dispatch(
                     tensor, optional_tensor, tensor, optional_tensor, optional_tensor,

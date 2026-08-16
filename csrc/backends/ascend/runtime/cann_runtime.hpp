@@ -16,6 +16,7 @@ struct CannRuntimeApi {
     void* (*current_stream)(void*) = nullptr;
     int (*synchronize_stream)(void*, void*) = nullptr;
     int (*synchronize_device)(void*) = nullptr;
+    int (*copy_from_host)(void*, void*, const void*, std::uint64_t) = nullptr;
     int (*copy_to_host)(void*, void*, const void*, std::uint64_t) = nullptr;
 };
 
@@ -59,6 +60,8 @@ public:
     transport::TransportStatus current_stream(void** stream);
     transport::TransportStatus synchronize_stream(void* stream);
     transport::TransportStatus synchronize_device();
+    transport::TransportStatus copy_from_host(
+        void* destination, const void* source, std::uint64_t bytes);
     transport::TransportStatus copy_to_host(
         void* destination, const void* source, std::uint64_t bytes);
 

@@ -459,7 +459,7 @@ int main() {
         self.assertNotIn("DEEP_EP_ASCEND_TESTING", bindings)
         self.assertNotIn("DEEP_EP_ASCEND_TEST_DIAGNOSTIC", bindings)
         self.assertIn("launch_internal_barrier", production)
-        self.assertNotIn("launch_internal_dispatch", production)
+        self.assertIn("launch_internal_dispatch", production)
         self.assertNotIn("launch_internal_combine", production)
         for marker in ("read_diagnostic", "copy_to_host",
                        "barrier_completion", "BarrierSequence",
@@ -480,6 +480,19 @@ int main() {
             self.assertIn(marker, production)
         for operation in ("barrier", "dispatch", "combine"):
             marker = f'require_transport("{operation}"'
+            self.assertIn(marker, production)
+
+        dispatch_capabilities = production[
+            production.index("kDispatchCapabilities"):production.index(
+                "kCombineCapabilities")]
+        self.assertNotIn("kDirectPeerPointer", dispatch_capabilities)
+        self.assertNotIn("kRemoteAtomicAddRelease", dispatch_capabilities)
+        for marker in (
+                "DispatchSequence", "DispatchHandleDescriptor",
+                "copy_from_host", "copy_to_host", "synchronize_stream",
+                "read_diagnostic", "num_sms == 1", "num_qps == 0",
+                "do_expand", "do_zero_padding",
+                "use_tma_aligned_col_major_sf"):
             self.assertIn(marker, production)
 
 

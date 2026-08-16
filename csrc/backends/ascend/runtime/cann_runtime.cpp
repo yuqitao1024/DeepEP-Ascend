@@ -23,7 +23,8 @@ bool valid_api(const CannRuntimeApi& api) {
     return api.allocate_device != nullptr && api.zero_device != nullptr &&
            api.free_device != nullptr && api.current_stream != nullptr &&
            api.synchronize_stream != nullptr &&
-           api.synchronize_device != nullptr && api.copy_to_host != nullptr;
+           api.synchronize_device != nullptr && api.copy_from_host != nullptr &&
+           api.copy_to_host != nullptr;
 }
 
 TransportStatus backend_failure(const char* operation, int backend_code) {
@@ -66,6 +67,13 @@ int runtime_synchronize_device(void*) {
     return c10_npu::npuSynchronizeDevice(true) ? 0 : -1;
 }
 
+int runtime_copy_from_host(
+    void*, void* destination, const void* source, std::uint64_t bytes) {
+    return aclrtMemcpy(
+        destination, static_cast<std::size_t>(bytes), source,
+        static_cast<std::size_t>(bytes), ACL_MEMCPY_HOST_TO_DEVICE);
+}
+
 int runtime_copy_to_host(
     void*, void* destination, const void* source, std::uint64_t bytes) {
     return aclrtMemcpy(
@@ -81,7 +89,8 @@ CannRuntimeApi make_cann_runtime_api() {
 #if DEEP_EP_ASCEND_HAS_CANN_RUNTIME
     return {nullptr, runtime_allocate, runtime_zero, runtime_free,
             runtime_current_stream, runtime_synchronize_stream,
-            runtime_synchronize_device, runtime_copy_to_host};
+            runtime_synchronize_device, runtime_copy_from_host,
+            runtime_copy_to_host};
 #else
     return {};
 #endif
@@ -273,6 +282,17 @@ TransportStatus CannRuntimeResources::synchronize_device() {
     const int result = runtime_api_.synchronize_device(runtime_api_.user_data);
     return result == 0 ? TransportStatus::success()
                        : backend_failure("synchronize_device", result);
+}
+
+TransportStatus CannRuntimeResources::copy_from_host(
+    void* destination, const void* source, std::uint64_t bytes) {
+    if (!initialized_ || destination == nullptr || source == nullptr || bytes == 0)
+        return TransportStatus::invalid(
+            "copy_from_host", "invalid runtime copy request");
+    const int result = runtime_api_.copy_from_host(
+        runtime_api_.user_data, destination, source, bytes);
+    return result == 0 ? TransportStatus::success()
+                       : backend_failure("copy_from_host", result);
 }
 
 TransportStatus CannRuntimeResources::copy_to_host(
