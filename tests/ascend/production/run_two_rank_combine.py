@@ -18,6 +18,7 @@ BF16_TOLERANCE = 1 / 128
 PADDING_SENTINEL = -64.0
 ORDER_VARIANT = "order-sensitive"
 ORDER_BOUNDARY = float(1 << 24)
+MAX_WEIGHT_DIFFERENCES = WORLD_SIZE * NUM_TOPK
 
 # At alignment 4, per-expert route counts are (2, 1)/(1, 1) for padding
 # and (4, 4)/(4, 4) near capacity, giving these (rows, padding) pairs.
@@ -198,6 +199,25 @@ def _masked_weight_values(routes, weights):
          for expert, weight in zip(token_routes, token_weights)]
         for token_routes, token_weights in zip(routes, weights)
     ]
+
+
+def _weight_mismatch_diagnostic(rank, actual, expected):
+    differences = []
+    for row, (actual_row, expected_row) in enumerate(zip(actual, expected)):
+        for lane, (actual_value, expected_value) in enumerate(zip(
+                actual_row, expected_row)):
+            if actual_value != expected_value:
+                differences.append({
+                    "index": [row, lane],
+                    "actual": actual_value,
+                    "expected": expected_value,
+                })
+    return {
+        "rank": rank,
+        "actual": actual,
+        "expected": expected,
+        "differences": differences[:MAX_WEIGHT_DIFFERENCES],
+    }
 
 
 def _apply_biases_once(values, biases):
@@ -388,6 +408,10 @@ def _behavior_fixtures():
     activation_ignores_weight = _reference_values(weight_routes, 0)[0]
     restored_weights = _masked_weight_values(
         weight_routes, ((0.25, 0.75),))[0]
+    weight_mismatch = _weight_mismatch_diagnostic(
+        0,
+        [[0.125, 0.0], [0.375, 0.0]],
+        [[0.125, 0.25], [0.375, 0.0]])
     bias_base = _reference_values(((0, 2),), 0)
     biases = (
         ((2.0, 2.0, 2.0, 2.0),),
@@ -667,6 +691,7 @@ def _behavior_fixtures():
             "bias_once": bias_once,
             "restored_weights": restored_weights,
         },
+        "weight_mismatch": weight_mismatch,
     }
 
 
@@ -707,6 +732,8 @@ def _contract():
            "bounded diagnostics phases do not synchronize failures")
     _check("_is_local_npu_tensor" in _calls(methods["_verify"]),
            "combine outputs do not enforce local NPU placement")
+    _check("_weight_mismatch_diagnostic" in _calls(methods["_verify"]),
+           "exact weight failures omit the bounded mismatch diagnostic")
     _check("_validate_expansion_mode" in
            _calls(methods["_expert_outputs"]),
            "expert outputs trust the returned handle mode")
@@ -1037,9 +1064,14 @@ class CombineMatrix:
             _check(_is_local_npu_tensor(
                 combined_weights, self.device.index),
                 "combine weights are not on the local NPU")
-            _check(self.torch.equal(
-                combined_weights.detach().cpu(), expected_weights),
-                "combine did not restore the exact original weights")
+            actual_weights = combined_weights.detach().cpu()
+            if not self.torch.equal(actual_weights, expected_weights):
+                diagnostic = _weight_mismatch_diagnostic(
+                    self.rank, actual_weights.tolist(),
+                    expected_weights.tolist())
+                raise AssertionError(
+                    "combine did not restore the exact original weights: "
+                    f"{json.dumps(diagnostic, sort_keys=True)}")
         _check(event.event is None and event.extra_tensors is None and
                event.hook_after_wait is None,
                "synchronous combine returned deferred event state")

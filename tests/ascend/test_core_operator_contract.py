@@ -1070,6 +1070,16 @@ int main() {
                         "bias_once": [9.0, 11.0, 13.0, 15.0],
                         "restored_weights": [0.25, 0.0],
                     },
+                    "weight_mismatch": {
+                        "actual": [[0.125, 0.0], [0.375, 0.0]],
+                        "differences": [{
+                            "actual": 0.0,
+                            "expected": 0.25,
+                            "index": [0, 1],
+                        }],
+                        "expected": [[0.125, 0.25], [0.375, 0.0]],
+                        "rank": 0,
+                    },
                 },
                 "expected_world_size": 2,
                 "empty_reference_shape": [0, 4],
