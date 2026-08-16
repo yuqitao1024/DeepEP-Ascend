@@ -8,7 +8,7 @@ namespace runtime = deep_ep::ascend::runtime;
 namespace transport = deep_ep::ascend::transport;
 namespace elastic = deep_ep::ascend::elastic;
 
-struct Trace { int launches = 0, copies = 0; std::uint64_t generation = 0; bool bad_diagnostic = false, fail_copy = false; } trace;
+struct Trace { int launches = 0, copies = 0; std::uint64_t generation = 0; bool bad_diagnostic = false, fail_copy = false, fail_launch = false; } trace;
 int alloc(void*, std::uint64_t n, void** p) { *p = std::malloc(n); return *p ? 0 : 1; }
 int zero(void*, void* p, std::uint64_t n) { std::memset(p, 0, n); return 0; }
 int free_(void*, void* p) { std::free(p); return 0; }
@@ -56,6 +56,7 @@ extern "C" int deep_ep_ascend_launch_barrier(elastic::BarrierArguments, elastic:
 extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elastic::CoreTiling t, void*) {
     ++trace.launches;
     trace.generation = a.generation;
+    if (trace.fail_launch) return 73;
     if (t.num_tokens == 0) return 0;
     a.prefix_per_rank[0]=1; a.prefix_per_rank[1]=2;
     a.prefix_per_expert[0]=0; a.prefix_per_expert[1]=1; a.prefix_per_expert[2]=1;
@@ -108,9 +109,46 @@ int main() {
     } catch (const std::runtime_error&) {
         if (trace.launches != 2) return 7;
     }
+    trace.fail_launch = true;
+    try {
+        (void)buffer->dispatch(x, none, idx, none, none, no_int, no_int, no_list,
+            none, none, none, none, none, none, none, 4, 2, 1, 1, 0,
+            no_event, no_event, false, false, false, true, false, false, false);
+        return 8;
+    } catch (const std::runtime_error&) {}
+    const int launches_after_failure = trace.launches;
+    try {
+        (void)buffer->dispatch(x, none, idx, none, none, no_int, no_int, no_list,
+            none, none, none, none, none, none, none, 4, 2, 1, 1, 0,
+            no_event, no_event, false, false, false, true, false, false, false);
+        return 9;
+    } catch (const std::runtime_error&) {
+        if (trace.launches != launches_after_failure) return 10;
+    }
+    trace.fail_launch = false;
+    auto diagnostic_buffer = deep_ep::ascend::ElasticBuffer::make_testing_buffer(
+        0, resources(), 2*1024*1024, 1);
+    trace.bad_diagnostic = true;
+    trace.fail_copy = true;
+    const int copies_before_diagnostic = trace.copies;
+    try {
+        (void)diagnostic_buffer->dispatch(x, none, idx, none, none,
+            no_int, no_int, no_list, none, none, none, none, none, none, none,
+            4, 2, 1, 1, 0, no_event, no_event,
+            false, false, false, true, false, false, false);
+        return 11;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("device diagnostic reported failure") ==
+                std::string::npos || trace.copies != copies_before_diagnostic + 1)
+            return 12;
+    }
+    trace.bad_diagnostic = false;
+    trace.fail_copy = false;
+    auto empty_buffer = deep_ep::ascend::ElasticBuffer::make_testing_buffer(
+        0, resources(), 2*1024*1024, 1);
     auto empty = torch::empty({0, 8}, x.options());
     auto empty_idx = torch::empty({0, 1}, idx.options());
-    auto empty_result = buffer->dispatch(empty, none, empty_idx, none, none, no_int, no_int, no_list,
+    auto empty_result = empty_buffer->dispatch(empty, none, empty_idx, none, none, no_int, no_int, no_list,
         none, none, none, none, none, none, none, 4, 2, 1, 1, 0, no_event, no_event,
         false, false, false, true, false, false, false);
     return std::get<0>(empty_result).size(0) == 0 ? 0 : 2;
