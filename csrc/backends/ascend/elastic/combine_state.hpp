@@ -81,6 +81,68 @@ is_valid_combine_origin_token(
            is_dispatch_local_index(origin_token, shard_capacity);
 }
 
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr bool
+combine_expanded_input_row_is_valid(
+    std::int32_t input_row, std::uint64_t num_input_rows) noexcept {
+    return input_row == -1 ||
+           (input_row >= 0 &&
+            static_cast<std::uint64_t>(input_row) < num_input_rows);
+}
+
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr std::uint64_t
+combine_expanded_record_count(
+    const std::int32_t* input_rows, std::uint64_t num_topk,
+    bool allow_multiple_reduction) noexcept {
+    std::uint64_t valid_lanes = 0;
+    for (std::uint64_t lane = 0; lane < num_topk; ++lane)
+        valid_lanes += input_rows[lane] == -1 ? 0 : 1;
+    return allow_multiple_reduction ? (valid_lanes == 0 ? 0 : 1) :
+        valid_lanes;
+}
+
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr std::int32_t
+combine_expanded_record_lane(
+    const std::int32_t* input_rows, std::uint64_t num_topk,
+    std::uint64_t record_index) noexcept {
+    std::uint64_t seen = 0;
+    for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
+        if (input_rows[lane] == -1)
+            continue;
+        if (seen++ == record_index)
+            return static_cast<std::int32_t>(lane);
+    }
+    return -1;
+}
+
+template <typename Value>
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE inline float
+combine_reduce_expanded_lanes(
+    const Value* input, const std::int32_t* input_rows,
+    std::uint64_t num_topk, std::uint64_t num_input_rows,
+    std::uint64_t hidden_elements, std::uint64_t hidden) noexcept {
+    float value = 0.0F;
+    for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
+        const std::int32_t input_row = input_rows[lane];
+        if (input_row == -1)
+            continue;
+        if (!combine_expanded_input_row_is_valid(input_row, num_input_rows))
+            return 0.0F;
+        value += static_cast<float>(input[
+            static_cast<std::uint64_t>(input_row) * hidden_elements + hidden]);
+    }
+    return value;
+}
+
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr float
+combine_routing_weight(const float* weights, std::uint64_t index) noexcept {
+    return weights[index];
+}
+
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr float
+combine_apply_biases(float value, float bias_0, float bias_1) noexcept {
+    return value + bias_0 + bias_1;
+}
+
 }  // namespace deep_ep::ascend::elastic
 
 #undef DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE

@@ -760,6 +760,30 @@ int main() {
             CoreRuntimeStatusCode::kInvalidArgument ||
         launch_trace_size != 0)
         return 58;
+    auto expanded_multiple_tiling = valid_tiling(
+        OperationKind::kCombine, ElementKind::kBFloat16, 1, 2,
+        mode_bit(CoreMode::kExpanded) |
+            mode_bit(CoreMode::kAllowMultipleReduction));
+    export_transport(&expanded_multiple_tiling);
+    auto maximum_expanded_input = weighted_combine;
+    maximum_expanded_input.local_window_base =
+        expanded_multiple_tiling.transport_context.local_window_base;
+    maximum_expanded_input.num_source_rows = 16;
+    maximum_expanded_input.num_input_rows = 32;
+    reset_launches();
+    if (!launch_internal_combine(
+            maximum_expanded_input, expanded_multiple_tiling,
+            required_core_launch_storage(expanded_multiple_tiling), nullptr).ok() ||
+        !trace_is(kCombineLaunch))
+        return 59;
+    ++maximum_expanded_input.num_input_rows;
+    reset_launches();
+    if (launch_internal_combine(
+            maximum_expanded_input, expanded_multiple_tiling,
+            required_core_launch_storage(expanded_multiple_tiling), nullptr).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 60;
 
     auto barrier_tiling = valid_barrier_tiling(0);
     BarrierArguments barrier{bytes, 7, 1000000000ULL};

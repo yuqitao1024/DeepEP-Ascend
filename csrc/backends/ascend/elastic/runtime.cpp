@@ -395,7 +395,7 @@ CoreRuntimeStatus launch_internal_combine(
     if (arguments.num_source_rows > maximum_source_rows)
         return invalid("combine source row count exceeds fixed shards");
     const std::uint64_t maximum_input_rows = expanded ?
-        tiling.num_max_tokens_per_rank * tiling.num_topk :
+        maximum_source_rows * tiling.num_topk :
         maximum_source_rows;
     if (arguments.num_input_rows > maximum_input_rows)
         return invalid("combine input row count exceeds fixed shards");

@@ -14,6 +14,8 @@ RUNTIME_PROBE = ROOT / "tests/ascend/core_runtime_contract_probe.cpp"
 PRODUCTION_LAYOUT_PROBE = ROOT / "tests/ascend/production_layout_probe.cpp"
 PRODUCTION_COMBINE_STATE_PROBE = \
     ROOT / "tests/ascend/production_combine_state_probe.cpp"
+PRODUCTION_COMBINE_SEMANTICS_PROBE = \
+    ROOT / "tests/ascend/production_combine_semantics_probe.cpp"
 PRODUCTION_DISPATCH_STATE_PROBE = \
     ROOT / "tests/ascend/production_dispatch_state_probe.cpp"
 PRODUCTION_BARRIER_STATE_PROBE = \
@@ -25,6 +27,20 @@ CORE_OPS = ROOT / "tests/ascend/core_ops"
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
+    def _run_production_combine_semantics_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "production_combine_semantics"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(PRODUCTION_COMBINE_SEMANTICS_PROBE),
+                 "-o", str(binary)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
     def test_simt_vf_arguments_have_explicit_device_abi(self):
         def split_arguments(arguments):
             result = []
@@ -204,6 +220,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             run_result = subprocess.run(
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_production_combine_semantics(self):
+        self._run_production_combine_semantics_probe()
 
     def test_production_dispatch_state_and_layout(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -573,7 +592,7 @@ int main() {
         normal_end = runner.index("else if", normal_begin + 1)
         normal_case = runner[normal_begin:normal_end]
         self.assertIn(
-            "run_combine_cli_case(stream, false, false, 0)", normal_case)
+            "run_combine_cli_case(stream, false, false, 0, false)", normal_case)
 
     def test_combine_runner_uses_real_context_and_defers_standalone_cli(self):
         """Catches rank-0 tiling and context-free remote launches."""
@@ -601,13 +620,13 @@ int main() {
         cli_wrapper = runner[cli_wrapper_begin:wrapper_end]
         self.assertIn("transport_context != nullptr", cli_wrapper)
         self.assertIn("run_combine_case(", cli_wrapper)
-        self.assertIn("run_combine_state_probe(stream)", cli_wrapper)
+        self.assertNotIn("run_combine_state_probe(stream)", cli_wrapper)
         self.assertIn("hardware-deferred", cli_wrapper)
         self.assertNotIn("make_device_transport_context", cli_wrapper)
 
         main = runner[runner.index("int main("):]
         self.assertNotIn("run_combine_case(stream", main)
-        self.assertEqual(main.count("run_combine_cli_case(stream"), 6)
+        self.assertEqual(main.count("run_combine_cli_case(stream"), 7)
 
     def test_combine_device_capacity_gate_and_runner_allocation(self):
         """Catches device output overflow and undersized shared buffers."""
@@ -661,57 +680,12 @@ int main() {
         self.assertIn("observed_output[2] == 0x5a5a", runner)
 
     def test_combine_expanded_semantics(self):
-        """Catches reading aligned padding or collapsing expanded lanes."""
-        source = (ELASTIC / "combine.asc").read_text()
-        producer_begin = source.index("__simt_vf__ inline void combine_producer_vf")
-        epilogue_begin = source.index("__simt_vf__ inline void combine_epilogue_vf")
-        producer = source[producer_begin:epilogue_begin]
-
-        # A source row with slots [3, 7] must reduce 3 then 7 to one record;
-        # single reduction must publish the same two values as distinct lanes.
-        for marker in (
-                "const bool expanded =", "const bool allow_multiple_reduction =",
-                "metadata[2 + lane]", "input_row < 0", "input_row != -1",
-                "static_cast<std::uint64_t>(input_row) >= num_input_rows",
-                "float value = 0.0F", "value += static_cast<float>(",
-                "header->contribution_lane = expanded && !allow_multiple_reduction"):
-            self.assertIn(marker, producer)
-        self.assertLess(producer.index("metadata[2 + lane]"),
-                        producer.index("x[\n                                static_cast<std::uint64_t>(input_row)"))
-
-        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
-        for literal in (
-                "const std::uint16_t kExpandedPaddingSentinel = 0x5a5a;",
-                "const std::uint16_t expected_multiple[] = {",
-                "float_to_bfloat16(3.0F)", "float_to_bfloat16(7.0F)",
-                "float_to_bfloat16(10.0F)"):
-            self.assertIn(literal, runner)
+        """Executes expanded lane planning and padding-safe reduction."""
+        self._run_production_combine_semantics_probe()
 
     def test_combine_weights_and_bias_semantics(self):
-        """Catches activation weighting or per-contributor bias application."""
-        source = (ELASTIC / "combine.asc").read_text()
-        epilogue_begin = source.index("__simt_vf__ inline void combine_epilogue_vf")
-        epilogue = source[epilogue_begin:]
-        for marker in (
-                "__gm__ const float* topk_weights", "__gm__ const bfloat16_t* bias_0",
-                "__gm__ const bfloat16_t* bias_1", "combined_topk_weights[",
-                "value += static_cast<float>(\n                    bias_0[",
-                "value += static_cast<float>(\n                    bias_1["):
-            self.assertIn(marker, epilogue)
-        self.assertIn("topk_weights[", source)
-        self.assertNotIn("payload[hidden]) *", epilogue)
-
-        runtime = (ELASTIC / "runtime.cpp").read_text()
-        self.assertIn("expanded combine requires allow_multiple_reduction",
-                      runtime)
-        self.assertNotIn("weighted or biased combine is deferred", runtime)
-
-        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
-        for literal in (
-                "const float expected_weights[] = {0.125F, 0.625F};",
-                "float_to_bfloat16(11.5F)",
-                "float_to_bfloat16(13.0F)"):
-            self.assertIn(literal, runner)
+        """Executes routing-weight identity and post-reduction bias checks."""
+        self._run_production_combine_semantics_probe()
 
     def test_dispatch_preflights_protocol_state_before_publication(self):
         source = (ELASTIC / "dispatch.asc").read_text()
