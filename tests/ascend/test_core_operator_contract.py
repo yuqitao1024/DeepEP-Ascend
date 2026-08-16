@@ -24,6 +24,21 @@ CORE_OPS = ROOT / "tests/ascend/core_ops"
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
     def test_simt_vf_arguments_have_explicit_device_abi(self):
+        def split_arguments(arguments):
+            result = []
+            start = 0
+            depth = 0
+            for index, character in enumerate(arguments):
+                if character in "([{":
+                    depth += 1
+                elif character in ")]}":
+                    depth -= 1
+                elif character == "," and depth == 0:
+                    result.append(arguments[start:index].strip())
+                    start = index + 1
+            result.append(arguments[start:].strip())
+            return result
+
         sources = {
             name: path.read_text()
             for name, path in {
@@ -35,6 +50,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             }.items()
         }
         signatures = {}
+        signature_arguments = {}
         calls_by_function = {}
         for source_name, source in sources.items():
             matches = re.findall(
@@ -44,6 +60,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             for function_name, arguments in matches:
                 normalized = " ".join(arguments.split())
                 signatures[function_name] = normalized
+                signature_arguments[function_name] = split_arguments(arguments)
                 self.assertNotIn("CoreTiling", normalized, function_name)
                 self.assertNotIn("BarrierArguments", normalized, function_name)
                 self.assertNotIn(
@@ -133,6 +150,17 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn(
             "ElementKind element_kind",
             signatures["core_operator_compile_probe_vf"])
+        for function_name in (
+                "dispatch_producer_vf", "dispatch_epilogue_vf"):
+            parameters = signature_arguments[function_name]
+            call_arguments = split_arguments(calls_by_function[function_name])
+            self.assertEqual(len(call_arguments), len(parameters) + 1)
+            for parameter, call_argument in zip(
+                    parameters, call_arguments[1:]):
+                if "*" in parameter:
+                    self.assertIn(
+                        "__gm__", call_argument,
+                        f"{function_name}: {call_argument}")
 
     def test_production_symmetric_window_layout(self):
         with tempfile.TemporaryDirectory() as directory:
