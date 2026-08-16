@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 import unittest
 
+from tests.ascend.test_stub_source import PYBIND11_HEADER, TORCH_HEADER
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PROBE = ROOT / "tests/ascend/core_operator_contract_probe.cpp"
@@ -494,6 +496,28 @@ int main() {
                 "do_expand", "do_zero_padding",
                 "use_tma_aligned_col_major_sf"):
             self.assertIn(marker, production)
+
+    def test_public_dispatch_probe_executes(self):
+        probe = ROOT / "tests/ascend/production_dispatch_probe.cpp"
+        self.assertTrue(probe.is_file(), str(probe))
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            (directory / "pybind11").mkdir()
+            (directory / "torch").mkdir()
+            (directory / "pybind11/pybind11.h").write_text(PYBIND11_HEADER)
+            (directory / "torch/python.h").write_text(TORCH_HEADER)
+            binary = directory / "production_dispatch_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 "-DDEEP_EP_ASCEND_TESTING=1", f"-I{directory}", f"-I{ROOT}", str(probe),
+                 str(ELASTIC / "runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
+                 "-o", str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
 
 if __name__ == "__main__":

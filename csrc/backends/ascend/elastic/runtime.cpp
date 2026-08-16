@@ -310,14 +310,15 @@ CoreRuntimeStatus launch_internal_dispatch(
         return invalid("dispatch generation must not be zero");
     if (arguments.timeout_cycles == 0)
         return invalid("dispatch timeout must not be zero");
-    if (arguments.x == nullptr || arguments.topk_indices == nullptr ||
+    if ((tiling.num_tokens != 0 &&
+         (arguments.x == nullptr || arguments.topk_indices == nullptr ||
+          arguments.destination_slots == nullptr)) ||
         arguments.communication_buffer == nullptr ||
         arguments.workspace == nullptr || arguments.recv_x == nullptr ||
         arguments.recv_topk_indices == nullptr ||
         arguments.prefix_per_rank == nullptr ||
         arguments.prefix_per_expert == nullptr ||
         arguments.unaligned_per_expert == nullptr ||
-        arguments.destination_slots == nullptr ||
         arguments.source_metadata == nullptr)
         return invalid("dispatch required argument is null");
     if (!is_aligned(arguments.communication_buffer) ||

@@ -102,6 +102,7 @@ public:
 class Device {
 public:
     c10::DeviceType type() const { return c10::DeviceType::PrivateUse1; }
+    bool operator==(const Device&) const { return true; }
 };
 
 class Tensor {

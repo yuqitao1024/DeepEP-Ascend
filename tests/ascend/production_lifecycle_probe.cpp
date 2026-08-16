@@ -300,6 +300,22 @@ void check_copy_failure_preserves_resources_for_retry() {
     CHECK(resources.destroy().ok());
 }
 
+void check_invalid_copy_requests_do_not_call_backend() {
+    Trace trace;
+    runtime::CannRuntimeResources resources;
+    CHECK(resources.initialize(
+        config(), 4096, runtime_api(trace), host_api(trace)).ok());
+    std::uint64_t value = 3;
+    const auto before = trace.count("runtime_copy_from_host");
+    CHECK(!resources.copy_from_host(nullptr, &value, sizeof(value)).ok());
+    CHECK(!resources.copy_from_host(resources.workspace(), nullptr, sizeof(value)).ok());
+    CHECK(!resources.copy_from_host(resources.workspace(), &value, 0).ok());
+    CHECK(trace.count("runtime_copy_from_host") == before);
+    CHECK(resources.destroy().ok());
+    CHECK(!resources.copy_from_host(resources.workspace(), &value, sizeof(value)).ok());
+    CHECK(trace.count("runtime_copy_from_host") == before);
+}
+
 void check_runtime_failures_cleanup() {
     for (int fail_call = 0; fail_call < 4; ++fail_call) {
         Trace trace;
@@ -428,5 +444,6 @@ int main() {
     check_team_destroy_failure_preserves_outer_window();
     check_runtime_free_failure_is_retryable();
     check_copy_failure_preserves_resources_for_retry();
+    check_invalid_copy_requests_do_not_call_backend();
     return failures == 0 ? 0 : 1;
 }
