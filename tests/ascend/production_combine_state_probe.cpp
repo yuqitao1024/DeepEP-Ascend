@@ -47,5 +47,9 @@ int main() {
     CHECK(header.contributor_rank == -1);
     CHECK(header.master_lane == -1);
     CHECK(header.contribution_lane == -1);
+    CHECK(is_valid_combine_source_identity(0, 0, 4, 1));
+    CHECK(!is_valid_combine_source_identity(1, 0, 4, 1));
+    CHECK(is_valid_combine_source_identity(4, 1, 4, 1));
+    CHECK(!is_valid_combine_source_identity(5, 1, 4, 1));
     return 0;
 }

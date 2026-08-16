@@ -112,7 +112,16 @@ std::unique_ptr<runtime::CannRuntimeResources> resources() {
 extern "C" int deep_ep_ascend_launch_barrier(
     elastic::BarrierArguments, elastic::CoreTiling, void*) { return 0; }
 extern "C" int deep_ep_ascend_launch_dispatch(
-    elastic::DispatchArguments, elastic::CoreTiling, void*) { return 0; }
+    elastic::DispatchArguments arguments, elastic::CoreTiling tiling, void*) {
+    trace.generation = arguments.generation;
+    arguments.prefix_per_rank[0] = 0;
+    arguments.prefix_per_rank[1] = 0;
+    std::memset(arguments.prefix_per_expert, 0,
+                (tiling.num_experts + 1) * sizeof(std::int32_t));
+    std::memset(arguments.unaligned_per_expert, 0,
+                tiling.num_experts * sizeof(std::int32_t));
+    return 0;
+}
 extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
     elastic::DispatchArguments, elastic::CoreTiling, void*) { return 0; }
 extern "C" int deep_ep_ascend_launch_combine(
@@ -215,9 +224,38 @@ std::unique_ptr<Buffer> buffer(bool allow_multiple_reduction = true) {
     auto owned = resources();
     if (!owned)
         return {};
+    const auto topology = elastic::CoreTopology{0, 2, 0, 2, 0, 1};
+    std::vector<elastic::DispatchHandleDescriptor> issued_descriptors{
+        elastic::make_dispatch_handle_descriptor(
+            7, topology, 1, 8, 2, 2, 4, 4, 0),
+        elastic::make_dispatch_handle_descriptor(
+            7, topology, 1, 8, 2, 2, 4, 4,
+            elastic::mode_bit(elastic::CoreMode::kExpanded)),
+    };
     return Buffer::make_testing_buffer(
         0, std::move(owned), 2 * 1024 * 1024, 1,
-        allow_multiple_reduction);
+        allow_multiple_reduction, std::move(issued_descriptors));
+}
+
+std::unique_ptr<Buffer> empty_registry_buffer() {
+    auto owned = resources();
+    if (!owned)
+        return {};
+    return Buffer::make_testing_buffer(
+        0, std::move(owned), 2 * 1024 * 1024, 1, true);
+}
+
+void register_dispatch_descriptor(Buffer& target, Inputs& inputs) {
+    const std::optional<Tensor> no_tensor;
+    const std::optional<int> no_int;
+    const std::optional<std::vector<int>> no_list;
+    const std::optional<Event> no_event;
+    auto dispatch_x = inputs.x.narrow(0, 0, 1);
+    (void)target.dispatch(
+        dispatch_x, no_tensor, inputs.indices, no_tensor, no_tensor,
+        no_int, no_int, no_list, no_tensor, no_tensor, no_tensor, no_tensor,
+        no_tensor, no_tensor, no_tensor, 4, 2, 4, 1, 0, no_event, no_event,
+        false, false, true, true, false, false, false);
 }
 
 bool error_contains(const std::function<void()>& operation,
@@ -284,6 +322,18 @@ bool normal_and_expanded_success() {
         trace.bias_0 == expanded.bias0.data_ptr() && trace.bias_1 == nullptr;
 }
 
+bool successful_dispatch_registers_descriptor() {
+    trace = {};
+    auto target = empty_registry_buffer();
+    if (!target)
+        return false;
+    Inputs inputs;
+    register_dispatch_descriptor(*target, inputs);
+    const auto result = call(*target, inputs);
+    return !std::get<2>(result).has_value() && trace.launches == 1 &&
+        trace.generations == std::vector<std::uint64_t>{1};
+}
+
 bool preflight_is_retryable() {
     trace = {};
     auto target = buffer();
@@ -313,7 +363,7 @@ bool preflight_is_retryable() {
             inputs.descriptor_value.num_experts = 4; inputs.write_descriptor();
         }, [&] { inputs.descriptor_value = original; inputs.write_descriptor(); }) ||
         !reject_then_restore("dispatch handle", [&] {
-            inputs.descriptor_value.expert_alignment = 0;
+            inputs.descriptor_value.expert_alignment = 8;
             inputs.write_descriptor();
         }, [&] { inputs.descriptor_value = original; inputs.write_descriptor(); }) ||
         !reject_then_restore("dispatch handle", [&] {
@@ -350,6 +400,38 @@ bool preflight_is_retryable() {
     trace.fail_stream = false;
     return !std::get<2>(call(*target, inputs)).has_value() &&
         trace.launches == 1 &&
+        trace.generations == std::vector<std::uint64_t>{1};
+}
+
+bool interior_origin_extent_is_retryable() {
+    trace = {};
+    auto target = buffer();
+    Inputs inputs;
+    inputs.source.data_ptr<std::int32_t>()[0] = 1;
+    if (!error_contains(
+            [&] { (void)call(*target, inputs); }, "source metadata") ||
+        trace.launches != 0)
+        return false;
+    inputs.source.data_ptr<std::int32_t>()[0] = 0;
+    const auto result = call(*target, inputs);
+    return !std::get<2>(result).has_value() && trace.launches == 1 &&
+        trace.generations == std::vector<std::uint64_t>{1};
+}
+
+bool positive_alignment_mutation_is_retryable() {
+    trace = {};
+    auto target = buffer();
+    Inputs inputs;
+    inputs.descriptor_value.expert_alignment = 8;
+    inputs.write_descriptor();
+    if (!error_contains(
+            [&] { (void)call(*target, inputs); }, "dispatch handle") ||
+        trace.launches != 0)
+        return false;
+    inputs.descriptor_value.expert_alignment = 4;
+    inputs.write_descriptor();
+    const auto result = call(*target, inputs);
+    return !std::get<2>(result).has_value() && trace.launches == 1 &&
         trace.generations == std::vector<std::uint64_t>{1};
 }
 
@@ -464,7 +546,12 @@ int main() {
         }
     };
     check(normal_and_expanded_success(), "normal and expanded outputs");
+    check(successful_dispatch_registers_descriptor(),
+          "successful dispatch registers descriptor");
     check(preflight_is_retryable(), "descriptor and metadata preflight retry");
+    check(interior_origin_extent_is_retryable(), "interior origin extent retry");
+    check(positive_alignment_mutation_is_retryable(),
+          "positive alignment mutation retry");
     check(expanded_slot_validation_is_retryable(), "expanded slot preflight");
     check(single_reduction_constructor_flag(), "single reduction constructor flag");
     check(tensor_and_flag_validation(), "tensor and deferred flags");

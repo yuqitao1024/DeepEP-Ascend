@@ -221,6 +221,17 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
+        source = (ELASTIC / "combine.asc").read_text()
+        producer_begin = source.index(
+            "__simt_vf__ inline void combine_producer_vf")
+        producer_end = source.index(
+            "__simt_vf__ inline void combine_epilogue_vf", producer_begin)
+        producer = source[producer_begin:producer_end]
+        identity_check = producer.index(
+            "is_valid_combine_source_identity(")
+        first_topk_read = producer.index("combined_topk_indices[")
+        self.assertLess(identity_check, first_topk_read)
+
     def test_production_combine_semantics(self):
         self._run_production_combine_semantics_probe()
 
