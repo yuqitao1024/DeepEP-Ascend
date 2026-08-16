@@ -1,3 +1,4 @@
+import json
 import pathlib
 import re
 import subprocess
@@ -15,6 +16,8 @@ PRODUCTION_DISPATCH_STATE_PROBE = \
     ROOT / "tests/ascend/production_dispatch_state_probe.cpp"
 PRODUCTION_BARRIER_STATE_PROBE = \
     ROOT / "tests/ascend/production_barrier_state_probe.cpp"
+TWO_RANK_DISPATCH = \
+    ROOT / "tests/ascend/production/run_two_rank_dispatch.py"
 ELASTIC = ROOT / "csrc/backends/ascend/elastic"
 CORE_OPS = ROOT / "tests/ascend/core_ops"
 
@@ -518,6 +521,34 @@ int main() {
             run_result = subprocess.run(
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_two_rank_dispatch_harness_contract(self):
+        expected_cases = [
+            "asymmetric-routing",
+            "empty-input",
+            "negative-one-route",
+            "duplicate-destination-rank",
+            "multiple-experts",
+            "optional-weights",
+            "expanded",
+            "aligned-zero-padding",
+            "cached-reuse",
+            "sequential-100-generations",
+            "combine-gated",
+            "invalid-expert-diagnostics",
+        ]
+        result = subprocess.run(
+            ["python3", str(TWO_RANK_DISPATCH), "--contract"],
+            cwd=ROOT, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "case_names": expected_cases,
+                "dispatch_surface": "Buffer.dispatch",
+                "expected_world_size": 2,
+                "reference": "gathered-literal-inputs",
+            })
 
 
 if __name__ == "__main__":
