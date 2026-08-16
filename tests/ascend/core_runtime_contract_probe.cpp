@@ -1,5 +1,6 @@
 #include <cstdint>
 
+#include "csrc/backends/ascend/elastic/dispatch_state.hpp"
 #include "csrc/backends/ascend/elastic/runtime.hpp"
 
 using namespace deep_ep::ascend::elastic;
@@ -111,6 +112,48 @@ void export_transport(CoreTiling* tiling) {
     tiling->transport_context.peer_address_table = 0x300000;
     tiling->transport_context.channel_table = 0x400000;
     tiling->transport_context.backend_context = 0x500000;
+}
+
+bool cached_mixed_rank_prefix_fixture_matches() {
+    constexpr int world_rank = 0;
+    constexpr int world_size = 2;
+    constexpr std::uint64_t num_experts = 4;
+    constexpr std::uint64_t num_topk = 2;
+    constexpr std::uint64_t expert_alignment = 4;
+    constexpr std::uint64_t num_records = 2;
+    constexpr std::int64_t records[num_records * num_topk] = {
+        0, 2,
+        1, 3,
+    };
+    constexpr std::int32_t cached_counts[num_experts] = {1, 1, 0, 0};
+    constexpr std::int32_t cached_prefix[num_experts + 1] = {0, 4, 8, 8, 8};
+    const std::uint64_t num_local_experts =
+        num_experts / static_cast<std::uint64_t>(world_size);
+    const std::uint64_t first_local_expert =
+        static_cast<std::uint64_t>(world_rank) * num_local_experts;
+    std::int32_t derived_prefix = 0;
+    for (std::uint64_t expert = 0; expert < num_experts; ++expert) {
+        std::int32_t actual_count = 0;
+        if (is_dispatch_expert_local(
+                static_cast<std::int64_t>(expert), first_local_expert,
+                num_local_experts)) {
+            for (std::uint64_t record = 0; record < num_records; ++record) {
+                for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
+                    if (records[record * num_topk + lane] ==
+                        static_cast<std::int64_t>(expert))
+                        ++actual_count;
+                }
+            }
+        }
+        if (actual_count != cached_counts[expert] ||
+            derived_prefix != cached_prefix[expert])
+            return false;
+        derived_prefix +=
+            ((actual_count + static_cast<std::int32_t>(expert_alignment) - 1) /
+             static_cast<std::int32_t>(expert_alignment)) *
+            static_cast<std::int32_t>(expert_alignment);
+    }
+    return derived_prefix == cached_prefix[num_experts];
 }
 
 }  // namespace
@@ -478,6 +521,9 @@ int main() {
             CoreRuntimeStatusCode::kInvalidArgument ||
         launch_trace_size != 0)
         return 24;
+
+    if (!cached_mixed_rank_prefix_fixture_matches())
+        return 46;
 
     return 0;
 }

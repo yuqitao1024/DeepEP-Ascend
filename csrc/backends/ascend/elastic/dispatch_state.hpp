@@ -137,6 +137,16 @@ constexpr bool same_topology(
            lhs.scale_out_size == rhs.scale_out_size;
 }
 
+constexpr bool is_dispatch_expert_local(
+    std::int64_t expert, std::uint64_t first_local_expert,
+    std::uint64_t num_local_experts) noexcept {
+    if (expert < 0)
+        return false;
+    const auto unsigned_expert = static_cast<std::uint64_t>(expert);
+    return unsigned_expert >= first_local_expert &&
+           unsigned_expert - first_local_expert < num_local_experts;
+}
+
 inline DispatchHandleStatus validate_dispatch_handle(
     const DispatchHandleDescriptor& expected,
     const DispatchHandleDescriptor& actual) {

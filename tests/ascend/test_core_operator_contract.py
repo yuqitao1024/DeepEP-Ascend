@@ -383,6 +383,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         derived_end = source.index("if (cached && expanded)", derived_begin)
         derived_prefix = source[derived_begin:derived_end]
         self.assertIn("expert_is_local", derived_prefix)
+        self.assertIn("is_dispatch_expert_local(", derived_prefix)
+        self.assertIn("if (expert_is_local)", derived_prefix)
         self.assertIn("first_local_expert", derived_prefix)
         self.assertIn("num_local_experts", derived_prefix)
 
@@ -396,6 +398,14 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "Mutation caught: cached slot validation after publication.",
                 "Mutation caught: nonlocal lanes counted in cached expert prefixes."):
             self.assertIn(mutation, runner)
+        mixed_begin = runner.index(
+            "bool run_dispatch_cached_mixed_rank(aclrtStream stream)")
+        mixed_end = runner.index("std::uint16_t float_to_bfloat16", mixed_begin)
+        mixed_case = runner[mixed_begin:mixed_end]
+        self.assertIn("cached_mixed_rank_prefix_probe_kernel<<<", mixed_case)
+        self.assertNotIn("make_dispatch_tiling", mixed_case)
+        self.assertIn("kMixedRankWorldSize", runner)
+        self.assertIn("kMixedRankWorldRank", runner)
 
     def test_production_api_does_not_bypass_transport_gate(self):
         production = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
