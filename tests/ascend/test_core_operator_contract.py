@@ -91,6 +91,21 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             result.append(arguments[start:].strip())
             return result
 
+        def braced_block_at(source, statement_start):
+            opening = source.index("{", statement_start)
+            depth = 0
+            for index in range(opening, len(source)):
+                if source[index] == "{":
+                    depth += 1
+                elif source[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return source[opening + 1:index], index + 1
+            raise AssertionError("unterminated producer block")
+
+        def brace_depth_at(source, position):
+            return source[:position].count("{") - source[:position].count("}")
+
         sources = {
             name: path.read_text()
             for name, path in {
@@ -296,6 +311,45 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
              split_arguments(fill_calls[0])],
             ["topk_weights", "row", "master_lane", "num_topk",
              "record", "hidden_bytes"])
+        fill_marker = "combine_fill_normal_record_routing_weights("
+        fill_position = producer.index(fill_marker)
+        normal_branch_position = producer.rfind(
+            "if (!expanded)", 0, fill_position)
+        self.assertNotEqual(normal_branch_position, -1, producer)
+        normal_branch, normal_branch_end = braced_block_at(
+            producer, normal_branch_position)
+        self.assertIn(fill_marker, normal_branch)
+        else_match = re.match(r"\s*else\s*", producer[normal_branch_end:])
+        self.assertIsNotNone(else_match, producer)
+        expanded_branch, expanded_branch_end = braced_block_at(
+            producer, normal_branch_end + else_match.end())
+        self.assertNotIn(fill_marker, expanded_branch)
+
+        record_position = producer.index("__gm__ std::uint8_t* record =")
+        zero_weights = re.search(
+            r"for\s*\(std::uint64_t lane = 0; lane < num_topk; \+\+lane\)"
+            r"\s*record_weights\[lane\] = 0\.0F;",
+            producer[record_position:normal_branch_position])
+        self.assertIsNotNone(zero_weights, producer)
+        zero_weights_position = record_position + zero_weights.start()
+        header_position = producer.index(
+            "auto* header =", expanded_branch_end)
+        self.assertLess(
+            record_position, zero_weights_position)
+        self.assertLess(
+            zero_weights_position, normal_branch_position)
+        self.assertLess(normal_branch_position, fill_position)
+        self.assertLess(fill_position, header_position)
+        per_record_depth = brace_depth_at(producer, record_position)
+        self.assertEqual(
+            brace_depth_at(producer, zero_weights_position),
+            per_record_depth)
+        self.assertEqual(
+            brace_depth_at(producer, normal_branch_position),
+            per_record_depth)
+        self.assertEqual(
+            brace_depth_at(producer, header_position),
+            per_record_depth)
         self.assertNotIn(
             "combine_normal_record_routing_weight(", producer)
         self.assertNotIn("combined_topk_indices", producer)
