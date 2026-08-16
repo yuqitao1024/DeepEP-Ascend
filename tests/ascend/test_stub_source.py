@@ -79,9 +79,11 @@ TORCH_HEADER = r"""
 #include <array>
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace c10 {
 enum class DeviceType { PrivateUse1 };
@@ -95,37 +97,54 @@ inline constexpr ScalarType kInt = 4;
 inline constexpr ScalarType kByte = 5;
 
 class TensorOptions {
+    ScalarType type_ = kBFloat16;
+    int device_ = 0;
 public:
-    TensorOptions dtype(ScalarType) const { return {}; }
+    TensorOptions dtype(ScalarType type) const { auto result = *this; result.type_ = type; return result; }
+    TensorOptions device(int device) const { auto result = *this; result.device_ = device; return result; }
+    ScalarType dtype() const { return type_; }
+    int device_index() const { return device_; }
 };
 
 class Device {
+    int index_ = 0;
 public:
+    Device() = default;
+    explicit Device(int index) : index_(index) {}
     c10::DeviceType type() const { return c10::DeviceType::PrivateUse1; }
-    bool operator==(const Device&) const { return true; }
+    bool operator==(const Device& other) const { return index_ == other.index_; }
 };
 
 class Tensor {
+    std::vector<std::int64_t> sizes_{1, 1};
+    ScalarType type_ = kBFloat16;
+    Device device_{};
+    std::shared_ptr<std::vector<std::uint8_t>> storage_ =
+        std::make_shared<std::vector<std::uint8_t>>(2);
 public:
+    Tensor() = default;
+    Tensor(std::initializer_list<std::int64_t> sizes, TensorOptions options)
+        : sizes_(sizes), type_(options.dtype()), device_(options.device_index()),
+          storage_(std::make_shared<std::vector<std::uint8_t>>(numel() * bytes())) {}
     bool is_contiguous() const { return true; }
-    Device device() const { return {}; }
-    std::int64_t dim() const { return 2; }
-    ScalarType scalar_type() const { return kBFloat16; }
-    std::int64_t size(std::int64_t dimension) const {
-        return dimension == 0 ? 1 : 1;
-    }
-    std::array<std::int64_t, 2> sizes() const { return {1, 1}; }
-    std::int64_t numel() const { return 1; }
-    TensorOptions options() const { return {}; }
-    void* data_ptr() const { return nullptr; }
+    Device device() const { return device_; }
+    std::int64_t dim() const { return sizes_.size(); }
+    ScalarType scalar_type() const { return type_; }
+    std::int64_t size(std::int64_t dimension) const { return sizes_.at(dimension); }
+    const std::vector<std::int64_t>& sizes() const { return sizes_; }
+    std::int64_t numel() const { std::int64_t result = 1; for (auto value : sizes_) result *= value; return result; }
+    TensorOptions options() const { return TensorOptions().dtype(type_); }
+    void* data_ptr() const { return numel() == 0 ? nullptr : storage_->data(); }
     template <typename T>
-    T* data_ptr() const { return nullptr; }
-    Tensor narrow(std::int64_t, std::int64_t, std::int64_t) const { return {}; }
+    T* data_ptr() const { return static_cast<T*>(data_ptr()); }
+    Tensor narrow(std::int64_t dimension, std::int64_t, std::int64_t length) const { auto result = *this; result.sizes_[dimension] = length; return result; }
     Tensor clone() const { return {}; }
+private:
+    std::size_t bytes() const { return type_ == kBFloat16 ? 2 : type_ == kLong ? 8 : type_ == kFloat || type_ == kInt ? 4 : 1; }
 };
 
-inline Tensor empty(std::initializer_list<std::int64_t>, const TensorOptions&) {
-    return {};
+inline Tensor empty(std::initializer_list<std::int64_t> sizes, const TensorOptions& options) {
+    return Tensor(sizes, options);
 }
 
 inline Tensor empty_like(const Tensor&) { return {}; }

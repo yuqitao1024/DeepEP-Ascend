@@ -260,6 +260,17 @@ class ElasticBuffer {
         raise_transport_status(transport_status, rank);
     }
 
+#if DEEP_EP_ASCEND_TESTING
+    struct TestingTag {};
+    ElasticBuffer(TestingTag, int rank, std::unique_ptr<runtime::CannRuntimeResources> resources,
+                  std::int64_t buffer_bytes, std::uint64_t timeout_cycles)
+        : rank_idx_(rank), num_ranks_(2), num_buffer_bytes_(buffer_bytes),
+          allow_hybrid_mode_(false), resources_(std::move(resources)),
+          barrier_timeout_cycles_(timeout_cycles) {
+        dispatch_family_ = 7;
+    }
+#endif
+
 public:
     using cpu_comm_t = std::vector<std::pair<int, int>>;
 
@@ -315,6 +326,15 @@ public:
             raise_transport_status(status, rank_idx_);
         resources_ = std::move(resources);
     }
+
+#if DEEP_EP_ASCEND_TESTING
+    static std::unique_ptr<ElasticBuffer> make_testing_buffer(
+        int rank, std::unique_ptr<runtime::CannRuntimeResources> resources,
+        std::int64_t buffer_bytes, std::uint64_t timeout_cycles) {
+        return std::unique_ptr<ElasticBuffer>(new ElasticBuffer(
+            TestingTag{}, rank, std::move(resources), buffer_bytes, timeout_cycles));
+    }
+#endif
 
     void destroy() {
         if (resources_ == nullptr)
@@ -870,18 +890,3 @@ public:
 };
 
 }  // namespace deep_ep::ascend
-
-#if DEEP_EP_ASCEND_TESTING
-namespace deep_ep::ascend::testing {
-
-inline int run_public_dispatch_probe() {
-    const elastic::CoreTopology topology{0, 2, 0, 2, 0, 1};
-    const auto uncached = elastic::make_dispatch_handle_descriptor(
-        7, topology, 1, 8, 2, 1, 1, 4, 0);
-    const auto cached_expected = elastic::make_dispatch_handle_descriptor(
-        7, topology, 1, 8, 2, 1, 1, 4, 0);
-    return elastic::validate_dispatch_handle(cached_expected, uncached).ok() ? 0 : 1;
-}
-
-}  // namespace deep_ep::ascend::testing
-#endif
