@@ -13,8 +13,8 @@ Each phase has an independent acceptance boundary. Work does not proceed to
 the next phase until the current phase passes its complete local, build, and
 two-NPU validation matrix.
 
-Phase 2E is implemented and validated on NPU8P. Phase 2F is the next active
-development boundary; Phase 2G remains planned.
+Phases 2E and 2F are implemented and validated on NPU8P. Phase 2G is the next
+development boundary and remains gated.
 
 The design builds on:
 
@@ -66,13 +66,12 @@ before output allocation or kernel launch and do not return fabricated data.
 
 ## Remaining Gaps
 
-Phase 2E closes the communicator, production extension, two-rank topology,
-buffer ownership, staged service, synchronous barrier, and teardown gaps.
-Dispatch and combine intentionally remain gated until Phases 2F and 2G
-implement their complete routing, metadata, and reduction protocols. Async
-events, public communication streams, hybrid routing, pipeline, Engram, AGRS,
-FP8 runtime, and scale-out remain interface-only or unsupported as listed in
-the non-goals.
+Phases 2E and 2F close the communicator, production extension, two-rank
+topology, buffer ownership, staged service, synchronous barrier, teardown,
+and BF16 dispatch gaps. Combine remains gated until Phase 2G implements its
+complete metadata and reduction protocol. Async events, public communication
+streams, hybrid routing, pipeline, Engram, AGRS, FP8 runtime, and scale-out
+remain interface-only or unsupported as listed in the non-goals.
 
 ## Selected Approach
 
@@ -436,6 +435,32 @@ Phase 2F is complete when:
 7. invalid input or device diagnostic returns a bounded error instead of a
    hang; and
 8. combine remains gated.
+
+All eight items passed on NPU8P devices 6 and 7 with system CANN 9.2.0 and the
+weekly HCOMM package from `hcomm-weekly-20260814` overlaid after the system
+environment. The focused build task
+`task_20260816_234947_110751921358` clean-built the testing extension and
+passed 61 Ascend tests, 15 platform tests, and 11 build tests. The final
+serialized acceptance task `task_20260816_235509_112303119438` repeated those
+test counts, clean-built both testing and production extensions, passed all 12
+two-rank reference cases, and printed `PHASE2F_ACCEPTANCE=PASS`. The matrix
+included cached-handle reuse, 100 sequential generations per rank, bounded
+invalid-expert diagnostics, and the Phase 2G combine gate.
+
+The testing extension SHA256 is
+`b3f88d1f6353f604555c0d5f47168b2cd7b4f5cad357bda65ad62f4fb1916c02`; the
+production extension SHA256 is
+`ab1843adf4b6f1c8dd8a81c7172ea19775bc099161b36f7901735b4fcbfef755`. The
+production dependency audit found no CUDA, NCCL, or NVSHMEM dependency. The
+source archive used for final acceptance has SHA256
+`94e894fc728c68051ad14329362a2b6ca2ab1b80cf50c8c452717dda74aacbbb`.
+
+The accepted descriptor protocol uses fixed source-owned inbox shards plus a
+generation-tagged count, signal, and barrier. Cached dispatch carries
+`DispatchHandleDescriptor` ABI version 1, including the generation family,
+topology, tensor shapes, alignment, capacity, and mode flags. Combine does not
+consume that descriptor in Phase 2F; its public path remains gated until the
+Phase 2G acceptance matrix passes.
 
 ## Phase 2G: BF16 Combine
 
