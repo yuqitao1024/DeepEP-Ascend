@@ -172,6 +172,19 @@ combine_routing_weight(
     return weights[index];
 }
 
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE inline float
+combine_normal_record_routing_weight(
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const float* weights,
+    std::uint64_t source_row, std::int32_t lane,
+    std::int32_t master_lane, std::uint64_t num_topk) noexcept {
+    if (weights == nullptr ||
+        !is_dispatch_local_index(lane, num_topk) ||
+        !is_dispatch_local_index(master_lane, num_topk))
+        return 0.0F;
+    return combine_routing_weight(
+        weights, source_row * num_topk + static_cast<std::uint64_t>(lane));
+}
+
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE inline CombineRecordHeader
 load_combine_record_header(
     DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const CombineRecordHeader* header)

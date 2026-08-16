@@ -16,6 +16,8 @@ PRODUCTION_COMBINE_STATE_PROBE = \
     ROOT / "tests/ascend/production_combine_state_probe.cpp"
 PRODUCTION_COMBINE_SEMANTICS_PROBE = \
     ROOT / "tests/ascend/production_combine_semantics_probe.cpp"
+PRODUCTION_COMBINE_PRODUCER_PROBE = \
+    ROOT / "tests/ascend/production_combine_producer_probe.cpp"
 PRODUCTION_COMBINE_DEVICE_POINTER_PROBE = \
     ROOT / "tests/ascend/production_combine_device_pointer_probe.cpp"
 PRODUCTION_DISPATCH_STATE_PROBE = \
@@ -31,6 +33,20 @@ CORE_OPS = ROOT / "tests/ascend/core_ops"
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
+    def test_production_combine_producer_weights(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "production_combine_producer"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(PRODUCTION_COMBINE_PRODUCER_PROBE),
+                 "-o", str(binary)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
     def _run_production_combine_semantics_probe(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = pathlib.Path(directory) / "production_combine_semantics"
@@ -247,8 +263,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         producer = source[producer_begin:producer_end]
         identity_check = producer.index(
             "is_valid_combine_source_identity(")
-        first_topk_read = producer.index("combined_topk_indices[")
-        self.assertLess(identity_check, first_topk_read)
+        normal_weight_load = producer.index(
+            "combine_normal_record_routing_weight(")
+        self.assertLess(identity_check, normal_weight_load)
+        self.assertNotIn("combined_topk_indices", producer)
 
     def test_production_combine_semantics(self):
         self._run_production_combine_semantics_probe()
