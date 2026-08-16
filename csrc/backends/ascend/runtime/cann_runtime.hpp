@@ -49,7 +49,6 @@ public:
     void* window_base() const noexcept { return window_.aligned; }
     void* workspace() const noexcept { return workspace_.aligned; }
     std::uint64_t workspace_bytes() const noexcept { return workspace_.bytes; }
-    void* stream() const noexcept { return stream_; }
     transport::HostTransport* transport() const noexcept {
         return transport_.get();
     }
@@ -57,7 +56,8 @@ public:
         return device_context_;
     }
 
-    transport::TransportStatus synchronize_stream();
+    transport::TransportStatus current_stream(void** stream);
+    transport::TransportStatus synchronize_stream(void* stream);
     transport::TransportStatus synchronize_device();
     transport::TransportStatus copy_to_host(
         void* destination, const void* source, std::uint64_t bytes);
@@ -79,7 +79,6 @@ private:
     CannRuntimeAllocation workspace_{};
     std::unique_ptr<transport::HostTransport> transport_;
     transport::DeviceTransportContext device_context_{};
-    void* stream_ = nullptr;
     bool owns_resources_ = false;
     bool initialized_ = false;
 };

@@ -15,6 +15,25 @@
 
 namespace deep_ep::ascend::transport::service {
 
+#if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && \
+    DEEP_EP_ASCEND_AICORE_URMA_SERVICE
+#define DEEP_EP_ASCEND_POLL_INLINE __aicore__ inline
+#else
+#define DEEP_EP_ASCEND_POLL_INLINE inline constexpr
+#endif
+
+DEEP_EP_ASCEND_POLL_INLINE bool barrier_poll_timed_out(
+    std::uint64_t start_cycles, std::uint64_t current_cycles,
+    std::uint64_t timeout_cycles, std::uint64_t retry_count,
+    std::uint64_t retry_limit) {
+    if (timeout_cycles == 0)
+        return retry_count >= retry_limit;
+    const auto elapsed_cycles = current_cycles - start_cycles;
+    return elapsed_cycles >= timeout_cycles;
+}
+
+#undef DEEP_EP_ASCEND_POLL_INLINE
+
 namespace model {
 
 struct State {
@@ -640,8 +659,8 @@ __aicore__ inline bool execute_barrier(
         return false;
 
     const auto generation = state->barrier_generation + 1;
-    const auto limit = current->timeout_cycles == 0 ?
-        retry_limit : current->timeout_cycles;
+    const auto start_cycles = static_cast<std::uint64_t>(
+        AscendC::GetSystemCycle());
     for (std::uint32_t peer = 0; peer < transport_team->member_count; ++peer) {
         if (peer == transport_team->self_member)
             continue;
@@ -661,7 +680,7 @@ __aicore__ inline bool execute_barrier(
             false, 0, 0, 0};
         std::uint64_t retry = 0;
         std::uint64_t observed = 0;
-        while (retry < limit) {
+        while (true) {
             aicore::sync_event<AscendC::HardEvent::S_MTE2>();
             AscendC::DataCopyPad(signal_scratch, signal_global, copy_params,
                                  pad_params);
@@ -670,12 +689,16 @@ __aicore__ inline bool execute_barrier(
             if (observed >= generation)
                 break;
             ++retry;
-        }
-        if (retry >= limit) {
-            record_error(
-                queue, DeviceTransportError::kCompletionTimeout,
-                command_index, current->opcode, peer, 0);
-            return false;
+            const auto current_cycles = static_cast<std::uint64_t>(
+                AscendC::GetSystemCycle());
+            if (barrier_poll_timed_out(
+                    start_cycles, current_cycles, current->timeout_cycles,
+                    retry, retry_limit)) {
+                record_error(
+                    queue, DeviceTransportError::kCompletionTimeout,
+                    command_index, current->opcode, peer, 0);
+                return false;
+            }
         }
     }
     state->barrier_generation = generation;

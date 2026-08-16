@@ -441,6 +441,16 @@ int main() {
                 Buffer::calculate_buffer_size(7, 128, 7168, 8, true, false, true);
             }))
         return 4;
+    try {
+        Buffer::cpu_comm_t cpu_comm;
+        Buffer invalid_timeout(0, 2, 7, cpu_comm, 2 * 1024 * 1024, 0,
+                               false, true, true, 3, 0, 300, 0, true);
+        return 5;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find(
+                "num_gpu_timeout_secs must be positive") == std::string::npos)
+            return 6;
+    }
     return 0;
 }
 """

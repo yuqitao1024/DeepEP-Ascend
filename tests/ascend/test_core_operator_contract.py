@@ -9,6 +9,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 PROBE = ROOT / "tests/ascend/core_operator_contract_probe.cpp"
 RUNTIME_PROBE = ROOT / "tests/ascend/core_runtime_contract_probe.cpp"
 PRODUCTION_LAYOUT_PROBE = ROOT / "tests/ascend/production_layout_probe.cpp"
+PRODUCTION_BARRIER_STATE_PROBE = \
+    ROOT / "tests/ascend/production_barrier_state_probe.cpp"
 ELASTIC = ROOT / "csrc/backends/ascend/elastic"
 CORE_OPS = ROOT / "tests/ascend/core_ops"
 
@@ -73,6 +75,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                     "std::uint64_t control_offset", "int world_rank",
                     "std::uint64_t generation"):
                 self.assertIn(argument, signature, function_name)
+        self.assertIn(
+            "std::uint64_t timeout_cycles",
+            signatures["barrier_producer_vf"])
         for function_name in ("dispatch_vf", "combine_vf"):
             signature = signatures[function_name]
             for argument in (
@@ -130,6 +135,20 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertEqual(compile_result.returncode, 0,
                              compile_result.stderr)
 
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_production_barrier_sequence_and_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "production_barrier_state_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(PRODUCTION_BARRIER_STATE_PROBE),
+                 "-o", str(binary)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
             run_result = subprocess.run(
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
@@ -215,7 +234,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_kernels_schedule_transport_through_the_facade(self):
         required = {
-            "barrier.asc": ("DeviceTransportFacade", "device_barrier"),
+            "barrier.asc": ("DeviceTransportFacade", "store_release(",
+                            "device_barrier"),
             "dispatch.asc": ("DeviceTransportFacade", "put(", "put_value(",
                              "signal(", "device_barrier("),
             "combine.asc": ("DeviceTransportFacade", "put(",
@@ -252,8 +272,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         for marker in (
                 "arguments.generation", "tiling.launch.num_blocks",
                 "threadIdx.x != 0", "DeviceTransportFacade transport(",
-                "context, 0", "transport.device_barrier("):
+                "context, 0", "arguments.timeout_cycles",
+                "transport.device_barrier("):
             self.assertIn(marker, source)
+        self.assertNotIn("transport.put_value(", source)
+        self.assertNotIn("transport.load_acquire(", source)
         for forbidden in ("HcclBarrier", "HcclAllReduce", "HcclAllGather"):
             self.assertNotIn(forbidden, source)
 
@@ -266,7 +289,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("launch_internal_dispatch", production)
         self.assertNotIn("launch_internal_combine", production)
         for marker in ("read_diagnostic", "copy_to_host",
-                       "barrier_completion", "barrier_generation_"):
+                       "barrier_completion", "BarrierSequence",
+                       "timeout_cycles_from_seconds"):
             self.assertIn(marker, production)
         self.assertIn("#if DEEP_EP_ASCEND_TESTING", production)
         self.assertIn("DEEP_EP_ASCEND_TEST_DIAGNOSTIC", production)
@@ -278,7 +302,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "diagnostic.peer = static_cast<std::uint32_t>(rank_idx_)",
                 "diagnostic.channel = 0",
                 "diagnostic.backend_status = 0",
-                "diagnostic.generation = barrier_generation_"):
+                       "diagnostic.generation = attempt.generation()",
+                       "attempt.complete()"):
             self.assertIn(marker, production)
         for operation in ("barrier", "dispatch", "combine"):
             marker = f'require_transport("{operation}"'

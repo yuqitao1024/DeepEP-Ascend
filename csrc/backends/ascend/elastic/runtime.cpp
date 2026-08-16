@@ -249,6 +249,8 @@ CoreRuntimeStatus launch_internal_barrier(
         return invalid("barrier stream must not be null");
     if (arguments.generation == 0)
         return invalid("barrier generation must not be zero");
+    if (arguments.timeout_cycles == 0)
+        return invalid("barrier timeout must not be zero");
     if (arguments.workspace == nullptr)
         return invalid("barrier workspace must not be null");
     if (!is_aligned(arguments.workspace))

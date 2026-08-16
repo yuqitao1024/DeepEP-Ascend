@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <iostream>
 
+#include "csrc/backends/ascend/transport/aicore_transport_service.hpp"
 #include "csrc/backends/ascend/transport/transport_commands.hpp"
 
 namespace transport = deep_ep::ascend::transport;
@@ -130,10 +131,21 @@ void check_queue_model() {
     CHECK(diagnostic.error == transport::DeviceTransportError::kNone);
 }
 
+void check_barrier_poll_timeout() {
+    using deep_ep::ascend::transport::service::barrier_poll_timed_out;
+
+    CHECK(!barrier_poll_timed_out(100, 104, 5, 99, 1));
+    CHECK(barrier_poll_timed_out(100, 105, 5, 0, 1000));
+    CHECK(!barrier_poll_timed_out(100, 1000, 0, 2, 3));
+    CHECK(barrier_poll_timed_out(100, 100, 0, 3, 3));
+    CHECK(barrier_poll_timed_out(UINT64_MAX - 2, 2, 5, 0, 1000));
+}
+
 }  // namespace
 
 int main() {
     check_factories();
     check_queue_model();
+    check_barrier_poll_timeout();
     return failures == 0 ? 0 : 1;
 }

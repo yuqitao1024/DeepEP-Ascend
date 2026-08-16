@@ -13,6 +13,9 @@ Each phase has an independent acceptance boundary. Work does not proceed to
 the next phase until the current phase passes its complete local, build, and
 two-NPU validation matrix.
 
+Phase 2E is implemented and validated on NPU8P. Phase 2F is the next active
+development boundary; Phase 2G remains planned.
+
 The design builds on:
 
 - `epv2-ascend-transport-contract.md`;
@@ -61,28 +64,15 @@ This round does not implement:
 The corresponding interfaces remain present. Unsupported combinations fail
 before output allocation or kernel launch and do not return fabricated data.
 
-## Current Gaps
+## Remaining Gaps
 
-The transport layer is functional, but the production call path still stops
-above it:
-
-1. `deep_ep.platform.get_comm_handle` returns no communicator for Ascend.
-2. The Ascend `ElasticBuffer` constructs `StubHostTransport` instead of
-   `CannHostTransport`.
-3. The production Ascend extension does not build and link the `.asc` core
-   kernels, host runtime, CANN transport, ACL, and HCOMM together.
-4. The core host runtime accepts only a single-rank topology.
-5. The Phase 2C kernels contain placeholder remote calls rather than complete
-   rank routing and symmetric-buffer offsets.
-6. The kernels enqueue staged commands but do not invoke the Phase 2D AICore
-   service at the required phase boundaries.
-7. The public dispatch and combine gates still require
-   `kDirectPeerPointer`, although the selected Ascend algorithm uses one-sided
-   puts and never directly dereferences a remote pointer.
-8. Python barrier, dispatch, domain-query, stream, and tensor checks still
-   route non-CUDA platforms to unconditional unsupported errors.
-
-This round closes only the gaps needed by the three core operations.
+Phase 2E closes the communicator, production extension, two-rank topology,
+buffer ownership, staged service, synchronous barrier, and teardown gaps.
+Dispatch and combine intentionally remain gated until Phases 2F and 2G
+implement their complete routing, metadata, and reduction protocols. Async
+events, public communication streams, hybrid routing, pipeline, Engram, AGRS,
+FP8 runtime, and scale-out remain interface-only or unsupported as listed in
+the non-goals.
 
 ## Selected Approach
 
@@ -182,6 +172,49 @@ HCCL process group can be released.
 round. The CUDA QP argument is not reused as an Ascend channel count; the
 Ascend runtime owns exactly one facade channel and validates that policy
 internally.
+
+### HCOMM memory and channel generations
+
+Repeated team/window lifecycles require an HCOMM source fix archived at
+`third_party/patches/hcomm/hcomm-team-window-deregister.patch`. The patch is
+based on HCOMM commit `8c5d5ad081e763f981c237d8dfdb15faea292d6e` and has
+SHA256 `7394982ec1c5432b3fe15898974e64441ba5a24a2bf5c110e49bb758174a9329`.
+
+Team and window destruction unbind their `CommMems` tags, while endpoint
+registrations and old physical channels remain domain-owned until `MyRank`
+teardown. Channel lookup separates the logical index from the physical index
+and keys physical generations by `(engine, CommMems version, logical index)`.
+The matching socket tag also includes the memory version. This is required
+because AIV URMA channel `UpdateMemInfo` is not implemented and otherwise
+silently retains the first team's synchronization buffer.
+
+Window deregistration uses a retryable two-phase commit. HCOMM teardown is
+recorded before unregistering the corresponding `CommMems`; owner and alias
+records are removed only after both operations succeed. A retry skips an
+already completed HCOMM step, while a window in teardown is unavailable for
+reuse or pending remote-memory exchange.
+
+Team destruction propagates any window-deregistration failure and preserves
+the team/window state for retry. Communicator destruction first closes a
+shared lifecycle gate, waits for in-flight team operations, and only then
+unloads binaries and clears teams. World-team teardown immediately makes its
+subteams unavailable, and handles already removed by communicator cleanup are
+idempotent no-ops instead of triggering a second raw HCOMM destruction.
+
+The validated isolated library was built with the CANN GCC 7.3 toolchain and
+has SHA256 `afb65298169b7810269322a32576429bcd67798a3336718a2642d2fb97332e77`.
+No HCOMM binary is committed to this repository.
+
+The added lifecycle mutex and state change the concrete C++ `CollComm` layout.
+The patched HCOMM library and all C++ consumers must be rebuilt together; the
+final validation performs that coordinated rebuild.
+
+DeepEP teardown preserves dependency order on failure. Once teardown starts,
+the runtime rejects further communication. A failed window deregistration
+retains the HCOMM window, team, and owning NPU allocation; a failed team
+destruction retains the team and owning allocation. A later `destroy()` call
+retries from that state, and the allocation is released only after HCOMM no
+longer owns either handle.
 
 ### Stream and completion policy
 
@@ -308,6 +341,20 @@ Phase 2E is complete when:
 7. timeout and injected device diagnostics become rank-qualified Python
    errors; and
 8. dispatch and combine remain gated.
+
+All eight items passed on NPU8P devices 6 and 7. The final evidence includes
+three explicit create/destroy cycles, descriptor proof that a later channel
+uses the new team synchronization memory, 100 public barrier generations,
+Phase 2D `barrier-repeat` and `teardown`, and injected rank-qualified timeout
+diagnostics. Task identifiers and artifact hashes are recorded in
+`third_party/patches/hcomm/README.md`.
+
+The final clean production task used `DEEP_EP_ASCEND_TESTING=0`, passed 53
+Ascend tests, 15 platform tests, 10 build tests, and a fresh 100-generation
+two-rank run. The same task also passed 100 injected-diagnostic generations.
+Its extension had no CUDA, NCCL, or NVSHMEM runtime dependency. The final task
+is `task_20260816_173926_27925920094`; artifact hashes and the HCOMM regression
+record are in `third_party/patches/hcomm/README.md`.
 
 ## Phase 2F: BF16 Dispatch
 

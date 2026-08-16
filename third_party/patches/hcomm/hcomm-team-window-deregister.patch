@@ -1,0 +1,2454 @@
+diff --git a/src/base_comm/resources/endpoint_pairs/endpoint_pair.cc b/src/base_comm/resources/endpoint_pairs/endpoint_pair.cc
+index 9570d99a..24860a2c 100644
+--- a/src/base_comm/resources/endpoint_pairs/endpoint_pair.cc
++++ b/src/base_comm/resources/endpoint_pairs/endpoint_pair.cc
+@@ -34,6 +34,7 @@ HcclResult EndpointPair::Init()
+ {
+     EXCEPTION_CATCH(socketMgr_ = std::make_unique<SocketMgr>(), return HCCL_E_PTR);
+     channelHandles_.clear();
++    channelGenerationIndices_.clear();
+     s32 devLogicId;
+     CHK_RET(hrtGetDevice(&devLogicId));
+     CHK_RET(hrtGetDevicePhyIdByIndex(static_cast<u32>(devLogicId), devicePhyId_));
+@@ -198,9 +199,53 @@ HcclResult EndpointPair::CreateChannel(
+     return HCCL_SUCCESS;
+ }
+ 
++HcclResult EndpointPair::CreateChannelForMemoryVersion(
++    EndpointHandle endpointHandle, CommEngine engine, uint64_t memoryVersion, u32 logicalReuseIdx,
++    HcommChannelDesc* channelDescs, ChannelHandle* channels, bool& isNewChannel, u32& physicalIndex)
++{
++    std::lock_guard<std::mutex> lock(channelMutex_);
++    const auto generationKey = std::make_pair(memoryVersion, logicalReuseIdx);
++    auto& generationIndices = channelGenerationIndices_[engine];
++    const auto generation = generationIndices.find(generationKey);
++    if (generation != generationIndices.end()) {
++        physicalIndex = generation->second;
++        CHK_PRT_RET(
++            physicalIndex >= channelHandles_[engine].size(),
++            HCCL_ERROR(
++                "[%s] invalid channel generation mapping, engine[%s] memoryVersion[%llu] logicalReuseIdx[%u] "
++                "physicalIndex[%u] channelCount[%zu]",
++                __func__, GetEnumToString(GetCommEngineStatusStrMap(), engine).c_str(), memoryVersion,
++                logicalReuseIdx, physicalIndex, channelHandles_[engine].size()),
++            HCCL_E_INTERNAL);
++        channels[0] = channelHandles_[engine][physicalIndex];
++        isNewChannel = false;
++        return HCCL_SUCCESS;
++    }
++
++    ChannelHandle newChannel = 0;
++    const HcclResult ret = static_cast<HcclResult>(
++        HcommCollectiveChannelCreate(endpointHandle, engine, channelDescs, 1, &newChannel));
++    if (ret != HCCL_SUCCESS) {
++        return ret;
++    }
++
++    auto& engineChannels = channelHandles_[engine];
++    physicalIndex = static_cast<u32>(engineChannels.size());
++    engineChannels.push_back(newChannel);
++    generationIndices.emplace(generationKey, physicalIndex);
++    channels[0] = newChannel;
++    isNewChannel = true;
++    HCCL_INFO(
++        "[%s] created channel generation, engine[%s] memoryVersion[%llu] logicalReuseIdx[%u] physicalIndex[%u]",
++        __func__, GetEnumToString(GetCommEngineStatusStrMap(), engine).c_str(), memoryVersion, logicalReuseIdx,
++        physicalIndex);
++    return HCCL_SUCCESS;
++}
++
+ // 找到对应的channelhandle，调用HcommChannelDestroy销毁平台层对象，并删除channelHandles_中的channelHandle元素
+ HcclResult EndpointPair::DestroyChannel(CommEngine engine, u32 reuseIdx)
+ {
++    std::lock_guard<std::mutex> lock(channelMutex_);
+     if (IsChannelNotExist(engine, reuseIdx)) {
+         HCCL_WARNING(
+             "EndpointPair::DestroyChannel: engine[%s] reuseIdx[%u], channelHandle size[%u],"
+@@ -216,6 +261,19 @@ HcclResult EndpointPair::DestroyChannel(CommEngine engine, u32 reuseIdx)
+     CHK_RET(static_cast<HcclResult>(HcommChannelDestroy(&channelHandle, 1)));
+     // 去掉channelHandles_中reuseIdx位置的channelHandle
+     channelHandles_[engine].erase(channelHandles_[engine].begin() + reuseIdx);
++    auto generationMap = channelGenerationIndices_.find(engine);
++    if (generationMap != channelGenerationIndices_.end()) {
++        for (auto generation = generationMap->second.begin(); generation != generationMap->second.end();) {
++            if (generation->second == reuseIdx) {
++                generation = generationMap->second.erase(generation);
++            } else {
++                if (generation->second > reuseIdx) {
++                    --generation->second;
++                }
++                ++generation;
++            }
++        }
++    }
+     HCCL_INFO(
+         "EndpointPair::DestroyChannel: engine[%s] reuseIdx[%u] destroy channel success,"
+         "channelHandle size[%u]",
+diff --git a/src/base_comm/resources/endpoint_pairs/endpoint_pair.h b/src/base_comm/resources/endpoint_pairs/endpoint_pair.h
+index 4f8e760d..6eb492fd 100644
+--- a/src/base_comm/resources/endpoint_pairs/endpoint_pair.h
++++ b/src/base_comm/resources/endpoint_pairs/endpoint_pair.h
+@@ -12,6 +12,8 @@
+ #define ENDPOINT_PAIR_H
+ 
+ #include <memory>
++#include <map>
++#include <mutex>
+ #include <vector>
+ #include "channels/channel.h"
+ #include "endpoint.h"
+@@ -99,6 +101,10 @@ public:
+         EndpointHandle endpointHandle, CommEngine engine, u32 reuseIdx, HcommChannelDesc* channelDescs,
+         ChannelHandle* channels);
+ 
++    HcclResult CreateChannelForMemoryVersion(
++        EndpointHandle endpointHandle, CommEngine engine, uint64_t memoryVersion, u32 logicalReuseIdx,
++        HcommChannelDesc* channelDescs, ChannelHandle* channels, bool& isNewChannel, u32& physicalIndex);
++
+     HcclResult DestroyChannel(CommEngine engine, u32 reuseIdx);
+ 
+     bool IsChannelNotExist(CommEngine engine, u32 reuseIdx);
+@@ -121,6 +127,8 @@ private:
+     EndpointDesc remoteEndpointDesc_{};
+     std::unique_ptr<Hccl::SocketManager> socketMgrCompat_;
+     std::unordered_map<CommEngine, std::vector<ChannelHandle>> channelHandles_{};
++    std::unordered_map<CommEngine, std::map<std::pair<uint64_t, u32>, u32>> channelGenerationIndices_{};
++    std::mutex channelMutex_;
+     Hccl::RankIpPortMapPtr rankIpPortMap_;
+     uint32_t devicePhyId_{};
+     std::unique_ptr<SocketMgr> socketMgr_;
+diff --git a/src/coll_communicator_mgr/api_c_adpt/coll_comm_res_c_adpt.cc b/src/coll_communicator_mgr/api_c_adpt/coll_comm_res_c_adpt.cc
+index 3566bfe0..392fab7b 100644
+--- a/src/coll_communicator_mgr/api_c_adpt/coll_comm_res_c_adpt.cc
++++ b/src/coll_communicator_mgr/api_c_adpt/coll_comm_res_c_adpt.cc
+@@ -858,12 +858,25 @@ struct SharedJettyRemoteGroup {
+ 
+ static HcclResult RegisterMemForSharedJettyChannels(
+     hccl::MyRank* myRank, EndpointHandle epHandle, std::vector<HcclChannelDesc>& channelDescs,
+-    std::vector<std::vector<MemHandle>>& memHandleStorage)
++    std::vector<std::vector<MemHandle>>& memHandleStorage, uint64_t& memoryVersion)
+ {
+     uint32_t channelNum = static_cast<uint32_t>(channelDescs.size());
+     for (uint32_t i = 0; i < channelNum; ++i) {
++        uint64_t preparedVersion = 0;
+         CHK_RET(myRank->PrepareMemHandles(
+-            epHandle, channelDescs[i].memHandles, channelDescs[i].memHandleNum, memHandleStorage[i]));
++            epHandle, channelDescs[i].memHandles, channelDescs[i].memHandleNum, memHandleStorage[i],
++            &preparedVersion));
++        if (i == 0) {
++            memoryVersion = preparedVersion;
++        } else {
++            CHK_PRT_RET(
++                preparedVersion != memoryVersion,
++                HCCL_ERROR(
++                    "[%s] communication memory changed while preparing channels, firstVersion[%llu], "
++                    "currentVersion[%llu], channelIndex[%u].",
++                    __func__, memoryVersion, preparedVersion, i),
++                HCCL_E_AGAIN);
++        }
+         channelDescs[i].memHandles = memHandleStorage[i].data();
+         channelDescs[i].memHandleNum = static_cast<uint32_t>(memHandleStorage[i].size());
+     }
+@@ -943,8 +956,8 @@ static HcclResult CreateSharedJettyChannelsForGroup(
+ static HcclResult AcquireSharedJettyGroupChannels(
+     HcclComm comm, CommEngine engine, const std::vector<HcclChannelDesc>& channelDescs,
+     const SharedJettyRemoteGroup& group, EndpointHandle epHandle, const std::string& commTag,
+-    const std::string& sharedTag, hccl::MyRank* myRank, const EndpointDesc& localEp, ChannelHandle* channels,
+-    std::vector<bool>* outIsNewChannel)
++    const std::string& sharedTag, uint64_t memoryVersion, hccl::MyRank* myRank, const EndpointDesc& localEp,
++    ChannelHandle* channels, std::vector<bool>* outIsNewChannel)
+ {
+     (void)comm;
+     uint32_t requestedNum = static_cast<uint32_t>(group.descIndices.size());
+@@ -960,7 +973,7 @@ static HcclResult AcquireSharedJettyGroupChannels(
+     std::vector<ChannelHandle> groupOut(requestedNum, 0);
+     uint32_t reusedCount = 0;
+     HcclResult acqRet = hccl::SharedJettyChannelPool::GetInstance().AcquireChannels(
+-        myRank, sharedTag, epPair, requestedNum, createFunc, groupOut.data(), &reusedCount);
++        myRank, sharedTag, memoryVersion, epPair, requestedNum, createFunc, groupOut.data(), &reusedCount);
+     if (acqRet != HCCL_SUCCESS) {
+         HCCL_ERROR("[%s] AcquireChannels failed for group, ret[%d].", __func__, acqRet);
+         return acqRet;
+@@ -983,7 +996,8 @@ static HcclResult AcquireSharedJettyGroupChannels(
+ 
+ static void RollbackAcquiredSharedJettyChannels(
+     uint32_t channelNum, ChannelHandle* channels, const std::vector<bool>* isNewChannel, const EndpointDesc& localEp,
+-    const std::vector<HcclChannelDesc>& channelDescs, hccl::MyRank* myRank, const std::string& sharedTag)
++    const std::vector<HcclChannelDesc>& channelDescs, hccl::MyRank* myRank, const std::string& sharedTag,
++    uint64_t memoryVersion)
+ {
+     // 多组部分失败时回滚已成功的新建 channel
+     // 复用的 channel 仍由池和其他调用方持有，不可销毁，否则导致 use-after-free
+@@ -991,7 +1005,8 @@ static void RollbackAcquiredSharedJettyChannels(
+         if (channels[i] != 0 && isNewChannel != nullptr && (*isNewChannel)[i]) {
+             (void)HcommChannelDestroy(&channels[i], 1);
+             hccl::EndpointDescPair epPair = std::make_pair(localEp, channelDescs[i].remoteEndpoint);
+-            hccl::SharedJettyChannelPool::GetInstance().RemoveChannels(myRank, sharedTag, epPair, &channels[i], 1);
++            hccl::SharedJettyChannelPool::GetInstance().RemoveChannels(
++                myRank, sharedTag, memoryVersion, epPair, &channels[i], 1);
+             channels[i] = 0;
+         }
+     }
+@@ -999,7 +1014,8 @@ static void RollbackAcquiredSharedJettyChannels(
+ 
+ static HcclResult AcquireSharedJettyChannels(
+     HcclComm comm, CommEngine engine, std::vector<HcclChannelDesc>& channelDescs,
+-    const hccl::HcclChannelConfigData* cfg, ChannelHandle* channels, std::vector<bool>* outIsNewChannel)
++    const hccl::HcclChannelConfigData* cfg, ChannelHandle* channels, std::vector<bool>* outIsNewChannel,
++    uint64_t* outMemoryVersion)
+ {
+     hccl::hcclComm* hcclComm = static_cast<hccl::hcclComm*>(comm);
+     hccl::CollComm* collComm = hcclComm->GetCollComm();
+@@ -1025,7 +1041,8 @@ static HcclResult AcquireSharedJettyChannels(
+     // 无论 memVec 是否为空都执行 RegisterMemory 并覆盖 memHandles：
+     // 空时 memHandleStorage[i] 为空 → memHandles=nullptr/memHandleNum=0，避免残留用户传入的无效句柄。
+     std::vector<std::vector<MemHandle>> memHandleStorage(channelNum);
+-    CHK_RET(RegisterMemForSharedJettyChannels(myRank, epHandle, channelDescs, memHandleStorage));
++    uint64_t memoryVersion = 0;
++    CHK_RET(RegisterMemForSharedJettyChannels(myRank, epHandle, channelDescs, memHandleStorage, memoryVersion));
+ 
+     std::vector<SharedJettyRemoteGroup> groups;
+     GroupChannelDescsByRemoteEp(channelDescs, groups);
+@@ -1033,7 +1050,7 @@ static HcclResult AcquireSharedJettyChannels(
+     HcclResult groupRet = HCCL_SUCCESS;
+     for (const auto& group : groups) {
+         groupRet = AcquireSharedJettyGroupChannels(
+-            comm, engine, channelDescs, group, epHandle, commTag, sharedTag, myRank, localEp, channels,
++            comm, engine, channelDescs, group, epHandle, commTag, sharedTag, memoryVersion, myRank, localEp, channels,
+             outIsNewChannel);
+         if (groupRet != HCCL_SUCCESS) {
+             break;
+@@ -1042,13 +1059,18 @@ static HcclResult AcquireSharedJettyChannels(
+ 
+     if (groupRet != HCCL_SUCCESS) {
+         RollbackAcquiredSharedJettyChannels(
+-            channelNum, channels, outIsNewChannel, localEp, channelDescs, myRank, sharedTag);
++            channelNum, channels, outIsNewChannel, localEp, channelDescs, myRank, sharedTag, memoryVersion);
+         return groupRet;
+     }
+ 
+     HCCL_INFO(
+-        "[%s] shared jetty channels acquired, comm[%p], tag[%s], channelNum[%u], remoteGroups[%zu].", __func__, comm,
+-        sharedTag.c_str(), channelNum, groups.size());
++        "[%s] shared jetty channels acquired, comm[%p], tag[%s], memoryVersion[%llu], channelNum[%u], "
++        "remoteGroups[%zu].",
++        __func__, comm, sharedTag.c_str(), memoryVersion, channelNum, groups.size());
++
++    if (outMemoryVersion != nullptr) {
++        *outMemoryVersion = memoryVersion;
++    }
+ 
+     // memHandleStorage 即将析构，清空 channelDescs 中的悬空指针，防止调用方误用
+     for (uint32_t i = 0; i < channelNum; ++i) {
+@@ -1116,7 +1138,7 @@ static HcclResult ProcessSharedQueueDescFinals(
+ static void DestroyAndClearSharedJettyChannels(
+     hccl::hcclComm* hcclComm, const std::string& sharedQueueTag, uint32_t channelNum, ChannelHandle* channels,
+     const std::vector<bool>& isNewChannel, const std::vector<ChannelHandle>& channelsCopy,
+-    const std::vector<HcclChannelDesc>& channelDescFinals)
++    const std::vector<HcclChannelDesc>& channelDescFinals, uint64_t memoryVersion)
+ {
+     // 仅销毁本轮新建的 channel，复用的 channel 保留在池中供其他调用方使用
+     for (uint32_t i = 0; i < channelNum; ++i) {
+@@ -1141,7 +1163,8 @@ static void DestroyAndClearSharedJettyChannels(
+         }
+         const EndpointDesc& remoteEp = channelDescFinals[i].remoteEndpoint;
+         hccl::EndpointDescPair epPair = std::make_pair(localEp, remoteEp);
+-        hccl::SharedJettyChannelPool::GetInstance().RemoveChannels(myRank, sharedQueueTag, epPair, &channelsCopy[i], 1);
++        hccl::SharedJettyChannelPool::GetInstance().RemoveChannels(
++            myRank, sharedQueueTag, memoryVersion, epPair, &channelsCopy[i], 1);
+     }
+ }
+ 
+@@ -1224,14 +1247,15 @@ static HcclResult ExchangeConsistencyForSharedJetty(
+ static HcclResult FinalizeSharedJettyAcquisition(
+     hccl::hcclComm* hcclComm, CommEngine engine, uint32_t channelNum, ChannelHandle* channels,
+     const std::vector<bool>& isNewChannel, const std::vector<HcclChannelDesc>& channelDescFinals,
+-    const std::string& sharedQueueTag)
++    const std::string& sharedQueueTag, uint64_t memoryVersion)
+ {
+     std::vector<ChannelHandle> channelsCopy(channels, channels + channelNum);
+ 
+     HcclResult waitRet = WaitForSharedJettyChannelsReady(channelNum, channels, hcclComm);
+     if (waitRet != HCCL_SUCCESS) {
+         DestroyAndClearSharedJettyChannels(
+-            hcclComm, sharedQueueTag, channelNum, channels, isNewChannel, channelsCopy, channelDescFinals);
++            hcclComm, sharedQueueTag, channelNum, channels, isNewChannel, channelsCopy, channelDescFinals,
++            memoryVersion);
+         return waitRet;
+     }
+ 
+@@ -1239,7 +1263,8 @@ static HcclResult FinalizeSharedJettyAcquisition(
+         = ExchangeConsistencyForSharedJetty(hcclComm, engine, channelNum, channelDescFinals, isNewChannel);
+     if (exchRet != HCCL_SUCCESS) {
+         DestroyAndClearSharedJettyChannels(
+-            hcclComm, sharedQueueTag, channelNum, channels, isNewChannel, channelsCopy, channelDescFinals);
++            hcclComm, sharedQueueTag, channelNum, channels, isNewChannel, channelsCopy, channelDescFinals,
++            memoryVersion);
+         return exchRet;
+     }
+     return HCCL_SUCCESS;
+@@ -1288,7 +1313,9 @@ HcclResult HcclChannelAcquireWithConfig(
+ 
+     auto* cfg = static_cast<hccl::HcclChannelConfigData*>(config);
+     std::vector<bool> isNewChannel;
+-    HcclResult ret = AcquireSharedJettyChannels(comm, engine, channelDescFinals, cfg, channels, &isNewChannel);
++    uint64_t sharedMemoryVersion = 0;
++    HcclResult ret
++        = AcquireSharedJettyChannels(comm, engine, channelDescFinals, cfg, channels, &isNewChannel, &sharedMemoryVersion);
+     CHK_PRT_RET(
+         ret != HCCL_SUCCESS, HCCL_ERROR(
+                                  "[%s] AcquireSharedJettyChannels failed, group[%s], ret[%d].", __func__,
+@@ -1297,7 +1324,8 @@ HcclResult HcclChannelAcquireWithConfig(
+ 
+     // 推进建链状态机至 READY + 一致性交换，失败时自动清理
+     CHK_RET(FinalizeSharedJettyAcquisition(
+-        hcclComm, engine, channelNum, channels, isNewChannel, channelDescFinals, sharedQueueTag));
++        hcclComm, engine, channelNum, channels, isNewChannel, channelDescFinals, sharedQueueTag,
++        sharedMemoryVersion));
+ 
+     CHK_RET(FinalizeV2ChannelAcquire(
+         hcclComm, engine, channelDescFinals, channels, channelNum, hasSymmetricMemHandles, beginTime));
+diff --git a/src/coll_communicator_mgr/communicator/coll_comm.cc b/src/coll_communicator_mgr/communicator/coll_comm.cc
+index a6f58b04..4997bed0 100644
+--- a/src/coll_communicator_mgr/communicator/coll_comm.cc
++++ b/src/coll_communicator_mgr/communicator/coll_comm.cc
+@@ -43,6 +43,8 @@ CollComm::~CollComm()
+         return;
+     }
+ 
++    BeginTeamLifecycleTeardown();
++
+     // 先注销TaskException，再销毁通信域资源，防止通信域资源销毁后rts回调TaskException
+     hcomm::TaskExceptionHost* handler = hcomm::TaskExceptionHost::GetInstance(deviceLogicId_);
+     if (handler != nullptr) {
+@@ -63,6 +65,12 @@ CollComm::~CollComm()
+     HCCL_RUN_INFO("[CollComm][~CollComm] cclBuffer free, commId[%s].", commId_.c_str());
+ }
+ 
++void CollComm::BeginTeamLifecycleTeardown()
++{
++    std::unique_lock<std::recursive_mutex> lock(teamLifecycleMutex_);
++    teamLifecycleClosing_ = true;
++}
++
+ HcclResult CollComm::Init(void* rankGraph, aclrtBinHandle binHandle, HcclMem cclBuffer, uint32_t opExpansionMode)
+ {
+     if (IsFullMode()) { // A5和下一代
+diff --git a/src/coll_communicator_mgr/communicator/coll_comm.h b/src/coll_communicator_mgr/communicator/coll_comm.h
+index d5cf25ab..9a2fd553 100644
+--- a/src/coll_communicator_mgr/communicator/coll_comm.h
++++ b/src/coll_communicator_mgr/communicator/coll_comm.h
+@@ -80,6 +80,12 @@ public:
+     // 是否为全功能模式（fullMode），供外部 owner 在注册/注销前判断是否需要管理
+     bool IsFullMode() const { return initMode_ == CollCommInitMode::fullMode; }
+ 
++    // Team 根创建与通信域析构共享此 gate；closing 状态仅在持锁时访问。
++    std::recursive_mutex& GetTeamLifecycleMutex() { return teamLifecycleMutex_; }
++    bool IsTeamLifecycleClosing() const { return teamLifecycleClosing_; }
++    void MarkTeamLifecycleClosing() { teamLifecycleClosing_ = true; }
++    void BeginTeamLifecycleTeardown();
++
+     // 获取Rank数量
+     uint32_t GetRankSize() const
+     {
+@@ -183,6 +189,8 @@ private:
+     std::unique_ptr<SymmetricMemory, SymmetricMemoryDeleter> symmetricMemory_{nullptr};
+     aclrtBinHandle binHcclHandle_{nullptr};
+     std::mutex binHcclmutex_;
++    std::recursive_mutex teamLifecycleMutex_;
++    bool teamLifecycleClosing_{false};
+ };
+ } // namespace hccl
+ 
+diff --git a/src/coll_communicator_mgr/resource_mgr/local/my_rank/comm_mems/comm_mems.h b/src/coll_communicator_mgr/resource_mgr/local/my_rank/comm_mems/comm_mems.h
+index 93a78cae..6b83de60 100644
+--- a/src/coll_communicator_mgr/resource_mgr/local/my_rank/comm_mems/comm_mems.h
++++ b/src/coll_communicator_mgr/resource_mgr/local/my_rank/comm_mems/comm_mems.h
+@@ -68,6 +68,12 @@ public:
+      */
+     HcclResult GetAllMemory(std::vector<HcclMem>& memVec, std::vector<std::string>& memTags, uint64_t& version);
+ 
++    uint64_t GetMemoryVersion()
++    {
++        std::lock_guard<std::mutex> lock(memMutex_);
++        return memVersion_;
++    }
++
+ private:
+     uint64_t bufferSize_{};
+     CommMemInfo cclMemInfo_{};
+diff --git a/src/coll_communicator_mgr/resource_mgr/local/my_rank/endpoints/endpoint_mgr.cc b/src/coll_communicator_mgr/resource_mgr/local/my_rank/endpoints/endpoint_mgr.cc
+index 0bc5efa8..4298e82b 100644
+--- a/src/coll_communicator_mgr/resource_mgr/local/my_rank/endpoints/endpoint_mgr.cc
++++ b/src/coll_communicator_mgr/resource_mgr/local/my_rank/endpoints/endpoint_mgr.cc
+@@ -19,24 +19,65 @@ TaggedMemMap::~TaggedMemMap()
+         return;
+     }
+     for (const auto& kv : tagToHandle_) {
+-        HcommResult ret = HcommMemUnreg(handle_, kv.second);
++        HcommResult ret = HcommMemUnreg(handle_, kv.second.handle);
+         if (ret != HCCL_SUCCESS) {
+             HCCL_ERROR(
+                 "[TaggedMemMap::~TaggedMemMap] HcommMemUnreg failed, handle[%p] tag[%s] ret[%d]", handle_,
+                 kv.first.c_str(), ret);
+         }
+     }
++    for (const auto& retiredHandle : retiredHandles_) {
++        HcommResult ret = HcommMemUnreg(handle_, retiredHandle);
++        if (ret != HCCL_SUCCESS) {
++            HCCL_ERROR(
++                "[TaggedMemMap::~TaggedMemMap] HcommMemUnreg failed for retired handle, endpoint[%p] "
++                "memHandle[%p] ret[%d]",
++                handle_, retiredHandle, ret);
++        }
++    }
+ }
+ 
+ MemHandle TaggedMemMap::FindHandle(const std::string& tag) const
+ {
+     auto it = tagToHandle_.find(tag);
+-    return it != tagToHandle_.end() ? it->second : nullptr;
++    return it != tagToHandle_.end() ? it->second.handle : nullptr;
+ }
+ 
+ bool TaggedMemMap::HasTag(const std::string& tag) const { return tagToHandle_.find(tag) != tagToHandle_.end(); }
+ 
+-void TaggedMemMap::EmplaceHandle(const std::string& tag, MemHandle handle) { tagToHandle_.emplace(tag, handle); }
++bool TaggedMemMap::HasSameMemory(const std::string& tag, const HcclMem& mem) const
++{
++    auto it = tagToHandle_.find(tag);
++    if (it == tagToHandle_.end()) {
++        return false;
++    }
++    const HcclMem& registered = it->second.mem;
++    return registered.type == mem.type && registered.addr == mem.addr && registered.size == mem.size;
++}
++
++void TaggedMemMap::UpdateHandle(const std::string& tag, const HcclMem& mem, MemHandle handle)
++{
++    auto it = tagToHandle_.find(tag);
++    if (it == tagToHandle_.end()) {
++        tagToHandle_.emplace(tag, TaggedMemEntry{mem, handle});
++        return;
++    }
++    if (it->second.handle != handle) {
++        retiredHandles_.push_back(it->second.handle);
++    }
++    it->second = TaggedMemEntry{mem, handle};
++}
++
++std::vector<MemHandle> TaggedMemMap::GetAllHandles() const
++{
++    std::vector<MemHandle> handles;
++    handles.reserve(tagToHandle_.size() + retiredHandles_.size());
++    for (const auto& kv : tagToHandle_) {
++        handles.push_back(kv.second.handle);
++    }
++    handles.insert(handles.end(), retiredHandles_.begin(), retiredHandles_.end());
++    return handles;
++}
+ 
+ MemHandle TaggedMemMap::RemoveTag(const std::string& tag)
+ {
+@@ -44,7 +85,7 @@ MemHandle TaggedMemMap::RemoveTag(const std::string& tag)
+     if (it == tagToHandle_.end()) {
+         return nullptr;
+     }
+-    MemHandle handle = it->second;
++    MemHandle handle = it->second.handle;
+     tagToHandle_.erase(it);
+     return handle;
+ }
+@@ -95,11 +136,16 @@ HcclResult EndpointMgr::RegisterMemory(
+     for (const auto& mem : memVec) {
+         const std::string& tag = memTag[index];
+         index++;
+-        // 检查tag是否已注册，避免重复注册
+-        if (taggedMap.HasTag(tag)) {
+-            HCCL_INFO("[%s]tag already registered, reuse existing handle, tag=%s", __FUNCTION__, tag.c_str());
++        // 只有完整内存描述一致时才能复用已有 handle。
++        if (taggedMap.HasSameMemory(tag, mem)) {
++            HCCL_INFO("[%s]tag and memory unchanged, reuse existing handle, tag=%s", __FUNCTION__, tag.c_str());
+             continue;
+         }
++        if (taggedMap.HasTag(tag)) {
++            HCCL_INFO(
++                "[%s]tag memory changed, register replacement handle, tag[%s] addr[%p] size[%llu]", __FUNCTION__,
++                tag.c_str(), mem.addr, mem.size);
++        }
+         MemHandle memHandle = nullptr;
+         CommMem commMem{static_cast<CommMemType>(mem.type), mem.addr, mem.size};
+         HcclResult ret = static_cast<HcclResult>(HcommMemReg(epHandle, tag.c_str(), &commMem, &memHandle));
+@@ -108,7 +154,8 @@ HcclResult EndpointMgr::RegisterMemory(
+             return ret;
+         }
+         CHK_PTR_NULL(memHandle);
+-        taggedMap.EmplaceHandle(tag, memHandle); // 记录到tag映射，后续相同tag直接命中
++        // 旧 handle 可能仍被共享 channel 引用，保留到 endpoint 析构时再注销。
++        taggedMap.UpdateHandle(tag, mem, memHandle);
+         if (ret == HCCL_E_AGAIN) {
+             HCCL_WARNING("This mem has already been registered, addr=%p, size=%llu", mem.addr, mem.size);
+         }
+diff --git a/src/coll_communicator_mgr/resource_mgr/local/my_rank/endpoints/endpoint_mgr.h b/src/coll_communicator_mgr/resource_mgr/local/my_rank/endpoints/endpoint_mgr.h
+index 6e6a829a..c72ecf16 100644
+--- a/src/coll_communicator_mgr/resource_mgr/local/my_rank/endpoints/endpoint_mgr.h
++++ b/src/coll_communicator_mgr/resource_mgr/local/my_rank/endpoints/endpoint_mgr.h
+@@ -40,13 +40,21 @@ public:
+ 
+     MemHandle FindHandle(const std::string& tag) const;
+     bool HasTag(const std::string& tag) const;
+-    void EmplaceHandle(const std::string& tag, MemHandle handle);
++    bool HasSameMemory(const std::string& tag, const HcclMem& mem) const;
++    void UpdateHandle(const std::string& tag, const HcclMem& mem, MemHandle handle);
++    std::vector<MemHandle> GetAllHandles() const;
+     MemHandle RemoveTag(const std::string& tag);
+ 
+ private:
++    struct TaggedMemEntry {
++        HcclMem mem{};
++        MemHandle handle{nullptr};
++    };
++
+     EndpointHandle handle_;
+     uint64_t version_{0};
+-    std::unordered_map<std::string, MemHandle> tagToHandle_;
++    std::unordered_map<std::string, TaggedMemEntry> tagToHandle_;
++    std::vector<MemHandle> retiredHandles_;
+ };
+ 
+ /**
+diff --git a/src/coll_communicator_mgr/resource_mgr/local/my_rank/my_rank.cc b/src/coll_communicator_mgr/resource_mgr/local/my_rank/my_rank.cc
+index ed198aad..82c1099a 100644
+--- a/src/coll_communicator_mgr/resource_mgr/local/my_rank/my_rank.cc
++++ b/src/coll_communicator_mgr/resource_mgr/local/my_rank/my_rank.cc
+@@ -175,7 +175,7 @@ HcclResult MyRank::GetLocalTlsStatus(Hccl::TlsStatus& tlsStatus) const
+     return Hccl::HrtRaGetTlsStatus(&info, tlsStatus);
+ }
+ 
+-HcclResult MyRank::RegisterCommMemsToEndpoint(EndpointHandle epHandle)
++HcclResult MyRank::RegisterCommMemsToEndpoint(EndpointHandle epHandle, uint64_t* memoryVersion)
+ {
+     std::vector<HcclMem> memVec;
+     std::vector<std::string> memTag;
+@@ -183,11 +183,15 @@ HcclResult MyRank::RegisterCommMemsToEndpoint(EndpointHandle epHandle)
+     CHK_RET(commMems_->GetAllMemory(memVec, memTag, version));
+     HCCL_INFO("[%s] got %zu memory regions to register, version[%llu]", __func__, memVec.size(), version);
+     CHK_RET(endpointMgr_->RegisterMemory(epHandle, memTag, memVec, version));
++    if (memoryVersion != nullptr) {
++        *memoryVersion = version;
++    }
+     return HCCL_SUCCESS;
+ }
+ 
+ HcclResult MyRank::PrepareMemHandles(
+-    EndpointHandle epHandle, void** memHandles, uint32_t memHandleNum, std::vector<MemHandle>& memHandleVec)
++    EndpointHandle epHandle, void** memHandles, uint32_t memHandleNum, std::vector<MemHandle>& memHandleVec,
++    uint64_t* memoryVersion)
+ {
+     // 从 CommMems 提取该 channel 需要的 tag 列表
+     // GetTagsFromHandles 始终 push cclBuffer；用户 handles 异常时内部跳过，不阻断注册
+@@ -195,7 +199,7 @@ HcclResult MyRank::PrepareMemHandles(
+     CHK_RET(commMems_->GetTagsFromHandles(memHandles, memHandleNum, memTags));
+ 
+     // 确保 CommMems 全量内存已注册到该 endpoint（版本一致则跳过）
+-    CHK_RET(RegisterCommMemsToEndpoint(epHandle));
++    CHK_RET(RegisterCommMemsToEndpoint(epHandle, memoryVersion));
+ 
+     // 从 endpoint 查询指定 tag 的 MemHandle
+     CHK_RET(endpointMgr_->GetMemHandlesByTags(epHandle, memTags, memHandleVec));
+@@ -680,7 +684,7 @@ HcclResult MyRank::CheckChannelParam(CommEngine engine, const HcclChannelDesc* c
+ HcclResult MyRank::BatchCreateChannels(
+     CommEngine engine, const HcclChannelDesc* channelDescs, uint32_t channelNum,
+     std::vector<HcommChannelDesc>& hcommDescs, ChannelHandle* channelHandles,
+-    std::vector<std::vector<MemHandle>>& allHandles)
++    std::vector<std::vector<MemHandle>>& allHandles, uint64_t expectedMemoryVersion)
+ {
+     CHK_PTR_NULL(channelDescs);
+     CHK_PTR_NULL(channelHandles);
+@@ -695,6 +699,7 @@ HcclResult MyRank::BatchCreateChannels(
+     // 记录本轮新申请的channel
+     newChannels_.clear();
+     bool isAllSuccess = true;
++    uint64_t channelMemoryVersion = expectedMemoryVersion;
+ 
+     for (uint32_t i = 0; i < channelNum; ++i) {
+         const EndpointDesc& localEndpointDesc = channelDescs[i].localEndpoint;
+@@ -726,7 +731,23 @@ HcclResult MyRank::BatchCreateChannels(
+             localEndpointDesc.protocol);
+ 
+         // 注册内存
+-        CHK_RET(PrepareMemHandles(epHandle, channelDescs[i].memHandles, channelDescs[i].memHandleNum, allHandles[i]));
++        uint64_t actualMemoryVersion = 0;
++        CHK_RET(PrepareMemHandles(
++            epHandle, channelDescs[i].memHandles, channelDescs[i].memHandleNum, allHandles[i],
++            &actualMemoryVersion));
++        if (channelMemoryVersion == 0) {
++            channelMemoryVersion = actualMemoryVersion;
++        }
++        if (actualMemoryVersion != channelMemoryVersion) {
++            HCCL_WARNING(
++                "[%s] communication memory changed while creating channels, expectedVersion[%llu] "
++                "actualVersion[%llu]",
++                __func__, channelMemoryVersion, actualMemoryVersion);
++            if (!newChannels_.empty()) {
++                CHK_RET(DestroyNewChannels(engine, channelDescs));
++            }
++            return HCCL_E_AGAIN;
++        }
+         HCCL_INFO(
+             "[%s][%u/%u] remoteRank[%u] got %zu user memory handles", __func__, i + 1, channelNum, remoteRank,
+             allHandles[i].size());
+@@ -765,10 +786,18 @@ HcclResult MyRank::BatchCreateChannels(
+         if (localEndpointDesc.loc.locType != remoteEndpointDesc.loc.locType) {
+             idx = UNREUSE_CHANNEL_IDX;
+         }
+-        bool isNewChannel = (endpointPair->IsChannelNotExist(engine, reuseIdx) || (idx == UNREUSE_CHANNEL_IDX));
++        bool isNewChannel = false;
++        u32 physicalIndex = reuseIdx;
+ 
+         // CreateChannel 返回 HCCL_E_UNAVAIL 表示资源不足创建失败
+-        ret = endpointPair->CreateChannel(epHandle, engine, idx, &hcommDescs[i], channelHandles + i);
++        if (idx == UNREUSE_CHANNEL_IDX) {
++            isNewChannel = true;
++            ret = endpointPair->CreateChannel(epHandle, engine, idx, &hcommDescs[i], channelHandles + i);
++        } else {
++            ret = endpointPair->CreateChannelForMemoryVersion(
++                epHandle, engine, channelMemoryVersion, reuseIdx, &hcommDescs[i], channelHandles + i,
++                isNewChannel, physicalIndex);
++        }
+         if (ret == HCCL_E_TIMEOUT || ret == HCCL_E_INTERNAL) {
+             Hccl::TlsStatus tlsStatus = Hccl::TlsStatus::UNKNOWN;
+             CHK_PRT_CONT(
+@@ -786,7 +815,7 @@ HcclResult MyRank::BatchCreateChannels(
+         }
+         // 记录新申请的channel信息，用于清理临时资源
+         if (isNewChannel) {
+-            newChannels_.emplace_back(std::make_pair(i, reuseIdx));
++            newChannels_.emplace_back(std::make_pair(i, physicalIndex));
+         }
+ 
+         CHK_PRT_RET(
+@@ -1043,10 +1072,14 @@ HcclResult MyRank::CreateChannels(
+     }
+ 
+     auto start = std::chrono::steady_clock::now();
+-    std::string socketTag = commTag + "_engine_" + std::to_string(engine);
++    CHK_SMART_PTR_NULL(commMems_);
++    const uint64_t memoryVersion = commMems_->GetMemoryVersion();
++    std::string socketTag = commTag + "_mem_version_" + std::to_string(memoryVersion) + "_engine_"
++        + std::to_string(engine);
+     CHK_RET(BatchCreateSockets(channelDescs, channelNum, socketTag, hcommDescs));
+     CHK_RET_UNAVAIL(
+-        BatchCreateChannels(engine, channelDescs, channelNum, hcommDescs, hostChannelHandleList, allHandles));
++        BatchCreateChannels(
++            engine, channelDescs, channelNum, hcommDescs, hostChannelHandleList, allHandles, memoryVersion));
+ 
+     if (!newChannels_.empty()) {
+         CHK_RET(BatchConnectChannels(channelDescs, hostChannelHandleList, channelNum));
+diff --git a/src/coll_communicator_mgr/resource_mgr/local/my_rank/my_rank.h b/src/coll_communicator_mgr/resource_mgr/local/my_rank/my_rank.h
+index 1c533a01..e294f950 100644
+--- a/src/coll_communicator_mgr/resource_mgr/local/my_rank/my_rank.h
++++ b/src/coll_communicator_mgr/resource_mgr/local/my_rank/my_rank.h
+@@ -118,7 +118,8 @@ public:
+         const HcclChannelDesc* channelDescs, const std::vector<HcommChannelDesc>& hcommDescs, uint32_t channelNum,
+         const std::vector<std::pair<u32, u32>>& newChannels, CommEngine engine);
+     HcclResult PrepareMemHandles(
+-        EndpointHandle epHandle, void** memHandles, uint32_t memHandleNum, std::vector<MemHandle>& memHandleVec);
++        EndpointHandle epHandle, void** memHandles, uint32_t memHandleNum, std::vector<MemHandle>& memHandleVec,
++        uint64_t* memoryVersion = nullptr);
+ 
+ private:
+     using ReuseSocketIdxMap = std::unordered_map<RankPair*, std::unordered_map<hcomm::EndpointPair*, u32>>;
+@@ -134,7 +135,7 @@ private:
+     HcclResult BatchCreateChannels(
+         CommEngine engine, const HcclChannelDesc* channelDescs, uint32_t channelNum,
+         std::vector<HcommChannelDesc>& hcommDescs, ChannelHandle* channelHandles,
+-        std::vector<std::vector<MemHandle>>& allHandles);
++        std::vector<std::vector<MemHandle>>& allHandles, uint64_t expectedMemoryVersion = 0);
+     HcclResult
+     BatchConnectChannels(const HcclChannelDesc* channelDescs, ChannelHandle* channelHandles, uint32_t channelNum);
+     void LogChannelCreationInfo(
+@@ -148,7 +149,7 @@ private:
+         uint32_t localRank, uint32_t remoteRank, const EndpointDesc& localEndpointDesc,
+         const EndpointDesc& remoteEndpointDesc, uint32_t& listenPort, HcommChannelDesc& hcommDesc);
+     HcclResult GetLocalTlsStatus(Hccl::TlsStatus& tlsStatus) const;
+-    HcclResult RegisterCommMemsToEndpoint(EndpointHandle epHandle);
++    HcclResult RegisterCommMemsToEndpoint(EndpointHandle epHandle, uint64_t* memoryVersion = nullptr);
+     HcclResult TryInitCcuInstanceLegacy();
+     HcclResult TryInitCcuInstance();
+     HcclResult ReserveCcuMsCommOrFallback();
+diff --git a/src/coll_communicator_mgr/resource_mgr/local/my_rank/shared_jetty_channel_pool.cc b/src/coll_communicator_mgr/resource_mgr/local/my_rank/shared_jetty_channel_pool.cc
+index 83cb5e5f..1ba1990e 100644
+--- a/src/coll_communicator_mgr/resource_mgr/local/my_rank/shared_jetty_channel_pool.cc
++++ b/src/coll_communicator_mgr/resource_mgr/local/my_rank/shared_jetty_channel_pool.cc
+@@ -22,12 +22,12 @@ SharedJettyChannelPool& SharedJettyChannelPool::GetInstance()
+ }
+ 
+ HcclResult SharedJettyChannelPool::ReturnExistingChannels(
+-    MyRank* myRank, const std::string& tag, const EndpointDescPair& epPair, uint32_t requestedNum,
+-    ChannelHandle* outChannels, uint32_t& returnFromExisting, uint32_t& needCreate)
++    MyRank* myRank, const std::string& tag, uint64_t memoryVersion, const EndpointDescPair& epPair,
++    uint32_t requestedNum, ChannelHandle* outChannels, uint32_t& returnFromExisting, uint32_t& needCreate)
+ {
+     std::lock_guard<std::mutex> lock(mtx_);
+     auto& tagMap = rankPools_[myRank];
+-    auto& epPairMap = tagMap[tag];
++    auto& epPairMap = tagMap[tag][memoryVersion];
+     auto& epChannels = epPairMap[epPair];
+ 
+     uint32_t available = static_cast<uint32_t>(epChannels.channels.size());
+@@ -39,8 +39,9 @@ HcclResult SharedJettyChannelPool::ReturnExistingChannels(
+     }
+ 
+     HCCL_INFO(
+-        "[%s] myRank[%p], tag[%s], available[%u], requested[%u], returnFromExisting[%u], needCreate[%u].", __func__,
+-        myRank, tag.c_str(), available, requestedNum, returnFromExisting, needCreate);
++        "[%s] myRank[%p], tag[%s], memoryVersion[%llu], available[%u], requested[%u], returnFromExisting[%u], "
++        "needCreate[%u].",
++        __func__, myRank, tag.c_str(), memoryVersion, available, requestedNum, returnFromExisting, needCreate);
+ 
+     for (uint32_t i = 0; i < returnFromExisting; ++i) {
+         uint32_t idx = epChannels.nextReturnIdx % epChannels.channels.size();
+@@ -52,7 +53,8 @@ HcclResult SharedJettyChannelPool::ReturnExistingChannels(
+ }
+ 
+ HcclResult SharedJettyChannelPool::AcquireChannels(
+-    MyRank* myRank, const std::string& tag, const EndpointDescPair& epPair, uint32_t requestedNum,
++    MyRank* myRank, const std::string& tag, uint64_t memoryVersion, const EndpointDescPair& epPair,
++    uint32_t requestedNum,
+     const std::function<HcclResult(uint32_t, ChannelHandle*)>& createFunc, ChannelHandle* outChannels,
+     uint32_t* outReusedCount)
+ {
+@@ -67,7 +69,8 @@ HcclResult SharedJettyChannelPool::AcquireChannels(
+     uint32_t needCreate = 0;
+ 
+     // 第一段（持锁）：查询已有 channel 并计算需新建数量，取走复用句柄后释放锁。
+-    CHK_RET(ReturnExistingChannels(myRank, tag, epPair, requestedNum, outChannels, returnFromExisting, needCreate));
++    CHK_RET(ReturnExistingChannels(
++        myRank, tag, memoryVersion, epPair, requestedNum, outChannels, returnFromExisting, needCreate));
+ 
+     // 第二段（无锁）：执行建链 I/O，避免阻塞其他 myRank/tag 的并发 Acquire。
+     if (needCreate > 0) {
+@@ -84,7 +87,7 @@ HcclResult SharedJettyChannelPool::AcquireChannels(
+         // 第三段（持锁）：将新建 channel 回填到池，重新定位条目以规避 rehash 导致的引用失效。
+         std::lock_guard<std::mutex> lock(mtx_);
+         auto& tagMap = rankPools_[myRank];
+-        auto& epPairMap = tagMap[tag];
++        auto& epPairMap = tagMap[tag][memoryVersion];
+         auto& epChannels = epPairMap[epPair];
+         for (uint32_t i = 0; i < needCreate; ++i) {
+             epChannels.channels.push_back(newChannels[i]);
+@@ -110,15 +113,19 @@ SharedJettyChannelPool::CollectMyRankChannelsLocked(MyRank* myRank, std::vector<
+     // 先统计总数并 reserve，避免 push_back 触发多次 realloc
+     uint32_t totalChannels = 0;
+     for (auto& tagEntry : it->second) {
+-        for (auto& epEntry : tagEntry.second) {
+-            totalChannels += static_cast<uint32_t>(epEntry.second.channels.size());
++        for (auto& versionEntry : tagEntry.second) {
++            for (auto& epEntry : versionEntry.second) {
++                totalChannels += static_cast<uint32_t>(epEntry.second.channels.size());
++            }
+         }
+     }
+     allChannels.reserve(totalChannels);
+     for (auto& tagEntry : it->second) {
+-        for (auto& epEntry : tagEntry.second) {
+-            for (ChannelHandle ch : epEntry.second.channels) {
+-                allChannels.push_back(ch);
++        for (auto& versionEntry : tagEntry.second) {
++            for (auto& epEntry : versionEntry.second) {
++                for (ChannelHandle ch : epEntry.second.channels) {
++                    allChannels.push_back(ch);
++                }
+             }
+         }
+     }
+@@ -167,8 +174,8 @@ HcclResult SharedJettyChannelPool::CheckMyRankDestroy(MyRank* myRank)
+ }
+ 
+ void SharedJettyChannelPool::RemoveChannels(
+-    MyRank* myRank, const std::string& tag, const EndpointDescPair& epPair, const ChannelHandle* channels,
+-    uint32_t channelNum)
++    MyRank* myRank, const std::string& tag, uint64_t memoryVersion, const EndpointDescPair& epPair,
++    const ChannelHandle* channels, uint32_t channelNum)
+ {
+     if (myRank == nullptr || channels == nullptr || channelNum == 0) {
+         return;
+@@ -182,8 +189,12 @@ void SharedJettyChannelPool::RemoveChannels(
+     if (epIt == tagIt->second.end()) {
+         return;
+     }
+-    auto pairIt = epIt->second.find(epPair);
+-    if (pairIt == epIt->second.end()) {
++    auto versionIt = epIt->second.find(memoryVersion);
++    if (versionIt == epIt->second.end()) {
++        return;
++    }
++    auto pairIt = versionIt->second.find(epPair);
++    if (pairIt == versionIt->second.end()) {
+         return;
+     }
+     auto& epChannels = pairIt->second;
+diff --git a/src/coll_communicator_mgr/resource_mgr/local/my_rank/shared_jetty_channel_pool.h b/src/coll_communicator_mgr/resource_mgr/local/my_rank/shared_jetty_channel_pool.h
+index 20601d3f..a69be37c 100644
+--- a/src/coll_communicator_mgr/resource_mgr/local/my_rank/shared_jetty_channel_pool.h
++++ b/src/coll_communicator_mgr/resource_mgr/local/my_rank/shared_jetty_channel_pool.h
+@@ -88,6 +88,7 @@ public:
+      * @brief 获取或创建共享 Jetty Channel
+      * @param[in] myRank 归属的 MyRank 指针（用于销毁时索引）
+      * @param[in] tag 共享队列 tag
++     * @param[in] memoryVersion channel 导入内存集合的版本
+      * @param[in] epPair 源目的 endpointPair
+      * @param[in] requestedNum 请求的 channel 数量
+      * @param[in] createFunc 创建新 channel 的回调
+@@ -96,10 +97,19 @@ public:
+      * @return HcclResult 执行结果
+      */
+     HcclResult AcquireChannels(
+-        MyRank* myRank, const std::string& tag, const EndpointDescPair& epPair, uint32_t requestedNum,
++        MyRank* myRank, const std::string& tag, uint64_t memoryVersion, const EndpointDescPair& epPair,
++        uint32_t requestedNum,
+         const std::function<HcclResult(uint32_t, ChannelHandle*)>& createFunc, ChannelHandle* outChannels,
+         uint32_t* outReusedCount = nullptr);
+ 
++    HcclResult AcquireChannels(
++        MyRank* myRank, const std::string& tag, const EndpointDescPair& epPair, uint32_t requestedNum,
++        const std::function<HcclResult(uint32_t, ChannelHandle*)>& createFunc, ChannelHandle* outChannels,
++        uint32_t* outReusedCount = nullptr)
++    {
++        return AcquireChannels(myRank, tag, 0, epPair, requestedNum, createFunc, outChannels, outReusedCount);
++    }
++
+     /**
+      * @brief 销毁 MyRank 下所有共享 Jetty Channel（MyRank 析构时调用）
+      * @param[in] myRank MyRank 指针
+@@ -117,13 +127,21 @@ public:
+      * @brief 从池中移除指定 channel 句柄（建链失败时清理已销毁的句柄）
+      * @param[in] myRank 归属的 MyRank 指针
+      * @param[in] tag 共享队列 tag
++     * @param[in] memoryVersion channel 导入内存集合的版本
+      * @param[in] epPair 源目的 endpointPair
+      * @param[in] channels 要移除的 channel 句柄数组
+      * @param[in] channelNum 数量
+      */
++    void RemoveChannels(
++        MyRank* myRank, const std::string& tag, uint64_t memoryVersion, const EndpointDescPair& epPair,
++        const ChannelHandle* channels, uint32_t channelNum);
++
+     void RemoveChannels(
+         MyRank* myRank, const std::string& tag, const EndpointDescPair& epPair, const ChannelHandle* channels,
+-        uint32_t channelNum);
++        uint32_t channelNum)
++    {
++        RemoveChannels(myRank, tag, 0, epPair, channels, channelNum);
++    }
+ 
+ private:
+     SharedJettyChannelPool() = default;
+@@ -132,11 +150,12 @@ private:
+     SharedJettyChannelPool& operator=(const SharedJettyChannelPool&) = delete;
+ 
+     HcclResult ReturnExistingChannels(
+-        MyRank* myRank, const std::string& tag, const EndpointDescPair& epPair, uint32_t requestedNum,
+-        ChannelHandle* outChannels, uint32_t& returnFromExisting, uint32_t& needCreate);
++        MyRank* myRank, const std::string& tag, uint64_t memoryVersion, const EndpointDescPair& epPair,
++        uint32_t requestedNum, ChannelHandle* outChannels, uint32_t& returnFromExisting, uint32_t& needCreate);
+ 
+     using EpPairMap = std::unordered_map<EndpointDescPair, EpPairChannels, EndpointDescPairHash, EndpointDescPairEqual>;
+-    using TagMap = std::unordered_map<std::string, EpPairMap>;
++    using MemoryVersionMap = std::unordered_map<uint64_t, EpPairMap>;
++    using TagMap = std::unordered_map<std::string, MemoryVersionMap>;
+     using RankPoolIter = std::unordered_map<MyRank*, TagMap>::iterator;
+ 
+     // 调用者须持有 mtx_。收集 myRank 下全部共享 Jetty channel 句柄。
+diff --git a/src/coll_communicator_mgr/team/hccl/hccl_team_c_adpt.cc b/src/coll_communicator_mgr/team/hccl/hccl_team_c_adpt.cc
+index 7ea2a058..6b093049 100644
+--- a/src/coll_communicator_mgr/team/hccl/hccl_team_c_adpt.cc
++++ b/src/coll_communicator_mgr/team/hccl/hccl_team_c_adpt.cc
+@@ -10,9 +10,12 @@
+ 
+ #include "hccl_team_c_adpt.h"
+ 
++#include <memory>
++#include <mutex>
+ #include <sstream>
+ #include <string>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <utility>
+ #include <vector>
+ 
+@@ -101,6 +104,15 @@ static HcclResult AllocTeamSyncMem(HcommTeamHandle* team, uint64_t syncMemSize,
+         *team = nullptr;
+         return HCCL_E_MEMORY;
+     }
++    HcclResult memsetRet = hrtMemSet(syncMemPtr, syncMemSize, syncMemSize);
++    if (memsetRet != HCCL_SUCCESS) {
++        HCCL_ERROR("[AllocTeamSyncMem] hrtMemSet failed, ret[%d] size[%llu]", memsetRet, syncMemSize);
++        (void)hrtFree(syncMemPtr);
++        syncMemPtr = nullptr;
++        (void)HcommTeamDestroy(*team);
++        *team = nullptr;
++        return memsetRet;
++    }
+     return HCCL_SUCCESS;
+ }
+ 
+@@ -125,6 +137,10 @@ HcclResult HcclWorldTeamCreate(HcclComm comm, const HcclTeamCreateDesc* desc, Hc
+     auto* hcclComm = static_cast<hccl::hcclComm*>(comm);
+     CollComm* collComm = hcclComm->GetCollComm();
+     CHK_PTR_NULL(collComm);
++    std::unique_lock<std::recursive_mutex> collCommLifecycleLock(collComm->GetTeamLifecycleMutex());
++    CHK_PRT_RET(
++        collComm->IsTeamLifecycleClosing(), HCCL_ERROR("[%s] communication domain is being destroyed", __func__),
++        HCCL_E_PARA);
+     const std::string commId = collComm->GetCommId();
+ 
+     /* 0. 校验 desc 与通信域匹配（worldTeam 可为子集）。 */
+@@ -195,6 +211,12 @@ HcclResult HcclSubTeamCreate(HcommTeamHandle worldTeam, const HcclTeamCreateDesc
+     CHK_PRT_RET(
+         desc->requirement.barrierCount == 0, HCCL_ERROR("[%s] barrierCount must be >= 1", __func__), HCCL_E_PARA);
+ 
++    TeamOperationGuard operation = HcclTeamMgr::GetInstance().AcquireTeamOperation(worldTeam);
++    CHK_PRT_RET(
++        operation.IsClosing(), HCCL_ERROR("[%s] communication domain is being destroyed", __func__), HCCL_E_PARA);
++    CHK_PRT_RET(
++        !operation.IsReady(), HCCL_ERROR("[%s] worldTeam[%p] not registered", __func__, worldTeam), HCCL_E_PARA);
++
+     /* selfRankId 是本 rank 的实际 rankId，需在 rankIds 中查找其下标作为 memberId。 */
+     uint32_t selfMemberId = 0;
+     CHK_RET(FindSelfMemberId(desc, selfMemberId));
+@@ -243,28 +265,77 @@ HcclResult HcclTeamDestroy(HcommTeamHandle team)
+ {
+     CHK_PTR_NULL(team);
+ 
++    TeamOperationGuard operation = HcclTeamMgr::GetInstance().AcquireTeamOperation(team);
++    CHK_PRT_RET(
++        operation.IsClosing(), HCCL_ERROR("[%s] communication domain is being destroyed", __func__), HCCL_E_PARA);
++
++    TeamDestroyState destroyState{};
++    const bool registered = HcclTeamMgr::GetInstance().BeginTeamDestroy(team, destroyState);
++    if (!registered) {
++        HCCL_WARNING("[%s] team[%p] not registered, maybe already destroyed", __func__, team);
++        return HCCL_SUCCESS;
++    }
++
+     /* worldTeam 销毁时连带销毁其所有 subTeam 与 window（1:N），避免泄漏。subTeam 无子 team、无 window。 */
+-    if (HcclTeamMgr::GetInstance().FindWorldTeam(team) == team) {
++    if (destroyState.worldTeam == team) {
+         // 先销毁所有 subTeam（递归调 HcclTeamDestroy，subTeam 不会重复进入此分支）
+         std::vector<HcommTeamHandle> subTeams = HcclTeamMgr::GetInstance().GetSubTeams(team);
+         for (HcommTeamHandle sub : subTeams) {
+-            (void)HcclTeamDestroy(sub);
++            HcclResult subRet = HcclTeamDestroy(sub);
++            CHK_PRT_RET(
++                subRet != HCCL_SUCCESS, HCCL_ERROR("[%s] subTeam[%p] destroy failed, ret[%d]", __func__, sub, subRet),
++                subRet);
+         }
+         // 再销毁 worldTeam 拥有的 window
+-        std::vector<WindowInfo> windows = HcclTeamMgr::GetInstance().GetWorldTeamWindows(team);
++        std::vector<WindowInfo> windows = HcclTeamMgr::GetInstance().GetWorldTeamWindowsForDestroy(team);
++        std::unordered_set<HcommWindowHandle> destroyedWindows;
+         for (const auto& win : windows) {
+-            if (win.handle != nullptr) {
+-                (void)HcommTeamWindowDeregister(team, win.handle);
++            if (win.handle != nullptr && destroyedWindows.insert(win.handle).second) {
++                HcclResult winRet = HcclTeamWindowDeregister(team, win.handle);
++                CHK_PRT_RET(
++                    winRet != HCCL_SUCCESS,
++                    HCCL_ERROR("[%s] window[%p] destroy failed, ret[%d]", __func__, win.handle, winRet), winRet);
+             }
+         }
+     }
+ 
+-    /* 释放该 team 的 syncMem（hrtFree）+ erase 条目。 */
+-    HcclTeamMgr::GetInstance().UnregisterTeam(team);
++    if (!destroyState.hcommDestroyed) {
++        HcommResult ret = HcommTeamDestroy(team);
++        CHK_PRT_RET(
++            ret != 0, HCCL_ERROR("[%s] HcommTeamDestroy failed, ret[%d]", __func__, ret),
++            static_cast<HcclResult>(ret));
++        CHK_PRT_RET(
++            !HcclTeamMgr::GetInstance().MarkTeamHcommDestroyed(team),
++            HCCL_ERROR("[%s] failed to record Hcomm team destruction, team[%p]", __func__, team), HCCL_E_INTERNAL);
++    }
++
++    /* Hcomm team 销毁成功后解除 syncMem 的域内 tag 绑定。endpoint MemReg 与共享 channel
++     * 由 MyRank 持有，留到通信域析构时统一释放。 */
++    if (!destroyState.syncMemUnregistered) {
++        if (destroyState.syncMemHandle != nullptr && !destroyState.syncMemTag.empty()) {
++            CHK_PTR_NULL(destroyState.collComm);
++            MyRank* myRank = destroyState.collComm->GetMyRank();
++            CHK_PTR_NULL(myRank);
++            CommMems* commMems = myRank->GetCommMems();
++            CHK_PTR_NULL(commMems);
++            HcclResult memRet = commMems->CommUnregMem(destroyState.syncMemTag, destroyState.syncMemHandle);
++            CHK_PRT_RET(
++                memRet != HCCL_SUCCESS,
++                HCCL_ERROR(
++                    "[%s] CommUnregMem failed for syncMem, tag[%s] memHandle[%p] ret[%d]", __func__,
++                    destroyState.syncMemTag.c_str(), destroyState.syncMemHandle, memRet),
++                memRet);
++        }
++        CHK_PRT_RET(
++            !HcclTeamMgr::GetInstance().MarkTeamSyncMemUnregistered(team),
++            HCCL_ERROR("[%s] failed to record syncMem deregistration, team[%p]", __func__, team), HCCL_E_INTERNAL);
++    }
+ 
+-    HcommResult ret = HcommTeamDestroy(team);
++    /* 所有外部步骤完成后才释放 syncMem 并移除 manager 条目；hrtFree 失败可重试。 */
++    HcclResult unregisterRet = HcclTeamMgr::GetInstance().UnregisterTeam(team);
+     CHK_PRT_RET(
+-        ret != 0, HCCL_ERROR("[%s] HcommTeamDestroy failed, ret[%d]", __func__, ret), static_cast<HcclResult>(ret));
++        unregisterRet != HCCL_SUCCESS,
++        HCCL_ERROR("[%s] UnregisterTeam failed, team[%p] ret[%d]", __func__, team, unregisterRet), unregisterRet);
+ 
+     HCCL_INFO("[%s] success", __func__);
+     return HCCL_SUCCESS;
+@@ -368,6 +439,12 @@ HcclResult HcclTeamWindowRegister(
+     CHK_PRT_RET(localMem->addr == nullptr, HCCL_ERROR("[%s] localMem addr is null", __func__), HCCL_E_PTR);
+     CHK_PRT_RET(localMem->size == 0, HCCL_ERROR("[%s] localMem size is 0", __func__), HCCL_E_PARA);
+ 
++    TeamOperationGuard operation = HcclTeamMgr::GetInstance().AcquireTeamOperation(worldTeam);
++    CHK_PRT_RET(
++        operation.IsClosing(), HCCL_ERROR("[%s] communication domain is being destroyed", __func__), HCCL_E_PARA);
++    CHK_PRT_RET(
++        !operation.IsReady(), HCCL_ERROR("[%s] worldTeam[%p] not registered", __func__, worldTeam), HCCL_E_PARA);
++
+     auto* hcclComm = static_cast<hccl::hcclComm*>(comm);
+     CollComm* collComm = hcclComm->GetCollComm();
+     CHK_PTR_NULL(collComm);
+@@ -377,11 +454,20 @@ HcclResult HcclTeamWindowRegister(
+     CHK_PRT_RET(
+         HcclTeamMgr::GetInstance().FindWorldTeam(worldTeam) != worldTeam,
+         HCCL_ERROR("[%s] worldTeam[%p] is not worldTeam", __func__, worldTeam), HCCL_E_PARA);
++    CHK_PRT_RET(
++        HcclTeamMgr::GetInstance().IsTeamDestroying(worldTeam),
++        HCCL_ERROR("[%s] worldTeam[%p] is being destroyed", __func__, worldTeam), HCCL_E_PARA);
+     CollComm* worldCollComm = HcclTeamMgr::GetInstance().FindCollComm(worldTeam);
+     CHK_PTR_NULL(worldCollComm);
+     CHK_PRT_RET(
+         worldCollComm->GetCommId() != commId,
+         HCCL_ERROR("[%s] worldTeam[%p] is not belong to comm[%s]", __func__, worldTeam, commId.c_str()), HCCL_E_PARA);
++    CHK_PRT_RET(
++        HcclTeamMgr::GetInstance().HasWorldTeamWindowInTeardown(worldTeam, *localMem),
++        HCCL_ERROR(
++            "[%s] localMem addr[%p] size[%llu] overlaps a window being deregistered", __func__, localMem->addr,
++            localMem->size),
++        HCCL_E_PARA);
+ 
+     auto myRank = collComm->GetMyRank();
+     CHK_PTR_NULL(myRank);
+@@ -403,6 +489,14 @@ HcclResult HcclTeamWindowDeregister(HcommTeamHandle team, HcommWindowHandle wind
+     CHK_PTR_NULL(team);
+     CHK_PTR_NULL(window);
+ 
++    TeamOperationGuard operation = HcclTeamMgr::GetInstance().AcquireTeamOperation(team);
++    CHK_PRT_RET(
++        operation.IsClosing(), HCCL_ERROR("[%s] communication domain is being destroyed", __func__), HCCL_E_PARA);
++    if (!operation.IsReady()) {
++        HCCL_WARNING("[%s] team[%p] not registered, maybe already destroyed", __func__, team);
++        return HCCL_SUCCESS;
++    }
++
+     /* 1. 取入参 team 对应的 worldTeam。 */
+     HcommTeamHandle worldTeam = HcclTeamMgr::GetInstance().FindWorldTeam(team);
+     CHK_PRT_RET(
+@@ -410,15 +504,50 @@ HcclResult HcclTeamWindowDeregister(HcommTeamHandle team, HcommWindowHandle wind
+         HCCL_WARNING("[%s] FindWorldTeam failed, team[%p] not registered, maybe already destroyed", __func__, team),
+         HCCL_SUCCESS);
+ 
+-    /* 2. 从 worldTeam 的 window 列表移除该 window 的记录（WindowInfo）。
+-     *    注：不注销 localMem 的 MemReg（由通信域析构兜底清理）；不处理 syncMem（team 粒度，team 销毁时释放）。 */
+-    HcclTeamMgr::GetInstance().RemoveWorldTeamWindow(worldTeam, window);
++    /* 2. 查询 owner 与注销进度，但在全部外部操作成功前保留 owner 和 alias。 */
++    WindowInfo owner{};
++    const bool registered
++        = HcclTeamMgr::GetInstance().GetWorldTeamWindowDeregisterState(worldTeam, window, owner);
+ 
+-    /* 3. 销毁 Hcomm 层 window。 */
+-    HcommResult ret = HcommTeamWindowDeregister(worldTeam, window);
+-    CHK_PRT_RET(
+-        ret != 0, HCCL_ERROR("[%s] HcommTeamWindowDeregister failed, ret[%d]", __func__, ret),
+-        static_cast<HcclResult>(ret));
++    /* 3. 销毁 Hcomm 层 window。成功后记录进度，使 CommMems 解绑失败可单独重试。 */
++    if (!registered || !owner.hcommDeregistered) {
++        HcommResult ret = HcommTeamWindowDeregister(worldTeam, window);
++        CHK_PRT_RET(
++            ret != 0, HCCL_ERROR("[%s] HcommTeamWindowDeregister failed, ret[%d]", __func__, ret),
++            static_cast<HcclResult>(ret));
++        CHK_PRT_RET(
++            registered && !HcclTeamMgr::GetInstance().MarkWorldTeamWindowDeregistered(worldTeam, window),
++            HCCL_ERROR("[%s] failed to record Hcomm deregistration, worldTeam[%p] window[%p]", __func__, worldTeam,
++                       window),
++            HCCL_E_INTERNAL);
++    }
++
++    /* 4. 只解除域内 tag 绑定，使同一地址可重新注册。endpoint MemReg 与共享 channel
++     * 都由 MyRank 持有并跨 team 复用，必须留到通信域析构时统一释放。 */
++    if (registered && owner.localMemHandle != nullptr && !owner.localMemTag.empty()) {
++        CollComm* collComm = HcclTeamMgr::GetInstance().FindCollComm(worldTeam);
++        CHK_PTR_NULL(collComm);
++        MyRank* myRank = collComm->GetMyRank();
++        CHK_PTR_NULL(myRank);
++        CommMems* commMems = myRank->GetCommMems();
++        CHK_PTR_NULL(commMems);
++        HcclResult memRet = commMems->CommUnregMem(owner.localMemTag, owner.localMemHandle);
++        CHK_PRT_RET(
++            memRet != HCCL_SUCCESS,
++            HCCL_ERROR(
++                "[%s] CommUnregMem failed, tag[%s] memHandle[%p] ret[%d]", __func__, owner.localMemTag.c_str(),
++                owner.localMemHandle, memRet),
++            memRet);
++    }
++
++    /* 5. 外部注销全部成功后，原子移除 owner 与全部子区间 alias。 */
++    if (registered) {
++        WindowInfo removedOwner{};
++        CHK_PRT_RET(
++            !HcclTeamMgr::GetInstance().TakeWorldTeamWindow(worldTeam, window, removedOwner),
++            HCCL_ERROR("[%s] failed to commit deregistration, worldTeam[%p] window[%p]", __func__, worldTeam, window),
++            HCCL_E_INTERNAL);
++    }
+ 
+     HCCL_INFO("[%s] success, team[%p] worldTeam[%p] window[%p]", __func__, team, worldTeam, window);
+     return HCCL_SUCCESS;
+@@ -670,6 +799,11 @@ HcclResult HcclTeamChannelsCreate(HcclComm comm, HcommTeamHandle team, const Hcc
+     CHK_PTR_NULL(desc);
+     CHK_PRT_RET(desc->channelCnt == 0, HCCL_ERROR("[%s] channelCnt is 0", __func__), HCCL_E_PARA);
+ 
++    TeamOperationGuard operation = HcclTeamMgr::GetInstance().AcquireTeamOperation(team);
++    CHK_PRT_RET(
++        operation.IsClosing(), HCCL_ERROR("[%s] communication domain is being destroyed", __func__), HCCL_E_PARA);
++    CHK_PRT_RET(!operation.IsReady(), HCCL_ERROR("[%s] team[%p] not registered", __func__, team), HCCL_E_PTR);
++
+     auto* hcclComm = static_cast<hccl::hcclComm*>(comm);
+     CollComm* collComm = hcclComm->GetCollComm();
+     CHK_PTR_NULL(collComm);
+diff --git a/src/coll_communicator_mgr/team/hccl/hccl_team_mgr.cc b/src/coll_communicator_mgr/team/hccl/hccl_team_mgr.cc
+index 2ec78bde..61bfa183 100644
+--- a/src/coll_communicator_mgr/team/hccl/hccl_team_mgr.cc
++++ b/src/coll_communicator_mgr/team/hccl/hccl_team_mgr.cc
+@@ -12,8 +12,11 @@
+ 
+ #include <algorithm>
+ #include <cstdint>
++#include <functional>
++#include <iterator>
+ #include <memory>
+ #include <mutex>
++#include <unordered_set>
+ #include <utility>
+ 
+ #include "adapter_rts_common.h"
+@@ -54,6 +57,7 @@ HcclResult HcclTeamMgr::RegisterWorldTeam(
+     entry.syncMemSize = syncMemSize;
+     entry.syncMemHandle = nullptr;
+     entry.syncMemTag.clear();
++    entry.lifecycleMutex = std::make_shared<std::recursive_mutex>();
+     entry.windows.clear();
+     entry.rankIds.assign(rankIds, rankIds + rankNum);
+     return HCCL_SUCCESS;
+@@ -71,8 +75,8 @@ HcclResult HcclTeamMgr::RegisterSubTeam(
+     }
+     std::unique_lock<std::shared_mutex> lock(mutex_);
+     auto worldIt = teamMap_.find(worldTeam);
+-    if (worldIt == teamMap_.end()) {
+-        HCCL_ERROR("[HcclTeamMgr][%s] worldTeam[%p] not registered", __func__, worldTeam);
++    if (worldIt == teamMap_.end() || worldIt->second.destroying) {
++        HCCL_ERROR("[HcclTeamMgr][%s] worldTeam[%p] not available", __func__, worldTeam);
+         return HCCL_E_PARA;
+     }
+     if (teamMap_.find(subTeam) != teamMap_.end()) {
+@@ -87,29 +91,106 @@ HcclResult HcclTeamMgr::RegisterSubTeam(
+     entry.syncMemSize = syncMemSize;
+     entry.syncMemHandle = nullptr;
+     entry.syncMemTag.clear();
++    entry.lifecycleMutex = worldIt->second.lifecycleMutex;
+     entry.windows.clear();
+     entry.rankIds.assign(rankIds, rankIds + rankNum);
+     return HCCL_SUCCESS;
+ }
+ 
+-void HcclTeamMgr::UnregisterTeam(HcommTeamHandle team)
++bool HcclTeamMgr::BeginTeamDestroy(HcommTeamHandle team, TeamDestroyState& state)
+ {
+     if (team == nullptr) {
+-        return;
++        return false;
++    }
++    std::unique_lock<std::shared_mutex> lock(mutex_);
++    auto it = teamMap_.find(team);
++    if (it == teamMap_.end()) {
++        return false;
++    }
++    TeamEntry& entry = it->second;
++    entry.destroying = true;
++    state.destroying = true;
++    state.hcommDestroyed = entry.hcommDestroyed;
++    state.syncMemUnregistered = entry.syncMemUnregistered;
++    state.worldTeam = (entry.worldTeam != nullptr) ? entry.worldTeam : team;
++    state.collComm = entry.collComm;
++    state.syncMemHandle = entry.syncMemHandle;
++    state.syncMemTag = entry.syncMemTag;
++    return true;
++}
++
++bool HcclTeamMgr::MarkTeamHcommDestroyed(HcommTeamHandle team)
++{
++    std::unique_lock<std::shared_mutex> lock(mutex_);
++    auto it = teamMap_.find(team);
++    if (it == teamMap_.end() || !it->second.destroying) {
++        return false;
++    }
++    it->second.hcommDestroyed = true;
++    return true;
++}
++
++bool HcclTeamMgr::MarkTeamSyncMemUnregistered(HcommTeamHandle team)
++{
++    std::unique_lock<std::shared_mutex> lock(mutex_);
++    auto it = teamMap_.find(team);
++    if (it == teamMap_.end() || !it->second.destroying || !it->second.hcommDestroyed) {
++        return false;
++    }
++    it->second.syncMemUnregistered = true;
++    return true;
++}
++
++bool HcclTeamMgr::IsTeamDestroying(HcommTeamHandle team)
++{
++    if (team == nullptr) {
++        return false;
++    }
++    std::shared_lock<std::shared_mutex> lock(mutex_);
++    auto it = teamMap_.find(team);
++    if (it == teamMap_.end()) {
++        return false;
++    }
++    if (it->second.destroying) {
++        return true;
++    }
++    if (it->second.worldTeam == nullptr) {
++        return false;
++    }
++    auto worldIt = teamMap_.find(it->second.worldTeam);
++    return worldIt != teamMap_.end() && worldIt->second.destroying;
++}
++
++HcclResult HcclTeamMgr::UnregisterTeam(HcommTeamHandle team)
++{
++    if (team == nullptr) {
++        return HCCL_SUCCESS;
++    }
++    auto lifecycleMutex = GetTeamLifecycleMutex(team);
++    std::unique_lock<std::recursive_mutex> lifecycleLock;
++    if (lifecycleMutex != nullptr) {
++        lifecycleLock = std::unique_lock<std::recursive_mutex>(*lifecycleMutex);
+     }
+     void* syncMemPtr = nullptr;
+     {
+-        std::unique_lock<std::shared_mutex> lock(mutex_);
++        std::shared_lock<std::shared_mutex> lock(mutex_);
+         auto it = teamMap_.find(team);
+         if (it == teamMap_.end()) {
+-            return;
++            return HCCL_SUCCESS;
+         }
+         syncMemPtr = it->second.syncMemPtr;
+-        teamMap_.erase(it);
+     }
+     if (syncMemPtr != nullptr) {
+-        (void)hrtFree(syncMemPtr);
++        HcclResult ret = hrtFree(syncMemPtr);
++        if (ret != HCCL_SUCCESS) {
++            HCCL_ERROR("[HcclTeamMgr][%s] hrtFree failed, team[%p] syncMemPtr[%p] ret[%d]", __func__, team,
++                       syncMemPtr, ret);
++            return ret;
++        }
+     }
++    std::unique_lock<std::shared_mutex> lock(mutex_);
++    teamMap_.erase(team);
++    return HCCL_SUCCESS;
+ }
+ 
+ CollComm* HcclTeamMgr::FindCollComm(HcommTeamHandle team)
+@@ -148,10 +229,66 @@ std::vector<uint32_t> HcclTeamMgr::GetRankIds(HcommTeamHandle team)
+     if (it == teamMap_.end()) {
+         return result;
+     }
+-    result = it->second.rankIds;
++    const TeamEntry& entry = it->second;
++    if (entry.destroying) {
++        return result;
++    }
++    if (entry.worldTeam != nullptr) {
++        auto worldIt = teamMap_.find(entry.worldTeam);
++        if (worldIt != teamMap_.end() && worldIt->second.destroying) {
++            return result;
++        }
++    }
++    result = entry.rankIds;
+     return result;
+ }
+ 
++std::shared_ptr<std::recursive_mutex> HcclTeamMgr::GetTeamLifecycleMutex(HcommTeamHandle team)
++{
++    if (team == nullptr) {
++        return nullptr;
++    }
++    std::shared_lock<std::shared_mutex> lock(mutex_);
++    auto it = teamMap_.find(team);
++    if (it == teamMap_.end()) {
++        return nullptr;
++    }
++    return it->second.lifecycleMutex;
++}
++
++TeamOperationGuard HcclTeamMgr::AcquireTeamOperation(HcommTeamHandle team)
++{
++    TeamOperationGuard guard;
++    if (team == nullptr) {
++        return guard;
++    }
++    {
++        std::shared_lock<std::shared_mutex> lock(mutex_);
++        auto it = teamMap_.find(team);
++        if (it == teamMap_.end() || it->second.collComm == nullptr || it->second.lifecycleMutex == nullptr) {
++            return guard;
++        }
++        guard.collComm_ = it->second.collComm;
++        guard.lifecycleMutex_ = it->second.lifecycleMutex;
++    }
++
++    guard.collCommLock_ = std::unique_lock<std::recursive_mutex>(guard.collComm_->GetTeamLifecycleMutex());
++    if (guard.collComm_->IsTeamLifecycleClosing()) {
++        guard.state_ = TeamOperationGuard::State::CLOSING;
++        return guard;
++    }
++    guard.lifecycleLock_ = std::unique_lock<std::recursive_mutex>(*guard.lifecycleMutex_);
++
++    std::shared_lock<std::shared_mutex> lock(mutex_);
++    auto it = teamMap_.find(team);
++    if (it == teamMap_.end() || it->second.collComm != guard.collComm_ ||
++        it->second.lifecycleMutex != guard.lifecycleMutex_) {
++        return guard;
++    }
++    guard.state_ = TeamOperationGuard::State::READY;
++    return guard;
++}
++
+ void* HcclTeamMgr::GetSyncMemPtr(HcommTeamHandle team)
+ {
+     CHK_PRT_RET(team == nullptr, HCCL_ERROR("[HcclTeamMgr][%s] team[%p] is invalid", __func__, team), nullptr);
+@@ -184,8 +321,8 @@ void HcclTeamMgr::SetTeamSyncMemHandle(HcommTeamHandle team, HcclMemHandle handl
+     }
+     std::unique_lock<std::shared_mutex> lock(mutex_);
+     auto it = teamMap_.find(team);
+-    if (it == teamMap_.end()) {
+-        HCCL_ERROR("[HcclTeamMgr][%s] team[%p] not registered", __func__, team);
++    if (it == teamMap_.end() || it->second.destroying) {
++        HCCL_ERROR("[HcclTeamMgr][%s] team[%p] not available", __func__, team);
+         return;
+     }
+     it->second.syncMemHandle = handle;
+@@ -223,13 +360,12 @@ bool HcclTeamMgr::FindReusableWindow(HcommTeamHandle worldTeam, const CommMem& l
+     }
+     std::unique_lock<std::shared_mutex> lock(mutex_);
+     auto it = teamMap_.find(worldTeam);
+-    if (it == teamMap_.end()) {
++    if (it == teamMap_.end() || it->second.destroying) {
+         return false;
+     }
+     // windows 按 registeredLocalMem.addr 升序
+     // upper_bound 找第一个 start > requestStart 的，反向遍历找包含请求区间的 window（请求是已注册 window 的子集）。
+     const uintptr_t requestStart = reinterpret_cast<uintptr_t>(localMem.addr);
+-    const uintptr_t requestEnd = requestStart + localMem.size;
+     auto& windows = it->second.windows;
+     auto upper
+         = std::upper_bound(windows.begin(), windows.end(), requestStart, [](uintptr_t addr, const WindowInfo& win) {
+@@ -237,16 +373,17 @@ bool HcclTeamMgr::FindReusableWindow(HcommTeamHandle worldTeam, const CommMem& l
+           });
+     for (auto wIt = upper; wIt != windows.begin();) {
+         --wIt;
+-        if (wIt->handle == nullptr) {
++        if (wIt->handle == nullptr || wIt->hcommDeregistered) {
+             continue;
+         }
+         const uintptr_t winStart = reinterpret_cast<uintptr_t>(wIt->registeredLocalMem.addr);
+-        const uintptr_t winEnd = winStart + wIt->registeredLocalMem.size;
+         // 请求区间是已注册 window 的子集（含精确匹配）→ 复用
+-        if (requestStart >= winStart && requestEnd <= winEnd) {
++        const uint64_t offset = (requestStart >= winStart) ? static_cast<uint64_t>(requestStart - winStart) : 0;
++        if (requestStart >= winStart && offset <= wIt->registeredLocalMem.size &&
++            localMem.size <= wIt->registeredLocalMem.size - offset) {
+             window = wIt->handle;
+             // 精确匹配（addr+size 完全相同）→ 已有记录，无需新增
+-            if (requestStart == winStart && requestEnd == winEnd) {
++            if (requestStart == winStart && localMem.size == wIt->registeredLocalMem.size) {
+                 return true;
+             }
+             // 子集包含但非精确匹配 → 复用 parent handle，为请求的 localMem 新增一条 WindowInfo，
+@@ -275,7 +412,7 @@ void HcclTeamMgr::AddWorldTeamWindow(
+     }
+     std::unique_lock<std::shared_mutex> lock(mutex_);
+     auto it = teamMap_.find(worldTeam);
+-    if (it == teamMap_.end()) {
++    if (it == teamMap_.end() || it->second.destroying) {
+         HCCL_ERROR("[HcclTeamMgr][%s] worldTeam[%p] not registered", __func__, worldTeam);
+         return;
+     }
+@@ -294,6 +431,23 @@ void HcclTeamMgr::AddWorldTeamWindow(
+ }
+ 
+ std::vector<WindowInfo> HcclTeamMgr::GetWorldTeamWindows(HcommTeamHandle worldTeam)
++{
++    std::vector<WindowInfo> result;
++    if (worldTeam == nullptr) {
++        return result;
++    }
++    std::shared_lock<std::shared_mutex> lock(mutex_);
++    auto it = teamMap_.find(worldTeam);
++    if (it == teamMap_.end()) {
++        return result;
++    }
++    std::copy_if(
++        it->second.windows.begin(), it->second.windows.end(), std::back_inserter(result),
++        [](const WindowInfo& info) { return !info.hcommDeregistered; });
++    return result;
++}
++
++std::vector<WindowInfo> HcclTeamMgr::GetWorldTeamWindowsForDestroy(HcommTeamHandle worldTeam)
+ {
+     std::vector<WindowInfo> result;
+     if (worldTeam == nullptr) {
+@@ -308,6 +462,33 @@ std::vector<WindowInfo> HcclTeamMgr::GetWorldTeamWindows(HcommTeamHandle worldTe
+     return result;
+ }
+ 
++bool HcclTeamMgr::HasWorldTeamWindowInTeardown(HcommTeamHandle worldTeam, const CommMem& localMem)
++{
++    if (worldTeam == nullptr || localMem.addr == nullptr || localMem.size == 0) {
++        return false;
++    }
++    std::shared_lock<std::shared_mutex> lock(mutex_);
++    auto it = teamMap_.find(worldTeam);
++    if (it == teamMap_.end()) {
++        return false;
++    }
++    const uintptr_t requestStart = reinterpret_cast<uintptr_t>(localMem.addr);
++    for (const auto& info : it->second.windows) {
++        if (!info.hcommDeregistered || info.registeredLocalMem.addr == nullptr ||
++            info.registeredLocalMem.size == 0) {
++            continue;
++        }
++        const uintptr_t windowStart = reinterpret_cast<uintptr_t>(info.registeredLocalMem.addr);
++        const bool overlaps = (requestStart <= windowStart)
++            ? (windowStart - requestStart < localMem.size)
++            : (requestStart - windowStart < info.registeredLocalMem.size);
++        if (overlaps) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ std::vector<HcclMemHandle> HcclTeamMgr::CollectPendingMemHandles(HcommTeamHandle worldTeam, HcommTeamHandle team)
+ {
+     std::vector<HcclMemHandle> result;
+@@ -316,11 +497,11 @@ std::vector<HcclMemHandle> HcclTeamMgr::CollectPendingMemHandles(HcommTeamHandle
+     }
+     std::unique_lock<std::shared_mutex> lock(mutex_);
+     auto itTeam = teamMap_.find(team);
+-    if (itTeam == teamMap_.end()) {
++    if (itTeam == teamMap_.end() || itTeam->second.destroying) {
+         return result;
+     }
+     auto itWorldTeam = teamMap_.find(worldTeam);
+-    if (itWorldTeam == teamMap_.end()) {
++    if (itWorldTeam == teamMap_.end() || itWorldTeam->second.destroying) {
+         return result;
+     }
+     // syncMemHandle：首次注册且未交换时收集
+@@ -330,7 +511,7 @@ std::vector<HcclMemHandle> HcclTeamMgr::CollectPendingMemHandles(HcommTeamHandle
+     }
+     // window localMemHandle：未交换的收集并标记
+     for (auto& win : itWorldTeam->second.windows) {
+-        if (!win.exchanged && win.localMemHandle != nullptr) {
++        if (!win.hcommDeregistered && !win.exchanged && win.localMemHandle != nullptr) {
+             result.push_back(win.localMemHandle);
+             win.exchanged = true;
+         }
+@@ -338,23 +519,76 @@ std::vector<HcclMemHandle> HcclTeamMgr::CollectPendingMemHandles(HcommTeamHandle
+     return result;
+ }
+ 
+-void HcclTeamMgr::RemoveWorldTeamWindow(HcommTeamHandle worldTeam, HcommWindowHandle window)
++bool HcclTeamMgr::GetWorldTeamWindowDeregisterState(
++    HcommTeamHandle worldTeam, HcommWindowHandle window, WindowInfo& owner)
+ {
+     if (worldTeam == nullptr || window == nullptr) {
+-        return;
++        return false;
++    }
++    std::shared_lock<std::shared_mutex> lock(mutex_);
++    auto it = teamMap_.find(worldTeam);
++    if (it == teamMap_.end()) {
++        return false;
++    }
++    bool found = false;
++    for (const auto& info : it->second.windows) {
++        if (info.handle != window) {
++            continue;
++        }
++        if (!found || (info.localMemHandle != nullptr && !info.localMemTag.empty())) {
++            owner = info;
++        }
++        found = true;
++    }
++    return found;
++}
++
++bool HcclTeamMgr::MarkWorldTeamWindowDeregistered(
++    HcommTeamHandle worldTeam, HcommWindowHandle window)
++{
++    if (worldTeam == nullptr || window == nullptr) {
++        return false;
+     }
+     std::unique_lock<std::shared_mutex> lock(mutex_);
+     auto it = teamMap_.find(worldTeam);
+     if (it == teamMap_.end()) {
+-        return;
++        return false;
++    }
++    bool found = false;
++    for (auto& info : it->second.windows) {
++        if (info.handle == window) {
++            info.hcommDeregistered = true;
++            found = true;
++        }
++    }
++    return found;
++}
++
++bool HcclTeamMgr::TakeWorldTeamWindow(
++    HcommTeamHandle worldTeam, HcommWindowHandle window, WindowInfo& owner)
++{
++    if (worldTeam == nullptr || window == nullptr) {
++        return false;
++    }
++    std::unique_lock<std::shared_mutex> lock(mutex_);
++    auto it = teamMap_.find(worldTeam);
++    if (it == teamMap_.end()) {
++        return false;
+     }
+     auto& wins = it->second.windows;
+-    for (auto wIt = wins.begin(); wIt != wins.end(); ++wIt) {
+-        if (wIt->handle == window) {
+-            wins.erase(wIt);
+-            return;
++    bool found = false;
++    for (auto wIt = wins.begin(); wIt != wins.end();) {
++        if (wIt->handle != window) {
++            ++wIt;
++            continue;
++        }
++        found = true;
++        if (wIt->localMemHandle != nullptr && !wIt->localMemTag.empty()) {
++            owner = *wIt;
+         }
++        wIt = wins.erase(wIt);
+     }
++    return found;
+ }
+ 
+ std::vector<HcommTeamHandle> HcclTeamMgr::GetSubTeams(HcommTeamHandle worldTeam)
+@@ -378,6 +612,30 @@ void HcclTeamMgr::ClearByCollComm(CollComm* collComm)
+     if (collComm == nullptr) {
+         return;
+     }
++    std::unique_lock<std::recursive_mutex> collCommLifecycleLock(collComm->GetTeamLifecycleMutex());
++    collComm->MarkTeamLifecycleClosing();
++    std::vector<std::shared_ptr<std::recursive_mutex>> lifecycleMutexes;
++    {
++        std::shared_lock<std::shared_mutex> lock(mutex_);
++        std::unordered_set<std::recursive_mutex*> seen;
++        for (const auto& pair : teamMap_) {
++            const auto& lifecycleMutex = pair.second.lifecycleMutex;
++            if (pair.second.collComm == collComm && lifecycleMutex != nullptr &&
++                seen.insert(lifecycleMutex.get()).second) {
++                lifecycleMutexes.push_back(lifecycleMutex);
++            }
++        }
++    }
++    std::sort(
++        lifecycleMutexes.begin(), lifecycleMutexes.end(),
++        [](const auto& lhs, const auto& rhs) {
++            return std::less<std::recursive_mutex*>{}(lhs.get(), rhs.get());
++        });
++    std::vector<std::unique_lock<std::recursive_mutex>> lifecycleLocks;
++    lifecycleLocks.reserve(lifecycleMutexes.size());
++    for (const auto& lifecycleMutex : lifecycleMutexes) {
++        lifecycleLocks.emplace_back(*lifecycleMutex);
++    }
+     // 锁内收集并 erase，锁外销毁，避免持 L2 锁调 L3 接口（锁嵌套/死锁风险）
+     std::vector<TeamCleanupInfo> cleanupInfos = CollectTeamCleanupInfo(collComm);
+     ExecuteTeamCleanup(cleanupInfos);
+@@ -395,10 +653,12 @@ std::vector<HcclTeamMgr::TeamCleanupInfo> HcclTeamMgr::CollectTeamCleanupInfo(Co
+         TeamCleanupInfo info;
+         info.handle = it->first;
+         info.syncMemPtr = it->second.syncMemPtr;
++        info.hcommDestroyed = it->second.hcommDestroyed;
+         // window 归 worldTeam 所有（entry.worldTeam==nullptr 表示自身是 worldTeam）
+         if (it->second.worldTeam == nullptr) {
++            std::unordered_set<HcommWindowHandle> uniqueWindows;
+             for (const auto& win : it->second.windows) {
+-                if (win.handle != nullptr) {
++                if (!win.hcommDeregistered && win.handle != nullptr && uniqueWindows.insert(win.handle).second) {
+                     info.windows.push_back(win.handle);
+                 }
+             }
+@@ -416,7 +676,9 @@ void HcclTeamMgr::ExecuteTeamCleanup(const std::vector<TeamCleanupInfo>& cleanup
+         for (HcommWindowHandle win : info.windows) {
+             (void)HcommTeamWindowDeregister(info.handle, win);
+         }
+-        (void)HcommTeamDestroy(info.handle);
++        if (!info.hcommDestroyed) {
++            (void)HcommTeamDestroy(info.handle);
++        }
+         if (info.syncMemPtr != nullptr) {
+             (void)hrtFree(info.syncMemPtr);
+         }
+diff --git a/src/coll_communicator_mgr/team/hccl/hccl_team_mgr.h b/src/coll_communicator_mgr/team/hccl/hccl_team_mgr.h
+index 0b10accb..5bf75591 100644
+--- a/src/coll_communicator_mgr/team/hccl/hccl_team_mgr.h
++++ b/src/coll_communicator_mgr/team/hccl/hccl_team_mgr.h
+@@ -11,6 +11,8 @@
+ #ifndef HCCL_TEAM_MGR_H
+ #define HCCL_TEAM_MGR_H
+ 
++#include <memory>
++#include <mutex>
+ #include <shared_mutex>
+ #include <string>
+ #include <unordered_map>
+@@ -36,8 +38,19 @@ typedef struct {
+     HcclMemHandle localMemHandle{nullptr}; // localMem 注册得到的句柄
+     std::string localMemTag;               // localMem 的 memTag（ChannelsCreate 远端 tag 匹配用）
+     bool exchanged{false};                 // 是否已参与建链交换，避免重复交换
++    bool hcommDeregistered{false};          // Hcomm window 已销毁，等待完成剩余解绑步骤
+ } WindowInfo;
+ 
++typedef struct {
++    bool destroying{false};
++    bool hcommDestroyed{false};
++    bool syncMemUnregistered{false};
++    HcommTeamHandle worldTeam{nullptr};
++    CollComm* collComm{nullptr};
++    HcclMemHandle syncMemHandle{nullptr};
++    std::string syncMemTag;
++} TeamDestroyState;
++
+ typedef struct {
+     CollComm* collComm{nullptr};        // 反查通信域
+     HcommTeamHandle worldTeam{nullptr}; // 父 world team；world team 自身为 nullptr
+@@ -47,12 +60,38 @@ typedef struct {
+     HcclMemHandle syncMemHandle{nullptr};
+     std::string syncMemTag;
+     bool syncMemExchanged{false}; // syncMemHandle 是否已参与建链交换，避免重复交换
++    bool destroying{false};
++    bool hcommDestroyed{false};
++    bool syncMemUnregistered{false};
++    std::shared_ptr<std::recursive_mutex> lifecycleMutex;
+     // worldTeam 下注册的所有 window（1:N，仅 world team 条目填充）
+     std::vector<WindowInfo> windows;
+     // memberId→rankId 映射，下标=memberId，值=rankId。L2 维护，rankId 不下沉 L3。
+     std::vector<uint32_t> rankIds;
+ } TeamEntry;
+ 
++class TeamOperationGuard {
++public:
++    TeamOperationGuard() = default;
++    TeamOperationGuard(TeamOperationGuard&&) = default;
++    TeamOperationGuard& operator=(TeamOperationGuard&&) = default;
++    TeamOperationGuard(const TeamOperationGuard&) = delete;
++    TeamOperationGuard& operator=(const TeamOperationGuard&) = delete;
++
++    bool IsReady() const { return state_ == State::READY; }
++    bool IsClosing() const { return state_ == State::CLOSING; }
++
++private:
++    friend class HcclTeamMgr;
++    enum class State { UNAVAILABLE, READY, CLOSING };
++
++    State state_{State::UNAVAILABLE};
++    CollComm* collComm_{nullptr};
++    std::shared_ptr<std::recursive_mutex> lifecycleMutex_;
++    std::unique_lock<std::recursive_mutex> collCommLock_;
++    std::unique_lock<std::recursive_mutex> lifecycleLock_;
++};
++
+ class HcclTeamMgr {
+ public:
+     static HcclTeamMgr& GetInstance();
+@@ -66,8 +105,13 @@ public:
+     HcclResult RegisterSubTeam(
+         HcommTeamHandle worldTeam, HcommTeamHandle subTeam, void* syncMemPtr, uint64_t syncMemSize,
+         const uint32_t* rankIds, uint32_t rankNum);
+-    // 销毁 team：hrtFree syncMem + erase 自身。memHandles 不注销。
+-    void UnregisterTeam(HcommTeamHandle team);
++    // 开始或恢复销毁，返回当前阶段快照；未注册返回 false。
++    bool BeginTeamDestroy(HcommTeamHandle team, TeamDestroyState& state);
++    bool MarkTeamHcommDestroyed(HcommTeamHandle team);
++    bool MarkTeamSyncMemUnregistered(HcommTeamHandle team);
++    bool IsTeamDestroying(HcommTeamHandle team);
++    // 最终释放 syncMem 并 erase 自身；hrtFree 失败时保留条目供重试。
++    HcclResult UnregisterTeam(HcommTeamHandle team);
+ 
+     // —— 查询 ——
+     CollComm* FindCollComm(HcommTeamHandle team);
+@@ -75,6 +119,10 @@ public:
+     HcommTeamHandle FindWorldTeam(HcommTeamHandle team);
+     // 取 team 的 rankIds（memberId→rankId 映射）拷贝，未找到返回空。
+     std::vector<uint32_t> GetRankIds(HcommTeamHandle team);
++    // world/sub team 共享的生命周期锁，串行化正常操作与销毁操作。
++    std::shared_ptr<std::recursive_mutex> GetTeamLifecycleMutex(HcommTeamHandle team);
++    // 固定按 CollComm gate -> world/sub hierarchy lock 顺序获取操作锁，并拒绝 closing 通信域。
++    TeamOperationGuard AcquireTeamOperation(HcommTeamHandle team);
+ 
+     // —— syncMem ——
+     void* GetSyncMemPtr(HcommTeamHandle team);
+@@ -93,12 +141,21 @@ public:
+     void AddWorldTeamWindow(
+         HcommTeamHandle worldTeam, HcommWindowHandle window, const CommMem& localMem, HcclMemHandle localMemHandle,
+         const std::string& localMemTag);
+-    // 取 worldTeam 的所有 window（拷贝），供 ChannelsCreate 遍历绑定。
++    // 取 worldTeam 中仍可使用的 window（拷贝），供 ChannelsCreate 遍历绑定。
+     std::vector<WindowInfo> GetWorldTeamWindows(HcommTeamHandle worldTeam);
++    // 取 worldTeam 的完整 window 列表（含注销中的记录），仅供销毁流程恢复使用。
++    std::vector<WindowInfo> GetWorldTeamWindowsForDestroy(HcommTeamHandle worldTeam);
++    // 查询 localMem 是否与已完成 Hcomm 注销、尚未完成内存解绑的 window 区间重叠。
++    bool HasWorldTeamWindowInTeardown(HcommTeamHandle worldTeam, const CommMem& localMem);
+     // 收集未交换的 memHandles（syncMemHandle + window localMemHandle），标记已交换，避免重复建链交换。
+     std::vector<HcclMemHandle> CollectPendingMemHandles(HcommTeamHandle worldTeam, HcommTeamHandle team);
+-    // 从 worldTeam 的 window 列表移除指定 window 的记录（HcclTeamWindowDeregister 用）。
+-    void RemoveWorldTeamWindow(HcommTeamHandle worldTeam, HcommWindowHandle window);
++    // 查询 window 注销进度，不移除 owner 或 alias，供失败后重试。
++    bool GetWorldTeamWindowDeregisterState(
++        HcommTeamHandle worldTeam, HcommWindowHandle window, WindowInfo& owner);
++    // 标记 Hcomm 层 window 已销毁；owner/alias 保留到 CommMems 解绑成功。
++    bool MarkWorldTeamWindowDeregistered(HcommTeamHandle worldTeam, HcommWindowHandle window);
++    // 原子移除指定 handle 的全部记录（含子区间 alias），并返回持有内存注册信息的 owner 记录。
++    bool TakeWorldTeamWindow(HcommTeamHandle worldTeam, HcommWindowHandle window, WindowInfo& owner);
+ 
+     // 取 worldTeam 下所有 subTeam 的 handle（worldTeam 销毁时连带销毁用）。锁内收集，调用方锁外销毁。
+     std::vector<HcommTeamHandle> GetSubTeams(HcommTeamHandle worldTeam);
+@@ -117,6 +174,7 @@ private:
+         HcommTeamHandle handle{nullptr};
+         std::vector<HcommWindowHandle> windows; // 仅 worldTeam 非空
+         void* syncMemPtr{nullptr};
++        bool hcommDestroyed{false};
+     };
+     // 锁内收集该通信域下所有 team 的销毁信息并 erase teamMap 条目
+     std::vector<TeamCleanupInfo> CollectTeamCleanupInfo(CollComm* collComm);
+diff --git a/test/ut/framework/next/coll_comms/rank/ut_shared_jetty_channel_pool.cc b/test/ut/framework/next/coll_comms/rank/ut_shared_jetty_channel_pool.cc
+index 77fa1e20..09fd94a6 100644
+--- a/test/ut/framework/next/coll_comms/rank/ut_shared_jetty_channel_pool.cc
++++ b/test/ut/framework/next/coll_comms/rank/ut_shared_jetty_channel_pool.cc
+@@ -142,6 +142,50 @@ TEST_F(SharedJettyChannelPoolTest, Ut_AcquireChannels_When_AllReuse_Expect_Succe
+     EXPECT_EQ(reusedCount, 2U);
+ }
+ 
++TEST_F(SharedJettyChannelPoolTest, Ut_AcquireChannels_When_MemoryVersionChanges_Expect_NewGeneration)
++{
++    MyRank* myRank = reinterpret_cast<MyRank*>(0x1);
++    EndpointDescPair epPair = MakeEpPair(0x01000001, 0x02000001);
++    constexpr uint64_t firstVersion = 1;
++    constexpr uint64_t secondVersion = 2;
++
++    ChannelHandle first[1];
++    uint32_t reusedCount = 1;
++    ASSERT_EQ(
++        SharedJettyChannelPool::GetInstance().AcquireChannels(
++            myRank, "tag1", firstVersion, epPair, 1, CreateChannelsStub, first, &reusedCount),
++        HCCL_SUCCESS);
++    EXPECT_EQ(reusedCount, 0U);
++    EXPECT_EQ(first[0], 0x1000);
++
++    ChannelHandle sameVersion[1];
++    reusedCount = 0;
++    ASSERT_EQ(
++        SharedJettyChannelPool::GetInstance().AcquireChannels(
++            myRank, "tag1", firstVersion, epPair, 1, CreateChannelsStub, sameVersion, &reusedCount),
++        HCCL_SUCCESS);
++    EXPECT_EQ(reusedCount, 1U);
++    EXPECT_EQ(sameVersion[0], first[0]);
++
++    ChannelHandle nextGeneration[1];
++    reusedCount = 1;
++    ASSERT_EQ(
++        SharedJettyChannelPool::GetInstance().AcquireChannels(
++            myRank, "tag1", secondVersion, epPair, 1, CreateChannelsStub, nextGeneration, &reusedCount),
++        HCCL_SUCCESS);
++    EXPECT_EQ(reusedCount, 0U);
++    EXPECT_NE(nextGeneration[0], first[0]);
++
++    ChannelHandle retainedFirst[1];
++    reusedCount = 0;
++    ASSERT_EQ(
++        SharedJettyChannelPool::GetInstance().AcquireChannels(
++            myRank, "tag1", firstVersion, epPair, 1, CreateChannelsStub, retainedFirst, &reusedCount),
++        HCCL_SUCCESS);
++    EXPECT_EQ(reusedCount, 1U);
++    EXPECT_EQ(retainedFirst[0], first[0]);
++}
++
+ TEST_F(SharedJettyChannelPoolTest, Ut_AcquireChannels_When_PartialReuse_Expect_Success)
+ {
+     MyRank* myRank = reinterpret_cast<MyRank*>(0x1);
+@@ -288,7 +332,7 @@ TEST_F(SharedJettyChannelPoolTest, Ut_RemoveChannels_When_Normal_Expect_Removed)
+     SharedJettyChannelPool::GetInstance().RemoveChannels(myRank, "tag1", epPair, toRemove, 1);
+ 
+     auto& rankPool = SharedJettyChannelPool::GetInstance().rankPools_[myRank];
+-    auto& epChannels = rankPool["tag1"][epPair];
++    auto& epChannels = rankPool["tag1"][0][epPair];
+     EXPECT_EQ(epChannels.channels.size(), 2U);
+ }
+ 
+@@ -305,7 +349,7 @@ TEST_F(SharedJettyChannelPoolTest, Ut_RemoveChannels_When_AllRemoved_Expect_Empt
+     SharedJettyChannelPool::GetInstance().RemoveChannels(myRank, "tag1", epPair, toRemove, 2);
+ 
+     auto& rankPool = SharedJettyChannelPool::GetInstance().rankPools_[myRank];
+-    auto& epChannels = rankPool["tag1"][epPair];
++    auto& epChannels = rankPool["tag1"][0][epPair];
+     EXPECT_EQ(epChannels.channels.size(), 0U);
+     EXPECT_EQ(epChannels.nextReturnIdx, 0U);
+ }
+@@ -323,7 +367,7 @@ TEST_F(SharedJettyChannelPoolTest, Ut_RemoveChannels_When_NotFound_Expect_NoChan
+     SharedJettyChannelPool::GetInstance().RemoveChannels(myRank, "tag1", epPair, toRemove, 1);
+ 
+     auto& rankPool = SharedJettyChannelPool::GetInstance().rankPools_[myRank];
+-    auto& epChannels = rankPool["tag1"][epPair];
++    auto& epChannels = rankPool["tag1"][0][epPair];
+     EXPECT_EQ(epChannels.channels.size(), 2U);
+ }
+ 
+@@ -347,5 +391,5 @@ TEST_F(SharedJettyChannelPoolTest, Ut_RemoveChannels_When_NoMatchingTag_Expect_N
+     ChannelHandle toRemove[] = {out[0]};
+     SharedJettyChannelPool::GetInstance().RemoveChannels(myRank, "nonexistent", epPair, toRemove, 1);
+     auto& rankPool = SharedJettyChannelPool::GetInstance().rankPools_[myRank];
+-    EXPECT_EQ(rankPool["tag1"][epPair].channels.size(), 2U);
++    EXPECT_EQ(rankPool["tag1"][0][epPair].channels.size(), 2U);
+ }
+diff --git a/test/ut/framework/next/coll_comms/resource_mgr/endpoints/ut_endpoint_mgr.cc b/test/ut/framework/next/coll_comms/resource_mgr/endpoints/ut_endpoint_mgr.cc
+index 004c22a3..9501e400 100644
+--- a/test/ut/framework/next/coll_comms/resource_mgr/endpoints/ut_endpoint_mgr.cc
++++ b/test/ut/framework/next/coll_comms/resource_mgr/endpoints/ut_endpoint_mgr.cc
+@@ -10,6 +10,7 @@
+ 
+ #include "gtest/gtest.h"
+ #include "mockcpp/mokc.h"
++#include <algorithm>
+ #include <mockcpp/mockcpp.hpp>
+ 
+ #include "endpoint_mgr.h"
+@@ -163,6 +164,28 @@ TEST_F(EndpointMgrTest, RegisterMemory_MixedDuplicateAndNewTags)
+     EXPECT_EQ(s_regTags[1], "B");
+ }
+ 
++TEST(TaggedMemMapTest, SameTagChangedAddressSwitchesCurrentHandleAndRetainsPreviousHandle)
++{
++    TaggedMemMap taggedMap(nullptr);
++    HcclMem firstMem = {HCCL_MEM_TYPE_DEVICE, (void*)0x1000, 1024};
++    HcclMem secondMem = {HCCL_MEM_TYPE_DEVICE, (void*)0x2000, 1024};
++    MemHandle firstHandle = (MemHandle)0xCC110001;
++    MemHandle secondHandle = (MemHandle)0xCC110002;
++
++    taggedMap.UpdateHandle("A", firstMem, firstHandle);
++    EXPECT_TRUE(taggedMap.HasSameMemory("A", firstMem));
++    EXPECT_FALSE(taggedMap.HasSameMemory("A", secondMem));
++
++    taggedMap.UpdateHandle("A", secondMem, secondHandle);
++    EXPECT_EQ(taggedMap.FindHandle("A"), secondHandle);
++    EXPECT_TRUE(taggedMap.HasSameMemory("A", secondMem));
++
++    const auto cleanupHandles = taggedMap.GetAllHandles();
++    EXPECT_EQ(cleanupHandles.size(), 2U);
++    EXPECT_NE(std::find(cleanupHandles.begin(), cleanupHandles.end(), firstHandle), cleanupHandles.end());
++    EXPECT_NE(std::find(cleanupHandles.begin(), cleanupHandles.end(), secondHandle), cleanupHandles.end());
++}
++
+ TEST_F(EndpointMgrTest, RegisterMemory_DifferentEndpointsSeparateReg)
+ {
+     MOCKER(HcommMemReg)
+diff --git a/test/ut/framework/next/coll_comms/team/hccl/ut_hccl_team_c_adpt.cc b/test/ut/framework/next/coll_comms/team/hccl/ut_hccl_team_c_adpt.cc
+index 34b1bb41..c8d1b1fe 100644
+--- a/test/ut/framework/next/coll_comms/team/hccl/ut_hccl_team_c_adpt.cc
++++ b/test/ut/framework/next/coll_comms/team/hccl/ut_hccl_team_c_adpt.cc
+@@ -20,8 +20,12 @@
+ #include "gtest/gtest.h"
+ #include "mockcpp/mockcpp.hpp"
+ 
++#include <chrono>
+ #include <cstring>
++#include <future>
++#include <limits>
+ #include <string>
++#include <thread>
+ #include <vector>
+ 
+ #include "hccl_team.h"
+@@ -58,6 +62,7 @@ HcommWindowHandle g_fakeWindow = reinterpret_cast<HcommWindowHandle>(0x30000);
+ void* g_fakeWsPtr = reinterpret_cast<void*>(0x40000);
+ HcclMemHandle g_fakeUserMemHandle = reinterpret_cast<HcclMemHandle>(0x60000);
+ ChannelHandle g_fakeChannel = static_cast<ChannelHandle>(0x70000);
++int g_windowDeregisterFailuresRemaining = 0;
+ 
+ // HcommTeamGetWorldTeamIds 出参缓冲：memberNum=4，selfMemberId 由调用方设定。
+ uint32_t g_worldTeamIds4[4] = {1, 3, 5, 7};
+@@ -141,6 +146,15 @@ HcommResult StubTeamWindowRegisterFill(
+     return 0;
+ }
+ 
++HcommResult StubTeamWindowDeregisterFailThenSucceed(HcommTeamHandle, HcommWindowHandle)
++{
++    if (g_windowDeregisterFailuresRemaining > 0) {
++        --g_windowDeregisterFailuresRemaining;
++        return static_cast<HcommResult>(HCCL_E_INTERNAL);
++    }
++    return 0;
++}
++
+ // —— HcommTeamCreate 桩：返回 ok 但 *team=nullptr（触发 E_INTERNAL 分支）——
+ HcommResult StubTeamCreateReturnNullTeam(
+     HcommTeamHandle worldTeam, const HcommTeamCreateDesc* desc, HcommTeamHandle* team, uint64_t* outSyncMemSize)
+@@ -213,6 +227,19 @@ HcclResult StubHrtMallocFill(void** devPtr, u64 size, bool level2Address)
+     return HCCL_SUCCESS;
+ }
+ 
++uint32_t g_hrtMemSetCallCnt = 0;
++void* g_hrtMemSetDst = nullptr;
++uint64_t g_hrtMemSetDestMax = 0;
++uint64_t g_hrtMemSetCount = 0;
++HcclResult StubHrtMemSetRecord(void* dst, uint64_t destMax, uint64_t count)
++{
++    g_hrtMemSetCallCnt++;
++    g_hrtMemSetDst = dst;
++    g_hrtMemSetDestMax = destMax;
++    g_hrtMemSetCount = count;
++    return HCCL_SUCCESS;
++}
++
+ // HcclRankGraphGetLinks 出参桩：返回单条 ROCE 链路。
+ CommLink g_fakeLink{};
+ HcclResult StubRankGraphGetLinks(
+@@ -346,6 +373,296 @@ void BuildChannelDesc(HcclTeamCreateChannelsDesc& desc, CommEngine engine, uint3
+ }
+ } // namespace
+ 
++// Regression: a contained range aliases its parent's Hcomm window handle. Deregistering
++// that handle must remove every alias so no stale range can be reused afterward.
++TEST(UtHcclTeamMgr, Ut_RemoveWorldTeamWindow_When_HandleHasAliases_Expect_AllAliasesRemoved)
++{
++    HcommTeamHandle worldTeam = reinterpret_cast<HcommTeamHandle>(0x81000);
++    CollComm* collComm = reinterpret_cast<CollComm*>(0x82000);
++    uint32_t rankIds[2] = {0, 1};
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterWorldTeam(worldTeam, collComm, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++
++    CommMem parentMem{};
++    parentMem.type = COMM_MEM_TYPE_DEVICE;
++    parentMem.addr = reinterpret_cast<void*>(0x100000);
++    parentMem.size = 4096;
++    HcommWindowHandle window = reinterpret_cast<HcommWindowHandle>(0x83000);
++    HcclTeamMgr::GetInstance().AddWorldTeamWindow(
++        worldTeam, window, parentMem, reinterpret_cast<HcclMemHandle>(0x84000), "parent-tag");
++
++    CommMem childMem{};
++    childMem.type = COMM_MEM_TYPE_DEVICE;
++    childMem.addr = reinterpret_cast<void*>(0x100400);
++    childMem.size = 512;
++    HcommWindowHandle reusedWindow = nullptr;
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().FindReusableWindow(worldTeam, childMem, reusedWindow));
++    ASSERT_EQ(reusedWindow, window);
++    ASSERT_EQ(HcclTeamMgr::GetInstance().GetWorldTeamWindows(worldTeam).size(), 2U);
++
++    WindowInfo owner{};
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().TakeWorldTeamWindow(worldTeam, window, owner));
++    EXPECT_EQ(owner.handle, window);
++    EXPECT_EQ(owner.localMemHandle, reinterpret_cast<HcclMemHandle>(0x84000));
++    EXPECT_EQ(owner.localMemTag, "parent-tag");
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().GetWorldTeamWindows(worldTeam).empty());
++    HcclTeamMgr::GetInstance().UnregisterTeam(worldTeam);
++}
++
++TEST(UtHcclTeamMgr, Ut_FindReusableWindow_When_AddressRangeNearUintptrMax_Expect_SubsetReused)
++{
++    HcommTeamHandle worldTeam = reinterpret_cast<HcommTeamHandle>(0x95000);
++    CollComm* collComm = reinterpret_cast<CollComm*>(0x96000);
++    uint32_t rankIds[2] = {0, 1};
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterWorldTeam(worldTeam, collComm, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++
++    const uintptr_t maxAddress = std::numeric_limits<uintptr_t>::max();
++    CommMem parentMem{};
++    parentMem.type = COMM_MEM_TYPE_DEVICE;
++    parentMem.addr = reinterpret_cast<void*>(maxAddress - 4095);
++    parentMem.size = 4096;
++    HcommWindowHandle window = reinterpret_cast<HcommWindowHandle>(0x97000);
++    HcclTeamMgr::GetInstance().AddWorldTeamWindow(
++        worldTeam, window, parentMem, reinterpret_cast<HcclMemHandle>(0x98000), "high-address-tag");
++
++    CommMem childMem{};
++    childMem.type = COMM_MEM_TYPE_DEVICE;
++    childMem.addr = reinterpret_cast<void*>(maxAddress - 2047);
++    childMem.size = 1024;
++    HcommWindowHandle reusedWindow = nullptr;
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().FindReusableWindow(worldTeam, childMem, reusedWindow));
++    EXPECT_EQ(reusedWindow, window);
++
++    HcclTeamMgr::GetInstance().UnregisterTeam(worldTeam);
++}
++
++TEST(UtHcclTeamMgr, Ut_WindowDeregisterState_When_HcommCompletes_Expect_RetryableCommit)
++{
++    HcommTeamHandle worldTeam = reinterpret_cast<HcommTeamHandle>(0x85000);
++    CollComm* collComm = reinterpret_cast<CollComm*>(0x86000);
++    uint32_t rankIds[2] = {0, 1};
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterWorldTeam(worldTeam, collComm, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++
++    CommMem parentMem{};
++    parentMem.type = COMM_MEM_TYPE_DEVICE;
++    parentMem.addr = reinterpret_cast<void*>(0x200000);
++    parentMem.size = 4096;
++    HcommWindowHandle window = reinterpret_cast<HcommWindowHandle>(0x87000);
++    HcclTeamMgr::GetInstance().AddWorldTeamWindow(
++        worldTeam, window, parentMem, reinterpret_cast<HcclMemHandle>(0x88000), "retry-tag");
++
++    CommMem childMem{};
++    childMem.type = COMM_MEM_TYPE_DEVICE;
++    childMem.addr = reinterpret_cast<void*>(0x200400);
++    childMem.size = 512;
++    HcommWindowHandle reusedWindow = nullptr;
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().FindReusableWindow(worldTeam, childMem, reusedWindow));
++
++    WindowInfo owner{};
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().GetWorldTeamWindowDeregisterState(worldTeam, window, owner));
++    EXPECT_FALSE(owner.hcommDeregistered);
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().MarkWorldTeamWindowDeregistered(worldTeam, window));
++
++    owner = {};
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().GetWorldTeamWindowDeregisterState(worldTeam, window, owner));
++    EXPECT_TRUE(owner.hcommDeregistered);
++    EXPECT_EQ(owner.localMemHandle, reinterpret_cast<HcclMemHandle>(0x88000));
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().GetWorldTeamWindows(worldTeam).empty());
++    EXPECT_EQ(HcclTeamMgr::GetInstance().GetWorldTeamWindowsForDestroy(worldTeam).size(), 2U);
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().HasWorldTeamWindowInTeardown(worldTeam, parentMem));
++
++    CommMem overlappingMem = parentMem;
++    overlappingMem.addr = reinterpret_cast<void*>(0x200F00);
++    overlappingMem.size = 512;
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().HasWorldTeamWindowInTeardown(worldTeam, overlappingMem));
++
++    CommMem disjointMem = parentMem;
++    disjointMem.addr = reinterpret_cast<void*>(0x201000);
++    EXPECT_FALSE(HcclTeamMgr::GetInstance().HasWorldTeamWindowInTeardown(worldTeam, disjointMem));
++
++    WindowInfo removedOwner{};
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().TakeWorldTeamWindow(worldTeam, window, removedOwner));
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().GetWorldTeamWindows(worldTeam).empty());
++    HcclTeamMgr::GetInstance().UnregisterTeam(worldTeam);
++}
++
++TEST(UtHcclTeamMgr, Ut_TeamDestroyState_When_WorldTeardownBegins_Expect_SubTeamUnavailable)
++{
++    HcommTeamHandle worldTeam = reinterpret_cast<HcommTeamHandle>(0x8F000);
++    HcommTeamHandle subTeam = reinterpret_cast<HcommTeamHandle>(0x90000);
++    CollComm* collComm = reinterpret_cast<CollComm*>(0x91000);
++    uint32_t rankIds[2] = {0, 1};
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterWorldTeam(worldTeam, collComm, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterSubTeam(worldTeam, subTeam, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++
++    TeamDestroyState state{};
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().BeginTeamDestroy(worldTeam, state));
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().IsTeamDestroying(subTeam));
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().GetRankIds(subTeam).empty());
++
++    HcclTeamMgr::GetInstance().UnregisterTeam(subTeam);
++    HcclTeamMgr::GetInstance().UnregisterTeam(worldTeam);
++}
++
++TEST(UtHcclTeamMgr, Ut_TeamLifecycleMutex_When_SubTeamRegistered_Expect_SharedWithWorldTeam)
++{
++    HcommTeamHandle worldTeam = reinterpret_cast<HcommTeamHandle>(0x92000);
++    HcommTeamHandle subTeam = reinterpret_cast<HcommTeamHandle>(0x93000);
++    CollComm* collComm = reinterpret_cast<CollComm*>(0x94000);
++    uint32_t rankIds[2] = {0, 1};
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterWorldTeam(worldTeam, collComm, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterSubTeam(worldTeam, subTeam, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++
++    auto worldMutex = HcclTeamMgr::GetInstance().GetTeamLifecycleMutex(worldTeam);
++    auto subMutex = HcclTeamMgr::GetInstance().GetTeamLifecycleMutex(subTeam);
++    ASSERT_NE(worldMutex, nullptr);
++    EXPECT_EQ(subMutex, worldMutex);
++
++    std::unique_lock<std::recursive_mutex> worldLock(*worldMutex);
++    EXPECT_TRUE(subMutex->try_lock());
++    subMutex->unlock();
++
++    HcclTeamMgr::GetInstance().UnregisterTeam(subTeam);
++    HcclTeamMgr::GetInstance().UnregisterTeam(worldTeam);
++}
++
++TEST(UtHcclTeamMgr, Ut_TeamOperationGuard_When_CollCommClosing_Expect_OperationRejected)
++{
++    HcommTeamHandle worldTeam = reinterpret_cast<HcommTeamHandle>(0x9D000);
++    ManagerCallbacks callbacks{};
++    CollComm collComm(nullptr, 0, "closing-operation-test", callbacks, CollCommInitMode::simpleMode);
++    uint32_t rankIds[2] = {0, 1};
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterWorldTeam(worldTeam, &collComm, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++    collComm.BeginTeamLifecycleTeardown();
++
++    {
++        auto operation = HcclTeamMgr::GetInstance().AcquireTeamOperation(worldTeam);
++        EXPECT_TRUE(operation.IsClosing());
++        EXPECT_FALSE(operation.IsReady());
++    }
++    HcclTeamMgr::GetInstance().UnregisterTeam(worldTeam);
++}
++
++TEST(UtHcclTeamMgr, Ut_ClearByCollComm_When_TeamOperationInFlight_Expect_WaitsForLifecycleLock)
++{
++    HcommTeamHandle worldTeam = reinterpret_cast<HcommTeamHandle>(0x99000);
++    HcommTeamHandle subTeam = reinterpret_cast<HcommTeamHandle>(0x9A000);
++    ManagerCallbacks callbacks{};
++    CollComm collComm(nullptr, 0, "team-lifecycle-test", callbacks, CollCommInitMode::simpleMode);
++    uint32_t rankIds[2] = {0, 1};
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterWorldTeam(worldTeam, &collComm, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterSubTeam(worldTeam, subTeam, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++
++    TeamDestroyState state{};
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().BeginTeamDestroy(worldTeam, state));
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().MarkTeamHcommDestroyed(worldTeam));
++    state = {};
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().BeginTeamDestroy(subTeam, state));
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().MarkTeamHcommDestroyed(subTeam));
++
++    auto lifecycleMutex = HcclTeamMgr::GetInstance().GetTeamLifecycleMutex(worldTeam);
++    ASSERT_NE(lifecycleMutex, nullptr);
++    std::unique_lock<std::recursive_mutex> lifecycleLock(*lifecycleMutex);
++    std::promise<void> cleanupStarted;
++    auto cleanupStartedFuture = cleanupStarted.get_future();
++    auto cleanup = std::async(std::launch::async, [&] {
++        cleanupStarted.set_value();
++        HcclTeamMgr::GetInstance().ClearByCollComm(&collComm);
++    });
++    cleanupStartedFuture.wait();
++    bool cleanupOwnsCommGate = false;
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++    while (!cleanupOwnsCommGate && std::chrono::steady_clock::now() < deadline) {
++        if (!collComm.GetTeamLifecycleMutex().try_lock()) {
++            cleanupOwnsCommGate = true;
++        } else {
++            collComm.GetTeamLifecycleMutex().unlock();
++            std::this_thread::yield();
++        }
++    }
++    ASSERT_TRUE(cleanupOwnsCommGate);
++    EXPECT_EQ(cleanup.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
++
++    lifecycleLock.unlock();
++    EXPECT_EQ(cleanup.wait_for(std::chrono::seconds(5)), std::future_status::ready);
++    cleanup.get();
++
++    {
++        std::unique_lock<std::recursive_mutex> commLock(collComm.GetTeamLifecycleMutex());
++        EXPECT_TRUE(collComm.IsTeamLifecycleClosing());
++    }
++}
++
++TEST(UtHcclTeamMgr, Ut_TeamDestroyState_When_PartialProgress_Expect_RetryableTransitions)
++{
++    HcommTeamHandle worldTeam = reinterpret_cast<HcommTeamHandle>(0x89000);
++    CollComm* collComm = reinterpret_cast<CollComm*>(0x8A000);
++    uint32_t rankIds[2] = {0, 1};
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterWorldTeam(worldTeam, collComm, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++
++    TeamDestroyState state{};
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().BeginTeamDestroy(worldTeam, state));
++    EXPECT_TRUE(state.destroying);
++    EXPECT_FALSE(state.hcommDestroyed);
++    EXPECT_FALSE(state.syncMemUnregistered);
++
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().MarkTeamHcommDestroyed(worldTeam));
++    state = {};
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().BeginTeamDestroy(worldTeam, state));
++    EXPECT_TRUE(state.hcommDestroyed);
++    EXPECT_FALSE(state.syncMemUnregistered);
++
++    EXPECT_TRUE(HcclTeamMgr::GetInstance().MarkTeamSyncMemUnregistered(worldTeam));
++    state = {};
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().BeginTeamDestroy(worldTeam, state));
++    EXPECT_TRUE(state.hcommDestroyed);
++    EXPECT_TRUE(state.syncMemUnregistered);
++
++    EXPECT_EQ(HcclTeamMgr::GetInstance().UnregisterTeam(worldTeam), HCCL_SUCCESS);
++    EXPECT_FALSE(HcclTeamMgr::GetInstance().BeginTeamDestroy(worldTeam, state));
++}
++
++TEST(UtHcclTeamMgr, Ut_TeamDestroyState_When_TeardownBegins_Expect_WindowNotReusable)
++{
++    HcommTeamHandle worldTeam = reinterpret_cast<HcommTeamHandle>(0x8B000);
++    CollComm* collComm = reinterpret_cast<CollComm*>(0x8C000);
++    uint32_t rankIds[2] = {0, 1};
++    ASSERT_EQ(
++        HcclTeamMgr::GetInstance().RegisterWorldTeam(worldTeam, collComm, nullptr, 0, rankIds, 2), HCCL_SUCCESS);
++
++    CommMem localMem{};
++    localMem.type = COMM_MEM_TYPE_DEVICE;
++    localMem.addr = reinterpret_cast<void*>(0x300000);
++    localMem.size = 4096;
++    HcommWindowHandle window = reinterpret_cast<HcommWindowHandle>(0x8D000);
++    HcclTeamMgr::GetInstance().AddWorldTeamWindow(
++        worldTeam, window, localMem, reinterpret_cast<HcclMemHandle>(0x8E000), "destroying-tag");
++
++    TeamDestroyState state{};
++    ASSERT_TRUE(HcclTeamMgr::GetInstance().BeginTeamDestroy(worldTeam, state));
++    HcommWindowHandle reusableWindow = nullptr;
++    EXPECT_FALSE(HcclTeamMgr::GetInstance().FindReusableWindow(worldTeam, localMem, reusableWindow));
++    EXPECT_EQ(reusableWindow, nullptr);
++
++    HcclTeamMgr::GetInstance().UnregisterTeam(worldTeam);
++}
++
++TEST(UtHcclTeamMgr, Ut_HcclTeamDestroy_When_TeamUnregistered_Expect_IdempotentNoOp)
++{
++    HcommTeamHandle unregisteredTeam = reinterpret_cast<HcommTeamHandle>(0x9F000);
++    EXPECT_EQ(HcclTeamDestroy(unregisteredTeam), HCCL_SUCCESS);
++}
++
+ // ===================== 测试夹具 =====================
+ class TestCollCommTeamCAdpt : public BaseInit {
+ public:
+@@ -387,6 +704,7 @@ protected:
+         MOCKER(HcommTeamWindowBindRemoteMems).stubs().will(returnValue(0));
+         MOCKER(HcommTeamBindRemoteSyncMem).stubs().will(returnValue(0));
+         MOCKER(hrtMalloc).stubs().will(invoke(StubHrtMallocFill));
++        MOCKER(hrtMemSet).stubs().will(returnValue(HCCL_SUCCESS));
+         MOCKER(hrtFree).stubs().will(returnValue(HCCL_SUCCESS));
+         MOCKER(HcclCommMemReg).stubs().will(invoke(StubMemRegFillUser));
+         MOCKER(HcclRankGraphGetLinks).stubs().will(invoke(StubRankGraphGetLinks));
+@@ -550,6 +868,49 @@ TEST_F(TestCollCommTeamCAdpt, Ut_HcclWorldTeamCreate_When_HrtMallocFail_Expect_R
+     EXPECT_EQ(worldTeam, nullptr);
+ }
+ 
++TEST_F(TestCollCommTeamCAdpt, Ut_HcclWorldTeamCreate_When_SyncMemAllocated_Expect_ZeroInitialized)
++{
++    g_hrtMemSetCallCnt = 0;
++    g_hrtMemSetDst = nullptr;
++    g_hrtMemSetDestMax = 0;
++    g_hrtMemSetCount = 0;
++    MOCKER(hrtMemSet).expects(once()).will(invoke(StubHrtMemSetRecord));
++    SetupSuccessMocks();
++
++    uint32_t rankIds[2] = {0, 1};
++    HcclTeamCreateDesc desc;
++    BuildTeamCreateDesc(desc, rankIds, 2, 1, 1);
++    HcommTeamHandle worldTeam = nullptr;
++
++    ASSERT_EQ(HcclWorldTeamCreate(comm, &desc, &worldTeam), HCCL_SUCCESS);
++    EXPECT_EQ(g_hrtMemSetCallCnt, 1U);
++    EXPECT_EQ(g_hrtMemSetDst, g_fakeWsPtr);
++    EXPECT_EQ(g_hrtMemSetDestMax, 4096U);
++    EXPECT_EQ(g_hrtMemSetCount, 4096U);
++    EXPECT_EQ(HcclTeamDestroy(worldTeam), HCCL_SUCCESS);
++}
++
++TEST_F(TestCollCommTeamCAdpt, Ut_HcclWorldTeamCreate_When_SyncMemZeroFails_Expect_FullRollback)
++{
++    uint32_t rankIds[2] = {0, 1};
++    HcclTeamCreateDesc desc;
++    BuildTeamCreateDesc(desc, rankIds, 2, 1, 1);
++    HcommTeamHandle worldTeam = nullptr;
++
++    MOCKER(HcommTeamCreate).stubs().will(invoke(StubTeamCreateFillWorld));
++    MOCKER(hrtMalloc).expects(once()).will(invoke(StubHrtMallocFill));
++    MOCKER(hrtMemSet).expects(once()).will(returnValue(HCCL_E_INTERNAL));
++    MOCKER(hrtFree).expects(once()).will(returnValue(HCCL_SUCCESS));
++    MOCKER(HcommTeamDestroy).expects(once()).will(returnValue(0));
++
++    HcclResult ret = HcclWorldTeamCreate(comm, &desc, &worldTeam);
++    EXPECT_EQ(ret, HCCL_E_INTERNAL);
++    if (worldTeam != nullptr) {
++        EXPECT_EQ(HcclTeamDestroy(worldTeam), HCCL_SUCCESS);
++    }
++    EXPECT_EQ(worldTeam, nullptr);
++}
++
+ // 功能：通信域销毁（ClearByCollComm）时，销毁该通信域下所有 team 及其 window 的 L3 资源。
+ // 验证：worldTeam 的 window 调 HcommTeamWindowDeregister，team 调 HcommTeamDestroy，syncMem 调 hrtFree。
+ TEST_F(TestCollCommTeamCAdpt, Ut_ClearByCollComm_When_TeamAndWindowExist_Expect_AllDestroyed)
+@@ -776,7 +1137,7 @@ TEST_F(TestCollCommTeamCAdpt, Ut_HcclTeamDestroy_When_TeamNullptr_Expect_ReturnH
+     EXPECT_EQ(HcclTeamDestroy(nullptr), HCCL_E_PTR);
+ }
+ 
+-// 异常：HcommTeamDestroy 失败时返回 ret 转换码，UnregisterTeam 已先执行。
++// 异常：HcommTeamDestroy 失败时返回 ret 转换码。
+ TEST_F(TestCollCommTeamCAdpt, Ut_HcclTeamDestroy_When_HcommDestroyFail_Expect_ReturnRet)
+ {
+     MOCKER(HcommTeamCreate).stubs().will(invoke(StubTeamCreateFillWorld));
+@@ -791,15 +1152,8 @@ TEST_F(TestCollCommTeamCAdpt, Ut_HcclTeamDestroy_When_HcommDestroyFail_Expect_Re
+ 
+     HcclResult ret = HcclTeamDestroy(worldTeam);
+     EXPECT_EQ(ret, static_cast<HcclResult>(HCCL_E_INTERNAL));
+-}
+-
+-// 异常：未注册 team 不崩溃，HcommTeamDestroy 仍被调用。
+-TEST_F(TestCollCommTeamCAdpt, Ut_HcclTeamDestroy_When_TeamUnregistered_Expect_NoCrashAndHcommDestroyCalled)
+-{
+-    // 未注册 team：FindWorldTeam 返回 nullptr（非 worldTeam，跳过 window 销毁），UnregisterTeam 静默，HcommTeamDestroy
+-    // 仍被调用。
+-    MOCKER(HcommTeamDestroy).stubs().will(returnValue(0));
+-    EXPECT_EQ(HcclTeamDestroy(g_fakeSubTeam), HCCL_SUCCESS); // g_fakeSubTeam 未注册
++    EXPECT_EQ(HcclTeamMgr::GetInstance().FindCollComm(worldTeam), hcclCommPtr->GetCollComm());
++    EXPECT_NE(HcclTeamMgr::GetInstance().GetSyncMemPtr(worldTeam), nullptr);
+ }
+ 
+ // 功能：HcclTeamDestroy 连带销毁 worldTeam 拥有的 window（L3 资源），避免泄漏。
+@@ -1172,6 +1526,37 @@ TEST_F(TestCollCommTeamCAdpt, Ut_HcclTeamWindowDeregister_When_Normal_Expect_Ret
+     EXPECT_EQ(HcclTeamDestroy(worldTeam), HCCL_SUCCESS);
+ }
+ 
++// Regression: deregistering a team window must release its CommMems tag so the
++// same address can be registered again within the same communication domain.
++TEST_F(TestCollCommTeamCAdpt, Ut_HcclTeamWindowDeregister_When_RegisterAgain_Expect_ReturnSuccess)
++{
++    SetupSuccessMocks();
++    uint32_t worldRankIds[2] = {0, 1};
++    HcclTeamCreateDesc worldDesc;
++    BuildTeamCreateDesc(worldDesc, worldRankIds, 2, 1, 1);
++    HcommTeamHandle worldTeam = nullptr;
++    ASSERT_EQ(HcclWorldTeamCreate(comm, &worldDesc, &worldTeam), HCCL_SUCCESS);
++
++    CommMem localMem{};
++    localMem.type = COMM_MEM_TYPE_DEVICE;
++    localMem.addr = reinterpret_cast<void*>(0xA800);
++    localMem.size = 1024;
++
++    HcommWindowHandle window = nullptr;
++    ASSERT_EQ(
++        HcclTeamWindowRegister(comm, worldTeam, &localMem, &window, HCOMM_TEAM_WINDOW_FLAG_SYMMETRIC), HCCL_SUCCESS);
++    ASSERT_EQ(HcclTeamWindowDeregister(worldTeam, window), HCCL_SUCCESS);
++
++    HcommWindowHandle recreatedWindow = nullptr;
++    EXPECT_EQ(
++        HcclTeamWindowRegister(comm, worldTeam, &localMem, &recreatedWindow, HCOMM_TEAM_WINDOW_FLAG_SYMMETRIC),
++        HCCL_SUCCESS);
++    if (recreatedWindow != nullptr) {
++        EXPECT_EQ(HcclTeamWindowDeregister(worldTeam, recreatedWindow), HCCL_SUCCESS);
++    }
++    EXPECT_EQ(HcclTeamDestroy(worldTeam), HCCL_SUCCESS);
++}
++
+ // 异常：入参空指针校验（team/window 为 nullptr → HCCL_E_PTR）。
+ TEST_F(TestCollCommTeamCAdpt, Ut_HcclTeamWindowDeregister_When_NullptrParams_Expect_ReturnHCCL_E_PTR)
+ {
+@@ -1190,8 +1575,8 @@ TEST_F(TestCollCommTeamCAdpt, Ut_HcclTeamWindowDeregister_When_TeamNotRegistered
+ // 异常：HcommTeamWindowDeregister 失败 → 返回 ret 转换码。
+ TEST_F(TestCollCommTeamCAdpt, Ut_HcclTeamWindowDeregister_When_HcommWindowDestroyFail_Expect_ReturnRet)
+ {
+-    // HcommTeamWindowDeregister 失败覆盖须在 SetupSuccessMocks() 前注册（FIFO）。
+-    MOCKER(HcommTeamWindowDeregister).stubs().will(returnValue(static_cast<HcommResult>(HCCL_E_INTERNAL)));
++    g_windowDeregisterFailuresRemaining = 1;
++    MOCKER(HcommTeamWindowDeregister).stubs().will(invoke(StubTeamWindowDeregisterFailThenSucceed));
+     SetupSuccessMocks();
+ 
+     uint32_t worldRankIds[2] = {0, 1};
+@@ -1210,10 +1595,15 @@ TEST_F(TestCollCommTeamCAdpt, Ut_HcclTeamWindowDeregister_When_HcommWindowDestro
+         HcclTeamWindowRegister(comm, worldTeam, &localMem, &window, HCOMM_TEAM_WINDOW_FLAG_SYMMETRIC), HCCL_SUCCESS);
+ 
+     // 注销时 HcommTeamWindowDeregister 失败 → 返回 HCCL_E_INTERNAL。
+-    // 注：RemoveWorldTeamWindow 已先执行（window 记录已移除），但 Hcomm 层 window 销毁失败。
+     EXPECT_EQ(HcclTeamWindowDeregister(worldTeam, window), static_cast<HcclResult>(HCCL_E_INTERNAL));
+ 
++    EXPECT_EQ(HcclTeamDestroy(worldTeam), static_cast<HcclResult>(HCCL_E_INTERNAL));
++    EXPECT_EQ(HcclTeamMgr::GetInstance().FindCollComm(worldTeam), hcclCommPtr->GetCollComm());
++    EXPECT_EQ(HcclTeamMgr::GetInstance().GetWorldTeamWindows(worldTeam).size(), 1U);
++
+     EXPECT_EQ(HcclTeamDestroy(worldTeam), HCCL_SUCCESS);
++    EXPECT_EQ(HcclTeamMgr::GetInstance().FindCollComm(worldTeam), nullptr);
++    EXPECT_EQ(HcclTeamMgr::GetInstance().GetWorldTeamWindows(worldTeam).size(), 0U);
+ }
+ 
+ // 功能：window 未在 worldTeam 列表中（RemoveWorldTeamWindow 空操作），仍调 HcommTeamWindowDeregister，返回成功。
+diff --git a/test/ut/framework/next/comms/endpoint_pairs/ut_endpoint_pair.cc b/test/ut/framework/next/comms/endpoint_pairs/ut_endpoint_pair.cc
+index 103ecbc5..2b8fa548 100644
+--- a/test/ut/framework/next/comms/endpoint_pairs/ut_endpoint_pair.cc
++++ b/test/ut/framework/next/comms/endpoint_pairs/ut_endpoint_pair.cc
+@@ -409,3 +409,57 @@ TEST_F(TestEndpointPair, Ut_DestroyChannel_When_Channel_Exist_Expect_SUCCESS)
+     EXPECT_EQ(endpointPair.channelHandles_[COMM_ENGINE_CCU][0], fakeChannelHandle + 1);
+     EXPECT_EQ(endpointPair.channelHandles_[COMM_ENGINE_CCU][1], fakeChannelHandle + 2);
+ }
++
++TEST_F(TestEndpointPair, Ut_CreateChannelForMemoryVersion_When_VersionChanges_Expect_NewPhysicalGeneration)
++{
++    EndpointDesc localEndpointDesc{};
++    EndpointDesc remoteEndpointDesc{};
++    EndpointPair endpointPair(localEndpointDesc, remoteEndpointDesc, rankIpPortMap);
++    HcommChannelDesc channelDesc{};
++    ChannelHandle channel = 0;
++    bool isNewChannel = false;
++    u32 physicalIndex = 0;
++
++    endpointPair.channelHandles_[COMM_ENGINE_AIV] = {100, 200};
++    endpointPair.channelGenerationIndices_[COMM_ENGINE_AIV].emplace(std::make_pair(10u, 0u), 0u);
++    endpointPair.channelGenerationIndices_[COMM_ENGINE_AIV].emplace(std::make_pair(11u, 0u), 1u);
++
++    EXPECT_EQ(endpointPair.CreateChannelForMemoryVersion(
++                  nullptr, COMM_ENGINE_AIV, 10, 0, &channelDesc, &channel, isNewChannel, physicalIndex),
++              HCCL_SUCCESS);
++    EXPECT_FALSE(isNewChannel);
++    EXPECT_EQ(physicalIndex, 0u);
++    EXPECT_EQ(channel, 100u);
++
++    EXPECT_EQ(endpointPair.CreateChannelForMemoryVersion(
++                  nullptr, COMM_ENGINE_AIV, 11, 0, &channelDesc, &channel, isNewChannel, physicalIndex),
++              HCCL_SUCCESS);
++    EXPECT_FALSE(isNewChannel);
++    EXPECT_EQ(physicalIndex, 1u);
++    EXPECT_EQ(channel, 200u);
++
++    EXPECT_EQ(endpointPair.CreateChannelForMemoryVersion(
++                  nullptr, COMM_ENGINE_AIV, 10, 0, &channelDesc, &channel, isNewChannel, physicalIndex),
++              HCCL_SUCCESS);
++    EXPECT_FALSE(isNewChannel);
++    EXPECT_EQ(physicalIndex, 0u);
++    EXPECT_EQ(channel, 100u);
++    EXPECT_EQ(endpointPair.channelHandles_[COMM_ENGINE_AIV].size(), 2u);
++    endpointPair.channelHandles_.clear();
++}
++
++TEST_F(TestEndpointPair, Ut_CreateChannelForMemoryVersion_When_CreateFails_Expect_NoGenerationMapping)
++{
++    EndpointDesc localEndpointDesc{};
++    EndpointDesc remoteEndpointDesc{};
++    EndpointPair endpointPair(localEndpointDesc, remoteEndpointDesc, rankIpPortMap);
++    ChannelHandle channel = 0;
++    bool isNewChannel = false;
++    u32 physicalIndex = 0;
++
++    EXPECT_NE(endpointPair.CreateChannelForMemoryVersion(
++                  nullptr, COMM_ENGINE_AIV, 12, 0, nullptr, &channel, isNewChannel, physicalIndex),
++              HCCL_SUCCESS);
++    EXPECT_EQ(endpointPair.channelHandles_[COMM_ENGINE_AIV].size(), 0u);
++    EXPECT_EQ(endpointPair.channelGenerationIndices_[COMM_ENGINE_AIV].size(), 0u);
++}

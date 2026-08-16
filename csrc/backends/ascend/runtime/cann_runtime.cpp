@@ -169,8 +169,8 @@ TransportStatus CannRuntimeResources::initialize_impl(
         (void)destroy();
         return status;
     }
-    stream_ = runtime_api_.current_stream(runtime_api_.user_data);
-    if (stream_ == nullptr) {
+    void* initial_stream = runtime_api_.current_stream(runtime_api_.user_data);
+    if (initial_stream == nullptr) {
         status = TransportStatus::runtime_failure(
             "current_stream", 0, "Torch NPU returned a null current stream");
         (void)destroy();
@@ -216,8 +216,10 @@ void CannRuntimeResources::free_allocation(
         return;
     const int result = runtime_api_.free_device(
         runtime_api_.user_data, allocation.owner);
-    if (result != 0)
+    if (result != 0) {
         retain_first(backend_failure(operation, result), first_error);
+        return;
+    }
     allocation = {};
 }
 
@@ -225,27 +227,41 @@ TransportStatus CannRuntimeResources::destroy() {
     if (!owns_resources_)
         return TransportStatus::success();
 
+    initialized_ = false;
+    device_context_ = {};
     TransportStatus first_error = TransportStatus::success();
     free_allocation(workspace_, "free_workspace", first_error);
     if (transport_ != nullptr) {
-        retain_first(transport_->destroy(), first_error);
-        transport_.reset();
+        const auto status = transport_->destroy();
+        retain_first(status, first_error);
+        if (status.ok())
+            transport_.reset();
     }
-    free_allocation(window_, "free_window", first_error);
-    stream_ = nullptr;
-    device_context_ = {};
-    initialized_ = false;
-    owns_resources_ = false;
-    runtime_api_ = {};
+    if (transport_ == nullptr)
+        free_allocation(window_, "free_window", first_error);
+    if (first_error.ok()) {
+        owns_resources_ = false;
+        runtime_api_ = {};
+    }
     return first_error;
 }
 
-TransportStatus CannRuntimeResources::synchronize_stream() {
-    if (!initialized_)
+TransportStatus CannRuntimeResources::current_stream(void** stream) {
+    if (!initialized_ || stream == nullptr)
         return TransportStatus::invalid(
-            "synchronize_stream", "runtime resources are not initialized");
+            "current_stream", "invalid runtime stream request");
+    *stream = runtime_api_.current_stream(runtime_api_.user_data);
+    return *stream != nullptr ? TransportStatus::success() :
+        TransportStatus::runtime_failure(
+            "current_stream", 0, "Torch NPU returned a null current stream");
+}
+
+TransportStatus CannRuntimeResources::synchronize_stream(void* stream) {
+    if (!initialized_ || stream == nullptr)
+        return TransportStatus::invalid(
+            "synchronize_stream", "invalid runtime stream request");
     const int result = runtime_api_.synchronize_stream(
-        runtime_api_.user_data, stream_);
+        runtime_api_.user_data, stream);
     return result == 0 ? TransportStatus::success()
                        : backend_failure("synchronize_stream", result);
 }

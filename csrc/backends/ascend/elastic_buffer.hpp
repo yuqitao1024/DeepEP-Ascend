@@ -15,6 +15,7 @@
 #include <torch/python.h>
 
 #include "elastic/layout.hpp"
+#include "elastic/barrier_state.hpp"
 #include "elastic/runtime.hpp"
 #include "runtime/cann_runtime.hpp"
 
@@ -55,7 +56,8 @@ class ElasticBuffer {
     int64_t num_buffer_bytes_;
     bool allow_hybrid_mode_;
     std::unique_ptr<runtime::CannRuntimeResources> resources_;
-    std::uint64_t barrier_generation_ = 0;
+    elastic::BarrierSequence barrier_sequence_;
+    std::uint64_t barrier_timeout_cycles_ = 0;
     bool destroyed_ = false;
 
     static constexpr auto kDispatchCapabilities =
@@ -72,7 +74,8 @@ class ElasticBuffer {
         transport::capability_bit(transport::TransportCapability::kScaleUpTeam);
 
     transport::HostTransport* host_transport() const {
-        TORCH_CHECK(resources_ != nullptr && resources_->transport() != nullptr,
+        TORCH_CHECK(!destroyed_ && resources_ != nullptr &&
+                        resources_->transport() != nullptr,
                     "DeepEP Ascend backend: runtime is destroyed");
         return resources_->transport();
     }
@@ -173,7 +176,7 @@ public:
                   const int64_t& num_cpu_buffer_bytes,
                   const bool& allow_hybrid_mode, const bool&, const bool&,
                   const int& sl_idx, const int& num_allocated_qps,
-                  const int&, const int&, const bool&)
+                  const int&, const int& num_gpu_timeout_secs, const bool&)
         : rank_idx_(rank_idx), num_ranks_(num_ranks),
           num_buffer_bytes_(num_buffer_bytes),
           allow_hybrid_mode_(allow_hybrid_mode) {
@@ -191,6 +194,10 @@ public:
                     "DeepEP Ascend backend: hybrid mode is unsupported");
         TORCH_CHECK(num_allocated_qps == 0,
                     "DeepEP Ascend backend: CUDA QP count must be zero");
+        TORCH_CHECK(
+            elastic::timeout_cycles_from_seconds(
+                num_gpu_timeout_secs, &barrier_timeout_cycles_),
+            "DeepEP Ascend backend: num_gpu_timeout_secs must be positive");
         TORCH_CHECK(
             num_buffer_bytes >=
                     static_cast<std::int64_t>(
@@ -212,7 +219,7 @@ public:
     }
 
     void destroy() {
-        if (destroyed_)
+        if (resources_ == nullptr)
             return;
         destroyed_ = true;
         const auto status = resources_->destroy();
@@ -260,17 +267,24 @@ public:
                 raise_transport_status(status, rank_idx_);
         }
 
-        ++barrier_generation_;
-        if (barrier_generation_ == 0)
-            ++barrier_generation_;
+        elastic::BarrierAttempt attempt(barrier_sequence_);
+        TORCH_CHECK(
+            attempt.valid(),
+            "DeepEP Ascend backend: barrier cannot continue after a failed "
+            "or concurrent attempt");
         auto tiling = build_barrier_tiling();
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_),
             resources_->workspace_bytes()};
         const elastic::BarrierArguments arguments{
-            resources_->workspace(), barrier_generation_};
+            resources_->workspace(), attempt.generation(),
+            barrier_timeout_cycles_};
+        void* stream = nullptr;
+        auto status = resources_->current_stream(&stream);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
         const auto launch_status = elastic::launch_internal_barrier(
-            arguments, tiling, storage, resources_->stream());
+            arguments, tiling, storage, stream);
         if (!launch_status.ok()) {
             const auto status = launch_status.code ==
                     elastic::CoreRuntimeStatusCode::kLaunchFailure ?
@@ -282,7 +296,7 @@ public:
             raise_transport_status(status, rank_idx_);
         }
 
-        auto status = resources_->synchronize_stream();
+        status = resources_->synchronize_stream(stream);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         transport::DeviceTransportDiagnostic diagnostic{};
@@ -298,7 +312,7 @@ public:
             diagnostic.peer = static_cast<std::uint32_t>(rank_idx_);
             diagnostic.channel = 0;
             diagnostic.backend_status = 0;
-            diagnostic.generation = barrier_generation_;
+            diagnostic.generation = attempt.generation();
         }
 #endif
 
@@ -324,10 +338,11 @@ public:
                 transport::kTransportCommandAbiVersion ||
             diagnostic.error != transport::DeviceTransportError::kNone)
             raise_barrier_diagnostic(diagnostic, "reported failure");
-        if (diagnostic.generation != barrier_generation_)
+        if (diagnostic.generation != attempt.generation())
             raise_barrier_diagnostic(diagnostic, "generation mismatch");
-        if (completion != barrier_generation_)
+        if (completion != attempt.generation())
             raise_barrier_diagnostic(diagnostic, "completion mismatch");
+        attempt.complete();
     }
 
     static int64_t calculate_buffer_size(

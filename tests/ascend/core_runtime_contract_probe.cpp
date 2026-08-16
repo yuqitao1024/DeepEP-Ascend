@@ -348,7 +348,7 @@ int main() {
         return 22;
 
     auto barrier_tiling = valid_barrier_tiling(0);
-    BarrierArguments barrier{bytes, 7};
+    BarrierArguments barrier{bytes, 7, 1000000000ULL};
     reset_launches();
     if (launch_internal_barrier(
             barrier, barrier_tiling,
@@ -366,6 +366,16 @@ int main() {
             CoreRuntimeStatusCode::kInvalidArgument ||
         launch_trace_size != 0)
         return 41;
+    reset_launches();
+    auto zero_timeout = barrier;
+    zero_timeout.timeout_cycles = 0;
+    if (launch_internal_barrier(
+            zero_timeout, barrier_tiling,
+            required_core_launch_storage(barrier_tiling),
+            reinterpret_cast<void*>(0x6161)).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 42;
     reset_launches();
     if (!launch_internal_barrier(
              barrier, barrier_tiling,

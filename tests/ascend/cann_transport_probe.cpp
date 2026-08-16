@@ -44,6 +44,8 @@ struct FakeApi {
     std::uintptr_t next_pointer = 0x100000;
     int fail_event = -1;
     int event_calls = 0;
+    int deregister_failures_remaining = 0;
+    int destroy_team_failures_remaining = 0;
     transport::StagedTransportContext staged{};
     std::uint32_t staged_copy_count = 0;
 
@@ -185,12 +187,20 @@ struct FakeApi {
         void* data, std::uintptr_t, std::uintptr_t) {
         auto& fake = self(data);
         fake.record(Event::kDeregisterWindow);
+        if (fake.deregister_failures_remaining > 0) {
+            --fake.deregister_failures_remaining;
+            return 80;
+        }
         return 0;
     }
 
     static int destroy_team(void* data, std::uintptr_t) {
         auto& fake = self(data);
         fake.record(Event::kDestroyTeam);
+        if (fake.destroy_team_failures_remaining > 0) {
+            --fake.destroy_team_failures_remaining;
+            return 81;
+        }
         return 0;
     }
 
@@ -311,10 +321,56 @@ void check_partial_failure_cleans_up() {
     }
 }
 
+std::unique_ptr<transport::HostTransport> make_active_transport(FakeApi& fake) {
+    auto created = transport::make_cann_transport(valid_config(), fake.api());
+    CHECK(created.status.ok());
+    CHECK(created.transport != nullptr);
+    alignas(64) static std::uint8_t window[4096]{};
+    CHECK(created.transport->register_symmetric_window(
+        window, sizeof(window)).ok());
+    CHECK(created.transport->acquire_channels(
+        1, transport::CooperationScope::kParticipant).ok());
+    return std::move(created.transport);
+}
+
+void check_deregister_failure_is_retryable() {
+    FakeApi fake;
+    auto active = make_active_transport(fake);
+    fake.deregister_failures_remaining = 1;
+
+    const auto first = active->destroy();
+    CHECK(!first.ok());
+    CHECK(first.operation == "unregister_symmetric_window");
+    CHECK(fake.count(Event::kDeregisterWindow) == 1);
+    CHECK(fake.count(Event::kDestroyTeam) == 0);
+
+    CHECK(active->destroy().ok());
+    CHECK(fake.count(Event::kDeregisterWindow) == 2);
+    CHECK(fake.count(Event::kDestroyTeam) == 1);
+}
+
+void check_team_destroy_failure_is_retryable() {
+    FakeApi fake;
+    auto active = make_active_transport(fake);
+    fake.destroy_team_failures_remaining = 1;
+
+    const auto first = active->destroy();
+    CHECK(!first.ok());
+    CHECK(first.operation == "destroy_team");
+    CHECK(fake.count(Event::kDeregisterWindow) == 1);
+    CHECK(fake.count(Event::kDestroyTeam) == 1);
+
+    CHECK(active->destroy().ok());
+    CHECK(fake.count(Event::kDeregisterWindow) == 1);
+    CHECK(fake.count(Event::kDestroyTeam) == 2);
+}
+
 }  // namespace
 
 int main() {
     check_success_and_reverse_cleanup();
     check_partial_failure_cleans_up();
+    check_deregister_failure_is_retryable();
+    check_team_destroy_failure_is_retryable();
     return failures == 0 ? 0 : 1;
 }

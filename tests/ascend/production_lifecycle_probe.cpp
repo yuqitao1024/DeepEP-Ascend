@@ -30,6 +30,12 @@ struct Trace {
     int host_calls = 0;
     std::uintptr_t runtime_next = 0x100003;
     std::uintptr_t host_next = 0x800000;
+    std::uintptr_t current_stream = 0x5151;
+    std::uintptr_t synchronized_stream = 0;
+    int deregister_failures_remaining = 0;
+    int destroy_team_failures_remaining = 0;
+    int runtime_free_fail_call = -1;
+    int runtime_free_calls = 0;
     bool null_stream = false;
 
     bool runtime_fail() {
@@ -70,18 +76,25 @@ int runtime_zero(void* data, void*, std::uint64_t) {
 }
 
 int runtime_free(void* data, void*) {
-    self(data).events.emplace_back("runtime_free");
+    auto& trace = self(data);
+    trace.events.emplace_back("runtime_free");
+    const bool fail = trace.runtime_free_calls++ == trace.runtime_free_fail_call;
+    if (fail)
+        return 63;
     return 0;
 }
 
 void* runtime_current_stream(void* data) {
     auto& trace = self(data);
     trace.events.emplace_back("current_stream");
-    return trace.null_stream ? nullptr : reinterpret_cast<void*>(0x5151);
+    return trace.null_stream ? nullptr :
+        reinterpret_cast<void*>(trace.current_stream);
 }
 
-int runtime_synchronize_stream(void* data, void*) {
-    self(data).events.emplace_back("synchronize_stream");
+int runtime_synchronize_stream(void* data, void* stream) {
+    auto& trace = self(data);
+    trace.events.emplace_back("synchronize_stream");
+    trace.synchronized_stream = reinterpret_cast<std::uintptr_t>(stream);
     return 0;
 }
 
@@ -183,12 +196,22 @@ int host_free(void* data, void*) {
 }
 
 int deregister_window(void* data, std::uintptr_t, std::uintptr_t) {
-    self(data).events.emplace_back("deregister_window");
+    auto& trace = self(data);
+    trace.events.emplace_back("deregister_window");
+    if (trace.deregister_failures_remaining > 0) {
+        --trace.deregister_failures_remaining;
+        return 80;
+    }
     return 0;
 }
 
 int destroy_team(void* data, std::uintptr_t) {
-    self(data).events.emplace_back("destroy_team");
+    auto& trace = self(data);
+    trace.events.emplace_back("destroy_team");
+    if (trace.destroy_team_failures_remaining > 0) {
+        --trace.destroy_team_failures_remaining;
+        return 81;
+    }
     return 0;
 }
 
@@ -219,7 +242,6 @@ void check_success_and_idempotent_cleanup() {
     CHECK(reinterpret_cast<std::uintptr_t>(resources.window_base()) %
           deep_ep::ascend::elastic::kPublicElasticBufferAlignment == 0);
     CHECK(resources.workspace() != nullptr);
-    CHECK(resources.stream() == reinterpret_cast<void*>(0x5151));
     CHECK(resources.transport() != nullptr);
     CHECK(resources.device_context().topology.world_size == 2);
     CHECK(trace.first("runtime_allocate") < trace.first("create_team"));
@@ -227,6 +249,13 @@ void check_success_and_idempotent_cleanup() {
     CHECK(trace.first("register_window") < trace.first("create_channels"));
     CHECK(trace.first("create_channels") < trace.first("current_stream"));
     CHECK(trace.count("runtime_allocate") == 2);
+
+    trace.current_stream = 0x6161;
+    void* current_stream = nullptr;
+    CHECK(resources.current_stream(&current_stream).ok());
+    CHECK(current_stream == reinterpret_cast<void*>(0x6161));
+    CHECK(resources.synchronize_stream(current_stream).ok());
+    CHECK(trace.synchronized_stream == 0x6161);
 
     CHECK(resources.destroy().ok());
     const auto after_destroy = trace.events.size();
@@ -285,6 +314,75 @@ void check_null_stream_cleans_all_resources() {
     CHECK(trace.count("destroy_team") == 1);
 }
 
+void check_deregister_failure_preserves_outer_window() {
+    Trace trace;
+    runtime::CannRuntimeResources resources;
+    CHECK(resources.initialize(
+        config(), 4096, runtime_api(trace), host_api(trace)).ok());
+    trace.deregister_failures_remaining = 1;
+
+    const auto first = resources.destroy();
+    CHECK(!first.ok());
+    CHECK(first.operation == "unregister_symmetric_window");
+    CHECK(!resources.initialized());
+    CHECK(resources.window_base() != nullptr);
+    CHECK(trace.count("runtime_free") == 1);
+    CHECK(trace.count("deregister_window") == 1);
+    CHECK(trace.count("destroy_team") == 0);
+
+    CHECK(resources.destroy().ok());
+    CHECK(resources.window_base() == nullptr);
+    CHECK(trace.count("runtime_free") == 2);
+    CHECK(trace.count("deregister_window") == 2);
+    CHECK(trace.count("destroy_team") == 1);
+}
+
+void check_team_destroy_failure_preserves_outer_window() {
+    Trace trace;
+    runtime::CannRuntimeResources resources;
+    CHECK(resources.initialize(
+        config(), 4096, runtime_api(trace), host_api(trace)).ok());
+    trace.destroy_team_failures_remaining = 1;
+
+    const auto first = resources.destroy();
+    CHECK(!first.ok());
+    CHECK(first.operation == "destroy_team");
+    CHECK(!resources.initialized());
+    CHECK(resources.window_base() != nullptr);
+    CHECK(trace.count("runtime_free") == 1);
+    CHECK(trace.count("deregister_window") == 1);
+    CHECK(trace.count("destroy_team") == 1);
+
+    CHECK(resources.destroy().ok());
+    CHECK(resources.window_base() == nullptr);
+    CHECK(trace.count("runtime_free") == 2);
+    CHECK(trace.count("deregister_window") == 1);
+    CHECK(trace.count("destroy_team") == 2);
+}
+
+void check_runtime_free_failure_is_retryable() {
+    for (int fail_call = 0; fail_call < 2; ++fail_call) {
+        Trace trace;
+        runtime::CannRuntimeResources resources;
+        CHECK(resources.initialize(
+            config(), 4096, runtime_api(trace), host_api(trace)).ok());
+        trace.runtime_free_fail_call = fail_call;
+
+        const auto first = resources.destroy();
+        CHECK(!first.ok());
+        CHECK(first.operation ==
+              (fail_call == 0 ? "free_workspace" : "free_window"));
+        CHECK(!resources.initialized());
+        CHECK((resources.workspace() != nullptr) == (fail_call == 0));
+        CHECK((resources.window_base() != nullptr) == (fail_call == 1));
+
+        CHECK(resources.destroy().ok());
+        CHECK(resources.workspace() == nullptr);
+        CHECK(resources.window_base() == nullptr);
+        CHECK(trace.count("runtime_free") == 3);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -292,5 +390,8 @@ int main() {
     check_runtime_failures_cleanup();
     check_host_failure_cleans_outer_allocation();
     check_null_stream_cleans_all_resources();
+    check_deregister_failure_preserves_outer_window();
+    check_team_destroy_failure_preserves_outer_window();
+    check_runtime_free_failure_is_retryable();
     return failures == 0 ? 0 : 1;
 }

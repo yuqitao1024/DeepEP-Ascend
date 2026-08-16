@@ -1,6 +1,5 @@
 #include "cann_transport.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -114,9 +113,9 @@ public:
 
     TransportStatus register_symmetric_window(
         void* base, std::int64_t bytes) override {
-        if (destroyed_)
+        if (teardown_started_)
             return TransportStatus::invalid(
-                "register_symmetric_window", "transport is destroyed");
+                "register_symmetric_window", "transport teardown has started");
         if (base == nullptr || bytes <= 0)
             return TransportStatus::invalid(
                 "register_symmetric_window",
@@ -173,9 +172,9 @@ public:
 
     TransportStatus acquire_channels(
         int count, CooperationScope scope) override {
-        if (destroyed_)
+        if (teardown_started_)
             return TransportStatus::invalid(
-                "acquire_channels", "transport is destroyed");
+                "acquire_channels", "transport teardown has started");
         if (window_ == 0)
             return TransportStatus::invalid(
                 "acquire_channels", "register a window first");
@@ -218,7 +217,7 @@ public:
         if (context == nullptr)
             return TransportStatus::invalid(
                 "export_device_context", "context must not be null");
-        if (destroyed_ || window_ == 0 || !channels_active_)
+        if (teardown_started_ || window_ == 0 || !channels_active_)
             return TransportStatus::invalid(
                 "export_device_context",
                 "window and channels must be active");
@@ -237,7 +236,7 @@ public:
         if (diagnostic == nullptr)
             return TransportStatus::invalid(
                 "read_diagnostic", "diagnostic must not be null");
-        if (destroyed_ || diagnostic_ == nullptr)
+        if (teardown_started_ || diagnostic_ == nullptr)
             return TransportStatus::invalid(
                 "read_diagnostic", "transport diagnostic is unavailable");
         const int result = api_.copy_from_device(
@@ -259,7 +258,7 @@ public:
     TransportStatus destroy() override {
         if (destroyed_)
             return TransportStatus::success();
-        destroyed_ = true;
+        teardown_started_ = true;
         channels_active_ = false;
 
         TransportStatus first_error = TransportStatus::success();
@@ -268,17 +267,26 @@ public:
         if (window_ != 0) {
             const int result = api_.deregister_window(
                 api_.user_data, team_, window_);
-            if (result != 0 && first_error.ok())
-                first_error = backend_failure(
-                    "unregister_symmetric_window", result);
-            window_ = 0;
+            if (result != 0) {
+                if (first_error.ok())
+                    first_error = backend_failure(
+                        "unregister_symmetric_window", result);
+            } else {
+                window_ = 0;
+                local_window_base_ = 0;
+                window_bytes_ = 0;
+            }
         }
-        if (team_ != 0) {
+        if (window_ == 0 && team_ != 0) {
             const int result = api_.destroy_team(api_.user_data, team_);
-            if (result != 0 && first_error.ok())
-                first_error = backend_failure("destroy_team", result);
-            team_ = 0;
+            if (result != 0) {
+                if (first_error.ok())
+                    first_error = backend_failure("destroy_team", result);
+            } else {
+                team_ = 0;
+            }
         }
+        destroyed_ = window_ == 0 && team_ == 0;
         return first_error;
     }
 
@@ -366,6 +374,7 @@ private:
     bool channels_created_ = false;
     bool channels_active_ = false;
     bool resources_initialized_ = false;
+    bool teardown_started_ = false;
     bool destroyed_ = false;
 
     void* commands_ = nullptr;

@@ -37,6 +37,7 @@ def _make_buffer(group):
     return deep_ep.ElasticBuffer(
         group,
         num_bytes=2 * 1024 * 1024,
+        num_gpu_timeout_secs=5,
         allow_hybrid_mode=False,
         explicitly_destroy=True,
     )

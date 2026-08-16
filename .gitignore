@@ -27,3 +27,6 @@ coredump/
 # OpenCode
 .sisyphus/
 AGENTS.md
+
+# Local machine skills and credentials
+/.agents/skills/pto-task-operations/
