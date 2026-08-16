@@ -984,14 +984,19 @@ class ElasticBuffer:
             handle: the returned communication handle.
             event: the event after executing the kernel (valid only if `async_with_compute_stream` is set).
         """
-        require_cuda("dispatch")
-        check_torch_deterministic()
+        if is_cuda():
+            require_cuda("dispatch")
+            check_torch_deterministic()
 
-        # Automatic decide SM and QP count
-        num_topk = (handle.topk_idx if topk_idx is None else topk_idx).shape[1]
-        num_sms = self.get_theoretical_num_sms(num_experts, num_topk) if num_sms == 0 else num_sms
-        num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
-        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+            # Automatic decide SM and QP count
+            num_topk = (handle.topk_idx if topk_idx is None else topk_idx).shape[1]
+            num_sms = self.get_theoretical_num_sms(num_experts, num_topk) if num_sms == 0 else num_sms
+            num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
+            assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+        else:
+            assert num_sms in (0, 1) and num_qps == 0, \
+                'DeepEP Ascend backend: dispatch requires num_sms=1 and num_qps=0'
+            num_sms = 1
 
         # Unpack SF
         x, sf = x if isinstance(x, tuple) else (x, None)

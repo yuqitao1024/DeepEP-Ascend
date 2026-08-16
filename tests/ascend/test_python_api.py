@@ -42,7 +42,6 @@ GATED_METHODS = {
     "all_gather": "all_gather",
     "get_theoretical_num_sms": "get_theoretical_num_sms",
     "get_theoretical_num_qps": "get_theoretical_num_qps",
-    "dispatch": "dispatch",
     "combine": "combine",
 }
 
@@ -256,9 +255,12 @@ def _install_fake_extension(platform, events):
         def dispatch(self, *args):
             self.dispatch_calls.append(args)
             recv_src_metadata = _FakeTensor(shape=(1,))
+            token_metadata_at_forward = (
+                _FakeTensor(shape=(96,)) if platform == "ascend" else None)
             return (args[0], args[1], args[2], args[3], args[2],
                     1, 1, [], _FakeTensor(), _FakeTensor(), _FakeTensor(),
-                    recv_src_metadata, _FakeTensor(), None, None, EventHandle())
+                    recv_src_metadata, _FakeTensor(), token_metadata_at_forward,
+                    None, None if platform == "ascend" else EventHandle())
 
         def combine(self, *args):
             self.combine_calls.append(args)
@@ -586,7 +588,6 @@ def _scenario_ascend_method_gates():
         "get_theoretical_num_sms": lambda: buffer.get_theoretical_num_sms(
             [poison], [poison]),
         "get_theoretical_num_qps": lambda: buffer.get_theoretical_num_qps(poison),
-        "dispatch": lambda: buffer.dispatch(poison),
         "combine": lambda: buffer.combine(poison, poison),
     }
     assert calls.keys() == GATED_METHODS.keys()
@@ -607,6 +608,58 @@ def _scenario_ascend_contextmanager_gate():
         allow_hybrid_mode=False, explicitly_destroy=True)
     _assert_transport_error(
         "agrs_new_session", lambda: buffer.agrs_new_session(False))
+
+
+def _scenario_ascend_dispatch():
+    deep_ep, extension, events = _load_package("ascend", True)
+    buffer = deep_ep.ElasticBuffer(
+        _FakeGroup(events, rank=0, size=2), num_bytes=2 * 1024 * 1024,
+        allow_hybrid_mode=False, explicitly_destroy=True)
+    runtime = extension.runtime_instances[-1]
+    x = _FakeTensor("npu", (1, 16))
+    topk_idx = _FakeTensor("npu", (1, 1))
+    topk_weights = _FakeTensor("npu", (1, 1))
+
+    _, _, recv_topk_weights, handle, event = buffer.dispatch(
+        x, topk_idx=topk_idx, topk_weights=topk_weights,
+        num_experts=1, num_max_tokens_per_rank=1)
+    dispatch_args = runtime.dispatch_calls[-1]
+    assert len(dispatch_args) == 29
+    assert dispatch_args[2] is topk_idx
+    assert dispatch_args[3] is topk_weights
+    assert dispatch_args[18:20] == (1, 0)
+    assert dispatch_args[20:24] == (None, None, False, False)
+    assert dispatch_args[25] is True
+    assert recv_topk_weights is topk_weights
+    assert isinstance(handle, deep_ep.EPHandle)
+    assert handle.num_sms == 1
+    assert handle.token_metadata_at_forward is not None
+    assert event.event is None
+
+    cached_topk_weights = _FakeTensor("npu", (1, 1))
+    _, _, recv_topk_weights, cached_handle, cached_event = buffer.dispatch(
+        x, topk_weights=cached_topk_weights, handle=handle)
+    cached_args = runtime.dispatch_calls[-1]
+    assert cached_args[2] is topk_idx
+    assert cached_args[3] is cached_topk_weights
+    assert cached_args[5:15] == deep_ep.ElasticBuffer._unpack_handle(handle)
+    assert cached_args[25] is False
+    assert recv_topk_weights is cached_topk_weights
+    assert cached_handle is handle
+    assert cached_event.event is None
+
+    for name, kwargs in (("num_sms", {"num_sms": 2}),
+                         ("num_qps", {"num_qps": 1})):
+        try:
+            buffer.dispatch(x, topk_idx=topk_idx, num_experts=1,
+                            num_max_tokens_per_rank=1, **kwargs)
+        except AssertionError as error:
+            assert str(error) == (
+                "DeepEP Ascend backend: dispatch requires num_sms=1 and num_qps=0")
+        else:
+            raise AssertionError(f"Ascend dispatch accepted {name}={kwargs[name]}")
+
+    buffer.destroy()
 
 
 def _scenario_ascend_weak_lru_gate():
@@ -783,6 +836,7 @@ SCENARIOS = {
     "ascend_implicit_size": _scenario_ascend_implicit_size,
     "ascend_method_gates": _scenario_ascend_method_gates,
     "ascend_contextmanager_gate": _scenario_ascend_contextmanager_gate,
+    "ascend_dispatch": _scenario_ascend_dispatch,
     "ascend_weak_lru_gate": _scenario_ascend_weak_lru_gate,
     "cuda_preservation": _scenario_cuda_preservation,
     "stale_cuda_extension_guard": _scenario_stale_cuda_extension_guard,
@@ -816,6 +870,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_contextmanager_method_gates_when_called(self):
         self.run_scenario("ascend_contextmanager_gate")
+
+    def test_dispatch_routes_to_the_synchronous_ascend_runtime(self):
+        self.run_scenario("ascend_dispatch")
 
     def test_cached_method_gates_before_hashing_arguments(self):
         self.run_scenario("ascend_weak_lru_gate")
