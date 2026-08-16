@@ -117,7 +117,21 @@ bool same_symmetric_window_layout(
                rhs.dispatch_staging_shard_bytes &&
            lhs.dispatch_staging_shard_count ==
                rhs.dispatch_staging_shard_count &&
-           lhs.dispatch_staging_bytes == rhs.dispatch_staging_bytes;
+           lhs.dispatch_staging_bytes == rhs.dispatch_staging_bytes &&
+           lhs.combine_control_offset == rhs.combine_control_offset &&
+           lhs.combine_control_bytes == rhs.combine_control_bytes &&
+           lhs.combine_receive_offset == rhs.combine_receive_offset &&
+           lhs.combine_receive_shard_bytes ==
+               rhs.combine_receive_shard_bytes &&
+           lhs.combine_receive_shard_count ==
+               rhs.combine_receive_shard_count &&
+           lhs.combine_receive_bytes == rhs.combine_receive_bytes &&
+           lhs.combine_staging_offset == rhs.combine_staging_offset &&
+           lhs.combine_staging_shard_bytes ==
+               rhs.combine_staging_shard_bytes &&
+           lhs.combine_staging_shard_count ==
+               rhs.combine_staging_shard_count &&
+           lhs.combine_staging_bytes == rhs.combine_staging_bytes;
 }
 
 bool context_topology_matches(

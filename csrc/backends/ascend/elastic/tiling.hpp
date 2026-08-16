@@ -42,7 +42,7 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 2;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 3;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -270,6 +270,10 @@ inline TilingStatus build_core_tiling(
         window_input.hidden = input.hidden;
         window_input.num_topk = input.num_topk;
         window_input.element_bytes = element_bytes;
+        window_input.expanded =
+            has_mode(input.mode_flags, CoreMode::kExpanded);
+        window_input.allow_multiple_reduction = has_mode(
+            input.mode_flags, CoreMode::kAllowMultipleReduction);
         const auto layout_status = build_symmetric_window_layout(
             window_input, &tiling.symmetric_window_layout);
         if (!layout_status.ok())

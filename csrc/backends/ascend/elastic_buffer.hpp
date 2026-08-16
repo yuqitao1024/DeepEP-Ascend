@@ -461,7 +461,8 @@ public:
     static int64_t calculate_buffer_size(
         const int64_t& comm_handle, const int& num_max_tokens_per_rank,
         const int& hidden, int num_topk, const bool& use_fp8_dispatch,
-        const bool& allow_hybrid_mode, const bool&) {
+        const bool& allow_hybrid_mode,
+        const bool& allow_multiple_reduction) {
         TORCH_CHECK(
             comm_handle != 0,
             "DeepEP Ascend backend: calculate_elastic_buffer_size "
@@ -485,6 +486,8 @@ public:
         input.hidden = static_cast<std::uint64_t>(hidden);
         input.num_topk = static_cast<std::uint64_t>(num_topk);
         input.element_bytes = 2;
+        input.expanded = true;
+        input.allow_multiple_reduction = allow_multiple_reduction;
         elastic::SymmetricWindowLayout layout{};
         const auto status =
             elastic::build_symmetric_window_layout(input, &layout);

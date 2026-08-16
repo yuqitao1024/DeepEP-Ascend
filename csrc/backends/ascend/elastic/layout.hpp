@@ -7,7 +7,11 @@ namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kAscendElasticAlignment = 32;
 inline constexpr std::uint64_t kPublicElasticBufferAlignment = 2ULL << 20U;
-inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 1;
+inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 2;
+inline constexpr std::uint64_t kCombineControlSlotBytes =
+    2 * sizeof(std::uint64_t);
+inline constexpr std::uint64_t kCombineRecordHeaderBytes =
+    2 * sizeof(std::uint32_t) + 4 * sizeof(std::int32_t);
 
 enum class CoreMode : std::uint8_t {
     kCached,
@@ -160,6 +164,8 @@ struct SymmetricWindowInput {
     std::uint64_t hidden = 0;
     std::uint64_t num_topk = 0;
     std::uint64_t element_bytes = 2;
+    bool expanded = false;
+    bool allow_multiple_reduction = false;
 };
 
 struct SymmetricWindowLayout {
@@ -191,6 +197,16 @@ struct SymmetricWindowLayout {
     std::uint64_t dispatch_staging_shard_bytes = 0;
     std::uint64_t dispatch_staging_shard_count = 0;
     std::uint64_t dispatch_staging_bytes = 0;
+    std::uint64_t combine_control_offset = 0;
+    std::uint64_t combine_control_bytes = 0;
+    std::uint64_t combine_receive_offset = 0;
+    std::uint64_t combine_receive_shard_bytes = 0;
+    std::uint64_t combine_receive_shard_count = 0;
+    std::uint64_t combine_receive_bytes = 0;
+    std::uint64_t combine_staging_offset = 0;
+    std::uint64_t combine_staging_shard_bytes = 0;
+    std::uint64_t combine_staging_shard_count = 0;
+    std::uint64_t combine_staging_bytes = 0;
 };
 
 class LayoutBuilder {
@@ -304,17 +320,41 @@ inline LayoutStatus build_symmetric_window_layout(
         LayoutBuilder combine_record;
         if (!combine_record.append(hidden_bytes, &ignored) ||
             !combine_record.append(topk_weight_bytes, &ignored) ||
-            !combine_record.append(4 * sizeof(std::int32_t), &ignored) ||
-            !combine_record.finish(&layout.combine_record_bytes) ||
-            !checked_multiply(input.num_max_tokens_per_rank,
-                              layout.combine_record_bytes,
-                              &layout.combine_contributor_shard_bytes) ||
-            !checked_align(layout.combine_contributor_shard_bytes,
+            !combine_record.append(kCombineRecordHeaderBytes, &ignored) ||
+            !combine_record.finish(&layout.combine_record_bytes))
+            return LayoutStatus::overflow("combine record layout overflow");
+
+        std::uint64_t combine_capacity = input.num_max_tokens_per_rank;
+        if (input.expanded && !input.allow_multiple_reduction &&
+            !checked_multiply(combine_capacity, effective_topk,
+                              &combine_capacity))
+            return LayoutStatus::overflow("combine record capacity overflow");
+        if (!checked_multiply(input.world_size, kCombineControlSlotBytes,
+                              &layout.combine_control_bytes) ||
+            !checked_multiply(combine_capacity, layout.combine_record_bytes,
+                              &layout.combine_receive_shard_bytes) ||
+            !checked_align(layout.combine_receive_shard_bytes,
                            kAscendElasticAlignment,
-                           &layout.combine_contributor_shard_bytes) ||
-            !checked_multiply(layout.combine_contributor_shard_bytes,
-                              input.world_size, &layout.combine_bytes))
+                           &layout.combine_receive_shard_bytes) ||
+            !checked_multiply(layout.combine_receive_shard_bytes,
+                              input.world_size, &layout.combine_receive_bytes) ||
+            !checked_multiply(combine_capacity, layout.combine_record_bytes,
+                              &layout.combine_staging_shard_bytes) ||
+            !checked_align(layout.combine_staging_shard_bytes,
+                           kAscendElasticAlignment,
+                           &layout.combine_staging_shard_bytes) ||
+            !checked_multiply(layout.combine_staging_shard_bytes,
+                              input.world_size, &layout.combine_staging_bytes) ||
+            !checked_add(layout.combine_control_bytes,
+                         layout.combine_receive_bytes,
+                         &layout.combine_bytes) ||
+            !checked_add(layout.combine_bytes, layout.combine_staging_bytes,
+                         &layout.combine_bytes))
             return LayoutStatus::overflow("combine region size overflow");
+        layout.combine_contributor_shard_bytes =
+            layout.combine_receive_shard_bytes;
+        layout.combine_receive_shard_count = input.world_size;
+        layout.combine_staging_shard_count = input.world_size;
     }
 
     layout.reserve_bytes = kAscendElasticAlignment;
@@ -328,9 +368,15 @@ inline LayoutStatus build_symmetric_window_layout(
     if (!checked_add(layout.control_offset, sizeof(SymmetricControlHeader),
                      &layout.dispatch_control_offset) ||
         !checked_add(layout.dispatch_offset, layout.dispatch_receive_bytes,
-                     &layout.dispatch_staging_offset))
+                     &layout.dispatch_staging_offset) ||
+        !checked_add(layout.combine_offset, layout.combine_control_bytes,
+                     &layout.combine_receive_offset) ||
+        !checked_add(layout.combine_receive_offset,
+                     layout.combine_receive_bytes,
+                     &layout.combine_staging_offset))
         return LayoutStatus::overflow("symmetric window offset overflow");
     layout.dispatch_receive_offset = layout.dispatch_offset;
+    layout.combine_control_offset = layout.combine_offset;
 
     *output = layout;
     return {};

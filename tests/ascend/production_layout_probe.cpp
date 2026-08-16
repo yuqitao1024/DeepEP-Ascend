@@ -3,7 +3,7 @@
 #include <limits>
 #include <type_traits>
 
-#include "csrc/backends/ascend/elastic/dispatch_state.hpp"
+#include "csrc/backends/ascend/elastic/combine_state.hpp"
 
 using namespace deep_ep::ascend::elastic;
 
@@ -63,12 +63,23 @@ int main() {
           input.world_size * sizeof(DispatchControlSlot));
     CHECK(layout.combine_contributor_shard_bytes >=
           input.num_max_tokens_per_rank * layout.combine_record_bytes);
+    CHECK(layout.combine_control_bytes ==
+          input.world_size * sizeof(CombineControlSlot));
+    CHECK(layout.combine_receive_shard_count == 2);
+    CHECK(layout.combine_staging_shard_count == 2);
+    CHECK(layout.combine_receive_shard_bytes >=
+          input.num_max_tokens_per_rank * layout.combine_record_bytes);
+    CHECK(layout.combine_staging_shard_bytes >=
+          input.num_max_tokens_per_rank * layout.combine_record_bytes);
     CHECK(layout.control_offset % kAscendElasticAlignment == 0);
     CHECK(layout.control_bytes >= sizeof(SymmetricControlHeader));
     CHECK(layout.dispatch_offset % kAscendElasticAlignment == 0);
     CHECK(layout.dispatch_receive_offset % kAscendElasticAlignment == 0);
     CHECK(layout.dispatch_staging_offset % kAscendElasticAlignment == 0);
     CHECK(layout.combine_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.combine_control_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.combine_receive_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.combine_staging_offset % kAscendElasticAlignment == 0);
     CHECK(layout.reserve_offset % kAscendElasticAlignment == 0);
     CHECK(layout.control_offset + layout.control_bytes <=
           layout.dispatch_offset);
@@ -79,6 +90,13 @@ int main() {
           layout.dispatch_offset + layout.dispatch_bytes);
     CHECK(layout.dispatch_offset + layout.dispatch_bytes <=
           layout.combine_offset);
+    CHECK(layout.combine_offset <= layout.combine_control_offset);
+    CHECK(layout.combine_control_offset + layout.combine_control_bytes <=
+          layout.combine_receive_offset);
+    CHECK(layout.combine_receive_offset + layout.combine_receive_bytes <=
+          layout.combine_staging_offset);
+    CHECK(layout.combine_staging_offset + layout.combine_staging_bytes <=
+          layout.reserve_offset);
     CHECK(layout.combine_offset + layout.combine_bytes <=
           layout.reserve_offset);
     CHECK(layout.total_bytes % kPublicElasticBufferAlignment == 0);
@@ -93,6 +111,10 @@ int main() {
           layout.dispatch_staging_shard_bytes);
     CHECK(larger_layout.combine_contributor_shard_bytes >
           layout.combine_contributor_shard_bytes);
+    CHECK(larger_layout.combine_receive_shard_bytes >
+          layout.combine_receive_shard_bytes);
+    CHECK(larger_layout.combine_staging_shard_bytes >
+          layout.combine_staging_shard_bytes);
     CHECK(larger_layout.total_bytes >= layout.total_bytes);
 
     auto conservative = input;
@@ -101,6 +123,32 @@ int main() {
     CHECK(build_symmetric_window_layout(
               conservative, &conservative_layout).ok());
     CHECK(conservative_layout.dispatch_source_shard_bytes > 0);
+
+    auto expanded_single_reduction = input;
+    expanded_single_reduction.expanded = true;
+    expanded_single_reduction.allow_multiple_reduction = false;
+    SymmetricWindowLayout expanded_single_reduction_layout{};
+    CHECK(build_symmetric_window_layout(
+              expanded_single_reduction,
+              &expanded_single_reduction_layout).ok());
+    CHECK(expanded_single_reduction_layout.combine_receive_shard_bytes >=
+          input.num_max_tokens_per_rank * input.num_topk *
+              expanded_single_reduction_layout.combine_record_bytes);
+    CHECK(expanded_single_reduction_layout.combine_staging_shard_bytes >=
+          input.num_max_tokens_per_rank * input.num_topk *
+              expanded_single_reduction_layout.combine_record_bytes);
+
+    auto expanded_multiple_reduction = expanded_single_reduction;
+    expanded_multiple_reduction.allow_multiple_reduction = true;
+    SymmetricWindowLayout expanded_multiple_reduction_layout{};
+    CHECK(build_symmetric_window_layout(
+              expanded_multiple_reduction,
+              &expanded_multiple_reduction_layout).ok());
+    CHECK(expanded_multiple_reduction_layout.combine_receive_shard_bytes >=
+          input.num_max_tokens_per_rank *
+              expanded_multiple_reduction_layout.combine_record_bytes);
+    CHECK(expanded_multiple_reduction_layout.combine_receive_shard_bytes <
+          expanded_single_reduction_layout.combine_receive_shard_bytes);
 
     auto invalid = input;
     invalid.world_size = 1;
@@ -116,6 +164,11 @@ int main() {
     overflow = input;
     overflow.num_max_tokens_per_rank =
         std::numeric_limits<std::uint64_t>::max();
+    CHECK(build_symmetric_window_layout(overflow, &layout).code ==
+          LayoutStatusCode::kOverflow);
+    overflow = expanded_single_reduction;
+    overflow.num_max_tokens_per_rank =
+        std::numeric_limits<std::uint64_t>::max() / input.num_topk + 1;
     CHECK(build_symmetric_window_layout(overflow, &layout).code ==
           LayoutStatusCode::kOverflow);
 

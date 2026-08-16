@@ -1,0 +1,51 @@
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <type_traits>
+
+#include "csrc/backends/ascend/elastic/combine_state.hpp"
+
+using namespace deep_ep::ascend::elastic;
+
+#define CHECK(condition) do { if (!(condition)) return __LINE__; } while (false)
+
+int main() {
+    static_assert(std::is_standard_layout_v<CombineControlSlot>);
+    static_assert(std::is_trivially_copyable_v<CombineControlSlot>);
+    static_assert(sizeof(CombineControlSlot) == 16);
+    static_assert(std::is_standard_layout_v<CombineRecordHeader>);
+    static_assert(std::is_trivially_copyable_v<CombineRecordHeader>);
+    static_assert(sizeof(CombineRecordHeader) == 24);
+
+    CombineSequence sequence;
+    {
+        CombineAttempt first(sequence);
+        CHECK(first.valid());
+        CHECK(first.generation() == 1);
+        first.complete();
+    }
+    CHECK(!sequence.poisoned());
+    {
+        CombineAttempt incomplete(sequence);
+        CHECK(incomplete.valid());
+        CHECK(incomplete.generation() == 2);
+    }
+    CHECK(sequence.poisoned());
+    CombineAttempt rejected(sequence);
+    CHECK(!rejected.valid());
+    CHECK(rejected.generation() == 0);
+
+    CombineSequence exhausted(std::numeric_limits<std::uint64_t>::max());
+    CombineAttempt exhausted_attempt(exhausted);
+    CHECK(!exhausted_attempt.valid());
+    CHECK(exhausted.poisoned());
+
+    const CombineRecordHeader header{};
+    CHECK(header.abi_version == kCombineRecordAbiVersion);
+    CHECK(header.struct_size == sizeof(CombineRecordHeader));
+    CHECK(header.origin_token == -1);
+    CHECK(header.contributor_rank == -1);
+    CHECK(header.master_lane == -1);
+    CHECK(header.contribution_lane == -1);
+    return 0;
+}

@@ -268,6 +268,12 @@ int main() {
     if (validate_internal_launch(malformed_barrier, barrier_storage).code !=
         CoreRuntimeStatusCode::kInvalidArgument)
         return 40;
+    malformed_barrier = barrier_rank_zero;
+    malformed_barrier.symmetric_window_layout.combine_receive_offset +=
+        kAscendElasticAlignment;
+    if (validate_internal_launch(malformed_barrier, barrier_storage).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 46;
 
     auto insufficient_barrier = barrier_storage;
     --insufficient_barrier.workspace_bytes;
