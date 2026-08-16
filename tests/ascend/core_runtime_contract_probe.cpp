@@ -232,6 +232,28 @@ int main() {
     if (!validate_internal_launch(dispatch_tiling, storage).ok())
         return 2;
 
+    CoreTilingInput excessive_input{};
+    excessive_input.operation = OperationKind::kDispatch;
+    excessive_input.element_kind = ElementKind::kBFloat16;
+    excessive_input.num_tokens = 9;
+    excessive_input.hidden = 64;
+    excessive_input.num_experts = 4;
+    excessive_input.num_topk = 2;
+    excessive_input.expert_alignment = 4;
+    excessive_input.num_max_tokens_per_rank = 8;
+    CoreTiling excessive_tiling{};
+    if (build_core_tiling(excessive_input, &excessive_tiling).code !=
+        TilingStatusCode::kInvalidArgument)
+        return 44;
+    auto excessive_descriptor = dispatch_tiling;
+    excessive_descriptor.num_tokens =
+        excessive_descriptor.num_max_tokens_per_rank + 1;
+    if (validate_internal_launch(
+            excessive_descriptor,
+            required_core_launch_storage(excessive_descriptor)).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 45;
+
     auto invalid_topology = dispatch_tiling;
     invalid_topology.topology.world_size = 2;
     if (validate_internal_launch(invalid_topology, storage).code !=

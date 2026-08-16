@@ -330,6 +330,40 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                        "dispatch_source_shard_count"):
             self.assertNotIn(legacy, source)
 
+    def test_dispatch_preflights_protocol_state_before_publication(self):
+        source = (ELASTIC / "dispatch.asc").read_text()
+        for marker in (
+                "DispatchProtocolError::kInvalidTopk",
+                "DispatchProtocolError::kInvalidCachedSlot",
+                "DispatchProtocolError::kInvalidCachedPrefix",
+                "DispatchProtocolError::kInvalidCachedMetadata",
+                "DispatchProtocolError::kCapacityOverflow",
+                "DeviceTransportError::kInvalidProtocol",
+                "record_dispatch_protocol_error",
+                "validate_cached_dispatch_state",
+                "dispatch_output_capacity",
+                "arguments.workspace",
+                "tiling.workspace_layout.scratch_offset"):
+            self.assertIn(marker, source)
+        self.assertIn("observed_transport_error", source)
+        diagnostic_check = source.index("observed_transport_error")
+        backend_status_write = source.index("&diagnostic->backend_status")
+        self.assertLess(diagnostic_check, backend_status_write)
+        self.assertNotIn("RemoteAction::signal_add", source)
+        self.assertIn("RemoteAction::signal_increment", source)
+        count_position = source.index("remote_count, count")
+        generation_position = source.index("remote_generation, generation")
+        signal_position = source.index("transport.signal(")
+        barrier_position = source.index("transport.device_barrier(")
+        self.assertLess(count_position, generation_position)
+        self.assertLess(generation_position, signal_position)
+        self.assertLess(signal_position, barrier_position)
+
+        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
+        for case_name in ("dispatch-invalid-topk",
+                          "dispatch-invalid-cache"):
+            self.assertIn(case_name, runner)
+
     def test_production_api_does_not_bypass_transport_gate(self):
         production = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
         bindings = (ROOT / "csrc/python_api.cpp").read_text()
