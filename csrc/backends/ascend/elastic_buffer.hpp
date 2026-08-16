@@ -633,9 +633,6 @@ public:
                             std::numeric_limits<int>::max()),
                     "DeepEP Ascend backend: dispatch output count overflow");
 
-        elastic::DispatchAttempt attempt(dispatch_sequence_);
-        TORCH_CHECK(attempt.valid(), "DeepEP Ascend backend: dispatch cannot continue "
-                    "after a failed or concurrent attempt");
         torch::Tensor rank_prefix;
         torch::Tensor expert_prefix;
         torch::Tensor unaligned;
@@ -745,6 +742,9 @@ public:
                 int_options);
         }
 
+        elastic::DispatchAttempt attempt(dispatch_sequence_);
+        TORCH_CHECK(attempt.valid(), "DeepEP Ascend backend: dispatch cannot continue "
+                    "after a failed or concurrent attempt");
         auto recv_x = torch::empty(
             {static_cast<int64_t>(do_expand ? expanded_records : max_recv_tokens),
              x.size(1)}, x.options());
