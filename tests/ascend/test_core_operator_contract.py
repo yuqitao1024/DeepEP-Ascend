@@ -364,6 +364,39 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                           "dispatch-invalid-cache"):
             self.assertIn(case_name, runner)
 
+    def test_cached_dispatch_validates_private_counts_and_local_prefixes(self):
+        """Catches public count repair and nonlocal cached expert counting."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        producer_begin = source.index(
+            "__simt_vf__ inline void dispatch_producer_vf")
+        epilogue_begin = source.index(
+            "__simt_vf__ inline void dispatch_epilogue_vf")
+        producer = source[producer_begin:epilogue_begin]
+        self.assertNotIn("prefix_per_rank[", producer)
+        self.assertIn("local_count_address", producer)
+        epilogue = source[epilogue_begin:]
+        self.assertIn(
+            "source_counts[0] = transport.load_acquire(local_count_address)",
+            epilogue)
+
+        derived_begin = source.index("std::int32_t derived_prefix")
+        derived_end = source.index("if (cached && expanded)", derived_begin)
+        derived_prefix = source[derived_begin:derived_end]
+        self.assertIn("expert_is_local", derived_prefix)
+        self.assertIn("first_local_expert", derived_prefix)
+        self.assertIn("num_local_experts", derived_prefix)
+
+        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
+        for case_name in ("dispatch-invalid-prefix",
+                          "dispatch-invalid-slot",
+                          "dispatch-cached-mixed-rank"):
+            self.assertIn(case_name, runner)
+        for mutation in (
+                "Mutation caught: producer-side cached rank-prefix repair.",
+                "Mutation caught: cached slot validation after publication.",
+                "Mutation caught: nonlocal lanes counted in cached expert prefixes."):
+            self.assertIn(mutation, runner)
+
     def test_production_api_does_not_bypass_transport_gate(self):
         production = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
         bindings = (ROOT / "csrc/python_api.cpp").read_text()
