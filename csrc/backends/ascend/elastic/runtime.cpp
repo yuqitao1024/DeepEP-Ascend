@@ -238,6 +238,8 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
                               mode_bit(CoreMode::kZeroPadding);
             break;
         case OperationKind::kCombine:
+            operation_modes = mode_bit(CoreMode::kExpanded) |
+                              mode_bit(CoreMode::kAllowMultipleReduction);
             break;
         default:
             return invalid("invalid operation kind");
@@ -374,8 +376,15 @@ CoreRuntimeStatus launch_internal_combine(
         arguments.local_window_base !=
             tiling.transport_context.local_window_base)
         return invalid("combine local window does not match transport");
-    if (arguments.num_source_rows != arguments.num_input_rows)
-        return invalid("combine source and input row counts must match");
+    const bool expanded = has_mode(tiling.mode_flags, CoreMode::kExpanded);
+    const bool allow_multiple_reduction = has_mode(
+        tiling.mode_flags, CoreMode::kAllowMultipleReduction);
+    if ((!expanded && arguments.num_source_rows != arguments.num_input_rows) ||
+        (expanded && !allow_multiple_reduction &&
+         arguments.topk_weights != nullptr))
+        return invalid(expanded ?
+            "expanded combine requires allow_multiple_reduction" :
+            "combine source and input row counts must match");
     if (tiling.num_max_tokens_per_rank >
         static_cast<std::uint64_t>(0x7fffffff) /
             static_cast<std::uint64_t>(tiling.topology.world_size))
@@ -385,6 +394,11 @@ CoreRuntimeStatus launch_internal_combine(
         static_cast<std::uint64_t>(tiling.topology.world_size);
     if (arguments.num_source_rows > maximum_source_rows)
         return invalid("combine source row count exceeds fixed shards");
+    const std::uint64_t maximum_input_rows = expanded ?
+        tiling.num_max_tokens_per_rank * tiling.num_topk :
+        maximum_source_rows;
+    if (arguments.num_input_rows > maximum_input_rows)
+        return invalid("combine input row count exceeds fixed shards");
     if ((arguments.num_source_rows != 0 &&
          (arguments.x == nullptr || arguments.source_metadata == nullptr)) ||
         arguments.combined_topk_indices == nullptr ||
@@ -392,11 +406,9 @@ CoreRuntimeStatus launch_internal_combine(
         arguments.communication_buffer == nullptr ||
         arguments.workspace == nullptr || arguments.combined_x == nullptr)
         return invalid("combine required argument is null");
-    if (arguments.topk_weights != nullptr ||
-        arguments.combined_topk_weights != nullptr ||
-        arguments.bias_0 != nullptr || arguments.bias_1 != nullptr)
-        return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
-                "weighted or biased combine is deferred"};
+    if ((arguments.topk_weights == nullptr) !=
+        (arguments.combined_topk_weights == nullptr))
+        return invalid("combine weights require both input and output");
     if (!is_aligned(arguments.communication_buffer) ||
         !is_aligned(arguments.workspace))
         return invalid("combine storage is misaligned");

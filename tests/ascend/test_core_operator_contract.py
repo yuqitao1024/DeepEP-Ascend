@@ -660,6 +660,59 @@ int main() {
                       combine_case)
         self.assertIn("observed_output[2] == 0x5a5a", runner)
 
+    def test_combine_expanded_semantics(self):
+        """Catches reading aligned padding or collapsing expanded lanes."""
+        source = (ELASTIC / "combine.asc").read_text()
+        producer_begin = source.index("__simt_vf__ inline void combine_producer_vf")
+        epilogue_begin = source.index("__simt_vf__ inline void combine_epilogue_vf")
+        producer = source[producer_begin:epilogue_begin]
+
+        # A source row with slots [3, 7] must reduce 3 then 7 to one record;
+        # single reduction must publish the same two values as distinct lanes.
+        for marker in (
+                "const bool expanded =", "const bool allow_multiple_reduction =",
+                "metadata[2 + lane]", "input_row < 0", "input_row != -1",
+                "static_cast<std::uint64_t>(input_row) >= num_input_rows",
+                "float value = 0.0F", "value += static_cast<float>(",
+                "header->contribution_lane = expanded && !allow_multiple_reduction"):
+            self.assertIn(marker, producer)
+        self.assertLess(producer.index("metadata[2 + lane]"),
+                        producer.index("x[\n                                static_cast<std::uint64_t>(input_row)"))
+
+        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
+        for literal in (
+                "const std::uint16_t kExpandedPaddingSentinel = 0x5a5a;",
+                "const std::uint16_t expected_multiple[] = {",
+                "float_to_bfloat16(3.0F)", "float_to_bfloat16(7.0F)",
+                "float_to_bfloat16(10.0F)"):
+            self.assertIn(literal, runner)
+
+    def test_combine_weights_and_bias_semantics(self):
+        """Catches activation weighting or per-contributor bias application."""
+        source = (ELASTIC / "combine.asc").read_text()
+        epilogue_begin = source.index("__simt_vf__ inline void combine_epilogue_vf")
+        epilogue = source[epilogue_begin:]
+        for marker in (
+                "__gm__ const float* topk_weights", "__gm__ const bfloat16_t* bias_0",
+                "__gm__ const bfloat16_t* bias_1", "combined_topk_weights[",
+                "value += static_cast<float>(\n                    bias_0[",
+                "value += static_cast<float>(\n                    bias_1["):
+            self.assertIn(marker, epilogue)
+        self.assertIn("topk_weights[", source)
+        self.assertNotIn("payload[hidden]) *", epilogue)
+
+        runtime = (ELASTIC / "runtime.cpp").read_text()
+        self.assertIn("expanded combine requires allow_multiple_reduction",
+                      runtime)
+        self.assertNotIn("weighted or biased combine is deferred", runtime)
+
+        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
+        for literal in (
+                "const float expected_weights[] = {0.125F, 0.625F};",
+                "float_to_bfloat16(11.5F)",
+                "float_to_bfloat16(13.0F)"):
+            self.assertIn(literal, runner)
+
     def test_dispatch_preflights_protocol_state_before_publication(self):
         source = (ELASTIC / "dispatch.asc").read_text()
         for marker in (

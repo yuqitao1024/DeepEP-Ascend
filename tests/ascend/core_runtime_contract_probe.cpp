@@ -56,10 +56,11 @@ bool trace_is(int first, int second = 0) {
 CoreTiling valid_tiling(
     OperationKind operation,
     ElementKind element_kind = ElementKind::kBFloat16,
-    int world_rank = 0, int world_size = 1) {
+    int world_rank = 0, int world_size = 1, CoreModeFlags mode_flags = 0) {
     CoreTilingInput input{};
     input.operation = operation;
     input.element_kind = element_kind;
+    input.mode_flags = mode_flags;
     input.num_tokens = operation == OperationKind::kBarrier ? 0 : 4;
     input.hidden = 64;
     input.num_experts = 4;
@@ -740,11 +741,25 @@ int main() {
     reset_launches();
     auto weighted_combine = combine;
     weighted_combine.topk_weights = weights;
-    status = launch_internal_combine(
-        weighted_combine, combine_tiling, combine_storage, nullptr);
-    if (status.code != CoreRuntimeStatusCode::kUnsupportedMode ||
-        launch_trace_size != 0)
+    weighted_combine.combined_topk_weights = weights;
+    if (!launch_internal_combine(
+            weighted_combine, combine_tiling, combine_storage, nullptr).ok() ||
+        !trace_is(kCombineLaunch))
         return 53;
+    reset_launches();
+    auto expanded_single_tiling = valid_tiling(
+        OperationKind::kCombine, ElementKind::kBFloat16, 1, 2,
+        mode_bit(CoreMode::kExpanded));
+    export_transport(&expanded_single_tiling);
+    auto expanded_weighted_combine = weighted_combine;
+    expanded_weighted_combine.local_window_base =
+        expanded_single_tiling.transport_context.local_window_base;
+    if (launch_internal_combine(
+            expanded_weighted_combine, expanded_single_tiling,
+            required_core_launch_storage(expanded_single_tiling), nullptr).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 58;
 
     auto barrier_tiling = valid_barrier_tiling(0);
     BarrierArguments barrier{bytes, 7, 1000000000ULL};
