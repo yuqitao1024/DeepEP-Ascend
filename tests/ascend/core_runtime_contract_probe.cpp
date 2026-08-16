@@ -20,6 +20,11 @@ int launch_trace_size = 0;
 int failing_launch = 0;
 int failing_code = 0;
 std::uint64_t barrier_generation = 0;
+std::uint64_t dispatch_generation = 0;
+std::uint64_t dispatch_timeout_cycles = 0;
+int dispatch_world_rank = -1;
+std::uint64_t dispatch_receive_offset = 0;
+std::uint64_t dispatch_staging_offset = 0;
 
 int record_launch(LaunchId launch) {
     launch_trace[launch_trace_size++] = launch;
@@ -86,6 +91,28 @@ CoreTiling valid_barrier_tiling(int world_rank) {
     return tiling;
 }
 
+void export_transport(CoreTiling* tiling) {
+    tiling->transport_context.capabilities =
+        transport::capability_bit(
+            transport::TransportCapability::kSymmetricWindow) |
+        transport::capability_bit(
+            transport::TransportCapability::kDevicePut) |
+        transport::capability_bit(
+            transport::TransportCapability::kDevicePutValue) |
+        transport::capability_bit(
+            transport::TransportCapability::kRemoteSignal) |
+        transport::capability_bit(
+            transport::TransportCapability::kSystemMemoryOrdering) |
+        transport::capability_bit(
+            transport::TransportCapability::kDeviceBarrier) |
+        transport::capability_bit(
+            transport::TransportCapability::kScaleUpTeam);
+    tiling->transport_context.local_window_base = 0x200000;
+    tiling->transport_context.peer_address_table = 0x300000;
+    tiling->transport_context.channel_table = 0x400000;
+    tiling->transport_context.backend_context = 0x500000;
+}
+
 }  // namespace
 
 extern "C" int deep_ep_ascend_launch_barrier(
@@ -95,7 +122,14 @@ extern "C" int deep_ep_ascend_launch_barrier(
 }
 
 extern "C" int deep_ep_ascend_launch_dispatch(
-    DispatchArguments, CoreTiling, void*) {
+    DispatchArguments arguments, CoreTiling tiling, void*) {
+    dispatch_generation = arguments.generation;
+    dispatch_timeout_cycles = arguments.timeout_cycles;
+    dispatch_world_rank = tiling.transport_context.topology.world_rank;
+    dispatch_receive_offset =
+        tiling.symmetric_window_layout.dispatch_receive_offset;
+    dispatch_staging_offset =
+        tiling.symmetric_window_layout.dispatch_staging_offset;
     return record_launch(kDispatchLaunch);
 }
 
@@ -174,12 +208,17 @@ int main() {
 
     auto two_rank_dispatch = valid_tiling(
         OperationKind::kDispatch, ElementKind::kBFloat16, 0, 2);
-    auto two_rank_combine = valid_tiling(
-        OperationKind::kCombine, ElementKind::kBFloat16, 1, 2);
     if (validate_internal_launch(
             two_rank_dispatch,
             required_core_launch_storage(two_rank_dispatch)).code !=
-            CoreRuntimeStatusCode::kUnsupportedTopology ||
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 43;
+    export_transport(&two_rank_dispatch);
+    auto two_rank_combine = valid_tiling(
+        OperationKind::kCombine, ElementKind::kBFloat16, 1, 2);
+    if (!validate_internal_launch(
+            two_rank_dispatch,
+            required_core_launch_storage(two_rank_dispatch)).ok() ||
         validate_internal_launch(
             two_rank_combine,
             required_core_launch_storage(two_rank_combine)).code !=
@@ -288,11 +327,14 @@ int main() {
     dispatch.unaligned_per_expert = integers;
     dispatch.destination_slots = integers;
     dispatch.source_metadata = integers;
+    dispatch.generation = 11;
+    dispatch.timeout_cycles = 101;
 
     reset_launches();
     if (!launch_internal_dispatch(
              dispatch, dispatch_tiling, storage, nullptr).ok() ||
-        !trace_is(kDispatchLaunch, kDispatchEpilogueLaunch))
+        !trace_is(kDispatchLaunch) || dispatch_generation != 11 ||
+        dispatch_timeout_cycles != 101)
         return 16;
     reset_launches(kDispatchLaunch, 5);
     auto status = launch_internal_dispatch(
@@ -300,13 +342,35 @@ int main() {
     if (status.code != CoreRuntimeStatusCode::kLaunchFailure ||
         status.backend_code != 5 || !trace_is(kDispatchLaunch))
         return 17;
-    reset_launches(kDispatchEpilogueLaunch, 7);
-    status = launch_internal_dispatch(dispatch, dispatch_tiling, storage,
-                                      nullptr);
-    if (status.code != CoreRuntimeStatusCode::kLaunchFailure ||
-        status.backend_code != 7 ||
-        !trace_is(kDispatchLaunch, kDispatchEpilogueLaunch))
+    reset_launches();
+    auto zero_dispatch_generation = dispatch;
+    zero_dispatch_generation.generation = 0;
+    status = launch_internal_dispatch(
+        zero_dispatch_generation, dispatch_tiling, storage, nullptr);
+    if (status.code != CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
         return 18;
+    reset_launches();
+    auto zero_dispatch_timeout = dispatch;
+    zero_dispatch_timeout.timeout_cycles = 0;
+    status = launch_internal_dispatch(
+        zero_dispatch_timeout, dispatch_tiling, storage, nullptr);
+    if (status.code != CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 41;
+    reset_launches();
+    auto rank_one_dispatch = valid_tiling(
+        OperationKind::kDispatch, ElementKind::kBFloat16, 1, 2);
+    export_transport(&rank_one_dispatch);
+    if (!launch_internal_dispatch(
+            dispatch, rank_one_dispatch,
+            required_core_launch_storage(rank_one_dispatch), nullptr).ok() ||
+        !trace_is(kDispatchLaunch) || dispatch_world_rank != 1 ||
+        dispatch_receive_offset != rank_one_dispatch.symmetric_window_layout
+                                       .dispatch_receive_offset ||
+        dispatch_staging_offset != rank_one_dispatch.symmetric_window_layout
+                                       .dispatch_staging_offset)
+        return 42;
     reset_launches();
     auto misaligned_dispatch = dispatch;
     misaligned_dispatch.workspace = bytes + 1;

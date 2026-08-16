@@ -80,7 +80,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn(
             "std::uint64_t timeout_cycles",
             signatures["barrier_producer_vf"])
-        for function_name in ("dispatch_vf", "combine_vf"):
+        for function_name in ("dispatch_producer_vf", "combine_vf"):
             signature = signatures[function_name]
             for argument in (
                     "std::uint32_t transport_abi_version",
@@ -103,9 +103,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "tiling.transport_context.local_window_base",
                 "tiling.transport_context.backend_context",
             },
-            "dispatch_vf": {
+            "dispatch_producer_vf": {
                 "tiling.transport_context.abi_version",
                 "tiling.transport_context.struct_size",
+                "tiling.transport_context.local_window_base",
+                "tiling.transport_context.topology.world_rank",
                 "tiling.transport_context.topology.world_size",
                 "tiling.transport_context.topology.scale_up_size",
                 "tiling.transport_context.backend_context",
@@ -296,6 +298,37 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("transport.load_acquire(", source)
         for forbidden in ("HcclBarrier", "HcclAllReduce", "HcclAllGather"):
             self.assertNotIn(forbidden, source)
+
+    def test_dispatch_has_fixed_shard_service_boundaries(self):
+        source = (ELASTIC / "dispatch.asc").read_text()
+        ordered_markers = (
+            "service::reset",
+            "asc_vf_call<dispatch_producer_vf>",
+            "service::execute",
+            "asc_vf_call<dispatch_epilogue_vf>",
+        )
+        for marker in ordered_markers:
+            self.assertIn(marker, source)
+        positions = [source.index(marker) for marker in ordered_markers]
+        self.assertEqual(positions, sorted(positions))
+        for marker in (
+                "transport_world_rank", "transport_local_window_base",
+                "arguments.generation", "arguments.timeout_cycles",
+                "dispatch_control_offset", "dispatch_control_bytes",
+                "dispatch_receive_offset", "dispatch_receive_shard_bytes",
+                "dispatch_receive_shard_count", "dispatch_receive_bytes",
+                "dispatch_staging_offset", "dispatch_staging_shard_bytes",
+                "dispatch_staging_shard_count", "dispatch_staging_bytes",
+                "destination_rank",
+                "transport.device_barrier(", "transport.consumed_generation()"):
+            self.assertIn(marker, source)
+        self.assertNotRegex(
+            source,
+            r"transport\.(?:put|put_value|signal)\(\s*"
+            r"transport::TransportTeam::k(?:World|ScaleUp),\s*0,")
+        for legacy in ("dispatch_source_shard_bytes",
+                       "dispatch_source_shard_count"):
+            self.assertNotIn(legacy, source)
 
     def test_production_api_does_not_bypass_transport_gate(self):
         production = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()

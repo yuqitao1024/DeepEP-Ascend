@@ -4,6 +4,22 @@ namespace deep_ep::ascend::elastic {
 
 namespace {
 
+constexpr transport::TransportCapabilities kDispatchTransportCapabilities =
+    transport::capability_bit(
+        transport::TransportCapability::kSymmetricWindow) |
+    transport::capability_bit(
+        transport::TransportCapability::kDevicePut) |
+    transport::capability_bit(
+        transport::TransportCapability::kDevicePutValue) |
+    transport::capability_bit(
+        transport::TransportCapability::kRemoteSignal) |
+    transport::capability_bit(
+        transport::TransportCapability::kSystemMemoryOrdering) |
+    transport::capability_bit(
+        transport::TransportCapability::kDeviceBarrier) |
+    transport::capability_bit(
+        transport::TransportCapability::kScaleUpTeam);
+
 CoreRuntimeStatus invalid(const char* message) {
     return {CoreRuntimeStatusCode::kInvalidArgument, 0, message};
 }
@@ -87,7 +103,21 @@ bool same_symmetric_window_layout(
            lhs.combine_bytes == rhs.combine_bytes &&
            lhs.reserve_offset == rhs.reserve_offset &&
            lhs.reserve_bytes == rhs.reserve_bytes &&
-           lhs.total_bytes == rhs.total_bytes;
+           lhs.total_bytes == rhs.total_bytes &&
+           lhs.dispatch_control_offset == rhs.dispatch_control_offset &&
+           lhs.dispatch_control_bytes == rhs.dispatch_control_bytes &&
+           lhs.dispatch_receive_offset == rhs.dispatch_receive_offset &&
+           lhs.dispatch_receive_shard_bytes ==
+               rhs.dispatch_receive_shard_bytes &&
+           lhs.dispatch_receive_shard_count ==
+               rhs.dispatch_receive_shard_count &&
+           lhs.dispatch_receive_bytes == rhs.dispatch_receive_bytes &&
+           lhs.dispatch_staging_offset == rhs.dispatch_staging_offset &&
+           lhs.dispatch_staging_shard_bytes ==
+               rhs.dispatch_staging_shard_bytes &&
+           lhs.dispatch_staging_shard_count ==
+               rhs.dispatch_staging_shard_count &&
+           lhs.dispatch_staging_bytes == rhs.dispatch_staging_bytes;
 }
 
 bool context_topology_matches(
@@ -108,6 +138,10 @@ CoreRuntimeStatus validate_operation_topology(const CoreTiling& tiling) {
                     "barrier requires exactly two scale-up ranks"};
         return {};
     }
+    if (tiling.operation == OperationKind::kDispatch &&
+        (is_single_rank_topology(tiling.topology) ||
+         is_two_rank_scale_up_topology(tiling.topology)))
+        return {};
     if (!is_single_rank_topology(tiling.topology))
         return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
                 "dispatch and combine multi-rank launch is deferred"};
@@ -120,14 +154,17 @@ CoreRuntimeStatus validate_transport_context(const CoreTiling& tiling) {
         context.struct_size != sizeof(transport::DeviceTransportContext) ||
         !context_topology_matches(context.topology, tiling.topology))
         return invalid("transport context does not match tiling topology");
-    if (tiling.operation != OperationKind::kBarrier)
+    if (tiling.operation != OperationKind::kBarrier &&
+        !(tiling.operation == OperationKind::kDispatch &&
+          is_two_rank_scale_up_topology(tiling.topology)))
         return {};
-    if ((context.capabilities & kBarrierTransportCapabilities) !=
-        kBarrierTransportCapabilities)
-        return invalid("transport context lacks barrier capabilities");
+    const auto required = tiling.operation == OperationKind::kDispatch ?
+        kDispatchTransportCapabilities : kBarrierTransportCapabilities;
+    if ((context.capabilities & required) != required)
+        return invalid("transport context lacks required capabilities");
     if (context.local_window_base == 0 || context.peer_address_table == 0 ||
         context.channel_table == 0 || context.backend_context == 0)
-        return invalid("barrier requires an exported transport context");
+        return invalid("operation requires an exported transport context");
     return {};
 }
 
@@ -269,6 +306,10 @@ CoreRuntimeStatus launch_internal_dispatch(
         return status;
     if (tiling.operation != OperationKind::kDispatch)
         return invalid("dispatch launch requires dispatch tiling");
+    if (arguments.generation == 0)
+        return invalid("dispatch generation must not be zero");
+    if (arguments.timeout_cycles == 0)
+        return invalid("dispatch timeout must not be zero");
     if (arguments.x == nullptr || arguments.topk_indices == nullptr ||
         arguments.communication_buffer == nullptr ||
         arguments.workspace == nullptr || arguments.recv_x == nullptr ||
@@ -282,13 +323,9 @@ CoreRuntimeStatus launch_internal_dispatch(
     if (!is_aligned(arguments.communication_buffer) ||
         !is_aligned(arguments.workspace))
         return invalid("dispatch storage is misaligned");
-    int result = deep_ep_ascend_launch_dispatch(arguments, tiling, stream);
-    if (result != 0)
-        return launch_failure(result, "dispatch kernel launch failed");
-    result = deep_ep_ascend_launch_dispatch_epilogue(
-        arguments, tiling, stream);
+    const int result = deep_ep_ascend_launch_dispatch(arguments, tiling, stream);
     return result == 0 ? CoreRuntimeStatus{} :
-        launch_failure(result, "dispatch epilogue launch failed");
+        launch_failure(result, "dispatch kernel launch failed");
 }
 
 CoreRuntimeStatus launch_internal_combine(

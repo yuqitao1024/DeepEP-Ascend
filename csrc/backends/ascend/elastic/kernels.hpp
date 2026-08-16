@@ -28,6 +28,8 @@ struct DispatchArguments {
     std::int32_t* unaligned_per_expert = nullptr;
     std::int32_t* destination_slots = nullptr;
     std::int32_t* source_metadata = nullptr;
+    std::uint64_t generation = 0;
+    std::uint64_t timeout_cycles = 0;
 };
 
 struct CombineArguments {
