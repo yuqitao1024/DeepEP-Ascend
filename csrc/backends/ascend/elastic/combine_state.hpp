@@ -8,8 +8,12 @@
 #if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
 #define DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE \
     __SIMT_DEVICE_FUNCTIONS_DECL__
+#define DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL __gm__
 #else
 #define DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE
+#if !defined(DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL)
+#define DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL
+#endif
 #endif
 
 namespace deep_ep::ascend::elastic {
@@ -42,7 +46,7 @@ static_assert(sizeof(CombineRecordHeader) == kCombineRecordHeaderBytes);
 struct CombineOriginRecordView {
     CombineRecordHeader header{};
     float activation = 0.0F;
-    const float* routing_weights = nullptr;
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const float* routing_weights = nullptr;
 };
 
 struct CombineOriginRecordRange {
@@ -116,7 +120,8 @@ combine_expanded_input_row_is_valid(
 
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr std::uint64_t
 combine_expanded_record_count(
-    const std::int32_t* input_rows, std::uint64_t num_topk,
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const std::int32_t* input_rows,
+    std::uint64_t num_topk,
     bool allow_multiple_reduction) noexcept {
     std::uint64_t valid_lanes = 0;
     for (std::uint64_t lane = 0; lane < num_topk; ++lane)
@@ -127,7 +132,8 @@ combine_expanded_record_count(
 
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr std::int32_t
 combine_expanded_record_lane(
-    const std::int32_t* input_rows, std::uint64_t num_topk,
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const std::int32_t* input_rows,
+    std::uint64_t num_topk,
     std::uint64_t record_index) noexcept {
     std::uint64_t seen = 0;
     for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
@@ -142,7 +148,8 @@ combine_expanded_record_lane(
 template <typename Value>
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE inline float
 combine_reduce_expanded_lanes(
-    const Value* input, const std::int32_t* input_rows,
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const Value* input,
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const std::int32_t* input_rows,
     std::uint64_t num_topk, std::uint64_t num_input_rows,
     std::uint64_t hidden_elements, std::uint64_t hidden) noexcept {
     float value = 0.0F;
@@ -158,9 +165,25 @@ combine_reduce_expanded_lanes(
     return value;
 }
 
-DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr float
-combine_routing_weight(const float* weights, std::uint64_t index) noexcept {
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE inline float
+combine_routing_weight(
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const float* weights,
+    std::uint64_t index) noexcept {
     return weights[index];
+}
+
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE inline CombineRecordHeader
+load_combine_record_header(
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const CombineRecordHeader* header)
+    noexcept {
+    CombineRecordHeader result{};
+    result.abi_version = header->abi_version;
+    result.struct_size = header->struct_size;
+    result.origin_token = header->origin_token;
+    result.contributor_rank = header->contributor_rank;
+    result.master_lane = header->master_lane;
+    result.contribution_lane = header->contribution_lane;
+    return result;
 }
 
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr float
@@ -172,11 +195,14 @@ template <typename RecordSource>
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE inline float
 combine_reduce_origin_records(
     const RecordSource& source, std::uint64_t contributor_count,
-    std::int32_t origin_token, const std::int64_t* combined_topk_indices,
+    std::int32_t origin_token,
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const std::int64_t*
+        combined_topk_indices,
     std::uint64_t num_topk, std::uint64_t num_experts,
     std::uint64_t num_local_experts, bool expanded,
     bool allow_multiple_reduction, std::uint64_t hidden, float bias_0,
-    float bias_1, float* output_weights) noexcept {
+    float bias_1,
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL float* output_weights) noexcept {
     if (output_weights != nullptr) {
         for (std::uint64_t lane = 0; lane < num_topk; ++lane)
             output_weights[lane] = 0.0F;
@@ -243,3 +269,4 @@ combine_reduce_origin_records(
 }  // namespace deep_ep::ascend::elastic
 
 #undef DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE
+#undef DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL
