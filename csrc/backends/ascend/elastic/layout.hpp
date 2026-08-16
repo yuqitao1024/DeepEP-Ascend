@@ -167,19 +167,9 @@ struct SymmetricWindowLayout {
     std::uint32_t struct_size = 0;
     std::uint64_t control_offset = 0;
     std::uint64_t control_bytes = 0;
-    std::uint64_t dispatch_control_offset = 0;
-    std::uint64_t dispatch_control_bytes = 0;
     std::uint64_t dispatch_offset = 0;
     std::uint64_t dispatch_record_bytes = 0;
-    std::uint64_t dispatch_receive_offset = 0;
-    std::uint64_t dispatch_receive_shard_bytes = 0;
-    std::uint64_t dispatch_receive_shard_count = 0;
-    std::uint64_t dispatch_receive_bytes = 0;
-    std::uint64_t dispatch_staging_offset = 0;
-    std::uint64_t dispatch_staging_shard_bytes = 0;
-    std::uint64_t dispatch_staging_shard_count = 0;
-    std::uint64_t dispatch_staging_bytes = 0;
-    // Retained for callers compiled against the initial window layout.
+    // Existing ABI field: describes the Phase 2F staging-shard geometry.
     std::uint64_t dispatch_source_shard_bytes = 0;
     std::uint64_t dispatch_source_shard_count = 0;
     std::uint64_t dispatch_bytes = 0;
@@ -191,6 +181,16 @@ struct SymmetricWindowLayout {
     std::uint64_t reserve_offset = 0;
     std::uint64_t reserve_bytes = 0;
     std::uint64_t total_bytes = 0;
+    std::uint64_t dispatch_control_offset = 0;
+    std::uint64_t dispatch_control_bytes = 0;
+    std::uint64_t dispatch_receive_offset = 0;
+    std::uint64_t dispatch_receive_shard_bytes = 0;
+    std::uint64_t dispatch_receive_shard_count = 0;
+    std::uint64_t dispatch_receive_bytes = 0;
+    std::uint64_t dispatch_staging_offset = 0;
+    std::uint64_t dispatch_staging_shard_bytes = 0;
+    std::uint64_t dispatch_staging_shard_count = 0;
+    std::uint64_t dispatch_staging_bytes = 0;
 };
 
 class LayoutBuilder {

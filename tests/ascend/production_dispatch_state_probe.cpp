@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 
 #include "csrc/backends/ascend/elastic/dispatch_state.hpp"
@@ -33,6 +34,12 @@ int main() {
     DispatchAttempt rejected(sequence);
     CHECK(!rejected.valid());
     CHECK(rejected.generation() == 0);
+
+    DispatchSequence exhausted(std::numeric_limits<std::uint64_t>::max());
+    DispatchAttempt exhausted_attempt(exhausted);
+    CHECK(!exhausted_attempt.valid());
+    CHECK(exhausted_attempt.generation() == 0);
+    CHECK(exhausted.poisoned());
 
     CoreTopology topology{};
     topology.world_size = 2;

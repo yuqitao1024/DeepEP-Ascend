@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 
 #include "layout.hpp"
 
@@ -12,6 +13,11 @@ class DispatchAttempt;
 
 class DispatchSequence {
 public:
+    DispatchSequence() = default;
+
+    explicit DispatchSequence(std::uint64_t last_generation) noexcept
+        : generation_(last_generation) {}
+
     bool poisoned() const noexcept { return poisoned_; }
 
 private:
@@ -20,9 +26,11 @@ private:
     bool begin(std::uint64_t* generation) noexcept {
         if (generation == nullptr || poisoned_ || in_progress_)
             return false;
+        if (generation_ == std::numeric_limits<std::uint64_t>::max()) {
+            poisoned_ = true;
+            return false;
+        }
         ++generation_;
-        if (generation_ == 0)
-            ++generation_;
         *generation = generation_;
         in_progress_ = true;
         return true;

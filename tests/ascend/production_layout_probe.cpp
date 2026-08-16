@@ -16,6 +16,27 @@ int main() {
     static_assert(std::is_trivially_copyable_v<SymmetricControlHeader>);
     static_assert(offsetof(SymmetricControlHeader, barrier_generation) == 16);
     static_assert(offsetof(SymmetricControlHeader, barrier_completion) == 32);
+    static_assert(offsetof(SymmetricWindowLayout, abi_version) == 0);
+    static_assert(offsetof(SymmetricWindowLayout, struct_size) == 4);
+    static_assert(offsetof(SymmetricWindowLayout, control_offset) == 8);
+    static_assert(offsetof(SymmetricWindowLayout, control_bytes) == 16);
+    static_assert(offsetof(SymmetricWindowLayout, dispatch_offset) == 24);
+    static_assert(offsetof(SymmetricWindowLayout, dispatch_record_bytes) == 32);
+    static_assert(
+        offsetof(SymmetricWindowLayout, dispatch_source_shard_bytes) == 40);
+    static_assert(
+        offsetof(SymmetricWindowLayout, dispatch_source_shard_count) == 48);
+    static_assert(offsetof(SymmetricWindowLayout, dispatch_bytes) == 56);
+    static_assert(offsetof(SymmetricWindowLayout, combine_offset) == 64);
+    static_assert(offsetof(SymmetricWindowLayout, combine_record_bytes) == 72);
+    static_assert(offsetof(
+        SymmetricWindowLayout, combine_contributor_shard_bytes) == 80);
+    static_assert(offsetof(
+        SymmetricWindowLayout, combine_contributor_shard_count) == 88);
+    static_assert(offsetof(SymmetricWindowLayout, combine_bytes) == 96);
+    static_assert(offsetof(SymmetricWindowLayout, reserve_offset) == 104);
+    static_assert(offsetof(SymmetricWindowLayout, reserve_bytes) == 112);
+    static_assert(offsetof(SymmetricWindowLayout, total_bytes) == 120);
 
     SymmetricWindowInput input{};
     input.world_size = 2;
