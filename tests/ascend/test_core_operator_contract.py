@@ -532,9 +532,9 @@ int main() {
                 "remote_generation, generation", "transport.signal(",
                 "transport.device_barrier(",
                 "transport.consumed_generation()",
-                "float value = 0.0F",
-                "value += static_cast<float>(payload[hidden])",
-                "combined_topk_weights[index] = 0.0F"):
+                "CombineOriginDeviceRecordSource",
+                "combine_reduce_origin_records(",
+                "static_cast<bfloat16_t>(value)"):
             self.assertIn(marker, source)
 
         self.assertNotRegex(
@@ -639,7 +639,7 @@ int main() {
             "is_valid_combine_token_extent(")
         output_position = epilogue.index(
             "for (std::uint64_t token = 0; token < num_tokens; ++token)")
-        weight_position = epilogue.index("combined_topk_weights[index] = 0.0F")
+        weight_position = epilogue.index("combined_topk_weights != nullptr")
         completion_position = epilogue.index("&control->combine_generation")
         self.assertLess(capacity_position, output_position)
         self.assertLess(capacity_position, weight_position)

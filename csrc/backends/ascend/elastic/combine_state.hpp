@@ -37,6 +37,19 @@ struct CombineRecordHeader {
 
 static_assert(sizeof(CombineRecordHeader) == kCombineRecordHeaderBytes);
 
+// A source-specific adapter exposes received records in this neutral form so
+// origin reduction can be exercised on the host and run on the device.
+struct CombineOriginRecordView {
+    CombineRecordHeader header{};
+    float activation = 0.0F;
+    const float* routing_weights = nullptr;
+};
+
+struct CombineOriginRecordRange {
+    const CombineOriginRecordView* records = nullptr;
+    std::uint64_t count = 0;
+};
+
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr bool
 is_clean_combine_transport_completion(
     std::uint64_t expected_generation, std::uint64_t consumed_generation,
@@ -141,6 +154,78 @@ combine_routing_weight(const float* weights, std::uint64_t index) noexcept {
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr float
 combine_apply_biases(float value, float bias_0, float bias_1) noexcept {
     return value + bias_0 + bias_1;
+}
+
+template <typename RecordSource>
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE inline float
+combine_reduce_origin_records(
+    const RecordSource& source, std::uint64_t contributor_count,
+    std::int32_t origin_token, const std::int64_t* combined_topk_indices,
+    std::uint64_t num_topk, std::uint64_t num_experts,
+    std::uint64_t num_local_experts, bool expanded,
+    bool allow_multiple_reduction, std::uint64_t hidden, float bias_0,
+    float bias_1, float* output_weights) noexcept {
+    if (output_weights != nullptr) {
+        for (std::uint64_t lane = 0; lane < num_topk; ++lane)
+            output_weights[lane] = 0.0F;
+    }
+
+    float activation = 0.0F;
+    if (num_local_experts == 0)
+        return combine_apply_biases(activation, bias_0, bias_1);
+
+    // Contributor rank and logical lane, rather than receive-slot layout,
+    // define the FP32 accumulation order.
+    for (std::uint64_t contributor_rank = 0;
+         contributor_rank < contributor_count; ++contributor_rank) {
+        for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
+            const std::int64_t expert = combined_topk_indices[
+                static_cast<std::uint64_t>(origin_token) * num_topk + lane];
+            if (expert < 0 || static_cast<std::uint64_t>(expert) >= num_experts ||
+                static_cast<std::uint64_t>(expert) / num_local_experts !=
+                    contributor_rank)
+                continue;
+            for (std::uint64_t slot = 0;
+                 slot < source.record_count(contributor_rank); ++slot) {
+                const CombineOriginRecordView record = source.record_at(
+                    contributor_rank, slot, hidden);
+                if (record.header.origin_token != origin_token ||
+                    record.header.contribution_lane !=
+                        static_cast<std::int32_t>(lane))
+                    continue;
+                activation += record.activation;
+                break;
+            }
+        }
+    }
+
+    if (output_weights != nullptr) {
+        for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
+            const std::int64_t expert = combined_topk_indices[
+                static_cast<std::uint64_t>(origin_token) * num_topk + lane];
+            if (expert < 0 ||
+                static_cast<std::uint64_t>(expert) >= num_experts)
+                continue;
+            const std::uint64_t contributor_rank =
+                static_cast<std::uint64_t>(expert) / num_local_experts;
+            if (contributor_rank >= contributor_count)
+                continue;
+            for (std::uint64_t slot = 0;
+                 slot < source.record_count(contributor_rank); ++slot) {
+                const CombineOriginRecordView record = source.record_at(
+                    contributor_rank, slot, hidden);
+                if (record.header.origin_token != origin_token ||
+                    (expanded && !allow_multiple_reduction &&
+                     record.header.contribution_lane !=
+                         static_cast<std::int32_t>(lane)))
+                    continue;
+                output_weights[lane] = record.routing_weights == nullptr ?
+                    0.0F : record.routing_weights[lane];
+                break;
+            }
+        }
+    }
+    return combine_apply_biases(activation, bias_0, bias_1);
 }
 
 }  // namespace deep_ep::ascend::elastic
