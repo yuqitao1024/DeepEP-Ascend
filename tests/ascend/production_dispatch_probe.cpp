@@ -1,6 +1,11 @@
+#include <array>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "csrc/backends/ascend/elastic_buffer.hpp"
 
@@ -8,17 +13,35 @@ namespace runtime = deep_ep::ascend::runtime;
 namespace transport = deep_ep::ascend::transport;
 namespace elastic = deep_ep::ascend::elastic;
 
-struct Trace { int launches = 0, copies = 0, device = 0; std::uint64_t generation = 0; bool bad_diagnostic = false, fail_copy = false, fail_launch = false; } trace;
+struct Trace {
+    int launches = 0;
+    int d2h_copies = 0;
+    int h2d_copies = 0;
+    int device = 0;
+    std::uint64_t generation = 0;
+    std::vector<std::uint64_t> generations;
+    bool bad_diagnostic = false;
+    bool fail_d2h = false;
+    bool fail_h2d = false;
+    bool fail_launch = false;
+    bool fail_stream = false;
+} trace;
+
 int alloc(void*, std::uint64_t n, void** p) { *p = std::malloc(n); return *p ? 0 : 1; }
 int zero(void*, void* p, std::uint64_t n) { std::memset(p, 0, n); return 0; }
 int free_(void*, void* p) { std::free(p); return 0; }
 int current_device(void*, int* device) { *device = trace.device; return 0; }
-void* stream(void*) { return &trace; }
+void* stream(void*) { return trace.fail_stream ? nullptr : &trace; }
 int sync(void*, void*) { return 0; }
 int sync_device(void*) { return 0; }
-int h2d(void*, void* d, const void* s, std::uint64_t n) { std::memcpy(d, s, n); return 0; }
+int h2d(void*, void* d, const void* s, std::uint64_t n) {
+    ++trace.h2d_copies;
+    if (trace.fail_h2d) return 92;
+    std::memcpy(d, s, n);
+    return 0;
+}
 int d2h(void*, void* d, const void* s, std::uint64_t n) {
-    ++trace.copies;
+    ++trace.d2h_copies;
     if (n == sizeof(transport::DeviceTransportDiagnostic)) {
         auto* diagnostic = static_cast<transport::DeviceTransportDiagnostic*>(d);
         *diagnostic = {};
@@ -27,7 +50,7 @@ int d2h(void*, void* d, const void* s, std::uint64_t n) {
         if (trace.bad_diagnostic) diagnostic->error = transport::DeviceTransportError::kCompletionFailure;
         return 0;
     }
-    if (trace.fail_copy) return 91;
+    if (trace.fail_d2h) return 91;
     std::memcpy(d, s, n); return 0;
 }
 int rank_(void*, std::int64_t, std::uint32_t* v) { *v = 0; return 0; }
@@ -57,117 +80,345 @@ extern "C" int deep_ep_ascend_launch_barrier(elastic::BarrierArguments, elastic:
 extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elastic::CoreTiling t, void*) {
     ++trace.launches;
     trace.generation = a.generation;
+    trace.generations.push_back(a.generation);
     if (trace.fail_launch) return 73;
     if (t.num_tokens == 0) return 0;
-    a.prefix_per_rank[0]=1; a.prefix_per_rank[1]=2;
-    a.prefix_per_expert[0]=0; a.prefix_per_expert[1]=1; a.prefix_per_expert[2]=1;
-    a.unaligned_per_expert[0]=1; a.unaligned_per_expert[1]=0;
+    const std::array<std::uint16_t, 16> payload{
+        0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108,
+        0x0201, 0x0202, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207, 0x0208};
+    std::memcpy(a.recv_x, payload.data(), payload.size() * sizeof(payload[0]));
+    a.recv_topk_indices[0] = 101;
+    a.recv_topk_indices[1] = 103;
+    if (a.recv_topk_weights != nullptr) {
+        a.recv_topk_weights[0] = 0.25F;
+        a.recv_topk_weights[1] = 0.75F;
+    }
+    a.prefix_per_rank[0] = 1;
+    a.prefix_per_rank[1] = 2;
+    a.prefix_per_expert[0] = 0;
+    a.prefix_per_expert[1] = 1;
+    a.prefix_per_expert[2] = 2;
+    a.unaligned_per_expert[0] = 1;
+    a.unaligned_per_expert[1] = 1;
+    a.destination_slots[0] = 5;
+    const std::array<std::int32_t, 6> metadata{0, 101, 901, 1, 103, 903};
+    std::memcpy(
+        a.source_metadata, metadata.data(), metadata.size() * sizeof(metadata[0]));
     return 0;
 }
 extern "C" int deep_ep_ascend_launch_combine(elastic::CombineArguments, elastic::CoreTiling, void*) { return 0; }
 extern "C" int deep_ep_ascend_launch_combine_epilogue(elastic::CombineArguments, elastic::CoreTiling, void*) { return 0; }
 
-int main() {
-    auto buffer = deep_ep::ascend::ElasticBuffer::make_testing_buffer(0, resources(), 2*1024*1024, 1);
-    auto x = torch::empty({1, 8}, torch::TensorOptions().dtype(torch::kBFloat16));
-    auto idx = torch::empty({1, 1}, torch::TensorOptions().dtype(torch::kLong));
-    auto weights = torch::empty({1, 1}, torch::TensorOptions().dtype(torch::kFloat));
+using Buffer = deep_ep::ascend::ElasticBuffer;
+using Tensor = torch::Tensor;
+
+struct Inputs {
+    Tensor x = torch::empty(
+        {1, 8}, torch::TensorOptions().dtype(torch::kBFloat16));
+    Tensor idx = torch::empty(
+        {1, 1}, torch::TensorOptions().dtype(torch::kLong));
+    Tensor weights = torch::empty(
+        {1, 1}, torch::TensorOptions().dtype(torch::kFloat));
+
+    Inputs() {
+        const std::array<std::uint16_t, 8> payload{
+            0x1001, 0x1002, 0x1003, 0x1004,
+            0x1005, 0x1006, 0x1007, 0x1008};
+        std::memcpy(x.data_ptr(), payload.data(), payload.size() * sizeof(payload[0]));
+        idx.data_ptr<std::int64_t>()[0] = 17;
+        weights.data_ptr<float>()[0] = 0.5F;
+    }
+};
+
+auto uncached_dispatch(
+    Buffer& buffer, const Inputs& inputs,
+    const std::optional<Tensor>& weights, bool copy_handle = true) {
     const std::optional<torch::Tensor> none;
     const std::optional<int> no_int;
     const std::optional<std::vector<int>> no_list;
     const std::optional<deep_ep::ascend::EventHandle> no_event;
-    auto result = buffer->dispatch(x, none, idx, weights, none, no_int, no_int, no_list,
+    return buffer.dispatch(
+        inputs.x, none, inputs.idx, weights, none, no_int, no_int, no_list,
         none, none, none, none, none, none, none, 4, 2, 1, 1, 0, no_event, no_event,
-        false, false, true, true, false, false, false);
-    if (trace.launches != 1 || trace.generation != 1 || std::get<0>(result).size(0) != 2 ||
-        std::get<1>(result).has_value() || !std::get<2>(result).has_value() ||
-        !std::get<3>(result).has_value() || !std::get<4>(result).has_value() ||
-        std::get<5>(result) != 2 || std::get<6>(result) != 1 ||
-        std::get<7>(result).size() != 1 || std::get<8>(result).size(0) != 2 ||
-        std::get<9>(result).size(0) != 3 || std::get<10>(result).size(0) != 2 ||
-        std::get<11>(result).size(0) != 2 || std::get<11>(result).size(1) != 3 ||
-        std::get<12>(result).size(0) != 1 || !std::get<13>(result).has_value() ||
-        std::get<14>(result).has_value() || std::get<15>(result).has_value()) return 1;
-    auto cached = buffer->dispatch(x, none, idx, weights, none,
-        std::get<5>(result), std::get<6>(result), std::get<7>(result),
-        std::get<8>(result), std::get<9>(result), std::get<10>(result),
-        std::get<12>(result), std::get<13>(result), std::get<11>(result), none,
+        false, false, copy_handle, true, false, false, false);
+}
+
+template <typename Result>
+auto cached_dispatch(
+    Buffer& buffer, const Inputs& inputs, const Result& handle,
+    const Tensor& rank_prefix) {
+    const std::optional<Tensor> none;
+    const std::optional<deep_ep::ascend::EventHandle> no_event;
+    return buffer.dispatch(
+        inputs.x, none, inputs.idx, inputs.weights, none,
+        std::get<5>(handle), std::get<6>(handle), std::get<7>(handle),
+        rank_prefix, std::get<9>(handle), std::get<10>(handle),
+        std::get<12>(handle), std::get<13>(handle), std::get<11>(handle), none,
         4, 2, 1, 1, 0, no_event, no_event,
         false, false, false, false, false, false, false);
-    if (trace.launches != 2 || trace.generation != 2 || std::get<5>(cached) != 2) return 3;
+}
+
+bool has_shape(const Tensor& tensor, std::initializer_list<std::int64_t> shape) {
+    return tensor.sizes() == std::vector<std::int64_t>(shape);
+}
+
+template <typename Value, std::size_t Size>
+bool has_values(const Tensor& tensor, const std::array<Value, Size>& expected) {
+    if (tensor.numel() != static_cast<std::int64_t>(Size)) return false;
+    const auto* actual = tensor.data_ptr<Value>();
+    for (std::size_t index = 0; index < Size; ++index)
+        if (actual[index] != expected[index]) return false;
+    return true;
+}
+
+template <typename Result>
+bool has_exact_result(
+    const Result& result, bool expect_weights, bool expect_copied_index) {
+    const std::array<std::uint16_t, 16> payload{
+        0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108,
+        0x0201, 0x0202, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207, 0x0208};
+    const std::array<std::int64_t, 2> indices{101, 103};
+    const std::array<float, 2> weights{0.25F, 0.75F};
+    const std::array<std::int64_t, 1> copied_index{17};
+    const std::array<std::int32_t, 2> rank_prefix{1, 2};
+    const std::array<std::int32_t, 3> expert_prefix{0, 1, 2};
+    const std::array<std::int32_t, 2> unaligned{1, 1};
+    const std::array<std::int32_t, 6> metadata{0, 101, 901, 1, 103, 903};
+    const std::array<std::int32_t, 1> slots{5};
+    if (!has_shape(std::get<0>(result), {2, 8}) ||
+        std::get<0>(result).scalar_type() != torch::kBFloat16 ||
+        !has_values(std::get<0>(result), payload) ||
+        std::get<1>(result).has_value() ||
+        !std::get<2>(result).has_value() ||
+        !has_shape(*std::get<2>(result), {2, 1}) ||
+        !has_values(*std::get<2>(result), indices) ||
+        std::get<3>(result).has_value() != expect_weights ||
+        (expect_weights && (!has_shape(*std::get<3>(result), {2, 1}) ||
+                            !has_values(*std::get<3>(result), weights))) ||
+        std::get<4>(result).has_value() != expect_copied_index ||
+        (expect_copied_index &&
+         (!has_shape(*std::get<4>(result), {1, 1}) ||
+          !has_values(*std::get<4>(result), copied_index))) ||
+        std::get<5>(result) != 2 || std::get<6>(result) != 2 ||
+        std::get<7>(result) != std::vector<int>{1} ||
+        !has_shape(std::get<8>(result), {2}) ||
+        !has_values(std::get<8>(result), rank_prefix) ||
+        !has_shape(std::get<9>(result), {3}) ||
+        !has_values(std::get<9>(result), expert_prefix) ||
+        !has_shape(std::get<10>(result), {2}) ||
+        !has_values(std::get<10>(result), unaligned) ||
+        !has_shape(std::get<11>(result), {2, 3}) ||
+        !has_values(std::get<11>(result), metadata) ||
+        !has_shape(std::get<12>(result), {1, 1}) ||
+        !has_values(std::get<12>(result), slots) ||
+        !std::get<13>(result).has_value() ||
+        !has_shape(*std::get<13>(result), {96}) ||
+        std::get<13>(result)->scalar_type() != torch::kByte ||
+        std::get<14>(result).has_value() || std::get<15>(result).has_value())
+        return false;
+
+    elastic::DispatchHandleDescriptor descriptor{};
+    std::memcpy(&descriptor, std::get<13>(result)->data_ptr(), 96);
+    return descriptor.abi_version == 1 && descriptor.struct_size == 96 &&
+        descriptor.family == 7 && descriptor.topology.world_rank == 0 &&
+        descriptor.topology.world_size == 2 &&
+        descriptor.topology.scale_up_rank == 0 &&
+        descriptor.topology.scale_up_size == 2 &&
+        descriptor.topology.scale_out_rank == 0 &&
+        descriptor.topology.scale_out_size == 1 && descriptor.num_tokens == 1 &&
+        descriptor.hidden == 8 && descriptor.num_experts == 2 &&
+        descriptor.num_topk == 1 && descriptor.expert_alignment == 1 &&
+        descriptor.num_max_tokens_per_rank == 4 && descriptor.mode_flags == 0;
+}
+
+bool exact_and_cached_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources) return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> weights = inputs.weights;
+    auto result = uncached_dispatch(*buffer, inputs, weights);
+    if (!has_exact_result(result, true, true) || trace.launches != 1 ||
+        trace.generations != std::vector<std::uint64_t>{1})
+        return false;
+
+    auto malformed_rank_prefix = std::get<8>(result).clone();
+    malformed_rank_prefix.data_ptr<std::int32_t>()[1] = 1;
     try {
-        (void)buffer->dispatch(x, none, idx, weights, none,
-            1, std::get<6>(result), std::get<7>(result), std::get<8>(result),
-            std::get<9>(result), std::get<10>(result), std::get<12>(result),
-            std::get<13>(result), std::get<11>(result), none,
-            4, 2, 1, 1, 0, no_event, no_event,
-            false, false, false, false, false, false, false);
-        return 4;
-    } catch (const std::runtime_error&) {
-        if (trace.launches != 2) return 5;
+        (void)cached_dispatch(*buffer, inputs, result, malformed_rank_prefix);
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("cached prefix tail mismatch") ==
+                std::string::npos ||
+            trace.launches != 1)
+            return false;
     }
-    auto wrong_device_idx = torch::empty(
-        {1, 1}, torch::TensorOptions().dtype(torch::kLong).device(1));
+
+    auto cached = cached_dispatch(*buffer, inputs, result, std::get<8>(result));
+    if (!has_exact_result(cached, true, false) || trace.launches != 2 ||
+        trace.generations != std::vector<std::uint64_t>({1, 2}))
+        return false;
+
+    auto wrong_device_rank_prefix = torch::empty(
+        {2}, torch::TensorOptions().dtype(torch::kInt).device(1));
+    std::memcpy(
+        wrong_device_rank_prefix.data_ptr(), std::get<8>(result).data_ptr(),
+        2 * sizeof(std::int32_t));
     try {
-        (void)buffer->dispatch(x, none, wrong_device_idx, none, none,
-            no_int, no_int, no_list, none, none, none, none, none, none, none,
-            4, 2, 1, 1, 0, no_event, no_event,
-            false, false, false, true, false, false, false);
-        return 6;
-    } catch (const std::runtime_error&) {
-        if (trace.launches != 2) return 7;
+        (void)cached_dispatch(*buffer, inputs, result, wrong_device_rank_prefix);
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("cached rank prefix") ==
+                std::string::npos ||
+            trace.launches != 2)
+            return false;
     }
-    trace.device = 1;
+
+    const std::optional<Tensor> no_weights;
+    auto no_weight_result = uncached_dispatch(*buffer, inputs, no_weights);
+    return has_exact_result(no_weight_result, false, true) &&
+        trace.launches == 3 &&
+        trace.generations == std::vector<std::uint64_t>({1, 2, 3});
+}
+
+bool descriptor_copy_retry_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources) return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> no_weights;
+    trace.fail_h2d = true;
     try {
-        (void)buffer->dispatch(x, none, idx, none, none, no_int, no_int, no_list,
-            none, none, none, none, none, none, none, 4, 2, 1, 1, 0,
-            no_event, no_event, false, false, false, true, false, false, false);
-        return 13;
-    } catch (const std::runtime_error&) {
-        if (trace.launches != 2) return 14;
+        (void)uncached_dispatch(*buffer, inputs, no_weights);
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("copy_from_host failed") ==
+                std::string::npos ||
+            trace.launches != 0)
+            return false;
     }
-    trace.device = 0;
+    trace.fail_h2d = false;
+    try {
+        const auto result = uncached_dispatch(*buffer, inputs, no_weights);
+        return has_exact_result(result, false, true) && trace.launches == 1 &&
+            trace.generations == std::vector<std::uint64_t>{1};
+    } catch (const std::runtime_error&) {
+        return false;
+    }
+}
+
+bool stream_retry_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources) return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> no_weights;
+    trace.fail_stream = true;
+    try {
+        (void)uncached_dispatch(*buffer, inputs, no_weights);
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("current_stream failed") ==
+                std::string::npos ||
+            trace.launches != 0)
+            return false;
+    }
+    trace.fail_stream = false;
+    try {
+        const auto result = uncached_dispatch(*buffer, inputs, no_weights);
+        return has_exact_result(result, false, true) && trace.launches == 1 &&
+            trace.generations == std::vector<std::uint64_t>{1};
+    } catch (const std::runtime_error&) {
+        return false;
+    }
+}
+
+bool launch_poison_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources) return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> no_weights;
     trace.fail_launch = true;
     try {
-        (void)buffer->dispatch(x, none, idx, none, none, no_int, no_int, no_list,
-            none, none, none, none, none, none, none, 4, 2, 1, 1, 0,
-            no_event, no_event, false, false, false, true, false, false, false);
-        return 8;
-    } catch (const std::runtime_error&) {}
-    const int launches_after_failure = trace.launches;
-    try {
-        (void)buffer->dispatch(x, none, idx, none, none, no_int, no_int, no_list,
-            none, none, none, none, none, none, none, 4, 2, 1, 1, 0,
-            no_event, no_event, false, false, false, true, false, false, false);
-        return 9;
-    } catch (const std::runtime_error&) {
-        if (trace.launches != launches_after_failure) return 10;
+        (void)uncached_dispatch(*buffer, inputs, no_weights);
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("backend error 73") ==
+                std::string::npos ||
+            trace.launches != 1 || trace.generation != 1 ||
+            trace.generations != std::vector<std::uint64_t>{1})
+            return false;
     }
     trace.fail_launch = false;
-    auto diagnostic_buffer = deep_ep::ascend::ElasticBuffer::make_testing_buffer(
-        0, resources(), 2*1024*1024, 1);
-    trace.bad_diagnostic = true;
-    trace.fail_copy = true;
-    const int copies_before_diagnostic = trace.copies;
     try {
-        (void)diagnostic_buffer->dispatch(x, none, idx, none, none,
-            no_int, no_int, no_list, none, none, none, none, none, none, none,
-            4, 2, 1, 1, 0, no_event, no_event,
-            false, false, false, true, false, false, false);
-        return 11;
+        (void)uncached_dispatch(*buffer, inputs, no_weights);
+        return false;
     } catch (const std::runtime_error& error) {
-        if (std::string(error.what()).find("device diagnostic reported failure") ==
-                std::string::npos || trace.copies != copies_before_diagnostic + 1)
-            return 12;
+        return std::string(error.what()).find("cannot continue") !=
+                std::string::npos &&
+            trace.launches == 1 && trace.generation == 1 &&
+            trace.generations == std::vector<std::uint64_t>{1};
     }
-    trace.bad_diagnostic = false;
-    trace.fail_copy = false;
-    auto empty_buffer = deep_ep::ascend::ElasticBuffer::make_testing_buffer(
-        0, resources(), 2*1024*1024, 1);
-    auto empty = torch::empty({0, 8}, x.options());
-    auto empty_idx = torch::empty({0, 1}, idx.options());
-    auto empty_result = empty_buffer->dispatch(empty, none, empty_idx, none, none, no_int, no_int, no_list,
-        none, none, none, none, none, none, none, 4, 2, 1, 1, 0, no_event, no_event,
-        false, false, false, true, false, false, false);
-    return std::get<0>(empty_result).size(0) == 0 ? 0 : 2;
+}
+
+bool diagnostic_order_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources) return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> no_weights;
+    trace.bad_diagnostic = true;
+    trace.fail_d2h = true;
+    const int copies_before_diagnostic = trace.d2h_copies;
+    try {
+        (void)uncached_dispatch(*buffer, inputs, no_weights);
+        return false;
+    } catch (const std::runtime_error& error) {
+        return std::string(error.what()).find("device diagnostic reported failure") !=
+                std::string::npos &&
+            trace.d2h_copies == copies_before_diagnostic + 1;
+    }
+}
+
+bool empty_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources) return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    inputs.x = torch::empty({0, 8}, inputs.x.options());
+    inputs.idx = torch::empty({0, 1}, inputs.idx.options());
+    const std::optional<Tensor> no_weights;
+    const auto result = uncached_dispatch(*buffer, inputs, no_weights);
+    return has_shape(std::get<0>(result), {0, 8}) &&
+        std::get<5>(result) == 0 && std::get<6>(result) == 0;
+}
+
+int main() {
+    int failures = 0;
+    const auto check = [&failures](bool passed, const char* name) {
+        if (!passed) {
+            ++failures;
+            std::cerr << "failed: " << name << '\n';
+        }
+    };
+    check(exact_and_cached_probe(), "exact outputs and cached preflight retry");
+    check(descriptor_copy_retry_probe(), "descriptor copy retry");
+    check(stream_retry_probe(), "stream acquisition retry");
+    check(launch_poison_probe(), "launch failure poisoning");
+    check(diagnostic_order_probe(), "diagnostic ordering");
+    check(empty_probe(), "empty dispatch");
+    return failures == 0 ? 0 : 1;
 }

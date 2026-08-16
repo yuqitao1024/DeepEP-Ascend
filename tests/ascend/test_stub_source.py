@@ -134,12 +134,19 @@ public:
     std::int64_t size(std::int64_t dimension) const { return sizes_.at(dimension); }
     const std::vector<std::int64_t>& sizes() const { return sizes_; }
     std::int64_t numel() const { std::int64_t result = 1; for (auto value : sizes_) result *= value; return result; }
-    TensorOptions options() const { return TensorOptions().dtype(type_); }
+    TensorOptions options() const {
+        return TensorOptions().dtype(type_).device(device_.index());
+    }
     void* data_ptr() const { return numel() == 0 ? nullptr : storage_->data(); }
     template <typename T>
     T* data_ptr() const { return static_cast<T*>(data_ptr()); }
     Tensor narrow(std::int64_t dimension, std::int64_t, std::int64_t length) const { auto result = *this; result.sizes_[dimension] = length; return result; }
-    Tensor clone() const { return {}; }
+    Tensor clone() const {
+        auto result = *this;
+        result.storage_ =
+            std::make_shared<std::vector<std::uint8_t>>(*storage_);
+        return result;
+    }
 private:
     std::size_t bytes() const { return type_ == kBFloat16 ? 2 : type_ == kLong ? 8 : type_ == kFloat || type_ == kInt ? 4 : 1; }
 };

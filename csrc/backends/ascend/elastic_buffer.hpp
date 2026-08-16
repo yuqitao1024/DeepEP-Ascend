@@ -750,9 +750,6 @@ public:
                 int_options);
         }
 
-        elastic::DispatchAttempt attempt(dispatch_sequence_);
-        TORCH_CHECK(attempt.valid(), "DeepEP Ascend backend: dispatch cannot continue "
-                    "after a failed or concurrent attempt");
         auto recv_x = torch::empty(
             {static_cast<int64_t>(do_expand ? expanded_records : max_recv_tokens),
              x.size(1)}, x.options());
@@ -797,7 +794,6 @@ public:
         arguments.unaligned_per_expert = unaligned.data_ptr<std::int32_t>();
         arguments.destination_slots = destination_slots.data_ptr<std::int32_t>();
         arguments.source_metadata = source_metadata.data_ptr<std::int32_t>();
-        arguments.generation = attempt.generation();
         arguments.timeout_cycles = barrier_timeout_cycles_;
         void* stream = nullptr;
         status = resources_->current_stream(&stream);
@@ -805,6 +801,10 @@ public:
             raise_transport_status(status, rank_idx_);
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_), resources_->workspace_bytes()};
+        elastic::DispatchAttempt attempt(dispatch_sequence_);
+        TORCH_CHECK(attempt.valid(), "DeepEP Ascend backend: dispatch cannot continue "
+                    "after a failed or concurrent attempt");
+        arguments.generation = attempt.generation();
         const auto launch_status = elastic::launch_internal_dispatch(
             arguments, tiling, storage, stream);
         if (!launch_status.ok())
