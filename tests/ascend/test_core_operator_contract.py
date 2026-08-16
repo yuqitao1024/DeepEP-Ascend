@@ -974,8 +974,33 @@ int main() {
                     "oracle-behavior-mutations",
                     "local-npu-output-placement",
                     "best-effort-cleanup",
+                    "synchronized-buffer-mode-phases",
+                    "literal-expanded-layout-counts",
                 ],
                 "behavior_fixtures": {
+                    "buffer_modes": {
+                        "false_to_true": {
+                            "reductions": 2,
+                            "trace": ["destroy:false", "construct:true"],
+                        },
+                        "initial_construction": {
+                            "reductions": 1,
+                            "trace": ["construct:true"],
+                        },
+                        "same_mode_reuse": {
+                            "reductions": 0,
+                            "trace": [],
+                        },
+                        "teardown_failure": {
+                            "construction_blocked": True,
+                            "reductions": 1,
+                            "trace": ["destroy:false"],
+                        },
+                        "true_to_false": {
+                            "reductions": 2,
+                            "trace": ["destroy:true", "construct:false"],
+                        },
+                    },
                     "cleanup": {
                         "calls": ["buffer-a", "buffer-b", "buffer-c",
                                   "process-group"],
@@ -987,12 +1012,24 @@ int main() {
                         "padding_rows": [0, 1, 3],
                         "row_2": [1.0, 2.0, 3.0, 4.0],
                     },
+                    "expanded_layouts": {
+                        "aligned-near-capacity": {
+                            "rank0": {"padding": 0, "rows": 8},
+                            "rank1": {"padding": 0, "rows": 8},
+                        },
+                        "aligned-padding": {
+                            "rank0": {"padding": 5, "rows": 8},
+                            "rank1": {"padding": 6, "rows": 8},
+                        },
+                    },
                     "mutations_rejected": {
+                        "alignment_2": True,
                         "bias_per_contributor": True,
                         "expanded_reads_sentinel": True,
                         "handle_expansion_mode": True,
                         "lane_order": True,
                         "rank_order": True,
+                        "surplus_expanded_row": True,
                         "weight_multiplies_activation": True,
                     },
                     "ordering": {

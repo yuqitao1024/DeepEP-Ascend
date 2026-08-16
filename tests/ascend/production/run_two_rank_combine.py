@@ -5,7 +5,7 @@ import os
 import re
 import struct
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 
 
@@ -18,6 +18,13 @@ BF16_TOLERANCE = 1 / 128
 PADDING_SENTINEL = -64.0
 ORDER_VARIANT = "order-sensitive"
 ORDER_BOUNDARY = float(1 << 24)
+
+# At alignment 4, per-expert route counts are (2, 1)/(1, 1) for padding
+# and (4, 4)/(4, 4) near capacity, giving these (rows, padding) pairs.
+LITERAL_EXPANDED_LAYOUTS = {
+    "aligned-padding": ((8, 5), (8, 6)),
+    "aligned-near-capacity": ((8, 0), (8, 0)),
+}
 
 CASE_NAMES = (
     "normal",
@@ -230,6 +237,45 @@ def _expanded_reference_rows(num_rows, metadata, gathered_routes,
     }
 
 
+def _literal_expanded_layout(spec, contributor_rank):
+    _check(spec.name in LITERAL_EXPANDED_LAYOUTS,
+           f"{spec.name} has no literal expanded-layout expectation")
+    _check(0 <= contributor_rank < WORLD_SIZE,
+           "expanded-layout contributor rank is invalid")
+    local_experts = NUM_EXPERTS // WORLD_SIZE
+    first_expert = contributor_rank * local_experts
+    expert_counts = [0] * local_experts
+    for source_routes in spec.routes:
+        for token_routes in source_routes:
+            for expert in token_routes:
+                expert = _integer(expert)
+                if first_expert <= expert < first_expert + local_experts:
+                    expert_counts[expert - first_expert] += 1
+    mapped_rows = sum(expert_counts)
+    aligned_rows = sum(
+        (count + spec.expert_alignment - 1) // spec.expert_alignment *
+        spec.expert_alignment
+        for count in expert_counts)
+    actual = (aligned_rows, aligned_rows - mapped_rows)
+    expected = LITERAL_EXPANDED_LAYOUTS[spec.name][contributor_rank]
+    _check(actual == expected,
+           f"{spec.name} rank {contributor_rank} literal expanded layout "
+           f"changed: expected {expected}, got {actual}")
+    return {"rows": expected[0], "padding": expected[1]}
+
+
+def _validate_expanded_layout(spec, contributor_rank, num_rows,
+                              padding_rows):
+    expected = _literal_expanded_layout(spec, contributor_rank)
+    _check(num_rows == expected["rows"],
+           f"{spec.name} rank {contributor_rank} expanded row count "
+           f"mismatch: expected {expected['rows']}, got {num_rows}")
+    _check(len(padding_rows) == expected["padding"],
+           f"{spec.name} rank {contributor_rank} expanded padding count "
+           f"mismatch: expected {expected['padding']}, "
+           f"got {len(padding_rows)}")
+
+
 def _reference_matrix(routes, origin_rank, variant=0):
     return {
         "shape": [len(routes), HIDDEN],
@@ -351,6 +397,14 @@ def _behavior_fixtures():
 
     expanded = _expanded_reference_rows(
         4, ((0, 0, 2, -1),), (((0, 2),), ()), 0, 0)
+    expanded_layouts = {
+        name: {
+            f"rank{rank}": _literal_expanded_layout(spec, rank)
+            for rank in range(WORLD_SIZE)
+        }
+        for name, spec in _case_specs().items()
+        if name in LITERAL_EXPANDED_LAYOUTS
+    }
 
     class FakeDevice:
         def __init__(self, device_type, index):
@@ -437,6 +491,62 @@ def _behavior_fixtures():
     except FailureSynchronizationError:
         pass
 
+    class ModeBuffer:
+        def __init__(self, mode, trace):
+            self.mode = mode
+            self.trace = trace
+
+        def destroy(self):
+            self.trace.append(f"destroy:{str(self.mode).lower()}")
+
+    class FakeDeepEp:
+        def __init__(self, trace):
+            self.trace = trace
+
+        def ElasticBuffer(self, *args, **kwargs):
+            del args
+            mode = kwargs["allow_multiple_reduction"]
+            self.trace.append(f"construct:{str(mode).lower()}")
+            return ModeBuffer(mode, self.trace)
+
+    def mode_fixture(initial_mode, target_mode, peer_teardown_failure=False):
+        trace = []
+        matrix = object.__new__(CombineMatrix)
+        matrix.torch = FakeTorch()
+        matrix.dist = FakeDist(peer_failure=peer_teardown_failure)
+        matrix.deep_ep = FakeDeepEp(trace)
+        matrix.group = object()
+        matrix.device = FakeDevice("npu", 0)
+        matrix.collectives_usable = True
+        matrix.buffer = None if initial_mode is None else ModeBuffer(
+            initial_mode, trace)
+        matrix.buffer_mode = initial_mode
+        matrix.live_buffers = [] if matrix.buffer is None else [matrix.buffer]
+        construction_blocked = False
+        try:
+            selected = matrix._select_buffer(target_mode, "mode-fixture")
+            _check(selected is matrix.buffer and
+                   matrix.buffer_mode == target_mode,
+                   "buffer selection did not install the requested mode")
+        except RuntimeError:
+            construction_blocked = peer_teardown_failure and not any(
+                event.startswith("construct:") for event in trace)
+        return {
+            "construction_blocked": construction_blocked,
+            "reductions": matrix.dist.reductions,
+            "trace": trace,
+        }
+
+    initial_construction = mode_fixture(None, True)
+    initial_construction.pop("construction_blocked")
+    same_mode_reuse = mode_fixture(True, True)
+    same_mode_reuse.pop("construction_blocked")
+    false_to_true = mode_fixture(False, True)
+    false_to_true.pop("construction_blocked")
+    true_to_false = mode_fixture(True, False)
+    true_to_false.pop("construction_blocked")
+    teardown_failure = mode_fixture(False, True, peer_teardown_failure=True)
+
     cleanup_calls = []
 
     class FakeBuffer:
@@ -481,6 +591,18 @@ def _behavior_fixtures():
         _validate_expansion_mode(False, True)
     except AssertionError:
         handle_mode_rejected = True
+    alignment_2_rejected = False
+    try:
+        _literal_expanded_layout(
+            replace(_case_specs()["aligned-padding"], expert_alignment=2), 0)
+    except AssertionError:
+        alignment_2_rejected = True
+    surplus_row_rejected = False
+    try:
+        _validate_expanded_layout(
+            _case_specs()["aligned-padding"], 0, 9, range(5))
+    except AssertionError:
+        surplus_row_rejected = True
 
     def mutation_rejected(expected, mutant):
         try:
@@ -490,6 +612,13 @@ def _behavior_fixtures():
         return False
 
     return {
+        "buffer_modes": {
+            "false_to_true": false_to_true,
+            "initial_construction": initial_construction,
+            "same_mode_reuse": same_mode_reuse,
+            "teardown_failure": teardown_failure,
+            "true_to_false": true_to_false,
+        },
         "cleanup": {
             "calls": cleanup_calls,
             "failures": cleanup_failures,
@@ -499,7 +628,9 @@ def _behavior_fixtures():
             "padding_rows": expanded["padding_rows"],
             "row_2": expanded["rows"][2],
         },
+        "expanded_layouts": expanded_layouts,
         "mutations_rejected": {
+            "alignment_2": alignment_2_rejected,
             "bias_per_contributor": mutation_rejected(
                 bias_once, bias_per_contributor),
             "expanded_reads_sentinel": mutation_rejected(
@@ -507,6 +638,7 @@ def _behavior_fixtures():
             "handle_expansion_mode": handle_mode_rejected,
             "lane_order": mutation_rejected(canonical, lane_reversed),
             "rank_order": mutation_rejected(canonical, rank_reversed),
+            "surplus_expanded_row": surplus_row_rejected,
             "weight_multiplies_activation": mutation_rejected(
                 activation_ignores_weight, multiplied_activation),
         },
@@ -561,8 +693,11 @@ def _contract():
                f"round-trip path is missing {call}")
     _check("self.dist.all_gather" in _calls(methods["_gather_routes"]),
            "original literal routes are not gathered")
-    _check("self._replace_buffer" in _calls(methods["_ensure_buffer"]),
-           "reduction mode changes do not recreate the buffer")
+    select_buffer_calls = _calls(methods["_select_buffer"])
+    _check(select_buffer_calls.count("self._run_step") == 2 and
+           "self._destroy_buffer" in select_buffer_calls and
+           "self._install_buffer" in select_buffer_calls,
+           "buffer teardown and construction are not separate phases")
     _check("self.dist.all_reduce" in _calls(methods["_run_step"]),
            "sub-operations do not synchronize failures")
     _check(_calls(methods["_round_trip"]).count("self._run_step") >= 6,
@@ -575,6 +710,9 @@ def _contract():
     _check("_validate_expansion_mode" in
            _calls(methods["_expert_outputs"]),
            "expert outputs trust the returned handle mode")
+    _check("_validate_expanded_layout" in
+           _calls(methods["_expert_outputs"]),
+           "expanded outputs trust the received row count")
 
     boundary_calls = _calls(methods["_case_boundary"])
     _check(boundary_calls.count("self.dist.barrier") == 2,
@@ -625,6 +763,8 @@ def _contract():
             "oracle-behavior-mutations",
             "local-npu-output-placement",
             "best-effort-cleanup",
+            "synchronized-buffer-mode-phases",
+            "literal-expanded-layout-counts",
         ],
         "behavior_fixtures": _behavior_fixtures(),
         "expected_world_size": WORLD_SIZE,
@@ -704,16 +844,24 @@ class CombineMatrix:
                     self.buffer = None
                     self.buffer_mode = None
 
-    def _replace_buffer(self, allow_multiple_reduction):
-        if self.buffer is not None:
-            self._destroy_buffer(self.buffer)
+    def _install_buffer(self, allow_multiple_reduction):
         self.buffer = self._make_buffer(allow_multiple_reduction)
         self.buffer_mode = allow_multiple_reduction
-
-    def _ensure_buffer(self, allow_multiple_reduction):
-        if self.buffer is None or self.buffer_mode != allow_multiple_reduction:
-            self._replace_buffer(allow_multiple_reduction)
         return self.buffer
+
+    def _select_buffer(self, allow_multiple_reduction, label):
+        transition_required = self.buffer is None or \
+            self.buffer_mode != allow_multiple_reduction
+        if not transition_required:
+            return self.buffer
+        if self.buffer is not None:
+            previous_buffer = self.buffer
+            self._run_step(
+                lambda: self._destroy_buffer(previous_buffer),
+                f"{label}: buffer teardown")
+        return self._run_step(
+            lambda: self._install_buffer(allow_multiple_reduction),
+            f"{label}: buffer construction")
 
     def _tensor(self, rows, columns, dtype):
         return self.torch.tensor(
@@ -806,6 +954,9 @@ class CombineMatrix:
 
         expanded = _expanded_reference_rows(
             recv_x.shape[0], metadata, gathered_routes, self.rank, variant)
+        if spec.name in LITERAL_EXPANDED_LAYOUTS:
+            _validate_expanded_layout(
+                spec, self.rank, recv_x.shape[0], expanded["padding_rows"])
         _check(not spec.require_padding or expanded["padding_rows"],
                f"{spec.name} did not produce an unmapped sentinel row")
         output = self._tensor(
@@ -897,17 +1048,14 @@ class CombineMatrix:
     def _round_trip(self, spec, variant=None, handle=None, payload_delta=0,
                     weight_scale=1.0, buffer=None):
         variant = spec.transform_variant if variant is None else variant
-
-        def prepare():
-            selected_buffer = self._ensure_buffer(
-                spec.allow_multiple_reduction) if buffer is None else buffer
-            tensors = self._materialize(
+        selected_buffer = self._select_buffer(
+            spec.allow_multiple_reduction,
+            spec.name) if buffer is None else buffer
+        x, routes, weights = self._run_step(
+            lambda: self._materialize(
                 spec, payload_delta=payload_delta,
-                weight_scale=weight_scale)
-            return (selected_buffer,) + tensors
-
-        selected_buffer, x, routes, weights = self._run_step(
-            prepare, f"{spec.name}: prepare")
+                weight_scale=weight_scale),
+            f"{spec.name}: materialize")
         gathered_routes = self._run_step(
             lambda: self._gather_routes(routes),
             f"{spec.name}: gather routes")
@@ -997,9 +1145,9 @@ class CombineMatrix:
 
     def _run_cross_buffer(self):
         spec = self.specs["cross-buffer-handle"]
-        source, x, routes, weights = self._run_step(
-            lambda: (self._ensure_buffer(True),) + self._materialize(spec),
-            "cross-buffer: prepare")
+        source = self._select_buffer(True, "cross-buffer")
+        x, routes, weights = self._run_step(
+            lambda: self._materialize(spec), "cross-buffer: materialize")
         gathered_routes = self._run_step(
             lambda: self._gather_routes(routes),
             "cross-buffer: gather routes")
@@ -1030,9 +1178,10 @@ class CombineMatrix:
 
     def _run_malformed_handle(self):
         spec = self.specs["malformed-handle"]
-        buffer, x, routes, weights = self._run_step(
-            lambda: (self._ensure_buffer(True),) + self._materialize(spec),
-            "malformed-handle: prepare")
+        buffer = self._select_buffer(True, "malformed-handle")
+        x, routes, weights = self._run_step(
+            lambda: self._materialize(spec),
+            "malformed-handle: materialize")
         gathered_routes = self._run_step(
             lambda: self._gather_routes(routes),
             "malformed-handle: gather routes")
@@ -1075,9 +1224,10 @@ class CombineMatrix:
 
     def _run_bounded_peer_diagnostics(self):
         spec = self.specs["bounded-peer-diagnostics"]
-        buffer, x, routes, _ = self._run_step(
-            lambda: (self._ensure_buffer(True),) + self._materialize(spec),
-            "bounded-peer-diagnostics: prepare")
+        buffer = self._select_buffer(True, "bounded-peer-diagnostics")
+        x, routes, _ = self._run_step(
+            lambda: self._materialize(spec),
+            "bounded-peer-diagnostics: materialize")
         gathered_routes = self._run_step(
             lambda: self._gather_routes(routes),
             "bounded-peer-diagnostics: gather routes")
