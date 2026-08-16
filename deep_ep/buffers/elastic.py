@@ -994,8 +994,9 @@ class ElasticBuffer:
             num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
             assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
         else:
-            assert num_sms in (0, 1) and num_qps == 0, \
-                'DeepEP Ascend backend: dispatch requires num_sms=1 and num_qps=0'
+            if num_sms not in (0, 1) or num_qps != 0:
+                raise RuntimeError(
+                    'DeepEP Ascend backend: dispatch requires num_sms=1 and num_qps=0')
             num_sms = 1
 
         # Unpack SF

@@ -255,9 +255,11 @@ def _install_fake_extension(platform, events):
         def dispatch(self, *args):
             self.dispatch_calls.append(args)
             recv_src_metadata = _FakeTensor(shape=(1,))
+            cloned_topk_idx = _FakeTensor(
+                args[2].device.type, args[2].shape)
             token_metadata_at_forward = (
                 _FakeTensor(shape=(96,)) if platform == "ascend" else None)
-            return (args[0], args[1], args[2], args[3], args[2],
+            return (args[0], args[1], args[2], args[3], cloned_topk_idx,
                     1, 1, [], _FakeTensor(), _FakeTensor(), _FakeTensor(),
                     recv_src_metadata, _FakeTensor(), token_metadata_at_forward,
                     None, None if platform == "ascend" else EventHandle())
@@ -622,7 +624,7 @@ def _scenario_ascend_dispatch():
 
     _, _, recv_topk_weights, handle, event = buffer.dispatch(
         x, topk_idx=topk_idx, topk_weights=topk_weights,
-        num_experts=1, num_max_tokens_per_rank=1)
+        num_experts=2, num_max_tokens_per_rank=1)
     dispatch_args = runtime.dispatch_calls[-1]
     assert len(dispatch_args) == 29
     assert dispatch_args[2] is topk_idx
@@ -633,6 +635,7 @@ def _scenario_ascend_dispatch():
     assert recv_topk_weights is topk_weights
     assert isinstance(handle, deep_ep.EPHandle)
     assert handle.num_sms == 1
+    assert handle.topk_idx is not topk_idx
     assert handle.token_metadata_at_forward is not None
     assert event.event is None
 
@@ -640,9 +643,19 @@ def _scenario_ascend_dispatch():
     _, _, recv_topk_weights, cached_handle, cached_event = buffer.dispatch(
         x, topk_weights=cached_topk_weights, handle=handle)
     cached_args = runtime.dispatch_calls[-1]
-    assert cached_args[2] is topk_idx
+    expected_cached_fields = (
+        1, 1, [],
+        handle.psum_num_recv_tokens_per_scaleup_rank,
+        handle.psum_num_recv_tokens_per_expert,
+        handle.num_unaligned_recv_tokens_per_expert,
+        handle.dst_buffer_slot_idx,
+        handle.token_metadata_at_forward,
+        handle.recv_src_metadata,
+        handle.channel_linked_list,
+    )
+    assert cached_args[2] is handle.topk_idx
     assert cached_args[3] is cached_topk_weights
-    assert cached_args[5:15] == deep_ep.ElasticBuffer._unpack_handle(handle)
+    assert cached_args[5:15] == expected_cached_fields
     assert cached_args[25] is False
     assert recv_topk_weights is cached_topk_weights
     assert cached_handle is handle
@@ -651,14 +664,82 @@ def _scenario_ascend_dispatch():
     for name, kwargs in (("num_sms", {"num_sms": 2}),
                          ("num_qps", {"num_qps": 1})):
         try:
-            buffer.dispatch(x, topk_idx=topk_idx, num_experts=1,
+            buffer.dispatch(x, topk_idx=topk_idx, num_experts=2,
                             num_max_tokens_per_rank=1, **kwargs)
-        except AssertionError as error:
+        except RuntimeError as error:
             assert str(error) == (
                 "DeepEP Ascend backend: dispatch requires num_sms=1 and num_qps=0")
         else:
             raise AssertionError(f"Ascend dispatch accepted {name}={kwargs[name]}")
 
+    no_weights_idx = _FakeTensor("npu", (1, 1))
+    recv_x, recv_topk_idx, recv_topk_weights, no_weights_handle, no_weights_event = \
+        buffer.dispatch(
+            x, topk_idx=no_weights_idx, num_experts=2,
+            num_max_tokens_per_rank=1, do_handle_copy=False)
+    no_weights_args = runtime.dispatch_calls[-1]
+    assert no_weights_args[0] is x
+    assert no_weights_args[2] is no_weights_idx
+    assert no_weights_args[3] is None
+    assert no_weights_args[18:20] == (1, 0)
+    assert no_weights_args[24] is False
+    assert recv_x is x
+    assert recv_topk_idx is no_weights_idx
+    assert recv_topk_weights is None
+    assert no_weights_handle.topk_idx is no_weights_idx
+    assert no_weights_event.event is None
+
+    empty_x = _FakeTensor("npu", (0, 16))
+    empty_topk_idx = _FakeTensor("npu", (0, 1))
+    recv_x, recv_topk_idx, recv_topk_weights, empty_handle, empty_event = \
+        buffer.dispatch(
+            empty_x, topk_idx=empty_topk_idx, num_experts=2,
+            num_max_tokens_per_rank=1, num_sms=1, num_qps=0)
+    empty_args = runtime.dispatch_calls[-1]
+    assert empty_args[0] is empty_x
+    assert empty_args[2] is empty_topk_idx
+    assert empty_args[3] is None
+    assert empty_args[18:20] == (1, 0)
+    assert empty_args[25] is True
+    assert recv_x is empty_x
+    assert recv_topk_idx is empty_topk_idx
+    assert recv_topk_weights is None
+    assert empty_handle.topk_idx is not empty_topk_idx
+    assert empty_event.event is None
+
+    buffer.destroy()
+
+
+def _scenario_ascend_dispatch_optimized():
+    deep_ep, extension, events = _load_package("ascend", True)
+    buffer = deep_ep.ElasticBuffer(
+        _FakeGroup(events, rank=0, size=2), num_bytes=2 * 1024 * 1024,
+        allow_hybrid_mode=False, explicitly_destroy=True)
+    runtime = extension.runtime_instances[-1]
+    x = _FakeTensor("npu", (1, 16))
+    topk_idx = _FakeTensor("npu", (1, 1))
+    expected_error = (
+        "DeepEP Ascend backend: dispatch requires num_sms=1 and num_qps=0")
+
+    for kwargs in ({"num_sms": 2}, {"num_qps": 1}):
+        call_count = len(runtime.dispatch_calls)
+        try:
+            buffer.dispatch(_Poison(), **kwargs)
+        except RuntimeError as error:
+            if str(error) != expected_error:
+                raise AssertionError(f"unexpected validation error: {error}")
+        else:
+            raise AssertionError(f"Ascend dispatch accepted {kwargs}")
+        if len(runtime.dispatch_calls) != call_count:
+            raise AssertionError("invalid Ascend dispatch reached runtime")
+
+    buffer.dispatch(
+        x, topk_idx=topk_idx, num_experts=2,
+        num_max_tokens_per_rank=1, num_sms=1, num_qps=0)
+    if len(runtime.dispatch_calls) != 1:
+        raise AssertionError("valid explicit Ascend dispatch did not reach runtime")
+    if runtime.dispatch_calls[-1][18:20] != (1, 0):
+        raise AssertionError("valid explicit Ascend counts changed before runtime")
     buffer.destroy()
 
 
@@ -708,6 +789,8 @@ def _scenario_cuda_preservation():
     elastic.check_nvlink_connections = lambda group: events.append("check_nvlink_connections")
     elastic.check_fast_rdma_atomic_support = lambda: events.append(
         "check_fast_rdma_atomic_support") or False
+    elastic.get_rdma_gbs = lambda: 100
+    elastic.get_nvlink_gbs = lambda: 100
     os.environ["EP_OVERRIDE_RDMA_SL"] = "7"
     group = _FakeGroup(events, rank=5, size=8)
 
@@ -803,6 +886,15 @@ def _scenario_cuda_preservation():
     assert runtime.dispatch_calls[-1][20] is previous_event
     assert runtime.dispatch_calls[-1][21] is previous_event_before_epilogue
 
+    _, _, _, auto_handle, _ = buffer.dispatch(
+        _FakeTensor("cuda", (1, 16)), topk_idx=_FakeTensor("cuda", (1, 1)),
+        num_experts=8, num_max_tokens_per_rank=1)
+    auto_args = runtime.dispatch_calls[-1]
+    assert auto_args[18] > 1
+    assert auto_args[19] > 0
+    assert auto_args[19] <= buffer.num_allocated_qps
+    assert auto_handle.num_sms == auto_args[18]
+
     combine_previous_event = extension.EventHandle()
     combine_previous_event_before_epilogue = extension.EventHandle()
     buffer.combine(
@@ -837,6 +929,7 @@ SCENARIOS = {
     "ascend_method_gates": _scenario_ascend_method_gates,
     "ascend_contextmanager_gate": _scenario_ascend_contextmanager_gate,
     "ascend_dispatch": _scenario_ascend_dispatch,
+    "ascend_dispatch_optimized": _scenario_ascend_dispatch_optimized,
     "ascend_weak_lru_gate": _scenario_ascend_weak_lru_gate,
     "cuda_preservation": _scenario_cuda_preservation,
     "stale_cuda_extension_guard": _scenario_stale_cuda_extension_guard,
@@ -844,10 +937,13 @@ SCENARIOS = {
 
 
 class PythonApiIsolationTest(unittest.TestCase):
-    def run_scenario(self, scenario):
+    def run_scenario(self, scenario, optimize=False):
+        command = [sys.executable]
+        if optimize:
+            command.append("-O")
+        command.extend([str(pathlib.Path(__file__).resolve()), "--isolation", scenario])
         result = subprocess.run(
-            [sys.executable, str(pathlib.Path(__file__).resolve()),
-             "--isolation", scenario],
+            command,
             cwd=ROOT, capture_output=True, text=True, check=False)
         self.assertEqual(
             result.returncode, 0,
@@ -873,6 +969,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_dispatch_routes_to_the_synchronous_ascend_runtime(self):
         self.run_scenario("ascend_dispatch")
+
+    def test_dispatch_count_validation_survives_optimized_python(self):
+        self.run_scenario("ascend_dispatch_optimized", optimize=True)
 
     def test_cached_method_gates_before_hashing_arguments(self):
         self.run_scenario("ascend_weak_lru_gate")
