@@ -226,7 +226,13 @@ bool combine_state_helpers_match() {
     constexpr std::uint64_t receive_shard_bytes = 0x400;
     constexpr std::uint64_t staging_offset = 0x3000;
     constexpr std::uint64_t staging_shard_bytes = 0x800;
-    return combine_receive_shard_address(
+    std::uint16_t capacity_output = 0x5a5a;
+    if (is_valid_combine_token_extent(9, 8))
+        capacity_output = 0;
+    return is_valid_combine_token_extent(8, 8) &&
+           !is_valid_combine_token_extent(9, 8) &&
+           capacity_output == 0x5a5a &&
+           combine_receive_shard_address(
                base, receive_offset, 0, receive_shard_bytes) == 0x102000 &&
            combine_receive_shard_address(
                base, receive_offset, 1, receive_shard_bytes) == 0x102400 &&
@@ -238,6 +244,39 @@ bool combine_state_helpers_match() {
            !is_valid_combine_origin_token(4, 4, 8) &&
            !is_valid_combine_origin_token(8, 16, 8) &&
            !is_valid_combine_origin_token(-1, 4, 8);
+}
+
+bool combine_runner_allocation_contract_matches() {
+    CoreTilingInput input{};
+    input.operation = OperationKind::kDispatch;
+    input.element_kind = ElementKind::kBFloat16;
+    input.num_tokens = 7;
+    input.hidden = 64;
+    input.num_experts = 4;
+    input.num_topk = 2;
+    input.expert_alignment = 4;
+    input.num_max_tokens_per_rank = 16;
+    CoreTiling dispatch{};
+    if (!build_core_tiling(input, &dispatch).ok())
+        return false;
+
+    input.operation = OperationKind::kCombine;
+    input.topology.world_size = 2;
+    input.topology.scale_up_size = 2;
+    CoreTiling combine{};
+    if (!build_core_tiling(input, &combine).ok())
+        return false;
+
+    const auto allocation = merge_core_launch_storage(
+        required_core_launch_storage(dispatch),
+        required_core_launch_storage(combine));
+    return dispatch.communication_buffer_bytes == 3584 &&
+           dispatch.workspace_bytes == 416 &&
+           combine.communication_buffer_bytes == 2097152 &&
+           combine.workspace_bytes == 416 &&
+           allocation.communication_buffer_bytes == 2097152 &&
+           allocation.workspace_bytes == 416 &&
+           combine.topology.world_size == 2;
 }
 
 }  // namespace
@@ -711,6 +750,8 @@ int main() {
         return 47;
     if (!combine_state_helpers_match())
         return 54;
+    if (!combine_runner_allocation_contract_matches())
+        return 58;
 
     return 0;
 }

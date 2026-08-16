@@ -30,6 +30,16 @@ struct CoreLaunchStorage {
     std::uint64_t workspace_bytes = 0;
 };
 
+constexpr CoreLaunchStorage merge_core_launch_storage(
+    const CoreLaunchStorage& lhs, const CoreLaunchStorage& rhs) noexcept {
+    return {
+        lhs.communication_buffer_bytes >= rhs.communication_buffer_bytes ?
+            lhs.communication_buffer_bytes : rhs.communication_buffer_bytes,
+        lhs.workspace_bytes >= rhs.workspace_bytes ?
+            lhs.workspace_bytes : rhs.workspace_bytes,
+    };
+}
+
 CoreLaunchStorage required_core_launch_storage(const CoreTiling& tiling);
 
 CoreRuntimeStatus validate_internal_launch(

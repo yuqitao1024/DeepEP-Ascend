@@ -582,6 +582,57 @@ int main() {
         self.assertIn(
             "run_combine_case(stream, false, false, 0)", normal_case)
 
+    def test_combine_device_capacity_gate_and_runner_allocation(self):
+        """Catches device output overflow and undersized shared buffers."""
+        source = (ELASTIC / "combine.asc").read_text()
+        epilogue_begin = source.index(
+            "__simt_vf__ inline void combine_epilogue_vf")
+        epilogue = source[epilogue_begin:]
+        self.assertIn("is_valid_combine_token_extent(", epilogue)
+        capacity_position = epilogue.index(
+            "is_valid_combine_token_extent(")
+        output_position = epilogue.index(
+            "for (std::uint64_t token = 0; token < num_tokens; ++token)")
+        weight_position = epilogue.index("combined_topk_weights[index] = 0.0F")
+        completion_position = epilogue.index("&control->combine_generation")
+        self.assertLess(capacity_position, output_position)
+        self.assertLess(capacity_position, weight_position)
+        self.assertLess(capacity_position, completion_position)
+        self.assertIn("CombineProtocolError::kCapacityOverflow", epilogue)
+
+        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
+        for marker in (
+                "is_valid_combine_token_extent(",
+                "merge_core_launch_storage(",
+                "allocation_storage.communication_buffer_bytes",
+                "allocation_storage.workspace_bytes",
+                "prefix_rank_count"):
+            self.assertIn(marker, runner)
+        allocation_begin = runner.index("bool allocate_dispatch_buffers")
+        allocation_end = runner.index(
+            "CoreTiling make_dispatch_tiling", allocation_begin)
+        allocation = runner[allocation_begin:allocation_end]
+        self.assertIn(
+            "allocate(&buffers->prefix_rank, prefix_rank_count)", allocation)
+        self.assertNotIn("allocate(&buffers->prefix_rank, 1)", allocation)
+
+        combine_begin = runner.index("bool run_combine_case")
+        combine_end = runner.index("bool run_barrier_local", combine_begin)
+        combine_case = runner[combine_begin:combine_end]
+        self.assertIn("allocation_storage", combine_case)
+        self.assertIn(
+            "static_cast<std::uint64_t>(combine_tiling.topology.world_size)",
+            combine_case)
+        self.assertIn(
+            "const transport::DeviceTransportContext* transport_context",
+            combine_case)
+        self.assertIn(
+            "combine_tiling.transport_context.local_window_base",
+            combine_case)
+        self.assertIn("arguments.communication_buffer = combine_communication",
+                      combine_case)
+        self.assertIn("observed_output[2] == 0x5a5a", runner)
+
     def test_dispatch_preflights_protocol_state_before_publication(self):
         source = (ELASTIC / "dispatch.asc").read_text()
         for marker in (

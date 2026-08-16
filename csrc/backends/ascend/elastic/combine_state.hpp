@@ -68,6 +68,12 @@ combine_staging_shard_address(
 }
 
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr bool
+is_valid_combine_token_extent(
+    std::uint64_t num_tokens, std::uint64_t shard_capacity) noexcept {
+    return num_tokens <= shard_capacity;
+}
+
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr bool
 is_valid_combine_origin_token(
     std::int32_t origin_token, std::uint64_t num_tokens,
     std::uint64_t shard_capacity) noexcept {
