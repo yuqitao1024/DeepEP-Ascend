@@ -17,6 +17,7 @@
 
 #include "elastic/layout.hpp"
 #include "elastic/barrier_state.hpp"
+#include "elastic/combine_state.hpp"
 #include "elastic/dispatch_state.hpp"
 #include "elastic/runtime.hpp"
 #include "runtime/cann_runtime.hpp"
@@ -57,9 +58,11 @@ class ElasticBuffer {
     int num_ranks_;
     int64_t num_buffer_bytes_;
     bool allow_hybrid_mode_;
+    bool allow_multiple_reduction_;
     std::unique_ptr<runtime::CannRuntimeResources> resources_;
     elastic::BarrierSequence barrier_sequence_;
     mutable elastic::DispatchSequence dispatch_sequence_;
+    mutable elastic::CombineSequence combine_sequence_;
     std::uint64_t dispatch_family_ = 0;
     std::uint64_t barrier_timeout_cycles_ = 0;
     bool destroyed_ = false;
@@ -85,18 +88,13 @@ class ElasticBuffer {
 
     static constexpr auto kCombineCapabilities =
         transport::capability_bit(transport::TransportCapability::kSymmetricWindow) |
-        transport::capability_bit(transport::TransportCapability::kDirectPeerPointer) |
         transport::capability_bit(transport::TransportCapability::kDevicePut) |
-        transport::capability_bit(
-            transport::TransportCapability::kRemoteAtomicAddRelease) |
+        transport::capability_bit(transport::TransportCapability::kDevicePutValue) |
         transport::capability_bit(transport::TransportCapability::kRemoteSignal) |
         transport::capability_bit(
             transport::TransportCapability::kSystemMemoryOrdering) |
-        transport::capability_bit(transport::TransportCapability::kDeviceBarrier);
-
-    static constexpr auto kHybridCapabilities =
-        transport::capability_bit(transport::TransportCapability::kScaleUpTeam) |
-        transport::capability_bit(transport::TransportCapability::kScaleOutTeam);
+        transport::capability_bit(transport::TransportCapability::kDeviceBarrier) |
+        transport::capability_bit(transport::TransportCapability::kScaleUpTeam);
 
     void require_transport(
         const char* operation, transport::TransportCapabilities required) const {
@@ -170,6 +168,24 @@ class ElasticBuffer {
             rank_idx_);
     }
 
+    [[noreturn]] void raise_combine_diagnostic(
+        const transport::DeviceTransportDiagnostic& diagnostic,
+        const char* detail) const {
+        auto message = std::string("device diagnostic ") + detail +
+            " error=" + diagnostic_name(diagnostic.error) +
+            " command_index=" + std::to_string(diagnostic.command_index) +
+            " opcode=" + std::to_string(
+                static_cast<std::uint32_t>(diagnostic.opcode)) +
+            " peer=" + std::to_string(diagnostic.peer) +
+            " channel=" + std::to_string(diagnostic.channel) +
+            " generation=" + std::to_string(diagnostic.generation);
+        raise_transport_status(
+            transport::TransportStatus::runtime_failure(
+                "combine", static_cast<int>(diagnostic.backend_status),
+                std::move(message)),
+            rank_idx_);
+    }
+
     elastic::CoreTiling build_barrier_tiling() const {
         const auto& context = resources_->device_context();
         elastic::CoreTilingInput input{};
@@ -221,6 +237,29 @@ class ElasticBuffer {
         return tiling;
     }
 
+    elastic::CoreTiling build_combine_tiling(
+        const elastic::DispatchHandleDescriptor& descriptor,
+        elastic::CoreModeFlags mode_flags) const {
+        const auto& context = resources_->device_context();
+        elastic::CoreTilingInput input{};
+        input.operation = elastic::OperationKind::kCombine;
+        input.element_kind = elastic::ElementKind::kBFloat16;
+        input.mode_flags = mode_flags;
+        input.num_tokens = descriptor.num_tokens;
+        input.hidden = descriptor.hidden;
+        input.num_experts = descriptor.num_experts;
+        input.num_topk = descriptor.num_topk;
+        input.expert_alignment = descriptor.expert_alignment;
+        input.num_max_tokens_per_rank = descriptor.num_max_tokens_per_rank;
+        input.topology = descriptor.topology;
+        elastic::CoreTiling tiling{};
+        const auto status = elastic::build_core_tiling(input, &tiling);
+        TORCH_CHECK(status.ok(), "DeepEP Ascend backend: combine ",
+                    status.message);
+        tiling.transport_context = context;
+        return tiling;
+    }
+
     static void validate_npu_tensor(
         const torch::Tensor& tensor, int64_t dimensions,
         torch::ScalarType type, const torch::Device& device,
@@ -255,12 +294,25 @@ class ElasticBuffer {
         raise_transport_status(transport_status, rank);
     }
 
+    static void raise_combine_launch_status(
+        const elastic::CoreRuntimeStatus& status, int rank) {
+        const auto transport_status = status.code ==
+                elastic::CoreRuntimeStatusCode::kLaunchFailure ?
+            transport::TransportStatus::runtime_failure(
+                "combine", status.backend_code, status.message) :
+            transport::TransportStatus::invalid("combine", status.message);
+        raise_transport_status(transport_status, rank);
+    }
+
 #if DEEP_EP_ASCEND_TESTING
     struct TestingTag {};
     ElasticBuffer(TestingTag, int rank, std::unique_ptr<runtime::CannRuntimeResources> resources,
-                  std::int64_t buffer_bytes, std::uint64_t timeout_cycles)
+                  std::int64_t buffer_bytes, std::uint64_t timeout_cycles,
+                  bool allow_multiple_reduction)
         : rank_idx_(rank), num_ranks_(2), num_buffer_bytes_(buffer_bytes),
-          allow_hybrid_mode_(false), resources_(std::move(resources)),
+          allow_hybrid_mode_(false),
+          allow_multiple_reduction_(allow_multiple_reduction),
+          resources_(std::move(resources)),
           barrier_timeout_cycles_(timeout_cycles) {
         dispatch_family_ = 7;
     }
@@ -273,12 +325,14 @@ public:
                   const int64_t& comm_handle, const cpu_comm_t& cpu_comm,
                   const int64_t& num_buffer_bytes,
                   const int64_t& num_cpu_buffer_bytes,
-                  const bool& allow_hybrid_mode, const bool&, const bool&,
+                  const bool& allow_hybrid_mode,
+                  const bool& allow_multiple_reduction, const bool&,
                   const int& sl_idx, const int& num_allocated_qps,
                   const int&, const int& num_gpu_timeout_secs, const bool&)
         : rank_idx_(rank_idx), num_ranks_(num_ranks),
           num_buffer_bytes_(num_buffer_bytes),
-          allow_hybrid_mode_(allow_hybrid_mode) {
+          allow_hybrid_mode_(allow_hybrid_mode),
+          allow_multiple_reduction_(allow_multiple_reduction) {
         TORCH_CHECK(num_ranks == 2,
                     "DeepEP Ascend backend: exactly two ranks are required");
         TORCH_CHECK(rank_idx >= 0 && rank_idx < num_ranks,
@@ -325,9 +379,11 @@ public:
 #if DEEP_EP_ASCEND_TESTING
     static std::unique_ptr<ElasticBuffer> make_testing_buffer(
         int rank, std::unique_ptr<runtime::CannRuntimeResources> resources,
-        std::int64_t buffer_bytes, std::uint64_t timeout_cycles) {
+        std::int64_t buffer_bytes, std::uint64_t timeout_cycles,
+        bool allow_multiple_reduction = true) {
         return std::unique_ptr<ElasticBuffer>(new ElasticBuffer(
-            TestingTag{}, rank, std::move(resources), buffer_bytes, timeout_cycles));
+            TestingTag{}, rank, std::move(resources), buffer_bytes,
+            timeout_cycles, allow_multiple_reduction));
     }
 #endif
 
@@ -950,26 +1006,300 @@ public:
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>,
                std::optional<EventHandle>>
-    combine(const torch::Tensor&, const std::optional<torch::Tensor>&,
-            const std::optional<torch::Tensor>&,
-            const std::optional<torch::Tensor>&, const torch::Tensor&,
-            const torch::Tensor&, const torch::Tensor&,
-            const std::optional<torch::Tensor>&,
-            const std::optional<torch::Tensor>&,
-            const int&, const int&, const int&, const int&,
-            const std::optional<EventHandle>&,
-            const std::optional<EventHandle>&,
-            const bool&, const bool&, const bool&) const {
-        auto required = kCombineCapabilities;
-        if (allow_hybrid_mode_) {
-            required |= kHybridCapabilities;
-            required |= transport::capability_bit(
-                transport::TransportCapability::kAsyncCompletion);
+    combine(const torch::Tensor& x,
+            const std::optional<torch::Tensor>& topk_weights,
+            const std::optional<torch::Tensor>& bias_0,
+            const std::optional<torch::Tensor>& bias_1,
+            const torch::Tensor& src_metadata,
+            const torch::Tensor& combined_topk_idx,
+            const torch::Tensor& psum_num_recv_tokens_per_scaleup_rank,
+            const std::optional<torch::Tensor>& token_metadata_at_forward,
+            const std::optional<torch::Tensor>& channel_linked_list,
+            const int& num_experts,
+            const int& num_max_tokens_per_rank,
+            const int& num_sms, const int& num_qps,
+            const std::optional<EventHandle>& previous_event,
+            const std::optional<EventHandle>& previous_event_before_epilogue,
+            const bool& async_with_compute_stream,
+            const bool& allocate_on_comm_stream,
+            const bool& use_expanded_layout) const {
+        require_transport("combine", kCombineCapabilities);
+        TORCH_CHECK(!destroyed_ && !allow_hybrid_mode_,
+                    "DeepEP Ascend backend: combine does not support hybrid mode");
+        TORCH_CHECK(!previous_event.has_value() &&
+                        !previous_event_before_epilogue.has_value() &&
+                        !async_with_compute_stream && !allocate_on_comm_stream,
+                    "DeepEP Ascend backend: combine is synchronous");
+        TORCH_CHECK(!channel_linked_list.has_value(),
+                    "DeepEP Ascend backend: combine does not support channel handles");
+        TORCH_CHECK(num_sms == 1,
+                    "DeepEP Ascend backend: combine requires num_sms=1");
+        TORCH_CHECK(num_qps == 0,
+                    "DeepEP Ascend backend: combine requires num_qps=0");
+        TORCH_CHECK(num_experts > 0 && num_experts % 2 == 0 &&
+                        num_max_tokens_per_rank > 0 &&
+                        num_max_tokens_per_rank <=
+                            std::numeric_limits<std::int32_t>::max() / 2,
+                    "DeepEP Ascend backend: combine requires positive two-rank "
+                    "expert capacity");
+        TORCH_CHECK(token_metadata_at_forward.has_value(),
+                    "DeepEP Ascend backend: combine requires a dispatch handle");
+
+        const auto device = x.device();
+        int current_device = -1;
+        auto status = resources_->current_device(&current_device);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        TORCH_CHECK(device.index() == resources_->owning_device() &&
+                        current_device == resources_->owning_device(),
+                    "DeepEP Ascend backend: combine tensors and current NPU "
+                    "must match the buffer device");
+        const auto validate = [&](const torch::Tensor& tensor,
+                                  int64_t dimensions,
+                                  torch::ScalarType type,
+                                  const char* name) {
+            TORCH_CHECK(
+                tensor.device().type() == c10::DeviceType::PrivateUse1 &&
+                    tensor.device() == device && tensor.is_contiguous() &&
+                    tensor.dim() == dimensions && tensor.scalar_type() == type,
+                "DeepEP Ascend backend: combine requires contiguous NPU ", name,
+                " with the expected rank and dtype");
+        };
+        validate(x, 2, torch::kBFloat16, "BF16 x");
+        validate(src_metadata, 2, torch::kInt, "int32 source metadata");
+        validate(combined_topk_idx, 2, torch::kLong,
+                 "int64 combined top-k indices");
+        validate(psum_num_recv_tokens_per_scaleup_rank, 1, torch::kInt,
+                 "int32 rank prefix");
+        validate(*token_metadata_at_forward, 1, torch::kByte,
+                 "dispatch handle descriptor");
+        TORCH_CHECK(x.size(0) >= 0 && x.size(1) > 0 &&
+                        src_metadata.size(0) >= 0 &&
+                        combined_topk_idx.size(0) >= 0 &&
+                        combined_topk_idx.size(1) > 0 &&
+                        combined_topk_idx.size(1) <= num_experts &&
+                        psum_num_recv_tokens_per_scaleup_rank.size(0) ==
+                            num_ranks_ &&
+                        token_metadata_at_forward->numel() ==
+                            static_cast<int64_t>(
+                                sizeof(elastic::DispatchHandleDescriptor)),
+                    "DeepEP Ascend backend: combine handle tensor shape mismatch");
+        const auto num_source_rows =
+            static_cast<std::uint64_t>(src_metadata.size(0));
+        const auto num_input_rows = static_cast<std::uint64_t>(x.size(0));
+        const auto num_topk =
+            static_cast<std::uint64_t>(combined_topk_idx.size(1));
+        const auto capacity =
+            static_cast<std::uint64_t>(num_max_tokens_per_rank);
+        const auto maximum_source_rows = capacity * 2;
+        TORCH_CHECK(src_metadata.size(1) ==
+                        static_cast<int64_t>(num_topk + 2) &&
+                        num_source_rows <= maximum_source_rows &&
+                        (!use_expanded_layout ?
+                             num_input_rows == num_source_rows :
+                             num_input_rows <= maximum_source_rows * num_topk),
+                    "DeepEP Ascend backend: combine source metadata shape or "
+                    "capacity mismatch");
+        if (topk_weights.has_value()) {
+            validate(*topk_weights, use_expanded_layout ? 1 : 2,
+                     torch::kFloat, "float32 top-k weights");
+            TORCH_CHECK(
+                (!use_expanded_layout &&
+                 topk_weights->size(0) == x.size(0) &&
+                 topk_weights->size(1) ==
+                     combined_topk_idx.size(1)) ||
+                    (use_expanded_layout &&
+                     topk_weights->size(0) == x.size(0)),
+                "DeepEP Ascend backend: combine top-k weights shape mismatch");
+            TORCH_CHECK(!use_expanded_layout || allow_multiple_reduction_,
+                        "DeepEP Ascend backend: expanded combine weights require "
+                        "allow_multiple_reduction");
         }
-        require_transport("combine", required);
-        raise_unsupported(
-            "combine",
-            "is unavailable until the Ascend device transport is implemented");
+        for (const auto* bias : {&bias_0, &bias_1}) {
+            if (!bias->has_value())
+                continue;
+            validate(**bias, 2, torch::kBFloat16, "BF16 bias");
+            TORCH_CHECK((*bias)->sizes() == std::vector<int64_t>({
+                            combined_topk_idx.size(0), x.size(1)}),
+                        "DeepEP Ascend backend: combine bias shape mismatch");
+        }
+
+        elastic::DispatchHandleDescriptor descriptor{};
+        status = resources_->copy_to_host(
+            &descriptor, token_metadata_at_forward->data_ptr(),
+            sizeof(descriptor));
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        const auto& context = resources_->device_context();
+        const elastic::CoreModeFlags dispatch_mode = use_expanded_layout ?
+            elastic::mode_bit(elastic::CoreMode::kExpanded) : 0;
+        const auto expected_descriptor =
+            elastic::make_dispatch_handle_descriptor(
+                dispatch_family_,
+                elastic::core_topology_from_transport(context.topology),
+                static_cast<std::uint64_t>(combined_topk_idx.size(0)),
+                static_cast<std::uint64_t>(x.size(1)),
+                static_cast<std::uint64_t>(num_experts), num_topk,
+                descriptor.expert_alignment, capacity, dispatch_mode);
+        const auto descriptor_status = elastic::validate_dispatch_handle(
+            expected_descriptor, descriptor);
+        TORCH_CHECK(descriptor_status.ok() && descriptor.expert_alignment > 0,
+                    "DeepEP Ascend backend: combine ",
+                    descriptor_status.ok() ?
+                        "invalid dispatch handle alignment" :
+                        descriptor_status.message);
+
+        std::vector<std::int32_t> host_prefix(num_ranks_);
+        std::vector<std::int32_t> host_metadata(
+            static_cast<std::size_t>(num_source_rows * (num_topk + 2)));
+        status = resources_->copy_to_host(
+            host_prefix.data(),
+            psum_num_recv_tokens_per_scaleup_rank.data_ptr(),
+            host_prefix.size() * sizeof(std::int32_t));
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        if (!host_metadata.empty()) {
+            status = resources_->copy_to_host(
+                host_metadata.data(), src_metadata.data_ptr(),
+                host_metadata.size() * sizeof(std::int32_t));
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+        }
+        std::uint64_t previous_end = 0;
+        for (int destination_rank = 0; destination_rank < num_ranks_;
+             ++destination_rank) {
+            const std::int32_t encoded_end = host_prefix[destination_rank];
+            TORCH_CHECK(encoded_end >= 0 &&
+                            static_cast<std::uint64_t>(encoded_end) >=
+                                previous_end &&
+                            static_cast<std::uint64_t>(encoded_end) <=
+                                num_source_rows,
+                        "DeepEP Ascend backend: combine rank prefix is invalid");
+            const auto end = static_cast<std::uint64_t>(encoded_end);
+            std::uint64_t records = 0;
+            for (std::uint64_t row = previous_end; row < end; ++row) {
+                const auto* metadata = host_metadata.data() +
+                    row * (num_topk + 2);
+                TORCH_CHECK(
+                    elastic::decode_dispatch_source_rank(
+                        metadata[0], capacity) == destination_rank &&
+                        elastic::is_dispatch_local_index(
+                            elastic::decode_dispatch_local_index(
+                                metadata[0], capacity), capacity) &&
+                        elastic::decode_dispatch_source_rank(
+                            metadata[1], num_topk) == destination_rank &&
+                        elastic::is_dispatch_local_index(
+                            elastic::decode_dispatch_local_index(
+                                metadata[1], num_topk), num_topk),
+                    "DeepEP Ascend backend: combine source metadata is invalid");
+                std::uint64_t valid_slots = 0;
+                for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
+                    const auto input_row = metadata[2 + lane];
+                    TORCH_CHECK(
+                        use_expanded_layout ?
+                            elastic::combine_expanded_input_row_is_valid(
+                                input_row, num_input_rows) :
+                            input_row == -1,
+                        "DeepEP Ascend backend: combine expanded slot is invalid");
+                    valid_slots += input_row == -1 ? 0 : 1;
+                }
+                records += !use_expanded_layout ? 1 :
+                    (allow_multiple_reduction_ ?
+                         (valid_slots == 0 ? 0 : 1) : valid_slots);
+            }
+            const auto record_capacity =
+                use_expanded_layout && !allow_multiple_reduction_ ?
+                    capacity * num_topk : capacity;
+            TORCH_CHECK(records <= record_capacity,
+                        "DeepEP Ascend backend: combine source metadata "
+                        "exceeds capacity");
+            previous_end = end;
+        }
+        TORCH_CHECK(previous_end == num_source_rows,
+                    "DeepEP Ascend backend: combine rank prefix tail mismatch");
+
+        elastic::CoreModeFlags combine_mode = dispatch_mode;
+        if (use_expanded_layout && allow_multiple_reduction_)
+            combine_mode |= elastic::mode_bit(
+                elastic::CoreMode::kAllowMultipleReduction);
+        auto tiling = build_combine_tiling(descriptor, combine_mode);
+        TORCH_CHECK(tiling.launch.num_blocks == 1 &&
+                        tiling.communication_buffer_bytes <=
+                            static_cast<std::uint64_t>(num_buffer_bytes_) &&
+                        tiling.workspace_bytes <= resources_->workspace_bytes(),
+                    "DeepEP Ascend backend: combine capacity exceeds runtime storage");
+        auto combined_x = torch::empty(
+            {combined_topk_idx.size(0), x.size(1)}, x.options());
+        std::optional<torch::Tensor> combined_weights;
+        if (topk_weights.has_value())
+            combined_weights = torch::empty(
+                {combined_topk_idx.size(0), combined_topk_idx.size(1)},
+                topk_weights->options());
+
+        void* stream = nullptr;
+        status = resources_->current_stream(&stream);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        elastic::CombineAttempt attempt(combine_sequence_);
+        TORCH_CHECK(attempt.valid(),
+                    "DeepEP Ascend backend: combine cannot continue after a "
+                    "failed or concurrent attempt");
+        elastic::CombineArguments arguments{};
+        arguments.x = x.data_ptr();
+        arguments.topk_weights = topk_weights.has_value() ?
+            topk_weights->data_ptr<float>() : nullptr;
+        arguments.source_metadata = src_metadata.data_ptr<std::int32_t>();
+        arguments.combined_topk_indices =
+            combined_topk_idx.data_ptr<std::int64_t>();
+        arguments.prefix_per_rank =
+            psum_num_recv_tokens_per_scaleup_rank.data_ptr<std::int32_t>();
+        arguments.bias_0 = bias_0.has_value() ? bias_0->data_ptr() : nullptr;
+        arguments.bias_1 = bias_1.has_value() ? bias_1->data_ptr() : nullptr;
+        arguments.communication_buffer = resources_->window_base();
+        arguments.workspace = resources_->workspace();
+        arguments.combined_x = combined_x.data_ptr();
+        arguments.combined_topk_weights = combined_weights.has_value() ?
+            combined_weights->data_ptr<float>() : nullptr;
+        arguments.generation = attempt.generation();
+        arguments.timeout_cycles = barrier_timeout_cycles_;
+        arguments.num_source_rows = num_source_rows;
+        arguments.num_input_rows = num_input_rows;
+        arguments.local_window_base = reinterpret_cast<std::uintptr_t>(
+            resources_->window_base());
+        const elastic::CoreLaunchStorage storage{
+            static_cast<std::uint64_t>(num_buffer_bytes_),
+            resources_->workspace_bytes()};
+        const auto launch_status = elastic::launch_internal_combine(
+            arguments, tiling, storage, stream);
+        if (!launch_status.ok())
+            raise_combine_launch_status(launch_status, rank_idx_);
+        status = resources_->synchronize_stream(stream);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        transport::DeviceTransportDiagnostic diagnostic{};
+        status = host_transport()->read_diagnostic(&diagnostic);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        if (diagnostic.abi_version !=
+                transport::kTransportCommandAbiVersion ||
+            diagnostic.error != transport::DeviceTransportError::kNone ||
+            diagnostic.generation != attempt.generation())
+            raise_combine_diagnostic(diagnostic, "reported failure");
+        std::uint64_t completion = 0;
+        const auto completion_offset =
+            tiling.symmetric_window_layout.control_offset +
+            offsetof(elastic::SymmetricControlHeader, combine_generation);
+        const auto* completion_address = reinterpret_cast<const void*>(
+            reinterpret_cast<std::uintptr_t>(resources_->window_base()) +
+            completion_offset);
+        status = resources_->copy_to_host(
+            &completion, completion_address, sizeof(completion));
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        if (completion != attempt.generation())
+            raise_combine_diagnostic(diagnostic, "completion mismatch");
+        attempt.complete();
+        return {combined_x, combined_weights, std::nullopt};
     }
 };
 

@@ -1150,13 +1150,24 @@ class ElasticBuffer:
             combined_topk_weights: the reduced top-k weights, with shape `[num_combined_tokens, num_topk]` and type `torch.float`.
             event: the event after executing the kernel (valid only if `async_with_compute_stream` is set).
         """
-        require_cuda("combine")
         check_torch_deterministic()
 
         # Automatic decide SM and QP count
-        num_sms = handle.num_sms if num_sms == 0 else num_sms
-        num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
-        assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+        if is_cuda():
+            require_cuda("combine")
+            num_sms = handle.num_sms if num_sms == 0 else num_sms
+            num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
+            assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
+        else:
+            if (num_sms not in (0, 1) or num_qps != 0):
+                raise RuntimeError(
+                    'DeepEP Ascend backend: combine requires num_sms=1 and num_qps=0')
+            if (previous_event is not None or
+                    previous_event_before_epilogue is not None or
+                    async_with_compute_stream or allocate_on_comm_stream):
+                raise RuntimeError(
+                    'DeepEP Ascend backend: combine is synchronous')
+            num_sms = 1
 
         bias_0, bias_1 = ElasticBuffer._unpack_bias(bias)
         combined_x, combined_topk_weights, event = \
@@ -1175,4 +1186,5 @@ class ElasticBuffer:
                                  async_with_compute_stream,
                                  allocate_on_comm_stream,
                                  handle.do_expand)
-        return combined_x, combined_topk_weights, EventOverlap(event)
+        return combined_x, combined_topk_weights, \
+            EventOverlap(event if is_cuda() else None)

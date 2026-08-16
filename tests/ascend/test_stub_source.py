@@ -384,8 +384,8 @@ int main() {
         return 15;
     if (!raises_transport_error(
             "combine", "requires unavailable device transport capabilities: "
-            "symmetric_window, direct_peer_pointer, device_put, remote_atomic_add_release, "
-            "remote_signal, system_memory_ordering, device_barrier", [&] {
+            "symmetric_window, device_put, device_put_value, remote_signal, "
+            "system_memory_ordering, device_barrier, scale_up_team", [&] {
                 buffer.combine(
                     tensor, optional_tensor, optional_tensor, optional_tensor,
                     tensor, tensor, tensor, optional_tensor, optional_tensor,
@@ -416,9 +416,8 @@ int main() {
         return 25;
     if (!raises_transport_error(
             "combine", "requires unavailable device transport capabilities: "
-            "symmetric_window, direct_peer_pointer, device_put, remote_atomic_add_release, "
-            "remote_signal, async_completion, system_memory_ordering, device_barrier, "
-            "scale_up_team, scale_out_team", [&] {
+            "symmetric_window, device_put, device_put_value, remote_signal, "
+            "system_memory_ordering, device_barrier, scale_up_team", [&] {
                 hybrid_buffer.combine(
                     tensor, optional_tensor, optional_tensor, optional_tensor,
                     tensor, tensor, tensor, optional_tensor, optional_tensor,

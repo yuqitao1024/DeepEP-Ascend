@@ -37,6 +37,7 @@ struct Trace {
     int runtime_free_fail_call = -1;
     int runtime_free_calls = 0;
     int runtime_copy_from_host_failures_remaining = 0;
+    int runtime_sync_failures_remaining = 0;
     bool null_stream = false;
 
     bool runtime_fail() {
@@ -98,6 +99,10 @@ int runtime_synchronize_stream(void* data, void* stream) {
     auto& trace = self(data);
     trace.events.emplace_back("synchronize_stream");
     trace.synchronized_stream = reinterpret_cast<std::uintptr_t>(stream);
+    if (trace.runtime_sync_failures_remaining > 0) {
+        --trace.runtime_sync_failures_remaining;
+        return 65;
+    }
     return 0;
 }
 
@@ -318,6 +323,18 @@ void check_invalid_copy_requests_do_not_call_backend() {
     CHECK(trace.count("runtime_copy_from_host") == before);
 }
 
+void check_stream_sync_failure_preserves_resources() {
+    Trace trace;
+    runtime::CannRuntimeResources resources;
+    CHECK(resources.initialize(
+        config(), 4096, runtime_api(trace), host_api(trace)).ok());
+    trace.runtime_sync_failures_remaining = 1;
+    CHECK(!resources.synchronize_stream(reinterpret_cast<void*>(0x6161)).ok());
+    CHECK(resources.initialized());
+    CHECK(resources.synchronize_stream(reinterpret_cast<void*>(0x6161)).ok());
+    CHECK(resources.destroy().ok());
+}
+
 void check_runtime_failures_cleanup() {
     for (int fail_call = 0; fail_call < 4; ++fail_call) {
         Trace trace;
@@ -447,5 +464,6 @@ int main() {
     check_runtime_free_failure_is_retryable();
     check_copy_failure_preserves_resources_for_retry();
     check_invalid_copy_requests_do_not_call_backend();
+    check_stream_sync_failure_preserves_resources();
     return failures == 0 ? 0 : 1;
 }

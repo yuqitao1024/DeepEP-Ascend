@@ -795,7 +795,7 @@ int main() {
         self.assertNotIn("DEEP_EP_ASCEND_TEST_DIAGNOSTIC", bindings)
         self.assertIn("launch_internal_barrier", production)
         self.assertIn("launch_internal_dispatch", production)
-        self.assertNotIn("launch_internal_combine", production)
+        self.assertIn("launch_internal_combine", production)
         for marker in ("read_diagnostic", "copy_to_host",
                        "barrier_completion", "BarrierSequence",
                        "timeout_cycles_from_seconds"):
@@ -844,6 +844,28 @@ int main() {
                 ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                  "-DDEEP_EP_ASCEND_TESTING=1", f"-I{directory}", f"-I{ROOT}", str(probe),
                  str(ELASTIC / "runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
+                 "-o", str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_public_combine_probe_executes(self):
+        probe = ROOT / "tests/ascend/production_combine_probe.cpp"
+        self.assertTrue(probe.is_file(), str(probe))
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            (directory / "pybind11").mkdir()
+            (directory / "torch").mkdir()
+            (directory / "pybind11/pybind11.h").write_text(PYBIND11_HEADER)
+            (directory / "torch/python.h").write_text(TORCH_HEADER)
+            binary = directory / "production_combine_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 "-DDEEP_EP_ASCEND_TESTING=1", f"-I{directory}", f"-I{ROOT}",
+                 str(probe), str(ELASTIC / "runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
                  "-o", str(binary)], capture_output=True, text=True, check=False)

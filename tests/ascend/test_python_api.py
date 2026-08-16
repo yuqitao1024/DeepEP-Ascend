@@ -42,7 +42,6 @@ GATED_METHODS = {
     "all_gather": "all_gather",
     "get_theoretical_num_sms": "get_theoretical_num_sms",
     "get_theoretical_num_qps": "get_theoretical_num_qps",
-    "combine": "combine",
 }
 
 
@@ -266,7 +265,7 @@ def _install_fake_extension(platform, events):
 
         def combine(self, *args):
             self.combine_calls.append(args)
-            return args[0], args[1], EventHandle()
+            return args[0], args[1], None if platform == "ascend" else EventHandle()
 
     def calculate_elastic_buffer_size(*args):
         extension.size_calls.append(args)
@@ -590,7 +589,6 @@ def _scenario_ascend_method_gates():
         "get_theoretical_num_sms": lambda: buffer.get_theoretical_num_sms(
             [poison], [poison]),
         "get_theoretical_num_qps": lambda: buffer.get_theoretical_num_qps(poison),
-        "combine": lambda: buffer.combine(poison, poison),
     }
     assert calls.keys() == GATED_METHODS.keys()
     for method, operation in GATED_METHODS.items():
@@ -740,6 +738,63 @@ def _scenario_ascend_dispatch_optimized():
         raise AssertionError("valid explicit Ascend dispatch did not reach runtime")
     if runtime.dispatch_calls[-1][18:20] != (1, 0):
         raise AssertionError("valid explicit Ascend counts changed before runtime")
+    buffer.destroy()
+
+
+def _scenario_ascend_combine():
+    deep_ep, extension, events = _load_package("ascend", True)
+    buffer = deep_ep.ElasticBuffer(
+        _FakeGroup(events, rank=0, size=2), num_bytes=2 * 1024 * 1024,
+        allow_hybrid_mode=False, explicitly_destroy=True)
+    runtime = extension.runtime_instances[-1]
+    x = _FakeTensor("npu", (2, 16))
+    topk_weights = _FakeTensor("npu", (2, 2))
+    bias_0 = _FakeTensor("npu", (1, 16))
+    bias_1 = _FakeTensor("npu", (1, 16))
+    recv_src_metadata = _FakeTensor("npu", (2, 4))
+    topk_idx = _FakeTensor("npu", (1, 2))
+    rank_prefix = _FakeTensor("npu", (2,))
+    descriptor = _FakeTensor("npu", (96,))
+    handle = deep_ep.EPHandle(
+        False, 2, 4, 4, 1, topk_idx, 2, 2, [], rank_prefix,
+        _FakeTensor("npu", (1,)), _FakeTensor("npu", (1,)),
+        recv_src_metadata, _FakeTensor("npu", (1, 2)), descriptor, None)
+
+    combined_x, combined_weights, event = buffer.combine(
+        x, handle, topk_weights=topk_weights, bias=(bias_0, bias_1))
+    assert combined_x is x
+    assert combined_weights is topk_weights
+    assert event.event is None
+    assert runtime.combine_calls[-1] == (
+        x, topk_weights, bias_0, bias_1, recv_src_metadata, topk_idx,
+        rank_prefix, descriptor, None, 2, 4, 1, 0,
+        None, None, False, False, False)
+
+    _, _, one_bias_event = buffer.combine(x, handle, bias=bias_0, num_sms=1)
+    assert runtime.combine_calls[-1][2:4] == (bias_0, None)
+    assert one_bias_event.event is None
+    buffer.combine(x, handle)
+    assert runtime.combine_calls[-1][2:4] == (None, None)
+
+    invalid_calls = (
+        ("num_sms", {"num_sms": 2}),
+        ("num_qps", {"num_qps": 1}),
+        ("previous_event", {"previous_event": deep_ep.EventOverlap(
+            extension.EventHandle())}),
+        ("previous_event_before_epilogue", {
+            "previous_event_before_epilogue": extension.EventHandle()}),
+        ("async_with_compute_stream", {"async_with_compute_stream": True}),
+        ("allocate_on_comm_stream", {"allocate_on_comm_stream": True}),
+    )
+    calls_before = len(runtime.combine_calls)
+    for name, kwargs in invalid_calls:
+        try:
+            buffer.combine(x, handle, **kwargs)
+        except RuntimeError as error:
+            assert "DeepEP Ascend backend: combine" in str(error), (name, error)
+        else:
+            raise AssertionError(f"Ascend combine accepted unsupported {name}")
+    assert len(runtime.combine_calls) == calls_before
     buffer.destroy()
 
 
@@ -930,6 +985,7 @@ SCENARIOS = {
     "ascend_contextmanager_gate": _scenario_ascend_contextmanager_gate,
     "ascend_dispatch": _scenario_ascend_dispatch,
     "ascend_dispatch_optimized": _scenario_ascend_dispatch_optimized,
+    "ascend_combine": _scenario_ascend_combine,
     "ascend_weak_lru_gate": _scenario_ascend_weak_lru_gate,
     "cuda_preservation": _scenario_cuda_preservation,
     "stale_cuda_extension_guard": _scenario_stale_cuda_extension_guard,
@@ -972,6 +1028,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_dispatch_count_validation_survives_optimized_python(self):
         self.run_scenario("ascend_dispatch_optimized", optimize=True)
+
+    def test_combine_routes_to_the_synchronous_ascend_runtime(self):
+        self.run_scenario("ascend_combine")
 
     def test_cached_method_gates_before_hashing_arguments(self):
         self.run_scenario("ascend_weak_lru_gate")
