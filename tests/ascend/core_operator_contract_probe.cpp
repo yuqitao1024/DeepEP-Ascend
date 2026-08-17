@@ -149,6 +149,54 @@ int main() {
         tiling.communication_buffer_bytes % kPublicElasticBufferAlignment != 0)
         return 16;
 
+    std::uint64_t logical_window_bytes = 0;
+    for (const auto operation : {
+             OperationKind::kBarrier, OperationKind::kDispatch,
+             OperationKind::kCombine}) {
+        for (int rank = 0; rank < 4; ++rank) {
+            input = valid_input();
+            input.operation = operation;
+            input.num_experts = 8;
+            if (operation == OperationKind::kBarrier) {
+                input.num_tokens = 0;
+                input.hidden = 0;
+                input.num_experts = 0;
+                input.num_topk = 0;
+                input.num_max_tokens_per_rank = 0;
+            }
+            input.topology.world_rank = rank;
+            input.topology.world_size = 4;
+            input.topology.scale_up_rank = rank % 2;
+            input.topology.scale_up_size = 2;
+            input.topology.scale_out_rank = rank / 2;
+            input.topology.scale_out_size = 2;
+            input.topology.kind =
+                deep_ep::ascend::transport::TransportTopologyKind::
+                    kLogicalSimulation;
+            input.topology.epoch = 17;
+            status = build_core_tiling(input, &tiling);
+            if (!status.ok() ||
+                tiling.symmetric_window_layout.struct_size !=
+                    sizeof(SymmetricWindowLayout) ||
+                tiling.symmetric_window_layout.barrier_generation_count != 4 ||
+                tiling.symmetric_window_layout.barrier_completion_count != 4 ||
+                (operation != OperationKind::kBarrier &&
+                 (tiling.symmetric_window_layout.dispatch_receive_shard_count != 4 ||
+                  tiling.symmetric_window_layout.dispatch_staging_shard_count != 4 ||
+                  tiling.symmetric_window_layout.combine_receive_shard_count != 4 ||
+                  tiling.symmetric_window_layout.combine_staging_shard_count != 4)) ||
+                tiling.communication_buffer_bytes !=
+                    tiling.symmetric_window_layout.total_bytes ||
+                tiling.communication_buffer_bytes == 0)
+                return 19;
+            if (logical_window_bytes == 0)
+                logical_window_bytes = tiling.communication_buffer_bytes;
+            else if (tiling.communication_buffer_bytes != logical_window_bytes)
+                return 20;
+        }
+        logical_window_bytes = 0;
+    }
+
     struct ScratchFixture {
         int world_size;
         std::uint64_t bytes;

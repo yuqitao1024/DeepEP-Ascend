@@ -107,6 +107,12 @@ inline std::string capability_names(TransportCapabilities capabilities) {
 }
 
 enum class TransportTeam : std::uint8_t { kWorld, kScaleUp, kScaleOut };
+
+struct TeamPeer {
+    TransportTeam team = TransportTeam::kWorld;
+    int peer = -1;
+    int world_peer = -1;
+};
 enum class CooperationScope : std::uint8_t {
     kParticipant,
     kWorkgroup,
@@ -287,6 +293,42 @@ constexpr bool checked_team_world_rank(
     if (translated < 0 || translated >= topology.world_size)
         return false;
     *world_peer = static_cast<int>(translated);
+    return true;
+}
+
+constexpr bool checked_team_peer_for_world_rank(
+    const TransportTopology& topology, int world_peer,
+    TeamPeer* team_peer) noexcept {
+    if (team_peer == nullptr || !valid_transport_topology(topology) ||
+        world_peer < 0 || world_peer >= topology.world_size)
+        return false;
+
+    TeamPeer result{};
+    result.world_peer = world_peer;
+    if (world_peer == topology.world_rank) {
+        result.team = TransportTeam::kWorld;
+        result.peer = world_peer;
+    } else {
+        const int peer_scale_up_rank = world_peer % topology.scale_up_size;
+        const int peer_scale_out_rank = world_peer / topology.scale_up_size;
+        if (peer_scale_out_rank == topology.scale_out_rank) {
+            result.team = TransportTeam::kScaleUp;
+            result.peer = peer_scale_up_rank;
+        } else if (peer_scale_up_rank == topology.scale_up_rank) {
+            result.team = TransportTeam::kScaleOut;
+            result.peer = peer_scale_out_rank;
+        } else {
+            result.team = TransportTeam::kWorld;
+            result.peer = world_peer;
+        }
+    }
+
+    int translated = -1;
+    if (!checked_team_world_rank(
+            topology, result.team, result.peer, &translated) ||
+        translated != world_peer)
+        return false;
+    *team_peer = result;
     return true;
 }
 

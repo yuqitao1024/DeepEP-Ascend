@@ -166,22 +166,27 @@ bool context_topology_matches(
 }
 
 CoreRuntimeStatus validate_operation_topology(const CoreTiling& tiling) {
+    const bool two_dimensional =
+        tiling.topology.kind ==
+            transport::TransportTopologyKind::kLogicalSimulation ||
+        tiling.topology.kind ==
+            transport::TransportTopologyKind::kPhysical2D;
     if (tiling.operation == OperationKind::kBarrier) {
-        if (!is_scale_up_topology(tiling.topology))
+        if (!is_scale_up_topology(tiling.topology) && !two_dimensional)
             return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
-                    "barrier requires a pure scale-up topology"};
+                    "barrier requires a supported multi-rank topology"};
         return {};
     }
     if (tiling.operation == OperationKind::kDispatch &&
         (is_single_rank_topology(tiling.topology) ||
-         is_scale_up_topology(tiling.topology)))
+         is_scale_up_topology(tiling.topology) || two_dimensional))
         return {};
     if (tiling.operation == OperationKind::kCombine &&
-        is_scale_up_topology(tiling.topology))
+        (is_scale_up_topology(tiling.topology) || two_dimensional))
         return {};
     if (tiling.operation == OperationKind::kCombine)
         return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
-                "combine requires a pure scale-up topology"};
+                "combine requires a supported multi-rank topology"};
     return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
             "unsupported operation topology"};
 }
@@ -192,17 +197,16 @@ CoreRuntimeStatus validate_transport_context(const CoreTiling& tiling) {
         context.struct_size != sizeof(transport::DeviceTransportContext) ||
         !context_topology_matches(context.topology, tiling.topology))
         return invalid("transport context does not match tiling topology");
-    const bool scale_up_operation =
-        (tiling.operation == OperationKind::kDispatch ||
-         tiling.operation == OperationKind::kCombine) &&
-        is_scale_up_topology(tiling.topology);
-    if (tiling.operation != OperationKind::kBarrier &&
-        !scale_up_operation)
+    if (is_single_rank_topology(tiling.topology))
         return {};
-    const auto required = tiling.operation == OperationKind::kDispatch ?
+    auto required = tiling.operation == OperationKind::kDispatch ?
         kDispatchTransportCapabilities :
         (tiling.operation == OperationKind::kCombine ?
              kCombineTransportCapabilities : kBarrierTransportCapabilities);
+    if (tiling.topology.kind ==
+        transport::TransportTopologyKind::kPhysical2D)
+        required |= transport::capability_bit(
+            transport::TransportCapability::kScaleOutTeam);
     if ((context.capabilities & required) != required)
         return invalid("transport context lacks required capabilities");
     if (context.local_window_base == 0 || context.peer_address_table == 0 ||

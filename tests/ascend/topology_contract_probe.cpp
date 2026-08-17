@@ -45,6 +45,70 @@ int main() {
     CHECK(!checked_team_world_rank(
         topology, TransportTeam::kScaleUp, 2, &world_peer));
 
+    struct RouteFixture {
+        int source;
+        int destination;
+        TransportTeam team;
+        int peer;
+    };
+    constexpr RouteFixture routes[] = {
+        {0, 1, TransportTeam::kScaleUp, 1},
+        {0, 2, TransportTeam::kScaleOut, 1},
+        {0, 3, TransportTeam::kWorld, 3},
+        {1, 0, TransportTeam::kScaleUp, 0},
+        {1, 2, TransportTeam::kWorld, 2},
+        {1, 3, TransportTeam::kScaleOut, 1},
+        {2, 0, TransportTeam::kScaleOut, 0},
+        {2, 1, TransportTeam::kWorld, 1},
+        {2, 3, TransportTeam::kScaleUp, 1},
+        {3, 0, TransportTeam::kWorld, 0},
+        {3, 1, TransportTeam::kScaleOut, 0},
+        {3, 2, TransportTeam::kScaleUp, 0},
+    };
+    for (const auto& fixture : routes) {
+        TransportTopology source_topology{};
+        CHECK(build_transport_topology(
+                  fixture.source, 4, 2,
+                  TransportTopologyKind::kLogicalSimulation, 17,
+                  &source_topology)
+                  .ok());
+        TeamPeer route{};
+        CHECK(checked_team_peer_for_world_rank(
+            source_topology, fixture.destination, &route));
+        CHECK(route.team == fixture.team);
+        CHECK(route.peer == fixture.peer);
+        CHECK(route.world_peer == fixture.destination);
+        CHECK(checked_team_world_rank(
+            source_topology, route.team, route.peer, &world_peer));
+        CHECK(world_peer == fixture.destination);
+    }
+    TeamPeer route{};
+    CHECK(!checked_team_peer_for_world_rank(topology, -1, &route));
+    CHECK(!checked_team_peer_for_world_rank(topology, 4, &route));
+    auto malformed_topology = topology;
+    malformed_topology.struct_size = 0;
+    CHECK(!checked_team_peer_for_world_rank(
+        malformed_topology, 0, &route));
+
+    for (int source = 0; source < 4; ++source) {
+        TransportTopology source_topology{};
+        CHECK(build_transport_topology(
+                  source, 4, 4, TransportTopologyKind::kFlatScaleUp, 1,
+                  &source_topology)
+                  .ok());
+        for (int destination = 0; destination < 4; ++destination) {
+            CHECK(checked_team_peer_for_world_rank(
+                source_topology, destination, &route));
+            if (destination == source)
+                CHECK(route.team == TransportTeam::kWorld &&
+                      route.peer == source);
+            else
+                CHECK(route.team == TransportTeam::kScaleUp &&
+                      route.peer == destination);
+            CHECK(route.world_peer == destination);
+        }
+    }
+
     TransportTopology identity_peer{};
     CHECK(build_transport_topology(
               1, 4, 2, TransportTopologyKind::kLogicalSimulation, 17,

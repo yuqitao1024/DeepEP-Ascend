@@ -336,7 +336,7 @@ inline TilingStatus build_core_tiling(
             input, &tiling.dispatch_output_capacity))
         return TilingStatus::overflow("layout size overflow");
 
-    if (is_scale_up_topology(input.topology)) {
+    if (!is_single_rank_topology(input.topology)) {
         SymmetricWindowInput window_input{};
         window_input.world_size =
             static_cast<std::uint32_t>(input.topology.world_size);

@@ -106,6 +106,36 @@ CoreTiling valid_barrier_tiling(int world_rank, int world_size = 2) {
     return tiling;
 }
 
+void export_transport(CoreTiling* tiling);
+
+CoreTiling valid_two_dimensional_tiling(
+    OperationKind operation, int world_rank,
+    transport::TransportTopologyKind kind =
+        transport::TransportTopologyKind::kLogicalSimulation) {
+    CoreTilingInput input{};
+    input.operation = operation;
+    input.element_kind = ElementKind::kBFloat16;
+    input.num_tokens = operation == OperationKind::kBarrier ? 0 : 4;
+    input.hidden = 64;
+    input.num_experts = 8;
+    input.num_topk = 2;
+    input.expert_alignment = 4;
+    input.num_max_tokens_per_rank = 8;
+    input.topology.world_rank = world_rank;
+    input.topology.world_size = 4;
+    input.topology.scale_up_rank = world_rank % 2;
+    input.topology.scale_up_size = 2;
+    input.topology.scale_out_rank = world_rank / 2;
+    input.topology.scale_out_size = 2;
+    input.topology.kind = kind;
+    input.topology.epoch = 17;
+    CoreTiling tiling{};
+    if (!build_core_tiling(input, &tiling).ok())
+        return {};
+    export_transport(&tiling);
+    return tiling;
+}
+
 void export_transport(CoreTiling* tiling) {
     tiling->transport_context.capabilities =
         transport::capability_bit(
@@ -412,6 +442,38 @@ int main() {
                 parameterized_combine,
                 required_core_launch_storage(parameterized_combine)).ok())
             return 68;
+    }
+
+    for (const auto operation : {
+             OperationKind::kBarrier, OperationKind::kDispatch,
+             OperationKind::kCombine}) {
+        for (int rank = 0; rank < 4; ++rank) {
+            auto logical = valid_two_dimensional_tiling(operation, rank);
+            if (!validate_internal_launch(
+                    logical, required_core_launch_storage(logical)).ok())
+                return 73;
+            auto missing_context = logical;
+            missing_context.transport_context.backend_context = 0;
+            if (validate_internal_launch(
+                    missing_context,
+                    required_core_launch_storage(missing_context)).code !=
+                CoreRuntimeStatusCode::kInvalidArgument)
+                return 74;
+
+            auto physical = valid_two_dimensional_tiling(
+                operation, rank,
+                transport::TransportTopologyKind::kPhysical2D);
+            if (validate_internal_launch(
+                    physical, required_core_launch_storage(physical)).code !=
+                CoreRuntimeStatusCode::kInvalidArgument)
+                return 75;
+            physical.transport_context.capabilities |=
+                transport::capability_bit(
+                    transport::TransportCapability::kScaleOutTeam);
+            if (!validate_internal_launch(
+                    physical, required_core_launch_storage(physical)).ok())
+                return 76;
+        }
     }
 
     auto malformed_barrier = valid_barrier_tiling(2, 3);
