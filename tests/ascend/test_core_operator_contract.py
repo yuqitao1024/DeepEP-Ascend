@@ -239,7 +239,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "std::uint64_t num_tokens",
             "std::uint64_t num_topk",
             "std::uint64_t shard_capacity",
+            "std::uint64_t dispatch_output_capacity",
             "std::uint64_t combine_record_bytes",
+            "std::uint64_t combine_weight_offset",
             "std::uint64_t combine_control_offset",
             "std::uint64_t combine_control_bytes",
             "std::uint64_t combine_receive_offset",
@@ -279,7 +281,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "tiling.num_tokens",
             "tiling.num_topk",
             "tiling.num_max_tokens_per_rank",
+            "tiling.dispatch_output_capacity",
             "tiling.symmetric_window_layout.combine_record_bytes",
+            "tiling.symmetric_window_layout.combine_weight_offset",
             "tiling.symmetric_window_layout.combine_control_offset",
             "tiling.symmetric_window_layout.combine_control_bytes",
             "tiling.symmetric_window_layout.combine_receive_offset",
@@ -310,7 +314,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             [" ".join(argument.split()) for argument in
              split_arguments(fill_calls[0])],
             ["topk_weights", "row", "master_lane", "num_topk",
-             "record", "hidden_bytes"])
+             "record", "combine_weight_offset"])
         fill_marker = "combine_fill_normal_record_routing_weights("
         fill_position = producer.index(fill_marker)
         normal_branch_position = producer.rfind(
@@ -324,6 +328,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         expanded_branch, expanded_branch_end = braced_block_at(
             producer, normal_branch_end + else_match.end())
         self.assertNotIn(fill_marker, expanded_branch)
+        self.assertRegex(
+            expanded_branch,
+            r"const std::int32_t input_row = metadata\[2 \+ lane\];\s*"
+            r"record_weights\[lane\] = topk_weights == nullptr \?\s*"
+            r"0\.0F : combine_routing_weight\(\s*topk_weights,\s*"
+            r"static_cast<std::uint64_t>\(input_row\)\);")
 
         record_position = producer.index("__gm__ std::uint8_t* record =")
         zero_weights = re.search(
@@ -353,6 +363,21 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn(
             "combine_normal_record_routing_weight(", producer)
         self.assertNotIn("combined_topk_indices", producer)
+        self.assertIn("record + combine_weight_offset", producer)
+        record_source_begin = sources["combine.asc"].index(
+            "struct CombineOriginDeviceRecordSource")
+        record_source_end = sources["combine.asc"].index(
+            "__simt_vf__ inline void combine_epilogue_vf",
+            record_source_begin)
+        record_source = sources["combine.asc"][
+            record_source_begin:record_source_end]
+        self.assertIn("record + weight_offset", record_source)
+        self.assertRegex(
+            sources["combine.asc"][record_source_end:],
+            re.compile(
+                r"const CombineOriginDeviceRecordSource origin_records\s*\{"
+                r".*?combine_weight_offset,\s*hidden_elements,",
+                re.DOTALL))
         dispatch_kernel_match = re.search(
             r"__global__\s+__vector__\s+void\s+dispatch_kernel\s*"
             r"\((.*?)\)\s*\{", sources["dispatch.asc"], flags=re.DOTALL)
@@ -433,9 +458,44 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             epilogue,
             r"is_valid_combine_origin_token\(\s*"
             r"header->origin_token,\s*num_tokens,\s*shard_capacity\)")
+        self.assertIn("is_valid_combine_record_lanes(", epilogue)
 
     def test_production_combine_semantics(self):
         self._run_production_combine_semantics_probe()
+
+    def test_combine_owner_validates_all_headers_before_payload_access(self):
+        def block_end(source, statement_start):
+            opening = source.index("{", statement_start)
+            depth = 0
+            for index in range(opening, len(source)):
+                if source[index] == "{":
+                    depth += 1
+                elif source[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return index + 1
+            raise AssertionError("unterminated owner validation loop")
+
+        source = (ELASTIC / "combine.asc").read_text()
+        epilogue_begin = source.index(
+            "__simt_vf__ inline void combine_epilogue_vf")
+        epilogue_end = source.index(
+            "__global__ __vector__ void combine_kernel", epilogue_begin)
+        epilogue = source[epilogue_begin:epilogue_end]
+        validation_anchor = epilogue.index(
+            "const std::uint64_t num_local_experts")
+        validation_begin = epilogue.index(
+            "for (int contributor_rank", validation_anchor)
+        validation_end = block_end(epilogue, validation_begin)
+        record_source = epilogue.index(
+            "const CombineOriginDeviceRecordSource origin_records")
+        first_reduction = epilogue.index(
+            "combine_reduce_origin_records(", record_source)
+        first_output_write = epilogue.index("combined_x[")
+
+        self.assertLess(validation_end, record_source)
+        self.assertLess(validation_end, first_reduction)
+        self.assertLess(validation_end, first_output_write)
 
     def test_production_dispatch_state_and_layout(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -738,9 +798,12 @@ int main() {
                 "CombineRecordHeader", "CombineControlSlot",
                 "CombineProtocolError::kInvalidPrefix",
                 "CombineProtocolError::kDuplicateRecord",
-                "raw_record_capacity", "count * combine_record_bytes",
+                "raw_record_capacity", "dispatch_output_capacity",
+                "num_input_rows > dispatch_output_capacity",
+                "tiling.dispatch_output_capacity",
+                "count * combine_record_bytes",
                 "header->origin_token", "header->contributor_rank",
-                "header->contribution_lane != header->master_lane",
+                "is_valid_combine_record_lanes(",
                 "record_count", "remote_count, count",
                 "remote_generation, generation", "transport.signal(",
                 "transport.device_barrier(",
@@ -1140,6 +1203,10 @@ int main() {
             "asymmetric-routing",
             "aligned-padding",
             "aligned-near-capacity",
+            "expanded-weighted-multiple-reduction",
+            "expanded-single-padded-extent",
+            "odd-hidden-unweighted",
+            "odd-hidden-weighted",
             "cached-dispatch-changed-outputs",
             "sequential-100-generations",
             "cross-buffer-handle",
@@ -1163,6 +1230,9 @@ int main() {
                     "bf16-tolerance",
                     "exact-float32-weights",
                     "weighted-same-contributor-lanes",
+                    "expanded-weighted-multiple-reduction",
+                    "padding-expanded-input-capacity",
+                    "odd-hidden-record-layout",
                     "case-boundary-barriers",
                     "distributed-failure-aggregation",
                     "buffer-before-group-teardown",
@@ -1214,6 +1284,14 @@ int main() {
                         "row_2": [1.0, 2.0, 3.0, 4.0],
                     },
                     "expanded_layouts": {
+                        "expanded-single-padded-extent": {
+                            "rank0": {"padding": 27, "rows": 32},
+                            "rank1": {"padding": 27, "rows": 32},
+                        },
+                        "expanded-weighted-multiple-reduction": {
+                            "rank0": {"padding": 27, "rows": 32},
+                            "rank1": {"padding": 27, "rows": 32},
+                        },
                         "aligned-near-capacity": {
                             "rank0": {"padding": 0, "rows": 8},
                             "rank1": {"padding": 0, "rows": 8},

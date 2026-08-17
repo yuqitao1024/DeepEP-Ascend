@@ -1103,8 +1103,7 @@ public:
                         static_cast<int64_t>(num_topk + 2) &&
                         num_source_rows <= maximum_source_rows &&
                         (!use_expanded_layout ?
-                             num_input_rows == num_source_rows :
-                             num_input_rows <= maximum_source_rows * num_topk),
+                             num_input_rows == num_source_rows : true),
                     "DeepEP Ascend backend: combine source metadata shape or "
                     "capacity mismatch");
         if (topk_weights.has_value()) {
@@ -1166,6 +1165,18 @@ public:
             expected_descriptor, descriptor);
         TORCH_CHECK(descriptor_status.ok(), "DeepEP Ascend backend: combine ",
                     descriptor_status.message);
+
+        elastic::CoreModeFlags combine_mode = dispatch_mode;
+        if (use_expanded_layout && allow_multiple_reduction_)
+            combine_mode |= elastic::mode_bit(
+                elastic::CoreMode::kAllowMultipleReduction);
+        auto tiling = build_combine_tiling(descriptor, combine_mode);
+        const std::uint64_t maximum_input_rows = use_expanded_layout ?
+            tiling.dispatch_output_capacity : maximum_source_rows;
+        TORCH_CHECK(
+            num_input_rows <= maximum_input_rows,
+            "DeepEP Ascend backend: combine source metadata shape or "
+            "capacity mismatch");
 
         std::vector<std::int32_t> host_prefix(num_ranks_);
         std::vector<std::int32_t> host_metadata(
@@ -1234,11 +1245,6 @@ public:
         TORCH_CHECK(previous_end == num_source_rows,
                     "DeepEP Ascend backend: combine rank prefix tail mismatch");
 
-        elastic::CoreModeFlags combine_mode = dispatch_mode;
-        if (use_expanded_layout && allow_multiple_reduction_)
-            combine_mode |= elastic::mode_bit(
-                elastic::CoreMode::kAllowMultipleReduction);
-        auto tiling = build_combine_tiling(descriptor, combine_mode);
         TORCH_CHECK(tiling.launch.num_blocks == 1 &&
                         tiling.communication_buffer_bytes <=
                             static_cast<std::uint64_t>(num_buffer_bytes_) &&

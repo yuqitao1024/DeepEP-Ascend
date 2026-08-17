@@ -20,14 +20,16 @@ ORDER_VARIANT = "order-sensitive"
 ORDER_BOUNDARY = float(1 << 24)
 MAX_WEIGHT_DIFFERENCES = WORLD_SIZE * NUM_TOPK
 
-# At alignment 4, per-expert route counts are (2, 1)/(1, 1) for padding
-# and (4, 4)/(4, 4) near capacity, giving these (rows, padding) pairs.
+# These literal pairs keep the public dispatch extent independent from the
+# combine implementation. The alignment-16 cases exceed the 24-row raw bound.
 LITERAL_EXPANDED_LAYOUTS = {
     "aligned-padding": ((8, 5), (8, 6)),
     "aligned-near-capacity": ((8, 0), (8, 0)),
+    "expanded-weighted-multiple-reduction": ((32, 27), (32, 27)),
+    "expanded-single-padded-extent": ((32, 27), (32, 27)),
 }
 
-CASE_NAMES = (
+BASELINE_CASE_NAMES = (
     "normal",
     "expanded-multiple-reduction",
     "expanded-single-reduction",
@@ -49,8 +51,18 @@ CASE_NAMES = (
     "repeated-teardown",
 )
 
-REGULAR_CASES = CASE_NAMES[:13]
-SPECIAL_CASES = CASE_NAMES[13:]
+ADDITIONAL_CASE_NAMES = (
+    "expanded-weighted-multiple-reduction",
+    "expanded-single-padded-extent",
+    "odd-hidden-unweighted",
+    "odd-hidden-weighted",
+)
+
+CASE_NAMES = (BASELINE_CASE_NAMES[:13] + ADDITIONAL_CASE_NAMES +
+              BASELINE_CASE_NAMES[13:])
+
+REGULAR_CASES = CASE_NAMES[:17]
+SPECIAL_CASES = CASE_NAMES[17:]
 
 
 @dataclass(frozen=True)
@@ -67,13 +79,14 @@ class CaseSpec:
     num_topk: int = NUM_TOPK
     require_padding: bool = False
     transform_variant: object = 0
+    hidden: int = HIDDEN
 
 
-def _payloads(counts, offset):
+def _payloads(counts, offset, hidden=HIDDEN):
     return tuple(
         tuple(
-            tuple(offset + rank * 40 + token * HIDDEN + column
-                  for column in range(HIDDEN))
+            tuple(offset + rank * 40 + token * hidden + column
+                  for column in range(hidden))
             for token in range(count))
         for rank, count in enumerate(counts))
 
@@ -82,6 +95,14 @@ def _case_specs():
     normal_routes = (
         ((0, 2), (1, -1)),
         ((2, 0), (3, -1)),
+    )
+    padded_routes = (
+        ((0, 1, -1), (2, 3, 0)),
+        ((2, 3, -1), (0, 1, 2)),
+    )
+    padded_weights = (
+        ((0.125, 0.25, 0.5), (0.625, 0.75, 0.875)),
+        ((1.0, 1.125, 1.25), (1.375, 1.5, 1.625)),
     )
     return {
         "normal": CaseSpec(
@@ -131,6 +152,25 @@ def _case_specs():
             (((0, 2), (0, 3), (1, 2), (1, 3)),
              ((0, 2), (1, 2), (0, 3), (1, 3))),
             do_expand=True, do_zero_padding=True, expert_alignment=4),
+        "expanded-weighted-multiple-reduction": CaseSpec(
+            "expanded-weighted-multiple-reduction",
+            _payloads((2, 2), 35), padded_routes, padded_weights,
+            do_expand=True, do_zero_padding=True, expert_alignment=16,
+            num_topk=3, require_padding=True),
+        "expanded-single-padded-extent": CaseSpec(
+            "expanded-single-padded-extent", _payloads((2, 2), 37),
+            padded_routes, do_expand=True, do_zero_padding=True,
+            expert_alignment=16, allow_multiple_reduction=False,
+            num_topk=3, require_padding=True),
+        "odd-hidden-unweighted": CaseSpec(
+            "odd-hidden-unweighted", _payloads((2, 2), 39, hidden=1),
+            normal_routes, hidden=1),
+        "odd-hidden-weighted": CaseSpec(
+            "odd-hidden-weighted", _payloads((2, 2), 41, hidden=1),
+            normal_routes,
+            (((0.125, 0.25), (0.375, 0.5)),
+             ((0.625, 0.75), (0.875, 1.0))),
+            hidden=1),
         "cached-dispatch-changed-outputs": CaseSpec(
             "cached-dispatch-changed-outputs", _payloads((2, 2), 25),
             normal_routes,
@@ -149,8 +189,11 @@ def _case_specs():
     }
 
 
-def _synthetic_transform(origin_rank, origin_token, lane, variant=0):
+def _synthetic_transform(origin_rank, origin_token, lane, variant=0,
+                         hidden=HIDDEN):
     if variant == ORDER_VARIANT:
+        _check(hidden == HIDDEN,
+               "order-sensitive transform requires the four-column fixture")
         order_columns = (
             (ORDER_BOUNDARY, 0.5),
             (0.5, -ORDER_BOUNDARY),
@@ -160,7 +203,7 @@ def _synthetic_transform(origin_rank, origin_token, lane, variant=0):
         identity = 1 + origin_rank * 16 + origin_token * 4 + lane * 2
         return [first, second, float(identity), float(identity + 1)]
     base = 1 + origin_rank * 16 + origin_token * 4 + lane * 2 + variant
-    return [float(base + column) for column in range(HIDDEN)]
+    return [float(base + column) for column in range(hidden)]
 
 
 def _float32_add(left, right):
@@ -172,7 +215,7 @@ def _integer(value):
 
 
 def _reference_values(routes, origin_rank, variant=0,
-                      contributor_order=None, lane_order=None):
+                      contributor_order=None, lane_order=None, hidden=HIDDEN):
     local_experts = NUM_EXPERTS // WORLD_SIZE
     contributor_order = tuple(range(WORLD_SIZE)) if contributor_order is None \
         else tuple(contributor_order)
@@ -180,15 +223,15 @@ def _reference_values(routes, origin_rank, variant=0,
     for origin_token, token_routes in enumerate(routes):
         lane_order_for_token = tuple(range(len(token_routes))) \
             if lane_order is None else tuple(lane_order)
-        values = [0.0] * HIDDEN
+        values = [0.0] * hidden
         for contributor_rank in contributor_order:
             for lane in lane_order_for_token:
                 expert = _integer(token_routes[lane])
                 if expert < 0 or expert // local_experts != contributor_rank:
                     continue
                 transform = _synthetic_transform(
-                    origin_rank, origin_token, lane, variant)
-                for column in range(HIDDEN):
+                    origin_rank, origin_token, lane, variant, hidden)
+                for column in range(hidden):
                     values[column] = _float32_add(
                         values[column], transform[column])
         result.append(values)
@@ -222,18 +265,18 @@ def _weight_mismatch_diagnostic(rank, actual, expected):
     }
 
 
-def _apply_biases_once(values, biases):
+def _apply_biases_once(values, biases, hidden=HIDDEN):
     result = [list(row) for row in values]
     for bias in biases:
         for row, bias_row in zip(result, bias):
-            for column in range(HIDDEN):
+            for column in range(hidden):
                 row[column] = _float32_add(row[column], bias_row[column])
     return result
 
 
 def _expanded_reference_rows(num_rows, metadata, gathered_routes,
-                             contributor_rank, variant):
-    rows = [[PADDING_SENTINEL] * HIDDEN for _ in range(num_rows)]
+                             contributor_rank, variant, hidden=HIDDEN):
+    rows = [[PADDING_SENTINEL] * hidden for _ in range(num_rows)]
     mapped = set()
     for metadata_row in metadata:
         encoded_source = _integer(metadata_row[0])
@@ -251,7 +294,7 @@ def _expanded_reference_rows(num_rows, metadata, gathered_routes,
                 raise AssertionError("expanded metadata names an invalid row")
             mapped.add(destination)
             rows[destination] = _synthetic_transform(
-                source_rank, source_token, lane, variant)
+                source_rank, source_token, lane, variant, hidden)
     return {
         "rows": rows,
         "mapped_rows": sorted(mapped),
@@ -298,10 +341,10 @@ def _validate_expanded_layout(spec, contributor_rank, num_rows,
            f"got {len(padding_rows)}")
 
 
-def _reference_matrix(routes, origin_rank, variant=0):
+def _reference_matrix(routes, origin_rank, variant=0, hidden=HIDDEN):
     return {
-        "shape": [len(routes), HIDDEN],
-        "values": _reference_values(routes, origin_rank, variant),
+        "shape": [len(routes), hidden],
+        "values": _reference_values(routes, origin_rank, variant, hidden=hidden),
     }
 
 
@@ -722,8 +765,37 @@ def _behavior_fixtures():
 
 def _contract():
     specs = _case_specs()
+    _check(tuple(name for name in CASE_NAMES if name in BASELINE_CASE_NAMES) ==
+           BASELINE_CASE_NAMES,
+           "the existing 19-case combine baseline changed")
     _check(set(specs) == set(CASE_NAMES) - {"sequential-100-generations"},
            "combine case specifications do not match the matrix")
+    expanded_weighted = specs["expanded-weighted-multiple-reduction"]
+    _check(expanded_weighted.do_expand and
+           expanded_weighted.allow_multiple_reduction and
+           expanded_weighted.weights is not None and
+           any(expert == -1 for rank_routes in expanded_weighted.routes
+               for token_routes in rank_routes for expert in token_routes),
+           "expanded weighted multiple-reduction coverage is incomplete")
+    local_experts = NUM_EXPERTS // WORLD_SIZE
+    _check(any(len([expert for expert in token_routes
+                    if expert >= 0 and expert // local_experts == contributor]) > 1
+               for rank_routes in expanded_weighted.routes
+               for token_routes in rank_routes
+               for contributor in range(WORLD_SIZE)),
+           "expanded weighted coverage lacks same-contributor lanes")
+    for name in ("expanded-weighted-multiple-reduction",
+                 "expanded-single-padded-extent"):
+        spec = specs[name]
+        raw_bound = CAPACITY * WORLD_SIZE * spec.num_topk
+        _check(all(_literal_expanded_layout(spec, rank)["rows"] > raw_bound
+                   for rank in range(WORLD_SIZE)),
+               f"{name} does not exceed the raw expanded-row bound")
+    _check(specs["odd-hidden-unweighted"].hidden == 1 and
+           specs["odd-hidden-unweighted"].weights is None and
+           specs["odd-hidden-weighted"].hidden == 1 and
+           specs["odd-hidden-weighted"].weights is not None,
+           "odd-hidden weighted and unweighted coverage is incomplete")
     _check(_reference_fixture() == {
         "rank0": [[4.0, 6.0, 8.0, 10.0], [5.0, 6.0, 7.0, 8.0]],
         "rank1": [[36.0, 38.0, 40.0, 42.0]],
@@ -804,6 +876,9 @@ def _contract():
             "bf16-tolerance",
             "exact-float32-weights",
             "weighted-same-contributor-lanes",
+            "expanded-weighted-multiple-reduction",
+            "padding-expanded-input-capacity",
+            "odd-hidden-record-layout",
             "case-boundary-barriers",
             "distributed-failure-aggregation",
             "buffer-before-group-teardown",
@@ -925,7 +1000,7 @@ class CombineMatrix:
         payloads = tuple(
             tuple(float(value + payload_delta) for value in row)
             for row in spec.payloads[self.rank])
-        x = self._tensor(payloads, HIDDEN, self.torch.bfloat16)
+        x = self._tensor(payloads, spec.hidden, self.torch.bfloat16)
         routes = self._tensor(
             spec.routes[self.rank], spec.num_topk, self.torch.int64)
         weights = None
@@ -993,33 +1068,35 @@ class CombineMatrix:
                 encoded_source = int(metadata_row[0].item())
                 source_rank, source_token = divmod(encoded_source, CAPACITY)
                 route = gathered_routes[source_rank][source_token]
-                value = [0.0] * HIDDEN
+                value = [0.0] * spec.hidden
                 for lane, expert_tensor in enumerate(route):
                     expert = int(expert_tensor.item())
                     if first_expert <= expert < last_expert:
                         lane_value = _synthetic_transform(
-                            source_rank, source_token, lane, variant)
-                        for column in range(HIDDEN):
+                            source_rank, source_token, lane, variant,
+                            spec.hidden)
+                        for column in range(spec.hidden):
                             value[column] = _float32_add(
                                 value[column], lane_value[column])
                 rows.append(value)
-            return self._tensor(rows, HIDDEN, self.torch.bfloat16)
+            return self._tensor(rows, spec.hidden, self.torch.bfloat16)
 
         expanded = _expanded_reference_rows(
-            recv_x.shape[0], metadata, gathered_routes, self.rank, variant)
+            recv_x.shape[0], metadata, gathered_routes, self.rank, variant,
+            spec.hidden)
         if spec.name in LITERAL_EXPANDED_LAYOUTS:
             _validate_expanded_layout(
                 spec, self.rank, recv_x.shape[0], expanded["padding_rows"])
         _check(not spec.require_padding or expanded["padding_rows"],
                f"{spec.name} did not produce an unmapped sentinel row")
         output = self._tensor(
-            expanded["rows"], HIDDEN, self.torch.bfloat16)
+            expanded["rows"], spec.hidden, self.torch.bfloat16)
         host = output.cpu()
         for row in expanded["padding_rows"]:
             _check(self.torch.equal(
                 host[row],
                 self.torch.full(
-                    (HIDDEN,), PADDING_SENTINEL,
+                    (spec.hidden,), PADDING_SENTINEL,
                     dtype=self.torch.bfloat16)),
                 "expanded padding sentinel was overwritten")
         return output
@@ -1029,16 +1106,17 @@ class CombineMatrix:
         for bias_index in range(spec.bias_count):
             rows = [
                 [float((bias_index + 1) * 2 + self.rank + column)
-                 for column in range(HIDDEN)]
+                 for column in range(spec.hidden)]
                 for _ in range(count)]
-            biases.append(self._tensor(rows, HIDDEN, self.torch.bfloat16))
+            biases.append(self._tensor(rows, spec.hidden, self.torch.bfloat16))
         if not biases:
             return None
         return biases[0] if len(biases) == 1 else tuple(biases)
 
-    def _expected(self, gathered_routes, variant, weights, biases):
+    def _expected(self, gathered_routes, variant, weights, biases,
+                  hidden=HIDDEN):
         reference = _reference_matrix(
-            gathered_routes[self.rank], self.rank, variant)
+            gathered_routes[self.rank], self.rank, variant, hidden)
         values = reference["values"]
         if biases is not None:
             bias_tensors = (biases,) if isinstance(
@@ -1046,7 +1124,7 @@ class CombineMatrix:
             bias_values = tuple(
                 bias.detach().cpu().float().tolist()
                 for bias in bias_tensors)
-            values = _apply_biases_once(values, bias_values)
+            values = _apply_biases_once(values, bias_values, hidden)
         expected_x = self.torch.tensor(
             values, dtype=self.torch.float32).reshape(
                 reference["shape"])
@@ -1136,7 +1214,7 @@ class CombineMatrix:
                 recv_x, returned_handle, gathered_routes, spec, variant)
             biases = self._biases(spec, routes.shape[0])
             expected = self._expected(
-                gathered_routes, variant, weights, biases)
+                gathered_routes, variant, weights, biases, spec.hidden)
             return expert_x, biases, expected
 
         expert_x, biases, expected = self._run_step(

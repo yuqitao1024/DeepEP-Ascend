@@ -134,7 +134,8 @@ bool same_symmetric_window_layout(
                rhs.combine_staging_shard_bytes &&
            lhs.combine_staging_shard_count ==
                rhs.combine_staging_shard_count &&
-           lhs.combine_staging_bytes == rhs.combine_staging_bytes;
+           lhs.combine_staging_bytes == rhs.combine_staging_bytes &&
+           lhs.combine_weight_offset == rhs.combine_weight_offset;
 }
 
 bool context_topology_matches(
@@ -383,7 +384,7 @@ CoreRuntimeStatus launch_internal_combine(
         (expanded && !allow_multiple_reduction &&
          arguments.topk_weights != nullptr))
         return invalid(expanded ?
-            "expanded combine requires allow_multiple_reduction" :
+            "expanded combine weights require allow_multiple_reduction" :
             "combine source and input row counts must match");
     if (tiling.num_max_tokens_per_rank >
         static_cast<std::uint64_t>(0x7fffffff) /
@@ -395,8 +396,7 @@ CoreRuntimeStatus launch_internal_combine(
     if (arguments.num_source_rows > maximum_source_rows)
         return invalid("combine source row count exceeds fixed shards");
     const std::uint64_t maximum_input_rows = expanded ?
-        maximum_source_rows * tiling.num_topk :
-        maximum_source_rows;
+        tiling.dispatch_output_capacity : maximum_source_rows;
     if (arguments.num_input_rows > maximum_input_rows)
         return invalid("combine input row count exceeds fixed shards");
     if ((arguments.num_source_rows != 0 &&

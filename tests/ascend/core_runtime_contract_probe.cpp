@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstring>
 
 #include "csrc/backends/ascend/elastic/combine_state.hpp"
 #include "csrc/backends/ascend/elastic/dispatch_state.hpp"
@@ -819,10 +820,13 @@ int main() {
     auto expanded_weighted_combine = weighted_combine;
     expanded_weighted_combine.local_window_base =
         expanded_single_tiling.transport_context.local_window_base;
-    if (launch_internal_combine(
-            expanded_weighted_combine, expanded_single_tiling,
-            required_core_launch_storage(expanded_single_tiling), nullptr).code !=
-            CoreRuntimeStatusCode::kInvalidArgument ||
+    status = launch_internal_combine(
+        expanded_weighted_combine, expanded_single_tiling,
+        required_core_launch_storage(expanded_single_tiling), nullptr);
+    if (status.code != CoreRuntimeStatusCode::kInvalidArgument ||
+        std::strcmp(
+            status.message,
+            "expanded combine weights require allow_multiple_reduction") != 0 ||
         launch_trace_size != 0)
         return 58;
     auto expanded_multiple_tiling = valid_tiling(
@@ -834,9 +838,10 @@ int main() {
     maximum_expanded_input.local_window_base =
         expanded_multiple_tiling.transport_context.local_window_base;
     maximum_expanded_input.num_source_rows = 16;
-    maximum_expanded_input.num_input_rows = 32;
+    maximum_expanded_input.num_input_rows = 40;
     reset_launches();
-    if (!launch_internal_combine(
+    if (expanded_multiple_tiling.dispatch_output_capacity != 40 ||
+        !launch_internal_combine(
             maximum_expanded_input, expanded_multiple_tiling,
             required_core_launch_storage(expanded_multiple_tiling), nullptr).ok() ||
         !trace_is(kCombineLaunch))

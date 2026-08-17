@@ -417,6 +417,34 @@ bool dispatch_descriptor_modes_are_exactly_compatible() {
         trace.launches == 0;
 }
 
+bool padding_expanded_extent_is_accepted() {
+    const auto expanded = elastic::mode_bit(elastic::CoreMode::kExpanded);
+    const auto zero_padding =
+        elastic::mode_bit(elastic::CoreMode::kZeroPadding);
+
+    trace = {};
+    auto target = buffer();
+    Inputs inputs(true);
+    inputs.x = torch::empty(
+        {24, 8}, torch::TensorOptions().dtype(torch::kBFloat16));
+    inputs.weights = torch::empty(
+        {24}, torch::TensorOptions().dtype(torch::kFloat));
+    inputs.source.data_ptr<std::int32_t>()[6] = -1;
+    inputs.source.data_ptr<std::int32_t>()[7] = 23;
+    inputs.descriptor_value =
+        elastic::make_attested_dispatch_handle_descriptor(
+            7, {0, 2, 0, 2, 0, 1}, 1, 8, 2, 2, 8, 4,
+            expanded | zero_padding);
+    inputs.write_descriptor();
+
+    const auto result = call(
+        *target, inputs, inputs.weights, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, false, false, true);
+    return !std::get<2>(result).has_value() && trace.launches == 1 &&
+        elastic::has_mode(trace.mode_flags, elastic::CoreMode::kExpanded) &&
+        !elastic::has_mode(trace.mode_flags, elastic::CoreMode::kZeroPadding);
+}
+
 bool long_lived_dispatch_validation_state_is_constant() {
     trace = {};
     auto target = stateless_buffer();
@@ -681,6 +709,8 @@ int main() {
           "successful dispatch handle is statelessly valid");
     check(dispatch_descriptor_modes_are_exactly_compatible(),
           "dispatch descriptor modes are exactly compatible");
+    check(padding_expanded_extent_is_accepted(),
+          "padding-expanded extent is accepted");
     check(long_lived_dispatch_validation_state_is_constant(),
           "long-lived dispatch validation state is constant");
     check(cross_buffer_dispatch_handle_is_retryable(),

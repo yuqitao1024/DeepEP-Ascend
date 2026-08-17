@@ -7,7 +7,7 @@ namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kAscendElasticAlignment = 32;
 inline constexpr std::uint64_t kPublicElasticBufferAlignment = 2ULL << 20U;
-inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 2;
+inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 3;
 inline constexpr std::uint64_t kCombineControlSlotBytes =
     2 * sizeof(std::uint64_t);
 inline constexpr std::uint64_t kCombineRecordHeaderBytes =
@@ -207,6 +207,7 @@ struct SymmetricWindowLayout {
     std::uint64_t combine_staging_shard_bytes = 0;
     std::uint64_t combine_staging_shard_count = 0;
     std::uint64_t combine_staging_bytes = 0;
+    std::uint64_t combine_weight_offset = 0;
 };
 
 class LayoutBuilder {
@@ -319,7 +320,8 @@ inline LayoutStatus build_symmetric_window_layout(
 
         LayoutBuilder combine_record;
         if (!combine_record.append(hidden_bytes, &ignored) ||
-            !combine_record.append(topk_weight_bytes, &ignored) ||
+            !combine_record.append(topk_weight_bytes,
+                                   &layout.combine_weight_offset) ||
             !combine_record.append(kCombineRecordHeaderBytes, &ignored) ||
             !combine_record.finish(&layout.combine_record_bytes))
             return LayoutStatus::overflow("combine record layout overflow");

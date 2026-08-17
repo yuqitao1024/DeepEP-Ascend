@@ -122,6 +122,44 @@ combine_expanded_input_row_is_valid(
             static_cast<std::uint64_t>(input_row) < num_input_rows);
 }
 
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr bool
+is_valid_combine_record_lanes(
+    DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const std::int64_t* routes,
+    std::uint64_t num_topk, std::uint64_t num_experts,
+    std::uint64_t num_local_experts, std::int32_t contributor_rank,
+    std::int32_t master_lane, std::int32_t contribution_lane,
+    bool expanded, bool allow_multiple_reduction) noexcept {
+    if (routes == nullptr || num_local_experts == 0 || contributor_rank < 0 ||
+        !is_dispatch_local_index(master_lane, num_topk) ||
+        !is_dispatch_local_index(contribution_lane, num_topk))
+        return false;
+
+    const std::uint64_t owner =
+        static_cast<std::uint64_t>(contributor_rank);
+    std::int32_t canonical_master = -1;
+    for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
+        const std::int64_t expert = routes[lane];
+        if (expert < 0 || static_cast<std::uint64_t>(expert) >= num_experts)
+            continue;
+        if (static_cast<std::uint64_t>(expert) / num_local_experts == owner) {
+            canonical_master = static_cast<std::int32_t>(lane);
+            break;
+        }
+    }
+    if (master_lane != canonical_master)
+        return false;
+
+    const std::int64_t contribution_expert = routes[
+        static_cast<std::uint64_t>(contribution_lane)];
+    if (contribution_expert < 0 ||
+        static_cast<std::uint64_t>(contribution_expert) >= num_experts ||
+        static_cast<std::uint64_t>(contribution_expert) /
+                num_local_experts != owner)
+        return false;
+    return expanded && !allow_multiple_reduction ? true :
+        contribution_lane == master_lane;
+}
+
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr std::uint64_t
 combine_expanded_record_count(
     DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL const std::int32_t* input_rows,
@@ -195,12 +233,12 @@ combine_fill_normal_record_routing_weights(
     std::uint64_t source_row, std::int32_t master_lane,
     std::uint64_t num_topk,
     DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL std::uint8_t* record,
-    std::uint64_t hidden_bytes) noexcept {
+    std::uint64_t weight_offset) noexcept {
     if (record == nullptr)
         return;
     auto* record_weights =
         reinterpret_cast<DEEP_EP_ASCEND_COMBINE_STATE_GLOBAL float*>(
-            record + hidden_bytes);
+            record + weight_offset);
     for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
         record_weights[lane] = combine_normal_record_routing_weight(
             weights, source_row, static_cast<std::int32_t>(lane),

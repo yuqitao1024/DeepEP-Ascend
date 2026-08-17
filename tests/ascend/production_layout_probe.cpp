@@ -37,6 +37,8 @@ int main() {
     static_assert(offsetof(SymmetricWindowLayout, reserve_offset) == 104);
     static_assert(offsetof(SymmetricWindowLayout, reserve_bytes) == 112);
     static_assert(offsetof(SymmetricWindowLayout, total_bytes) == 120);
+    static_assert(
+        offsetof(SymmetricWindowLayout, combine_weight_offset) == 288);
 
     SymmetricWindowInput input{};
     input.world_size = 2;
@@ -67,6 +69,10 @@ int main() {
           input.world_size * sizeof(CombineControlSlot));
     CHECK(layout.combine_receive_shard_count == 2);
     CHECK(layout.combine_staging_shard_count == 2);
+    CHECK(layout.combine_weight_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.combine_weight_offset >= input.hidden * input.element_bytes);
+    CHECK(layout.combine_weight_offset + input.num_topk * sizeof(float) <=
+          layout.combine_record_bytes - kAscendElasticAlignment);
     CHECK(layout.combine_receive_shard_bytes >=
           input.num_max_tokens_per_rank * layout.combine_record_bytes);
     CHECK(layout.combine_staging_shard_bytes >=

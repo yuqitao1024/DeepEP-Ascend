@@ -42,7 +42,7 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 3;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 4;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -188,7 +188,8 @@ inline bool build_dispatch_output_capacity(
     if (output == nullptr)
         return false;
     *output = 0;
-    if (input.operation != OperationKind::kDispatch)
+    if (input.operation != OperationKind::kDispatch &&
+        input.operation != OperationKind::kCombine)
         return true;
 
     std::uint64_t raw_lane_count = 0;

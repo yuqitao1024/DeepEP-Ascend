@@ -57,5 +57,19 @@ int main() {
     CHECK(!is_valid_combine_source_identity(1, 0, 0, 4, 1));
     CHECK(is_valid_combine_source_identity(4, 1, 0, 4, 1));
     CHECK(is_valid_combine_source_identity(5, 1, 0, 4, 1));
+
+    const std::int64_t routes[] = {1, 0, 2, -1};
+    CHECK(is_valid_combine_record_lanes(
+        routes, 4, 4, 2, 0, 0, 0, false, false));
+    CHECK(!is_valid_combine_record_lanes(
+        routes, 4, 4, 2, 0, 1, 1, false, false));
+    CHECK(!is_valid_combine_record_lanes(
+        routes, 4, 4, 2, 0, 0, 1, true, true));
+    CHECK(is_valid_combine_record_lanes(
+        routes, 4, 4, 2, 0, 0, 1, true, false));
+    CHECK(!is_valid_combine_record_lanes(
+        routes, 4, 4, 2, 0, 0, 2, true, false));
+    CHECK(is_valid_combine_record_lanes(
+        routes, 4, 4, 2, 1, 2, 2, true, true));
     return 0;
 }
