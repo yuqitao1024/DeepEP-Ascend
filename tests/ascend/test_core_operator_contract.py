@@ -417,6 +417,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "combine_fill_normal_record_routing_weights(")
         self.assertLess(identity_check, normal_weight_fill)
         self.assertNotIn("combined_topk_indices", producer)
+        epilogue = source[producer_end:]
+        self.assertRegex(
+            epilogue,
+            r"is_valid_combine_origin_token\(\s*"
+            r"header->origin_token,\s*num_tokens,\s*shard_capacity\)")
 
     def test_production_combine_semantics(self):
         self._run_production_combine_semantics_probe()

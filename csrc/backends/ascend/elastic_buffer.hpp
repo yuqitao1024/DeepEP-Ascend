@@ -1186,7 +1186,7 @@ public:
                     row * (num_topk + 2);
                 TORCH_CHECK(
                     elastic::is_valid_combine_source_identity(
-                        metadata[0], destination_rank, capacity,
+                        metadata[0], destination_rank, rank_idx_, capacity,
                         descriptor.num_tokens) &&
                         elastic::decode_dispatch_source_rank(
                             metadata[1], num_topk) == destination_rank &&

@@ -101,13 +101,17 @@ is_valid_combine_origin_token(
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr bool
 is_valid_combine_source_identity(
     std::int32_t encoded_source, int destination_rank,
+    int current_rank,
     std::uint64_t shard_capacity, std::uint64_t num_tokens) noexcept {
+    const int origin_rank = decode_dispatch_source_rank(
+        encoded_source, shard_capacity);
     const std::int32_t origin_token = decode_dispatch_local_index(
         encoded_source, shard_capacity);
-    return decode_dispatch_source_rank(encoded_source, shard_capacity) ==
-               destination_rank &&
+    const std::uint64_t origin_token_bound =
+        origin_rank == current_rank ? num_tokens : shard_capacity;
+    return origin_rank == destination_rank &&
            is_valid_combine_origin_token(
-               origin_token, num_tokens, shard_capacity);
+               origin_token, origin_token_bound, shard_capacity);
 }
 
 DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr bool
