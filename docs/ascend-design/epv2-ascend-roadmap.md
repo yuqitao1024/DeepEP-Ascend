@@ -148,6 +148,23 @@ runtime rank gate.
 
 ## Phase 3C: Cross-Host Scale-Out And RoCE
 
+### Current status
+
+Status: logical 2x2 vertical slice implemented and qualified; physical
+multi-host RoCE qualification remains open.
+
+The versioned row-major topology, logical team-to-world peer translation,
+route-aware synchronous BF16 barrier/dispatch/combine path, bounded command
+validation, collective topology preflight, handle attestation, and teardown
+are implemented. NPU8P passed a four-rank `logical-single-host` run using
+devices `0,1` as logical host A and `6,7` as logical host B, including 100
+barrier generations and an independent BF16 dispatch/combine round trip.
+
+This single-host evidence does not qualify physical RoCE addressing, NIC
+selection, cross-host registration, link/process failure behavior, or
+performance. The physical scale-out capability remains disabled until the
+real multi-host acceptance below passes.
+
 ### Deliverables
 
 - define the Ascend scale-out team and topology contract;
