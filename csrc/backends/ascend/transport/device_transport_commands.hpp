@@ -22,10 +22,13 @@ DEEP_EP_ASCEND_SIMT_CALLEE int local_rank(
 DEEP_EP_ASCEND_SIMT_CALLEE bool checked_world_peer(
     const TransportTopology& topology, TransportTeam team, int peer,
     int* world_peer) {
-    if (world_peer == nullptr || topology.world_size <= 0 ||
-        topology.scale_up_size <= 0 || topology.scale_out_size <= 0 ||
+    if (world_peer == nullptr || peer < 0 ||
+        topology.abi_version != kTransportTopologyAbiVersion ||
+        topology.struct_size != sizeof(TransportTopology) ||
+        topology.epoch == 0 || topology.world_size <= 0 ||
         topology.world_rank < 0 ||
         topology.world_rank >= topology.world_size ||
+        topology.scale_up_size <= 0 || topology.scale_out_size <= 0 ||
         topology.scale_up_rank < 0 ||
         topology.scale_up_rank >= topology.scale_up_size ||
         topology.scale_out_rank < 0 ||
@@ -37,22 +40,33 @@ DEEP_EP_ASCEND_SIMT_CALLEE bool checked_world_peer(
         topology.scale_out_rank !=
             topology.world_rank / topology.scale_up_size)
         return false;
+    if (topology.kind == TransportTopologyKind::kFlatScaleUp) {
+        if (topology.scale_up_size != topology.world_size ||
+            topology.scale_out_size != 1)
+            return false;
+    } else if (topology.kind == TransportTopologyKind::kPhysical2D ||
+               topology.kind == TransportTopologyKind::kLogicalSimulation) {
+        if (topology.scale_out_size < 2)
+            return false;
+    } else {
+        return false;
+    }
 
     int translated = -1;
     switch (team) {
         case TransportTeam::kWorld:
-            if (peer < 0 || peer >= topology.world_size)
+            if (peer >= topology.world_size)
                 return false;
             translated = peer;
             break;
         case TransportTeam::kScaleUp:
-            if (peer < 0 || peer >= topology.scale_up_size)
+            if (peer >= topology.scale_up_size)
                 return false;
             translated = topology.scale_out_rank * topology.scale_up_size +
                 peer;
             break;
         case TransportTeam::kScaleOut:
-            if (peer < 0 || peer >= topology.scale_out_size)
+            if (peer >= topology.scale_out_size)
                 return false;
             translated = peer * topology.scale_up_size +
                 topology.scale_up_rank;
@@ -449,7 +463,14 @@ DEEP_EP_ASCEND_SIMT_CALLEE void wait_signal(
     SignalValue target, std::uint64_t timeout_cycles) {
     auto* queue = detail::command_queue(context);
     int world_peer = -1;
-    if (channel != 0 || !detail::checked_world_peer(
+    if (channel != 0) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidChannel,
+            TransportCommandOpcode::kSignal, team, source_rank, world_peer,
+            channel);
+        return;
+    }
+    if (!detail::checked_world_peer(
             context.topology, team, source_rank, &world_peer)) {
         detail::record_error(
             queue, DeviceTransportError::kInvalidRank,

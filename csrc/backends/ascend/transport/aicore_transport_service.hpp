@@ -50,6 +50,7 @@ struct State {
     std::uint64_t outstanding = 0;
     std::uint64_t barrier_generation = 0;
     std::uint64_t retry_count = 0;
+    int completion_failure_world_peer = 0;
 };
 
 inline State make_state(
@@ -58,12 +59,10 @@ inline State make_state(
     State result;
     result.member_count = member_count;
     result.self_member = self_member;
-    result.topology.world_rank = static_cast<int>(self_member);
-    result.topology.world_size = static_cast<int>(member_count);
-    result.topology.scale_up_rank = static_cast<int>(self_member);
-    result.topology.scale_up_size = static_cast<int>(member_count);
-    result.topology.scale_out_rank = 0;
-    result.topology.scale_out_size = 1;
+    (void)build_transport_topology(
+        static_cast<int>(self_member), static_cast<int>(member_count),
+        static_cast<int>(member_count),
+        TransportTopologyKind::kFlatScaleUp, 1, &result.topology);
     result.retry_limit = retry_limit;
     return result;
 }
@@ -78,61 +77,11 @@ inline State make_state(
     return result;
 }
 
-inline bool is_remote_operation(TransportCommandOpcode opcode) {
-    return opcode == TransportCommandOpcode::kPut ||
-           opcode == TransportCommandOpcode::kPutValue64 ||
-           opcode == TransportCommandOpcode::kRemoteAdd64 ||
-           opcode == TransportCommandOpcode::kSignal;
-}
-
 inline bool validate(
     const TransportCommand& command, const State& state,
     DeviceTransportError& error) {
-    if (command.opcode == TransportCommandOpcode::kNone) {
-        error = DeviceTransportError::kUnsupportedOperation;
-        return false;
-    }
-    if (command.channel != 0) {
-        error = DeviceTransportError::kInvalidChannel;
-        return false;
-    }
-    if (is_remote_operation(command.opcode)) {
-        int expected_world_peer = -1;
-        if (!command::checked_world_peer(
-                state.topology, command.team, command.peer,
-                &expected_world_peer) ||
-            command.world_peer != expected_world_peer ||
-            command.world_peer < 0 ||
-            static_cast<std::uint32_t>(command.world_peer) >=
-                state.member_count) {
-            error = DeviceTransportError::kInvalidRank;
-            return false;
-        }
-    }
-    if ((command.opcode == TransportCommandOpcode::kPut ||
-         command.opcode == TransportCommandOpcode::kPutValue64 ||
-         command.opcode == TransportCommandOpcode::kRemoteAdd64) &&
-        command.destination == kNullDeviceAddress) {
-        error = DeviceTransportError::kInvalidAddress;
-        return false;
-    }
-    if (command.opcode == TransportCommandOpcode::kPut &&
-        (command.source == kNullDeviceAddress || command.bytes == 0)) {
-        error = DeviceTransportError::kInvalidAddress;
-        return false;
-    }
-    if (command.opcode == TransportCommandOpcode::kPutValue64 &&
-        command.value_bytes != sizeof(std::uint64_t)) {
-        error = DeviceTransportError::kUnsupportedOperation;
-        return false;
-    }
-    if (command.opcode == TransportCommandOpcode::kSignal &&
-        command.action_kind != RemoteActionKind::kSignalAdd &&
-        command.action_kind != RemoteActionKind::kSignalIncrement) {
-        error = DeviceTransportError::kUnsupportedOperation;
-        return false;
-    }
-    return true;
+    error = command::validate_for_dispatch(command, state.topology);
+    return error == DeviceTransportError::kNone;
 }
 
 inline bool drain(
@@ -144,7 +93,7 @@ inline bool drain(
         state.retry_count = state.retry_limit;
         command::record_first_error(
             diagnostic, DeviceTransportError::kCompletionTimeout,
-            command_index, opcode, 0, 0);
+            command_index, opcode, state.completion_failure_world_peer, 0);
         return false;
     }
     state.completed = state.submitted;
@@ -214,9 +163,12 @@ __aicore__ inline bool valid_command_route(
     if (current == nullptr)
         return false;
     const auto& topology = context.topology;
-    if (topology.world_size <= 0 || topology.scale_up_size <= 0 ||
-        topology.scale_out_size <= 0 || topology.world_rank < 0 ||
+    if (topology.abi_version != kTransportTopologyAbiVersion ||
+        topology.struct_size != sizeof(TransportTopology) ||
+        topology.epoch == 0 || topology.world_size <= 0 ||
+        topology.world_rank < 0 ||
         topology.world_rank >= topology.world_size ||
+        topology.scale_up_size <= 0 || topology.scale_out_size <= 0 ||
         topology.scale_up_rank < 0 ||
         topology.scale_up_rank >= topology.scale_up_size ||
         topology.scale_out_rank < 0 ||
@@ -228,6 +180,17 @@ __aicore__ inline bool valid_command_route(
         topology.scale_out_rank !=
             topology.world_rank / topology.scale_up_size)
         return false;
+    if (topology.kind == TransportTopologyKind::kFlatScaleUp) {
+        if (topology.scale_up_size != topology.world_size ||
+            topology.scale_out_size != 1)
+            return false;
+    } else if (topology.kind == TransportTopologyKind::kPhysical2D ||
+               topology.kind == TransportTopologyKind::kLogicalSimulation) {
+        if (topology.scale_out_size < 2)
+            return false;
+    } else {
+        return false;
+    }
 
     int expected = -1;
     switch (current->team) {
@@ -252,7 +215,77 @@ __aicore__ inline bool valid_command_route(
             break;
         default: return false;
     }
-    return expected == current->world_peer;
+    return expected >= 0 && expected < topology.world_size &&
+           expected == current->world_peer;
+}
+
+__aicore__ inline DeviceTransportError validate_command(
+    const DeviceTransportContext& context,
+    __gm__ const TransportCommand* current) {
+    if (current == nullptr)
+        return DeviceTransportError::kInvalidQueue;
+    if (current->opcode == TransportCommandOpcode::kNone)
+        return DeviceTransportError::kUnsupportedOperation;
+    if (current->channel != 0)
+        return DeviceTransportError::kInvalidChannel;
+
+    if (current->opcode == TransportCommandOpcode::kPut ||
+        current->opcode == TransportCommandOpcode::kPutValue64 ||
+        current->opcode == TransportCommandOpcode::kRemoteAdd64 ||
+        current->opcode == TransportCommandOpcode::kSignal) {
+        if (!valid_command_route(context, current))
+            return DeviceTransportError::kInvalidRank;
+    }
+
+    switch (current->opcode) {
+        case TransportCommandOpcode::kPut:
+            if (current->destination == kNullDeviceAddress ||
+                current->source == kNullDeviceAddress || current->bytes == 0)
+                return DeviceTransportError::kInvalidAddress;
+            if (current->scope != CooperationScope::kParticipant ||
+                current->segment != MemorySegment::kDevice ||
+                current->options != kDefaultOptions ||
+                current->action_kind != RemoteActionKind::kNone)
+                return DeviceTransportError::kInvalidProtocol;
+            return DeviceTransportError::kNone;
+        case TransportCommandOpcode::kPutValue64:
+            if (current->destination == kNullDeviceAddress)
+                return DeviceTransportError::kInvalidAddress;
+            if (current->value_bytes != sizeof(std::uint64_t) ||
+                current->options != kDefaultOptions)
+                return DeviceTransportError::kInvalidProtocol;
+            return DeviceTransportError::kNone;
+        case TransportCommandOpcode::kRemoteAdd64:
+            if (current->destination == kNullDeviceAddress)
+                return DeviceTransportError::kInvalidAddress;
+            return current->options == kDefaultOptions ?
+                DeviceTransportError::kNone :
+                DeviceTransportError::kInvalidProtocol;
+        case TransportCommandOpcode::kSignal:
+            if ((current->action_kind != RemoteActionKind::kSignalAdd &&
+                 current->action_kind !=
+                     RemoteActionKind::kSignalIncrement) ||
+                current->options != kDefaultOptions)
+                return DeviceTransportError::kInvalidProtocol;
+            return DeviceTransportError::kNone;
+        case TransportCommandOpcode::kFlush:
+            if (current->options != kDefaultOptions ||
+                current->team != TransportTeam::kWorld ||
+                current->peer != 0 || current->world_peer != 0)
+                return DeviceTransportError::kInvalidProtocol;
+            if (current->scope != CooperationScope::kParticipant &&
+                current->scope != CooperationScope::kWorkgroup &&
+                current->scope != CooperationScope::kDevice)
+                return DeviceTransportError::kInvalidProtocol;
+            return DeviceTransportError::kNone;
+        case TransportCommandOpcode::kBarrier:
+            if (current->options != kWorldTeamMask ||
+                current->team != TransportTeam::kWorld ||
+                current->peer != 0 || current->world_peer != 0)
+                return DeviceTransportError::kInvalidProtocol;
+            return DeviceTransportError::kNone;
+        default: return DeviceTransportError::kUnsupportedOperation;
+    }
 }
 
 __aicore__ inline __gm__ StagedTransportContext* staged_context(
@@ -263,10 +296,19 @@ __aicore__ inline __gm__ StagedTransportContext* staged_context(
 
 __aicore__ inline __gm__ TransportCommandQueue* command_queue(
     const DeviceTransportContext& context) {
+    if (context.abi_version != kDeviceTransportAbiVersion ||
+        context.struct_size != sizeof(DeviceTransportContext) ||
+        context.backend_context == 0)
+        return nullptr;
     auto* staged = staged_context(context);
     if (staged == nullptr)
         return nullptr;
     aicore::flush_cacheline(staged);
+    if (staged->abi_version != kTransportCommandAbiVersion ||
+        staged->struct_size != sizeof(StagedTransportContext) ||
+        staged->cann_compatibility != kStagedTransportCannCompatibility ||
+        staged->command_queue == 0)
+        return nullptr;
     return reinterpret_cast<__gm__ TransportCommandQueue*>(
         staged->command_queue);
 }
@@ -285,7 +327,8 @@ __aicore__ inline __gm__ DeviceTransportDiagnostic* diagnostic(
 
 __aicore__ inline void record_error(
     __gm__ TransportCommandQueue* queue, DeviceTransportError error,
-    std::uint32_t command_index, TransportCommandOpcode opcode, int peer,
+    std::uint32_t command_index, TransportCommandOpcode opcode,
+    TransportTeam transport_team, int peer, int world_peer,
     std::uint32_t channel, std::uint32_t backend_status = 0) {
     auto* output = diagnostic(queue);
     if (output == nullptr)
@@ -293,9 +336,11 @@ __aicore__ inline void record_error(
     aicore::flush_cacheline(output);
     if (output->error != DeviceTransportError::kNone)
         return;
-    (void)peer;
     output->command_index = command_index;
     output->opcode = opcode;
+    output->peer = static_cast<std::uint32_t>(peer);
+    output->world_peer = world_peer;
+    output->team = transport_team;
     output->channel = channel;
     output->backend_status = backend_status;
     output->error = error;
@@ -303,15 +348,13 @@ __aicore__ inline void record_error(
     aicore::flush_cacheline(output);
 }
 
-__aicore__ inline void record_route(
-    __gm__ TransportCommandQueue* queue,
-    __gm__ const TransportCommand* current) {
-    auto* output = diagnostic(queue);
-    if (output == nullptr || current == nullptr)
-        return;
-    output->peer = static_cast<std::uint32_t>(current->peer);
-    output->world_peer = current->world_peer;
-    output->team = current->team;
+__aicore__ inline void record_error(
+    __gm__ TransportCommandQueue* queue, DeviceTransportError error,
+    std::uint32_t command_index, TransportCommandOpcode opcode, int world_peer,
+    std::uint32_t channel, std::uint32_t backend_status = 0) {
+    record_error(
+        queue, error, command_index, opcode, TransportTeam::kWorld,
+        world_peer, world_peer, channel, backend_status);
 }
 
 __aicore__ inline __gm__ cann_abi::Team* team(
@@ -359,7 +402,25 @@ struct ResolvedPeer {
     __gm__ cann_abi::Channel* channel = nullptr;
     __gm__ cann_abi::SqContext* sq = nullptr;
     __gm__ cann_abi::CqContext* cq = nullptr;
+    std::uint32_t world_peer = 0;
 };
+
+__aicore__ inline DeviceTransportError channel_error(
+    const DeviceTransportContext& context, std::uint32_t peer,
+    std::uint32_t channel_index) {
+    auto* resolved_channel = resolve_peer(team(context), peer, channel_index);
+    if (resolved_channel == nullptr)
+        return DeviceTransportError::kInvalidChannel;
+    if (resolved_channel->protocol !=
+        static_cast<std::int32_t>(cann_abi::kUbcCtpProtocol))
+        return DeviceTransportError::kInvalidProtocol;
+    if (resolved_channel->sq_count <= cann_abi::kDefaultQueueIndex ||
+        resolved_channel->cq_count <= cann_abi::kDefaultQueueIndex ||
+        resolved_channel->sq_contexts == 0 ||
+        resolved_channel->cq_contexts == 0)
+        return DeviceTransportError::kInvalidQueue;
+    return DeviceTransportError::kNone;
+}
 
 __aicore__ inline cann_abi::SqContext snapshot_sq(
     __gm__ cann_abi::SqContext* source) {
@@ -386,18 +447,59 @@ __aicore__ inline ResolvedPeer resolve_context(
     const DeviceTransportContext& context, std::uint32_t peer,
     std::uint32_t channel_index) {
     ResolvedPeer result;
+    if (channel_error(context, peer, channel_index) !=
+        DeviceTransportError::kNone)
+        return result;
     result.channel = resolve_peer(team(context), peer, channel_index);
-    if (result.channel == nullptr ||
-        result.channel->protocol !=
-            static_cast<std::int32_t>(cann_abi::kUbcCtpProtocol) ||
-        result.channel->sq_count <= cann_abi::kDefaultQueueIndex ||
-        result.channel->cq_count <= cann_abi::kDefaultQueueIndex)
-        return ResolvedPeer{};
     result.sq = reinterpret_cast<__gm__ cann_abi::SqContext*>(
         result.channel->sq_contexts) + cann_abi::kDefaultQueueIndex;
     result.cq = reinterpret_cast<__gm__ cann_abi::CqContext*>(
         result.channel->cq_contexts) + cann_abi::kDefaultQueueIndex;
+    result.world_peer = peer;
     return result;
+}
+
+__aicore__ inline DeviceTransportError preflight_command_channels(
+    const DeviceTransportContext& context,
+    __gm__ const TransportCommand* current, int& failed_world_peer) {
+    failed_world_peer = current == nullptr ? -1 : current->world_peer;
+    if (current == nullptr)
+        return DeviceTransportError::kInvalidQueue;
+    const bool collective =
+        current->opcode == TransportCommandOpcode::kFlush ||
+        current->opcode == TransportCommandOpcode::kBarrier;
+    if (collective && context.topology.world_size <= 1)
+        return DeviceTransportError::kNone;
+    auto* transport_team = team(context);
+    if (transport_team == nullptr ||
+        transport_team->member_count !=
+            static_cast<std::uint32_t>(context.topology.world_size) ||
+        transport_team->self_member !=
+            static_cast<std::uint32_t>(context.topology.world_rank))
+        return DeviceTransportError::kInvalidQueue;
+
+    if (collective) {
+        for (std::uint32_t peer = 0; peer < transport_team->member_count;
+             ++peer) {
+            if (peer == transport_team->self_member)
+                continue;
+            const auto error = channel_error(context, peer, current->channel);
+            if (error != DeviceTransportError::kNone) {
+                failed_world_peer = static_cast<int>(peer);
+                return error;
+            }
+        }
+        return DeviceTransportError::kNone;
+    }
+
+    if (current->opcode == TransportCommandOpcode::kPut ||
+        current->opcode == TransportCommandOpcode::kPutValue64 ||
+        current->opcode == TransportCommandOpcode::kRemoteAdd64 ||
+        current->opcode == TransportCommandOpcode::kSignal)
+        return channel_error(
+            context, static_cast<std::uint32_t>(current->world_peer),
+            current->channel);
+    return DeviceTransportError::kNone;
 }
 
 __aicore__ inline bool drain_channel(
@@ -411,7 +513,7 @@ __aicore__ inline bool drain_channel(
         peer.cq->entry_bytes != sizeof(cann_abi::UrmaCqe)) {
         record_error(
             queue, DeviceTransportError::kInvalidQueue, command_index,
-            opcode, 0, 0);
+            opcode, static_cast<int>(peer.world_peer), 0);
         return false;
     }
     const auto head_value = aicore::load_device(
@@ -453,7 +555,7 @@ __aicore__ inline bool drain_channel(
             }
             record_error(
                 queue, DeviceTransportError::kCompletionTimeout,
-                command_index, opcode, 0, 0);
+                command_index, opcode, static_cast<int>(peer.world_peer), 0);
             return false;
         }
         const auto substatus = (word0 >> 16U) & 0xffU;
@@ -461,7 +563,7 @@ __aicore__ inline bool drain_channel(
         if (status != 0 || substatus != 0) {
             record_error(
                 queue, DeviceTransportError::kCompletionFailure,
-                command_index, opcode, 0, 0,
+                command_index, opcode, static_cast<int>(peer.world_peer), 0,
                 (status << 8U) | substatus);
             return false;
         }
@@ -818,6 +920,19 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
     if (queue == nullptr)
         return;
     aicore::flush_cacheline(queue);
+    if (queue->abi_version != kTransportCommandAbiVersion ||
+        queue->struct_size != sizeof(TransportCommandQueue) ||
+        queue->commands == 0 || queue->count > queue->capacity ||
+        queue->service_state == 0 || queue->diagnostic == 0) {
+        detail::record_error(
+            queue,
+            queue->abi_version != kTransportCommandAbiVersion ||
+                    queue->struct_size != sizeof(TransportCommandQueue)
+                ? DeviceTransportError::kInvalidAbi
+                : DeviceTransportError::kInvalidQueue,
+            0, TransportCommandOpcode::kNone, 0, 0);
+        return;
+    }
     auto* state = detail::service_state(queue);
     if (state == nullptr)
         return;
@@ -840,16 +955,43 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
     for (std::uint32_t index = 0; index < count; ++index) {
         auto* current = commands + index;
         aicore::flush_cacheline(current);
-        detail::record_route(queue, current);
         bool success = true;
-        if (current->opcode == TransportCommandOpcode::kFlush) {
+        const auto command_error = detail::validate_command(context, current);
+        if (command_error != DeviceTransportError::kNone) {
+            detail::record_error(
+                queue, command_error, index, current->opcode, current->team,
+                current->peer, current->world_peer, current->channel);
+            success = false;
+        }
+
+        int failed_world_peer = current->world_peer;
+        const auto channel_error = success ?
+            detail::preflight_command_channels(
+                context, current, failed_world_peer) :
+            DeviceTransportError::kNone;
+        if (channel_error != DeviceTransportError::kNone) {
+            const bool collective =
+                current->opcode == TransportCommandOpcode::kFlush ||
+                current->opcode == TransportCommandOpcode::kBarrier;
+            detail::record_error(
+                queue, channel_error, index, current->opcode,
+                collective ? TransportTeam::kWorld : current->team,
+                collective ? failed_world_peer : current->peer,
+                failed_world_peer, current->channel);
+            success = false;
+        }
+
+        if (!success) {
+            // Validation is complete before any transport submission.
+        } else if (current->opcode == TransportCommandOpcode::kFlush) {
             success = detail::drain_all(
                 context, queue, index, current->opcode, retry_limit,
                 wqe_scratch);
             if (!success)
                 detail::record_error(
                     queue, DeviceTransportError::kInvalidQueue, index,
-                    current->opcode, 0, current->channel);
+                    current->opcode, current->team, current->peer,
+                    current->world_peer, current->channel);
         } else if (current->opcode == TransportCommandOpcode::kBarrier) {
             success = detail::execute_barrier(
                 context, queue, current, index, state, retry_limit,
@@ -857,21 +999,16 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
             if (!success)
                 detail::record_error(
                     queue, DeviceTransportError::kInvalidQueue, index,
-                    current->opcode, 0, current->channel);
-        } else if (!detail::valid_command_route(context, current) ||
-                   current->world_peer < 0 ||
-                   current->world_peer >= context.topology.world_size) {
-            detail::record_error(
-                queue, DeviceTransportError::kInvalidRank, index,
-                current->opcode, current->world_peer, current->channel);
-            success = false;
+                    current->opcode, current->team, current->peer,
+                    current->world_peer, current->channel);
         } else if (current->opcode == TransportCommandOpcode::kSignal) {
             success = detail::execute_signal(
                 context, queue, current, index, retry_limit, wqe_scratch);
             if (!success)
                 detail::record_error(
                     queue, DeviceTransportError::kInvalidAddress, index,
-                    current->opcode, current->world_peer, current->channel);
+                    current->opcode, current->team, current->peer,
+                    current->world_peer, current->channel);
         } else {
             auto peer = detail::resolve_context(
                 context, static_cast<std::uint32_t>(current->world_peer),
@@ -886,7 +1023,8 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                     current->destination, bytes, remote_address)) {
                 detail::record_error(
                     queue, DeviceTransportError::kInvalidAddress, index,
-                    current->opcode, current->world_peer, current->channel);
+                    current->opcode, current->team, current->peer,
+                    current->world_peer, current->channel);
                 success = false;
             } else if (current->opcode == TransportCommandOpcode::kPut) {
                 auto* local = detail::resolve_buffer(
@@ -901,7 +1039,8 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                     current->bytes > 0xffffffffULL) {
                     detail::record_error(
                         queue, DeviceTransportError::kInvalidAddress, index,
-                        current->opcode, current->world_peer, current->channel);
+                        current->opcode, current->team, current->peer,
+                        current->world_peer, current->channel);
                     success = false;
                 } else {
                     const auto sq = detail::snapshot_sq(peer.sq);
@@ -925,7 +1064,8 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                 if (remote == nullptr) {
                     detail::record_error(
                         queue, DeviceTransportError::kInvalidAddress, index,
-                        current->opcode, current->world_peer, current->channel);
+                        current->opcode, current->team, current->peer,
+                        current->world_peer, current->channel);
                     success = false;
                 } else {
                     const auto sq = detail::snapshot_sq(peer.sq);
@@ -952,8 +1092,8 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
             } else {
                 detail::record_error(
                     queue, DeviceTransportError::kUnsupportedOperation,
-                    index, current->opcode, current->world_peer,
-                    current->channel);
+                    index, current->opcode, current->team, current->peer,
+                    current->world_peer, current->channel);
                 success = false;
             }
         }

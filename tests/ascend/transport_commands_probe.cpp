@@ -46,12 +46,9 @@ static_assert(sizeof(transport::StagedTransportContext) == 64);
 
 void check_team_peer_translation() {
     transport::TransportTopology topology{};
-    topology.world_rank = 1;
-    topology.world_size = 4;
-    topology.scale_up_rank = 1;
-    topology.scale_up_size = 2;
-    topology.scale_out_rank = 0;
-    topology.scale_out_size = 2;
+    CHECK(transport::build_transport_topology(
+        1, 4, 2, transport::TransportTopologyKind::kLogicalSimulation,
+        1, &topology).ok());
 
     int world_peer = -1;
     CHECK(transport::command::checked_world_peer(
@@ -81,12 +78,9 @@ void check_team_peer_translation() {
         malformed, transport::TransportTeam::kScaleUp, 0, &world_peer));
 
     transport::TransportTopology flat{};
-    flat.world_rank = 2;
-    flat.world_size = 4;
-    flat.scale_up_rank = 2;
-    flat.scale_up_size = 4;
-    flat.scale_out_rank = 0;
-    flat.scale_out_size = 1;
+    CHECK(transport::build_transport_topology(
+        2, 4, 4, transport::TransportTopologyKind::kFlatScaleUp,
+        1, &flat).ok());
     CHECK(transport::command::checked_world_peer(
         flat, transport::TransportTeam::kScaleUp, 3, &world_peer));
     CHECK(world_peer == 3);
@@ -97,7 +91,7 @@ void check_team_peer_translation() {
 
 void check_factories() {
     const auto put = transport::command::make_put(
-        transport::TransportTeam::kWorld, 2, 0, 0x1110, 0x2220, 96,
+        transport::TransportTeam::kWorld, 2, 2, 0, 0x1110, 0x2220, 96,
         transport::CooperationScope::kParticipant,
         transport::MemorySegment::kDevice, transport::kDefaultOptions);
     CHECK(put.opcode == transport::TransportCommandOpcode::kPut);
@@ -109,21 +103,22 @@ void check_factories() {
     CHECK(put.bytes == 96);
 
     const auto put_value = transport::command::make_put_value64(
-        transport::TransportTeam::kScaleUp, 1, 0, 0x3330,
+        transport::TransportTeam::kScaleUp, 1, 3, 0, 0x3330,
         0xa5a5a5a55a5a5a5aULL, transport::kDefaultOptions);
     CHECK(put_value.opcode == transport::TransportCommandOpcode::kPutValue64);
+    CHECK(put_value.world_peer == 3);
     CHECK(put_value.value_bytes == 8);
     CHECK(put_value.destination == 0x3330);
     CHECK(put_value.value == 0xa5a5a5a55a5a5a5aULL);
 
     const auto faa = transport::command::make_remote_add64(
-        transport::TransportTeam::kWorld, 1, 0, 0x4440, -7);
+        transport::TransportTeam::kWorld, 1, 1, 0, 0x4440, -7);
     CHECK(faa.opcode == transport::TransportCommandOpcode::kRemoteAdd64);
     CHECK(faa.destination == 0x4440);
     CHECK(static_cast<std::int64_t>(faa.value) == -7);
 
     const auto signal = transport::command::make_signal(
-        transport::TransportTeam::kWorld, 1, 0,
+        transport::TransportTeam::kWorld, 1, 1, 0,
         transport::RemoteAction::signal_add(0x88, 9));
     CHECK(signal.opcode == transport::TransportCommandOpcode::kSignal);
     CHECK(signal.action_kind == transport::RemoteActionKind::kSignalAdd);
@@ -153,7 +148,7 @@ void check_queue_model() {
 
     CHECK(transport::command::append(
         queue, transport::command::make_put(
-            transport::TransportTeam::kWorld, 1, 0, 0x1000, 0x2000, 64,
+            transport::TransportTeam::kWorld, 1, 1, 0, 0x1000, 0x2000, 64,
             transport::CooperationScope::kParticipant,
             transport::MemorySegment::kDevice,
             transport::kDefaultOptions)));
@@ -190,6 +185,48 @@ void check_queue_model() {
     CHECK(diagnostic.error == transport::DeviceTransportError::kNone);
 }
 
+void check_service_entry_contract() {
+    transport::TransportCommand commands[2]{};
+    transport::TransportServiceState service{};
+    transport::DeviceTransportDiagnostic diagnostic{};
+    auto queue = transport::command::make_queue(
+        commands, 2, &service, &diagnostic);
+    transport::StagedTransportContext staged{};
+    staged.command_queue = reinterpret_cast<std::uintptr_t>(&queue);
+
+    CHECK(transport::command::valid_staged_context_header(
+        staged.abi_version, staged.struct_size, staged.cann_compatibility,
+        staged.command_queue));
+    CHECK(transport::command::valid_command_queue_header(
+        queue.abi_version, queue.struct_size, queue.commands, queue.capacity,
+        queue.count, queue.service_state, queue.diagnostic));
+
+    CHECK(!transport::command::valid_staged_context_header(
+        staged.abi_version + 1, staged.struct_size,
+        staged.cann_compatibility, staged.command_queue));
+    CHECK(!transport::command::valid_staged_context_header(
+        staged.abi_version, staged.struct_size - 1,
+        staged.cann_compatibility, staged.command_queue));
+    CHECK(!transport::command::valid_staged_context_header(
+        staged.abi_version, staged.struct_size,
+        staged.cann_compatibility + 1, staged.command_queue));
+    CHECK(!transport::command::valid_staged_context_header(
+        staged.abi_version, staged.struct_size, staged.cann_compatibility, 0));
+
+    CHECK(!transport::command::valid_command_queue_header(
+        queue.abi_version + 1, queue.struct_size, queue.commands,
+        queue.capacity, queue.count, queue.service_state, queue.diagnostic));
+    CHECK(!transport::command::valid_command_queue_header(
+        queue.abi_version, queue.struct_size - 1, queue.commands,
+        queue.capacity, queue.count, queue.service_state, queue.diagnostic));
+    CHECK(!transport::command::valid_command_queue_header(
+        queue.abi_version, queue.struct_size, 0, queue.capacity, queue.count,
+        queue.service_state, queue.diagnostic));
+    CHECK(!transport::command::valid_command_queue_header(
+        queue.abi_version, queue.struct_size, queue.commands, queue.capacity,
+        queue.capacity + 1, queue.service_state, queue.diagnostic));
+}
+
 void check_barrier_poll_timeout() {
     using deep_ep::ascend::transport::service::barrier_poll_timed_out;
 
@@ -206,6 +243,7 @@ int main() {
     check_team_peer_translation();
     check_factories();
     check_queue_model();
+    check_service_entry_contract();
     check_barrier_poll_timeout();
     return failures == 0 ? 0 : 1;
 }

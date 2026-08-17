@@ -37,15 +37,15 @@ void check_order_flush_and_barrier() {
 
     transport::TransportCommand commands[5]{};
     commands[0] = transport::command::make_put(
-        transport::TransportTeam::kWorld, 1, 0, 0x1000, 0x2000, 64,
+        transport::TransportTeam::kWorld, 1, 1, 0, 0x1000, 0x2000, 64,
         transport::CooperationScope::kParticipant,
         transport::MemorySegment::kDevice, transport::kDefaultOptions);
     commands[1] = transport::command::make_remote_add64(
-        transport::TransportTeam::kWorld, 2, 0, 0x3000, 1);
+        transport::TransportTeam::kWorld, 2, 2, 0, 0x3000, 1);
     commands[2] = transport::command::make_flush(
         0, transport::CooperationScope::kDevice);
     commands[3] = transport::command::make_signal(
-        transport::TransportTeam::kWorld, 1, 0,
+        transport::TransportTeam::kWorld, 1, 1, 0,
         transport::RemoteAction::signal_increment(2));
     commands[4] = transport::command::make_barrier(1, 64);
 
@@ -65,7 +65,7 @@ void check_order_flush_and_barrier() {
 void check_validation_stops_before_later_commands() {
     transport::TransportCommand commands[2]{};
     commands[0] = transport::command::make_put_value64(
-        transport::TransportTeam::kWorld, 7, 0, 0x1000, 9,
+        transport::TransportTeam::kWorld, 7, 7, 0, 0x1000, 9,
         transport::kDefaultOptions);
     commands[1] = transport::command::make_flush(
         0, transport::CooperationScope::kParticipant);
@@ -87,7 +87,7 @@ void check_validation_stops_before_later_commands() {
 void check_completion_timeout_is_finite() {
     transport::TransportCommand commands[2]{};
     commands[0] = transport::command::make_remote_add64(
-        transport::TransportTeam::kWorld, 1, 0, 0x1000, 1);
+        transport::TransportTeam::kWorld, 1, 1, 0, 0x1000, 1);
     commands[1] = transport::command::make_flush(
         0, transport::CooperationScope::kParticipant);
 
@@ -102,18 +102,37 @@ void check_completion_timeout_is_finite() {
     CHECK(diagnostic.command_index == 1);
 }
 
+void check_barrier_failure_preserves_failed_world_peer() {
+    auto barrier = transport::command::make_barrier(1, 64);
+    auto state = service::model::make_state(4, 0, 3);
+    state.completions_enabled = false;
+    state.completion_failure_world_peer = 3;
+    transport::DeviceTransportDiagnostic diagnostic{};
+
+    CHECK(!service::model::execute(&barrier, 1, state, diagnostic));
+    CHECK(diagnostic.error ==
+          transport::DeviceTransportError::kCompletionTimeout);
+    CHECK(diagnostic.team == transport::TransportTeam::kWorld);
+    CHECK(diagnostic.peer == 3);
+    CHECK(diagnostic.world_peer == 3);
+
+    transport::command::record_first_error(
+        diagnostic, transport::DeviceTransportError::kInvalidQueue, 9,
+        transport::TransportCommandOpcode::kBarrier,
+        transport::TransportTeam::kScaleOut, 1, 2, 0);
+    CHECK(diagnostic.team == transport::TransportTeam::kWorld);
+    CHECK(diagnostic.peer == 3);
+    CHECK(diagnostic.world_peer == 3);
+}
+
 void check_service_uses_translated_world_peer() {
     transport::TransportTopology topology{};
-    topology.world_rank = 1;
-    topology.world_size = 4;
-    topology.scale_up_rank = 1;
-    topology.scale_up_size = 2;
-    topology.scale_out_rank = 0;
-    topology.scale_out_size = 2;
+    CHECK(transport::build_transport_topology(
+        1, 4, 2, transport::TransportTopologyKind::kLogicalSimulation,
+        1, &topology).ok());
     auto command = transport::command::make_put_value64(
-        transport::TransportTeam::kScaleOut, 1, 0, 0x1000, 9,
+        transport::TransportTeam::kScaleOut, 1, 3, 0, 0x1000, 9,
         transport::kDefaultOptions);
-    command.world_peer = 3;
 
     auto state = service::model::make_state(topology, 8);
     transport::DeviceTransportDiagnostic diagnostic{};
@@ -131,12 +150,61 @@ void check_service_uses_translated_world_peer() {
     CHECK(diagnostic.world_peer == 2);
 }
 
+void check_protocol_validation_precedes_dispatch() {
+    auto check_rejected = [](
+                              transport::TransportCommand command,
+                              transport::DeviceTransportError expected) {
+        auto state = service::model::make_state(2, 0, 8);
+        transport::DeviceTransportDiagnostic diagnostic{};
+        CHECK(!service::model::execute(&command, 1, state, diagnostic));
+        CHECK(state.executed_count == 0);
+        CHECK(state.submitted == 0);
+        CHECK(diagnostic.error == expected);
+    };
+
+    auto remote = transport::command::make_put(
+        transport::TransportTeam::kWorld, 1, 1, 0, 0x1000, 0x2000, 64,
+        transport::CooperationScope::kParticipant,
+        transport::MemorySegment::kDevice, transport::kDefaultOptions);
+    remote.channel = 1;
+    check_rejected(remote, transport::DeviceTransportError::kInvalidChannel);
+    remote.channel = 0;
+    remote.options = transport::kAggregateRequests;
+    check_rejected(remote, transport::DeviceTransportError::kInvalidProtocol);
+    remote.options = transport::kDefaultOptions;
+    remote.scope = transport::CooperationScope::kWorkgroup;
+    check_rejected(remote, transport::DeviceTransportError::kInvalidProtocol);
+
+    auto flush = transport::command::make_flush(
+        0, transport::CooperationScope::kDevice);
+    flush.channel = 1;
+    check_rejected(flush, transport::DeviceTransportError::kInvalidChannel);
+    flush.channel = 0;
+    flush.options = transport::kAggregateRequests;
+    check_rejected(flush, transport::DeviceTransportError::kInvalidProtocol);
+
+    auto barrier = transport::command::make_barrier(1, 64);
+    barrier.channel = 1;
+    check_rejected(barrier, transport::DeviceTransportError::kInvalidChannel);
+    barrier.channel = 0;
+    barrier.options = 2;
+    check_rejected(barrier, transport::DeviceTransportError::kInvalidProtocol);
+
+    auto signal = transport::command::make_signal(
+        transport::TransportTeam::kWorld, 1, 1, 0,
+        transport::RemoteAction::signal_increment(1));
+    signal.action_kind = transport::RemoteActionKind::kNone;
+    check_rejected(signal, transport::DeviceTransportError::kInvalidProtocol);
+}
+
 }  // namespace
 
 int main() {
     check_order_flush_and_barrier();
     check_validation_stops_before_later_commands();
     check_completion_timeout_is_finite();
+    check_barrier_failure_preserves_failed_world_peer();
     check_service_uses_translated_world_peer();
+    check_protocol_validation_precedes_dispatch();
     return failures == 0 ? 0 : 1;
 }
