@@ -13,8 +13,8 @@ Each phase has an independent acceptance boundary. Work does not proceed to
 the next phase until the current phase passes its complete local, build, and
 two-NPU validation matrix.
 
-Phases 2E and 2F are implemented and validated on NPU8P. Phase 2G is the next
-development boundary and remains gated.
+Phases 2E, 2F, and 2G are implemented and validated on NPU8P for the selected
+two-rank synchronous BF16 scope.
 
 The design builds on:
 
@@ -66,10 +66,9 @@ before output allocation or kernel launch and do not return fabricated data.
 
 ## Remaining Gaps
 
-Phases 2E and 2F close the communicator, production extension, two-rank
+Phases 2E, 2F, and 2G close the communicator, production extension, two-rank
 topology, buffer ownership, staged service, synchronous barrier, teardown,
-and BF16 dispatch gaps. Combine remains gated until Phase 2G implements its
-complete metadata and reduction protocol. Async events, public communication
+BF16 dispatch, and BF16 combine gaps. Async events, public communication
 streams, hybrid routing, pipeline, Engram, AGRS, FP8 runtime, and scale-out
 remain interface-only or unsupported as listed in the non-goals.
 
@@ -479,9 +478,9 @@ combine gate.
 The accepted descriptor protocol uses fixed source-owned inbox shards plus a
 generation-tagged count, signal, and barrier. Cached dispatch carries
 `DispatchHandleDescriptor` ABI version 1, including the generation family,
-topology, tensor shapes, alignment, capacity, and mode flags. Combine does not
-consume that descriptor in Phase 2F; its public path remains gated until the
-Phase 2G acceptance matrix passes.
+topology, tensor shapes, alignment, capacity, and mode flags. Phase 2F records
+but does not consume that descriptor in combine. The accepted Phase 2G path
+now validates and consumes it before every combine launch.
 
 ## Phase 2G: BF16 Combine
 
@@ -499,6 +498,9 @@ top-k width, expert alignment, capacity, and expanded mode. Source metadata,
 rank prefixes, expanded slots, and all encoded source ranks, token indices,
 and lanes are validated against those descriptor bounds. A handle from a
 different buffer, topology, shape, or mode is rejected before launch.
+Expanded handles may retain the dispatch-only zero-padding mode when their
+complete family attestation matches; zero padding is not forwarded into the
+combine tiling.
 
 The symmetric combine region contains two kinds of fixed shards and a control
 array:
@@ -599,6 +601,36 @@ least 100 dispatch/combine generations. The terminal NPU8P task clean-builds
 testing and production extensions, audits out CUDA/NCCL/NVSHMEM dependencies,
 and prints `PHASE2G_ACCEPTANCE=PASS` only after every case passes on both
 ranks.
+
+Final serialized task `task_20260817_100335_19495615895` on NPU8P devices 6
+and 7 clean-built testing and production `dav-3510` extensions from source
+commit `8d8ee64eb57810873ca5c6e064cf8b2e0d5c72b1`. It passed 74 Ascend tests,
+15 platform tests, 11 build tests, the production dependency audit, and all 19
+public two-rank cases for 38 rank-case executions. It also passed 100
+dispatch/combine generations per rank, exact float32 routing weights, bounded
+invalid-peer diagnostics, sequence poisoning, and repeated teardown, then
+printed `PHASE2G_ACCEPTANCE=PASS` and exited zero.
+
+The accepted source archive SHA256 is
+`248a7bcabc0b0360b3905042636b357245793bbd5ef7850f62292041c46166a4`;
+the testing extension SHA256 is
+`316ef16695463ac048d171ef9345c266aa69bd257e9d5fc4b7c041b03ddcbe83`;
+and the production extension SHA256 is
+`3a1b5f27f51af0aba4016de077506fe74921a386f84dbe72b86f1f66ec4597db`.
+The production audit found no CUDA, NCCL, or NVSHMEM dependency.
+
+The task used patched HCOMM library SHA256
+`afb65298169b7810269322a32576429bcd67798a3336718a2642d2fb97332e77`,
+weekly-compatible `hccl_team.h` SHA256
+`b843960291727653cebd1f4453cb71c4ab3255743c5216e2ef17baaaf1be312b`,
+and archived lifecycle patch SHA256
+`7394982ec1c5432b3fe15898974e64441ba5a24a2bf5c110e49bb758174a9329`.
+The accepted protocol uses contributor-owned staging and receive shards,
+generation-tagged `{generation, count}` control slots, and an independent
+monotonic combine generation. Combined BF16 values use `rtol=1/128` and
+`atol=1/128`; routing weights match exactly. Async events, mapped-CPU
+synchronization, hybrid, pipeline, Engram, AGRS, FP8, and scale-out execution
+remain deferred.
 
 ## Error Handling
 
