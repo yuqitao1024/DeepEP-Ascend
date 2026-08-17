@@ -212,6 +212,12 @@ struct Inputs {
         std::memcpy(descriptor.data_ptr(), &descriptor_value,
                     sizeof(descriptor_value));
     }
+
+    void attest_descriptor_mode(elastic::CoreModeFlags mode_flags) {
+        descriptor_value = elastic::make_attested_dispatch_handle_descriptor(
+            7, {0, 2, 0, 2, 0, 1}, 1, 8, 2, 2, 4, 4, mode_flags);
+        write_descriptor();
+    }
 };
 
 using Result = std::tuple<Tensor, std::optional<Tensor>, std::optional<Event>>;
@@ -355,6 +361,60 @@ bool successful_dispatch_handle_is_statelessly_valid() {
     const auto result = call(*target, inputs);
     return !std::get<2>(result).has_value() && trace.launches == 1 &&
         trace.generations == std::vector<std::uint64_t>{1};
+}
+
+bool dispatch_descriptor_modes_are_exactly_compatible() {
+    const auto expanded = elastic::mode_bit(elastic::CoreMode::kExpanded);
+    const auto zero_padding =
+        elastic::mode_bit(elastic::CoreMode::kZeroPadding);
+    const auto combine_mode =
+        elastic::mode_bit(elastic::CoreMode::kAllowMultipleReduction);
+
+    trace = {};
+    auto aligned_target = buffer();
+    Inputs aligned(true);
+    aligned.attest_descriptor_mode(expanded | zero_padding);
+    const auto aligned_result = call(
+        *aligned_target, aligned, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, false, false, true);
+    if (std::get<2>(aligned_result).has_value() || trace.launches != 1 ||
+        !elastic::has_mode(trace.mode_flags, elastic::CoreMode::kExpanded) ||
+        elastic::has_mode(trace.mode_flags, elastic::CoreMode::kZeroPadding))
+        return false;
+
+    trace = {};
+    auto normal_target = buffer();
+    Inputs normal;
+    normal.attest_descriptor_mode(zero_padding);
+    if (!error_contains(
+            [&] { (void)call(*normal_target, normal); }, "dispatch handle") ||
+        trace.launches != 0)
+        return false;
+
+    trace = {};
+    auto unsupported_target = buffer();
+    Inputs unsupported(true);
+    unsupported.attest_descriptor_mode(expanded | combine_mode);
+    if (!error_contains(
+            [&] { (void)call(
+                *unsupported_target, unsupported, std::nullopt, std::nullopt,
+                std::nullopt, std::nullopt, 1, 0, std::nullopt, false, false,
+                true); },
+            "dispatch handle") || trace.launches != 0)
+        return false;
+
+    trace = {};
+    auto unattested_target = buffer();
+    Inputs unattested(true);
+    unattested.descriptor_value.mode_flags |= zero_padding;
+    unattested.write_descriptor();
+    return error_contains(
+               [&] { (void)call(
+                   *unattested_target, unattested, std::nullopt, std::nullopt,
+                   std::nullopt, std::nullopt, 1, 0, std::nullopt, false,
+                   false, true); },
+               "dispatch handle") &&
+        trace.launches == 0;
 }
 
 bool long_lived_dispatch_validation_state_is_constant() {
@@ -619,6 +679,8 @@ int main() {
     check(normal_and_expanded_success(), "normal and expanded outputs");
     check(successful_dispatch_handle_is_statelessly_valid(),
           "successful dispatch handle is statelessly valid");
+    check(dispatch_descriptor_modes_are_exactly_compatible(),
+          "dispatch descriptor modes are exactly compatible");
     check(long_lived_dispatch_validation_state_is_constant(),
           "long-lived dispatch validation state is constant");
     check(cross_buffer_dispatch_handle_is_retryable(),

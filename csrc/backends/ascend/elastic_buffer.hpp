@@ -1138,8 +1138,21 @@ public:
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         const auto& context = resources_->device_context();
+        const auto expanded_dispatch_mode =
+            elastic::mode_bit(elastic::CoreMode::kExpanded);
+        const auto zero_padding_dispatch_mode =
+            elastic::mode_bit(elastic::CoreMode::kZeroPadding);
         const elastic::CoreModeFlags dispatch_mode = use_expanded_layout ?
-            elastic::mode_bit(elastic::CoreMode::kExpanded) : 0;
+            expanded_dispatch_mode : 0;
+        const bool compatible_descriptor_mode = use_expanded_layout ?
+            descriptor.mode_flags == expanded_dispatch_mode ||
+                descriptor.mode_flags ==
+                    (expanded_dispatch_mode | zero_padding_dispatch_mode) :
+            descriptor.mode_flags == 0;
+        TORCH_CHECK(
+            compatible_descriptor_mode,
+            "DeepEP Ascend backend: combine dispatch handle does not match "
+            "the current call");
         const auto expected_descriptor =
             elastic::make_attested_dispatch_handle_descriptor(
                 dispatch_family_,
@@ -1147,7 +1160,8 @@ public:
                 static_cast<std::uint64_t>(combined_topk_idx.size(0)),
                 static_cast<std::uint64_t>(x.size(1)),
                 static_cast<std::uint64_t>(num_experts), num_topk,
-                descriptor.expert_alignment, capacity, dispatch_mode);
+                descriptor.expert_alignment, capacity,
+                descriptor.mode_flags);
         const auto descriptor_status = elastic::validate_dispatch_handle(
             expected_descriptor, descriptor);
         TORCH_CHECK(descriptor_status.ok(), "DeepEP Ascend backend: combine ",
