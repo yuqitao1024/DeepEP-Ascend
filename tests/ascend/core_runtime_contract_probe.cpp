@@ -56,12 +56,13 @@ bool trace_is(int first, int second = 0) {
 CoreTiling valid_tiling(
     OperationKind operation,
     ElementKind element_kind = ElementKind::kBFloat16,
-    int world_rank = 0, int world_size = 1, CoreModeFlags mode_flags = 0) {
+    int world_rank = 0, int world_size = 1, CoreModeFlags mode_flags = 0,
+    std::uint64_t num_tokens = 4) {
     CoreTilingInput input{};
     input.operation = operation;
     input.element_kind = element_kind;
     input.mode_flags = mode_flags;
-    input.num_tokens = operation == OperationKind::kBarrier ? 0 : 4;
+    input.num_tokens = operation == OperationKind::kBarrier ? 0 : num_tokens;
     input.hidden = 64;
     input.num_experts = 4;
     input.num_topk = 2;
@@ -689,6 +690,70 @@ int main() {
         combine_staging_offset !=
             combine_tiling.symmetric_window_layout.combine_staging_offset)
         return 20;
+
+    auto zero_token_combine_tiling = valid_tiling(
+        OperationKind::kCombine, ElementKind::kBFloat16, 1, 2, 0, 0);
+    export_transport(&zero_token_combine_tiling);
+    const auto zero_token_combine_storage =
+        required_core_launch_storage(zero_token_combine_tiling);
+    auto zero_token_combine = combine;
+    zero_token_combine.combined_topk_indices = nullptr;
+    zero_token_combine.combined_x = nullptr;
+    zero_token_combine.num_source_rows = 0;
+    zero_token_combine.num_input_rows = 0;
+    zero_token_combine.local_window_base =
+        zero_token_combine_tiling.transport_context.local_window_base;
+    reset_launches();
+    if (!launch_internal_combine(
+             zero_token_combine, zero_token_combine_tiling,
+             zero_token_combine_storage, nullptr).ok() ||
+        !trace_is(kCombineLaunch))
+        return 61;
+
+    reset_launches();
+    auto zero_token_missing_prefix = zero_token_combine;
+    zero_token_missing_prefix.prefix_per_rank = nullptr;
+    if (launch_internal_combine(
+            zero_token_missing_prefix, zero_token_combine_tiling,
+            zero_token_combine_storage, nullptr).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 62;
+    reset_launches();
+    auto zero_token_missing_workspace = zero_token_combine;
+    zero_token_missing_workspace.workspace = nullptr;
+    if (launch_internal_combine(
+            zero_token_missing_workspace, zero_token_combine_tiling,
+            zero_token_combine_storage, nullptr).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 63;
+    reset_launches();
+    auto zero_token_missing_window = zero_token_combine;
+    zero_token_missing_window.local_window_base = 0;
+    if (launch_internal_combine(
+            zero_token_missing_window, zero_token_combine_tiling,
+            zero_token_combine_storage, nullptr).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 64;
+    reset_launches();
+    auto nonempty_missing_indices = combine;
+    nonempty_missing_indices.combined_topk_indices = nullptr;
+    if (launch_internal_combine(
+            nonempty_missing_indices, combine_tiling, combine_storage,
+            nullptr).code != CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 65;
+    reset_launches();
+    auto nonempty_missing_output = combine;
+    nonempty_missing_output.combined_x = nullptr;
+    if (launch_internal_combine(
+            nonempty_missing_output, combine_tiling, combine_storage,
+            nullptr).code != CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 66;
+
     reset_launches(kCombineLaunch, 8);
     status = launch_internal_combine(
         combine, combine_tiling, combine_storage, nullptr);

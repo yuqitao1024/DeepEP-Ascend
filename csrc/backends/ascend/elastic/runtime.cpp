@@ -401,10 +401,12 @@ CoreRuntimeStatus launch_internal_combine(
         return invalid("combine input row count exceeds fixed shards");
     if ((arguments.num_source_rows != 0 &&
          (arguments.x == nullptr || arguments.source_metadata == nullptr)) ||
-        arguments.combined_topk_indices == nullptr ||
+        (tiling.num_tokens != 0 &&
+         (arguments.combined_topk_indices == nullptr ||
+          arguments.combined_x == nullptr)) ||
         arguments.prefix_per_rank == nullptr ||
         arguments.communication_buffer == nullptr ||
-        arguments.workspace == nullptr || arguments.combined_x == nullptr)
+        arguments.workspace == nullptr)
         return invalid("combine required argument is null");
     if ((arguments.topk_weights == nullptr) !=
         (arguments.combined_topk_weights == nullptr))
