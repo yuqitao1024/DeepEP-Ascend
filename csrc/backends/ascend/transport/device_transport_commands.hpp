@@ -79,6 +79,51 @@ DEEP_EP_ASCEND_SIMT_CALLEE bool checked_world_peer(
     return true;
 }
 
+DEEP_EP_ASCEND_SIMT_CALLEE bool valid_topology(
+    const TransportTopology& topology) {
+    int translated = -1;
+    return checked_world_peer(
+               topology, TransportTeam::kWorld, topology.world_rank,
+               &translated) &&
+           translated == topology.world_rank;
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE bool checked_team_peer_for_world_rank(
+    const TransportTopology& topology, int world_peer,
+    TeamPeer* team_peer) {
+    if (team_peer == nullptr || world_peer < 0 ||
+        world_peer >= topology.world_size || !valid_topology(topology))
+        return false;
+
+    TeamPeer result{};
+    result.world_peer = world_peer;
+    if (world_peer == topology.world_rank) {
+        result.team = TransportTeam::kWorld;
+        result.peer = world_peer;
+    } else {
+        const int peer_scale_up_rank = world_peer % topology.scale_up_size;
+        const int peer_scale_out_rank = world_peer / topology.scale_up_size;
+        if (peer_scale_out_rank == topology.scale_out_rank) {
+            result.team = TransportTeam::kScaleUp;
+            result.peer = peer_scale_up_rank;
+        } else if (peer_scale_up_rank == topology.scale_up_rank) {
+            result.team = TransportTeam::kScaleOut;
+            result.peer = peer_scale_out_rank;
+        } else {
+            result.team = TransportTeam::kWorld;
+            result.peer = world_peer;
+        }
+    }
+
+    int translated = -1;
+    if (!checked_world_peer(
+            topology, result.team, result.peer, &translated) ||
+        translated != world_peer)
+        return false;
+    *team_peer = result;
+    return true;
+}
+
 DEEP_EP_ASCEND_SIMT_CALLEE __gm__ TransportCommandQueue* command_queue(
     const DeviceTransportContext& context) {
     if (context.abi_version != kDeviceTransportAbiVersion ||

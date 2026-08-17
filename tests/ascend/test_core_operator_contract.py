@@ -39,6 +39,68 @@ CORE_OPS = ROOT / "tests/ascend/core_ops"
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
+    def test_route_aware_kernels_receive_complete_topology(self):
+        required_parameters = (
+            "transport_topology_abi_version",
+            "transport_topology_struct_size",
+            "transport_world_rank",
+            "transport_world_size",
+            "transport_scale_up_rank",
+            "transport_scale_up_size",
+            "transport_scale_out_rank",
+            "transport_scale_out_size",
+            "transport_scale_up_direct",
+            "transport_topology_kind",
+            "transport_topology_epoch",
+        )
+        required_arguments = (
+            "topology.abi_version",
+            "topology.struct_size",
+            "topology.world_rank",
+            "topology.world_size",
+            "topology.scale_up_rank",
+            "topology.scale_up_size",
+            "topology.scale_out_rank",
+            "topology.scale_out_size",
+            "topology.scale_up_direct",
+            "topology.kind",
+            "topology.epoch",
+        )
+        for source_name in ("dispatch.asc", "combine.asc"):
+            source = (ELASTIC / source_name).read_text()
+            for suffix in ("producer_vf", "epilogue_vf"):
+                function_name = source_name.removesuffix(".asc") + "_" + suffix
+                signature = re.search(
+                    rf"__simt_vf__\s+inline\s+void\s+{function_name}\s*"
+                    rf"\((.*?)\)\s*\{{", source, flags=re.DOTALL)
+                self.assertIsNotNone(signature, function_name)
+                for parameter in required_parameters:
+                    self.assertIn(parameter, signature.group(1), function_name)
+                call = re.search(
+                    rf"asc_vf_call<{function_name}>\s*\((.*?)\);",
+                    source, flags=re.DOTALL)
+                self.assertIsNotNone(call, function_name)
+                for argument in required_arguments:
+                    self.assertIn(argument, call.group(1), function_name)
+
+    def test_remote_operator_commands_reuse_checked_team_peer(self):
+        for source_name, signal_name in (
+                ("dispatch.asc", "kDispatchReleaseSignalIndex"),
+                ("combine.asc", "kCombineReleaseSignalIndex")):
+            source = (ELASTIC / source_name).read_text()
+            self.assertIn("checked_team_peer_for_world_rank(", source,
+                          source_name)
+            self.assertGreaterEqual(source.count("route.team"), 4, source_name)
+            self.assertGreaterEqual(source.count("route.peer"), 4, source_name)
+            self.assertNotIn(
+                "TransportTeam::kScaleUp, destination_rank", source,
+                source_name)
+            self.assertIn(signal_name, source, source_name)
+            self.assertEqual(source.count("transport.device_barrier("), 1,
+                             source_name)
+        barrier = (ELASTIC / "barrier.asc").read_text()
+        self.assertEqual(barrier.count("transport.device_barrier("), 1)
+
     def test_production_combine_producer_weights(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = pathlib.Path(directory) / "production_combine_producer"
@@ -209,17 +271,33 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "tiling.transport_context.abi_version",
                 "tiling.transport_context.struct_size",
                 "tiling.transport_context.local_window_base",
+                "tiling.transport_context.topology.abi_version",
+                "tiling.transport_context.topology.struct_size",
                 "tiling.transport_context.topology.world_rank",
                 "tiling.transport_context.topology.world_size",
+                "tiling.transport_context.topology.scale_up_rank",
                 "tiling.transport_context.topology.scale_up_size",
+                "tiling.transport_context.topology.scale_out_rank",
+                "tiling.transport_context.topology.scale_out_size",
+                "tiling.transport_context.topology.scale_up_direct",
+                "tiling.transport_context.topology.kind",
+                "tiling.transport_context.topology.epoch",
                 "tiling.transport_context.backend_context",
             },
             "combine_producer_vf": {
                 "tiling.transport_context.abi_version",
                 "tiling.transport_context.struct_size",
+                "tiling.transport_context.topology.abi_version",
+                "tiling.transport_context.topology.struct_size",
                 "tiling.transport_context.topology.world_rank",
                 "tiling.transport_context.topology.world_size",
+                "tiling.transport_context.topology.scale_up_rank",
                 "tiling.transport_context.topology.scale_up_size",
+                "tiling.transport_context.topology.scale_out_rank",
+                "tiling.transport_context.topology.scale_out_size",
+                "tiling.transport_context.topology.scale_up_direct",
+                "tiling.transport_context.topology.kind",
+                "tiling.transport_context.topology.epoch",
                 "tiling.transport_context.backend_context",
             },
         }
@@ -240,9 +318,17 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "std::uint32_t transport_abi_version",
             "std::uint32_t transport_struct_size",
             "std::uintptr_t transport_local_window_base",
+            "std::uint32_t transport_topology_abi_version",
+            "std::uint32_t transport_topology_struct_size",
             "int transport_world_rank",
             "int transport_world_size",
+            "int transport_scale_up_rank",
             "int transport_scale_up_size",
+            "int transport_scale_out_rank",
+            "int transport_scale_out_size",
+            "std::uint32_t transport_scale_up_direct",
+            "std::uint32_t transport_topology_kind",
+            "std::uint64_t transport_topology_epoch",
             "std::uintptr_t transport_backend_context",
             "CoreModeFlags mode_flags",
             "std::uint64_t generation",
@@ -285,9 +371,17 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "tiling.transport_context.abi_version",
             "tiling.transport_context.struct_size",
             "local_window_base",
+            "tiling.transport_context.topology.abi_version",
+            "tiling.transport_context.topology.struct_size",
             "tiling.transport_context.topology.world_rank",
             "tiling.transport_context.topology.world_size",
+            "tiling.transport_context.topology.scale_up_rank",
             "tiling.transport_context.topology.scale_up_size",
+            "tiling.transport_context.topology.scale_out_rank",
+            "tiling.transport_context.topology.scale_out_size",
+            "static_cast<std::uint32_t>( tiling.transport_context.topology.scale_up_direct)",
+            "static_cast<std::uint32_t>(tiling.transport_context.topology.kind)",
+            "tiling.transport_context.topology.epoch",
             "tiling.transport_context.backend_context",
             "tiling.mode_flags",
             "generation",

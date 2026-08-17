@@ -6,6 +6,8 @@ namespace deep_ep::ascend::transport::sync_layout {
 
 inline constexpr std::uint32_t kLogicalSignalCount = 4;
 inline constexpr std::uint32_t kLogicalBarrierCount = 1;
+inline constexpr std::uint32_t kDispatchReleaseSignalIndex = 0;
+inline constexpr std::uint32_t kCombineReleaseSignalIndex = 1;
 
 // HCOMM world teams only accept barrier synchronization storage. The first
 // groups back logical signals; the remaining group backs barrier session zero.
