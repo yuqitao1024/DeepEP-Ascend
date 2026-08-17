@@ -11,6 +11,7 @@ committed.
 - Patch SHA256: `7394982ec1c5432b3fe15898974e64441ba5a24a2bf5c110e49bb758174a9329`
 - Compiler: `GCC: (Do-Compiler V100R001C30B0032) 7.3.0`
 - Patched `libhcomm.so` SHA256: `afb65298169b7810269322a32576429bcd67798a3336718a2642d2fb97332e77`
+- Full package SHA256: `33432305ed72929415d8aef825fd31927ffbda87972bed541b21b3f43cad5da9`
 
 Apply the patch from a clean checkout at the baseline commit:
 
@@ -74,6 +75,17 @@ Only `lib64/libhcomm.so` resolves to the patched GCC 7.3 build. Other overlay
 entries resolve to the user-installed weekly HCOMM package. The weekly package
 was not overwritten.
 
+The validated full package is installed at:
+
+```text
+/home/pyptouser/yuqitao/Ascend/hcomm-deepep-window-fix-7394982e/cann
+```
+
+NPU8P tasks use the stable entry point
+`/home/pyptouser/yuqitao/Ascend/hcomm-deepep-current/cann`. It resolves to the
+versioned installation above. Weekly and experimental HCOMM installations are
+not selected by DeepEP tasks.
+
 ## Validation record
 
 - `task_20260816_051703_20128429487`: shared-channel memory-version and endpoint
@@ -125,6 +137,15 @@ was not overwritten.
   extension SHA256 remained
   `afd502907cf06389a079d30344340217db1c5a120f37ccf46744096183d581e1`, and
   the task completed with exit code 0.
+- `task_20260817_214332_36511077985`: rebuilt the full HCOMM run package from
+  baseline `8c5d5ad` plus the archived patch; package SHA256 is recorded above.
+- `task_20260817_214627_368375922298`: installed the package into the versioned
+  user directory and reproduced the recorded patched `libhcomm.so` SHA256.
+- `task_20260817_214749_36883025604`: the installed package passed ABI and
+  dependency audits, build 11/11, platform 15/15, Ascend 78/78, 100 two-rank
+  barriers, dispatch 14/14, and combine 23/23 on devices 6 and 7.
+- `task_20260817_215327_370689110251`: promoted the validated versioned
+  installation to the stable `hcomm-deepep-current` entry point.
 
 The AArch64 mockcpp trampoline cannot intercept a shared-library-internal C
 call reliably, so the endpoint test uses real generation lookup and real input

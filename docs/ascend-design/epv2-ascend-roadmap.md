@@ -78,6 +78,19 @@ accepted subphases.
 
 ## Phase 3A: Production Dependency And Deployment Closure
 
+### Current decision
+
+Status: closed for the current NPU8P development baseline.
+
+Freeze the validated downstream package built from HCOMM baseline `8c5d5ad`
+plus `third_party/patches/hcomm/hcomm-team-window-deregister.patch`. NPU8P
+tasks consume it through `hcomm-deepep-current`. The MR 4655 backport is
+abandoned and further Phase 3A patch development is closed; neither resumes
+without a new explicit project decision. Revisit the dependency only when a
+compatible vendor package provides the same lifecycle behavior.
+An official vendor-distributed package and path-independent deployment remain
+desirable, but are deferred and do not block Phase 3B.
+
 ### Deliverables
 
 - move the archived HCOMM team/window lifecycle fix into an official package
@@ -88,15 +101,16 @@ accepted subphases.
   path; and
 - retain lifecycle retry, idempotent destruction, and dependency-order tests.
 
-### Acceptance
+### Acceptance for the current NPU8P baseline
 
 - a clean environment can build and import the production extension without
   CUDA, NCCL, or NVSHMEM dependencies;
 - repeated communicator, team, window, and channel creation/destruction passes;
 - the complete Phase 2E-2G two-NPU regression passes with the packaged
   dependency set; and
-- deployment instructions do not require credentials or machine-specific
-  private paths.
+- NPU8P deployment uses the stable `hcomm-deepep-current` entry point without
+  embedding credentials. Path-independent deployment is deferred as recorded
+  in the current decision above.
 
 ## Phase 3B: Scale-Up Topology And Concurrency
 
