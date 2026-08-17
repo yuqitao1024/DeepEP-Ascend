@@ -39,6 +39,7 @@ namespace model {
 struct State {
     std::uint32_t member_count = 1;
     std::uint32_t self_member = 0;
+    TransportTopology topology{};
     std::uint64_t retry_limit = 1;
     bool completions_enabled = true;
     std::uint32_t executed_count = 0;
@@ -57,6 +58,22 @@ inline State make_state(
     State result;
     result.member_count = member_count;
     result.self_member = self_member;
+    result.topology.world_rank = static_cast<int>(self_member);
+    result.topology.world_size = static_cast<int>(member_count);
+    result.topology.scale_up_rank = static_cast<int>(self_member);
+    result.topology.scale_up_size = static_cast<int>(member_count);
+    result.topology.scale_out_rank = 0;
+    result.topology.scale_out_size = 1;
+    result.retry_limit = retry_limit;
+    return result;
+}
+
+inline State make_state(
+    const TransportTopology& topology, std::uint64_t retry_limit) {
+    State result;
+    result.member_count = static_cast<std::uint32_t>(topology.world_size);
+    result.self_member = static_cast<std::uint32_t>(topology.world_rank);
+    result.topology = topology;
     result.retry_limit = retry_limit;
     return result;
 }
@@ -80,12 +97,14 @@ inline bool validate(
         return false;
     }
     if (is_remote_operation(command.opcode)) {
-        if (command.team == TransportTeam::kScaleOut) {
-            error = DeviceTransportError::kUnsupportedOperation;
-            return false;
-        }
-        if (command.peer < 0 ||
-            static_cast<std::uint32_t>(command.peer) >= state.member_count) {
+        int expected_world_peer = -1;
+        if (!command::checked_world_peer(
+                state.topology, command.team, command.peer,
+                &expected_world_peer) ||
+            command.world_peer != expected_world_peer ||
+            command.world_peer < 0 ||
+            static_cast<std::uint32_t>(command.world_peer) >=
+                state.member_count) {
             error = DeviceTransportError::kInvalidRank;
             return false;
         }
@@ -141,8 +160,8 @@ inline bool execute(
         DeviceTransportError error = DeviceTransportError::kNone;
         if (!validate(current, state, error)) {
             command::record_first_error(
-                diagnostic, error, index, current.opcode, current.peer,
-                current.channel);
+                diagnostic, error, index, current.opcode, current.team,
+                current.peer, current.world_peer, current.channel);
             return false;
         }
 
@@ -189,6 +208,53 @@ namespace detail {
 inline constexpr std::uint64_t kDefaultRetryLimit = 1000000;
 inline constexpr std::uint32_t kServiceScratchBytes = 512;
 
+__aicore__ inline bool valid_command_route(
+    const DeviceTransportContext& context,
+    __gm__ const TransportCommand* current) {
+    if (current == nullptr)
+        return false;
+    const auto& topology = context.topology;
+    if (topology.world_size <= 0 || topology.scale_up_size <= 0 ||
+        topology.scale_out_size <= 0 || topology.world_rank < 0 ||
+        topology.world_rank >= topology.world_size ||
+        topology.scale_up_rank < 0 ||
+        topology.scale_up_rank >= topology.scale_up_size ||
+        topology.scale_out_rank < 0 ||
+        topology.scale_out_rank >= topology.scale_out_size ||
+        static_cast<std::int64_t>(topology.scale_up_size) *
+                topology.scale_out_size != topology.world_size ||
+        topology.scale_up_rank !=
+            topology.world_rank % topology.scale_up_size ||
+        topology.scale_out_rank !=
+            topology.world_rank / topology.scale_up_size)
+        return false;
+
+    int expected = -1;
+    switch (current->team) {
+        case TransportTeam::kWorld:
+            if (current->peer < 0 || current->peer >= topology.world_size)
+                return false;
+            expected = current->peer;
+            break;
+        case TransportTeam::kScaleUp:
+            if (current->peer < 0 ||
+                current->peer >= topology.scale_up_size)
+                return false;
+            expected = topology.scale_out_rank * topology.scale_up_size +
+                current->peer;
+            break;
+        case TransportTeam::kScaleOut:
+            if (current->peer < 0 ||
+                current->peer >= topology.scale_out_size)
+                return false;
+            expected = current->peer * topology.scale_up_size +
+                topology.scale_up_rank;
+            break;
+        default: return false;
+    }
+    return expected == current->world_peer;
+}
+
 __aicore__ inline __gm__ StagedTransportContext* staged_context(
     const DeviceTransportContext& context) {
     return reinterpret_cast<__gm__ StagedTransportContext*>(
@@ -227,14 +293,25 @@ __aicore__ inline void record_error(
     aicore::flush_cacheline(output);
     if (output->error != DeviceTransportError::kNone)
         return;
+    (void)peer;
     output->command_index = command_index;
     output->opcode = opcode;
-    output->peer = static_cast<std::uint32_t>(peer);
     output->channel = channel;
     output->backend_status = backend_status;
     output->error = error;
     aicore::system_fence();
     aicore::flush_cacheline(output);
+}
+
+__aicore__ inline void record_route(
+    __gm__ TransportCommandQueue* queue,
+    __gm__ const TransportCommand* current) {
+    auto* output = diagnostic(queue);
+    if (output == nullptr || current == nullptr)
+        return;
+    output->peer = static_cast<std::uint32_t>(current->peer);
+    output->world_peer = current->world_peer;
+    output->team = current->team;
 }
 
 __aicore__ inline __gm__ cann_abi::Team* team(
@@ -371,10 +448,7 @@ __aicore__ inline bool drain_channel(
                     output->cq_head = expected;
                     output->cq_tail = tail;
                     output->backend_status = word0;
-                    output->reserved[0] = head_value;
-                    output->reserved[1] = aicore::load_device(
-                        reinterpret_cast<__gm__ std::uint32_t*>(
-                            peer.sq->tail));
+                    output->reserved = head_value;
                 }
             }
             record_error(
@@ -576,8 +650,8 @@ __aicore__ inline bool execute_signal(
     std::uint64_t retry_limit,
     const AscendC::LocalTensor<std::uint32_t>& wqe_scratch) {
     auto* transport_team = team(context);
-    if (transport_team == nullptr || current->peer < 0 ||
-        static_cast<std::uint32_t>(current->peer) >=
+    if (transport_team == nullptr || current->world_peer < 0 ||
+        static_cast<std::uint32_t>(current->world_peer) >=
             transport_team->member_count)
         return false;
     std::uint64_t remote_address = 0;
@@ -597,21 +671,22 @@ __aicore__ inline bool execute_signal(
             (static_cast<std::uint64_t>(current->signal_index) *
                  transport_team->member_count +
              transport_team->self_member) * sizeof(std::uint64_t);
-        remote_address = memories[current->peer].address + offset;
+        remote_address = memories[current->world_peer].address + offset;
     } else if (current->action_kind == RemoteActionKind::kSignalAdd) {
         const auto logical = context.local_window_base +
             current->symmetric_offset;
         if (!resolve_remote_target(
-                context, static_cast<std::uint32_t>(current->peer), logical,
+                context, static_cast<std::uint32_t>(current->world_peer), logical,
                 sizeof(std::uint64_t), remote_address))
             return false;
     } else {
         return false;
     }
     return post_faa(
-        context, queue, static_cast<std::uint32_t>(current->peer),
+        context, queue, static_cast<std::uint32_t>(current->world_peer),
         remote_address,
-        default_fetch_result(context, static_cast<std::uint32_t>(current->peer)),
+        default_fetch_result(
+            context, static_cast<std::uint32_t>(current->world_peer)),
         current->value, command_index, current->opcode, retry_limit,
         wqe_scratch);
 }
@@ -765,6 +840,7 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
     for (std::uint32_t index = 0; index < count; ++index) {
         auto* current = commands + index;
         aicore::flush_cacheline(current);
+        detail::record_route(queue, current);
         bool success = true;
         if (current->opcode == TransportCommandOpcode::kFlush) {
             success = detail::drain_all(
@@ -782,11 +858,12 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                 detail::record_error(
                     queue, DeviceTransportError::kInvalidQueue, index,
                     current->opcode, 0, current->channel);
-        } else if (current->peer < 0 ||
-                   current->peer >= context.topology.world_size) {
+        } else if (!detail::valid_command_route(context, current) ||
+                   current->world_peer < 0 ||
+                   current->world_peer >= context.topology.world_size) {
             detail::record_error(
                 queue, DeviceTransportError::kInvalidRank, index,
-                current->opcode, current->peer, current->channel);
+                current->opcode, current->world_peer, current->channel);
             success = false;
         } else if (current->opcode == TransportCommandOpcode::kSignal) {
             success = detail::execute_signal(
@@ -794,10 +871,10 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
             if (!success)
                 detail::record_error(
                     queue, DeviceTransportError::kInvalidAddress, index,
-                    current->opcode, current->peer, current->channel);
+                    current->opcode, current->world_peer, current->channel);
         } else {
             auto peer = detail::resolve_context(
-                context, static_cast<std::uint32_t>(current->peer),
+                context, static_cast<std::uint32_t>(current->world_peer),
                 current->channel);
             std::uint64_t remote_address = 0;
             const std::uint64_t bytes =
@@ -805,11 +882,11 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                     current->bytes : sizeof(std::uint64_t);
             if (peer.channel == nullptr ||
                 !detail::resolve_remote_target(
-                    context, static_cast<std::uint32_t>(current->peer),
+                    context, static_cast<std::uint32_t>(current->world_peer),
                     current->destination, bytes, remote_address)) {
                 detail::record_error(
                     queue, DeviceTransportError::kInvalidAddress, index,
-                    current->opcode, current->peer, current->channel);
+                    current->opcode, current->world_peer, current->channel);
                 success = false;
             } else if (current->opcode == TransportCommandOpcode::kPut) {
                 auto* local = detail::resolve_buffer(
@@ -824,7 +901,7 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                     current->bytes > 0xffffffffULL) {
                     detail::record_error(
                         queue, DeviceTransportError::kInvalidAddress, index,
-                        current->opcode, current->peer, current->channel);
+                        current->opcode, current->world_peer, current->channel);
                     success = false;
                 } else {
                     const auto sq = detail::snapshot_sq(peer.sq);
@@ -848,7 +925,7 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                 if (remote == nullptr) {
                     detail::record_error(
                         queue, DeviceTransportError::kInvalidAddress, index,
-                        current->opcode, current->peer, current->channel);
+                        current->opcode, current->world_peer, current->channel);
                     success = false;
                 } else {
                     const auto sq = detail::snapshot_sq(peer.sq);
@@ -865,16 +942,18 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                        TransportCommandOpcode::kRemoteAdd64) {
                 success = detail::post_faa(
                     context, queue,
-                    static_cast<std::uint32_t>(current->peer),
+                    static_cast<std::uint32_t>(current->world_peer),
                     remote_address,
                     detail::default_fetch_result(
-                        context, static_cast<std::uint32_t>(current->peer)),
+                        context,
+                        static_cast<std::uint32_t>(current->world_peer)),
                     current->value, index, current->opcode, retry_limit,
                     wqe_scratch);
             } else {
                 detail::record_error(
                     queue, DeviceTransportError::kUnsupportedOperation,
-                    index, current->opcode, current->peer, current->channel);
+                    index, current->opcode, current->world_peer,
+                    current->channel);
                 success = false;
             }
         }

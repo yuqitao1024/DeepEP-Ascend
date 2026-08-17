@@ -8,7 +8,7 @@
 
 namespace deep_ep::ascend::transport {
 
-inline constexpr std::uint32_t kTransportCommandAbiVersion = 1;
+inline constexpr std::uint32_t kTransportCommandAbiVersion = 2;
 inline constexpr std::uint32_t kStagedTransportCannCompatibility =
     0x00090200U;
 
@@ -47,7 +47,7 @@ struct alignas(64) TransportCommand {
     DeviceOptions options = kDefaultOptions;
     std::uint32_t value_bytes = 0;
     std::uint32_t signal_index = 0;
-    std::uint32_t reserved0 = 0;
+    std::int32_t world_peer = 0;
     DeviceAddress source = kNullDeviceAddress;
     DeviceAddress destination = kNullDeviceAddress;
     std::uint64_t bytes = 0;
@@ -92,7 +92,10 @@ struct alignas(64) DeviceTransportDiagnostic {
     std::uint32_t cq_tail = 0;
     std::uint32_t backend_status = 0;
     std::uint64_t generation = 0;
-    std::uint64_t reserved[2]{};
+    std::int32_t world_peer = 0;
+    TransportTeam team = TransportTeam::kWorld;
+    std::uint8_t reserved0[3]{};
+    std::uint64_t reserved = 0;
 };
 
 struct alignas(64) StagedTransportContext {
@@ -121,6 +124,52 @@ static_assert(std::is_trivially_copyable_v<StagedTransportContext>);
 
 namespace command {
 
+inline constexpr bool checked_world_peer(
+    const TransportTopology& topology, TransportTeam team, int peer,
+    int* world_peer) {
+    if (world_peer == nullptr || topology.world_size <= 0 ||
+        topology.scale_up_size <= 0 || topology.scale_out_size <= 0 ||
+        topology.world_rank < 0 ||
+        topology.world_rank >= topology.world_size ||
+        topology.scale_up_rank < 0 ||
+        topology.scale_up_rank >= topology.scale_up_size ||
+        topology.scale_out_rank < 0 ||
+        topology.scale_out_rank >= topology.scale_out_size ||
+        static_cast<std::int64_t>(topology.scale_up_size) *
+                topology.scale_out_size != topology.world_size ||
+        topology.scale_up_rank !=
+            topology.world_rank % topology.scale_up_size ||
+        topology.scale_out_rank !=
+            topology.world_rank / topology.scale_up_size)
+        return false;
+
+    int translated = -1;
+    switch (team) {
+        case TransportTeam::kWorld:
+            if (peer < 0 || peer >= topology.world_size)
+                return false;
+            translated = peer;
+            break;
+        case TransportTeam::kScaleUp:
+            if (peer < 0 || peer >= topology.scale_up_size)
+                return false;
+            translated = topology.scale_out_rank * topology.scale_up_size +
+                peer;
+            break;
+        case TransportTeam::kScaleOut:
+            if (peer < 0 || peer >= topology.scale_out_size)
+                return false;
+            translated = peer * topology.scale_up_size +
+                topology.scale_up_rank;
+            break;
+        default: return false;
+    }
+    if (translated < 0 || translated >= topology.world_size)
+        return false;
+    *world_peer = translated;
+    return true;
+}
+
 inline TransportCommand make_put(
     TransportTeam team, int peer, std::uint32_t channel,
     DeviceAddress destination, DeviceAddress source, std::uint64_t bytes,
@@ -131,6 +180,7 @@ inline TransportCommand make_put(
     result.scope = scope;
     result.segment = segment;
     result.peer = peer;
+    result.world_peer = peer;
     result.channel = channel;
     result.options = options;
     result.source = source;
@@ -146,6 +196,7 @@ inline TransportCommand make_put_value64(
     result.opcode = TransportCommandOpcode::kPutValue64;
     result.team = team;
     result.peer = peer;
+    result.world_peer = peer;
     result.channel = channel;
     result.options = options;
     result.value_bytes = sizeof(std::uint64_t);
@@ -161,6 +212,7 @@ inline TransportCommand make_remote_add64(
     result.opcode = TransportCommandOpcode::kRemoteAdd64;
     result.team = team;
     result.peer = peer;
+    result.world_peer = peer;
     result.channel = channel;
     result.destination = destination;
     result.value = static_cast<std::uint64_t>(value);
@@ -175,6 +227,7 @@ inline TransportCommand make_signal(
     result.team = team;
     result.action_kind = action.kind;
     result.peer = peer;
+    result.world_peer = peer;
     result.channel = channel;
     result.signal_index = action.signal_index;
     result.value = action.value;
@@ -214,15 +267,26 @@ inline TransportCommandQueue make_queue(
 
 inline void record_first_error(
     DeviceTransportDiagnostic& diagnostic, DeviceTransportError error,
-    std::uint32_t command_index, TransportCommandOpcode opcode, int peer,
-    std::uint32_t channel) {
+    std::uint32_t command_index, TransportCommandOpcode opcode,
+    TransportTeam team, int peer, int world_peer, std::uint32_t channel) {
     if (diagnostic.error != DeviceTransportError::kNone)
         return;
     diagnostic.error = error;
     diagnostic.command_index = command_index;
     diagnostic.opcode = opcode;
     diagnostic.peer = static_cast<std::uint32_t>(peer);
+    diagnostic.world_peer = world_peer;
+    diagnostic.team = team;
     diagnostic.channel = channel;
+}
+
+inline void record_first_error(
+    DeviceTransportDiagnostic& diagnostic, DeviceTransportError error,
+    std::uint32_t command_index, TransportCommandOpcode opcode, int peer,
+    std::uint32_t channel) {
+    record_first_error(
+        diagnostic, error, command_index, opcode, TransportTeam::kWorld,
+        peer, peer, channel);
 }
 
 inline void reset(TransportCommandQueue& queue, std::uint64_t generation) {
@@ -247,8 +311,9 @@ inline bool append(
                 *diagnostic,
                 commands == nullptr ? DeviceTransportError::kInvalidQueue
                                     : DeviceTransportError::kCommandOverflow,
-                queue.count, transport_command.opcode,
-                transport_command.peer, transport_command.channel);
+                queue.count, transport_command.opcode, transport_command.team,
+                transport_command.peer, transport_command.world_peer,
+                transport_command.channel);
         }
         return false;
     }

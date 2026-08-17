@@ -19,14 +19,50 @@ DEEP_EP_ASCEND_SIMT_CALLEE int local_rank(
     return -1;
 }
 
-DEEP_EP_ASCEND_SIMT_CALLEE int team_size(
-    const DeviceTransportContext& context, TransportTeam team) {
+DEEP_EP_ASCEND_SIMT_CALLEE bool checked_world_peer(
+    const TransportTopology& topology, TransportTeam team, int peer,
+    int* world_peer) {
+    if (world_peer == nullptr || topology.world_size <= 0 ||
+        topology.scale_up_size <= 0 || topology.scale_out_size <= 0 ||
+        topology.world_rank < 0 ||
+        topology.world_rank >= topology.world_size ||
+        topology.scale_up_rank < 0 ||
+        topology.scale_up_rank >= topology.scale_up_size ||
+        topology.scale_out_rank < 0 ||
+        topology.scale_out_rank >= topology.scale_out_size ||
+        static_cast<std::int64_t>(topology.scale_up_size) *
+                topology.scale_out_size != topology.world_size ||
+        topology.scale_up_rank !=
+            topology.world_rank % topology.scale_up_size ||
+        topology.scale_out_rank !=
+            topology.world_rank / topology.scale_up_size)
+        return false;
+
+    int translated = -1;
     switch (team) {
-        case TransportTeam::kWorld: return context.topology.world_size;
-        case TransportTeam::kScaleUp: return context.topology.scale_up_size;
-        case TransportTeam::kScaleOut: return context.topology.scale_out_size;
+        case TransportTeam::kWorld:
+            if (peer < 0 || peer >= topology.world_size)
+                return false;
+            translated = peer;
+            break;
+        case TransportTeam::kScaleUp:
+            if (peer < 0 || peer >= topology.scale_up_size)
+                return false;
+            translated = topology.scale_out_rank * topology.scale_up_size +
+                peer;
+            break;
+        case TransportTeam::kScaleOut:
+            if (peer < 0 || peer >= topology.scale_out_size)
+                return false;
+            translated = peer * topology.scale_up_size +
+                topology.scale_up_rank;
+            break;
+        default: return false;
     }
-    return 0;
+    if (translated < 0 || translated >= topology.world_size)
+        return false;
+    *world_peer = translated;
+    return true;
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE __gm__ TransportCommandQueue* command_queue(
@@ -91,7 +127,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE __gm__ std::uint64_t* signal_address(
 
 DEEP_EP_ASCEND_SIMT_CALLEE void record_error(
     __gm__ TransportCommandQueue* queue, DeviceTransportError error,
-    TransportCommandOpcode opcode, int peer, DeviceChannel channel) {
+    TransportCommandOpcode opcode, TransportTeam team, int peer,
+    int world_peer, DeviceChannel channel) {
     auto* output = diagnostic(queue);
     if (output == nullptr ||
         simt::load_observed(reinterpret_cast<__gm__ std::uint32_t*>(
@@ -106,11 +143,22 @@ DEEP_EP_ASCEND_SIMT_CALLEE void record_error(
         reinterpret_cast<__gm__ std::uint32_t*>(&output->opcode),
         static_cast<std::uint32_t>(opcode));
     simt::store_published(&output->peer, static_cast<std::uint32_t>(peer));
+    simt::store_published(&output->world_peer, world_peer);
+    simt::store_published(
+        reinterpret_cast<__gm__ std::uint8_t*>(&output->team),
+        static_cast<std::uint8_t>(team));
     simt::store_published(&output->channel, channel);
     simt::system_fence();
     simt::store_published(
         reinterpret_cast<__gm__ std::uint32_t*>(&output->error),
         static_cast<std::uint32_t>(error));
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void record_error(
+    __gm__ TransportCommandQueue* queue, DeviceTransportError error,
+    TransportCommandOpcode opcode, int peer, DeviceChannel channel) {
+    record_error(
+        queue, error, opcode, TransportTeam::kWorld, peer, peer, channel);
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE bool validate_queue(
@@ -135,25 +183,21 @@ DEEP_EP_ASCEND_SIMT_CALLEE bool validate_queue(
     return true;
 }
 
-DEEP_EP_ASCEND_SIMT_CALLEE bool validate_peer(
+DEEP_EP_ASCEND_SIMT_CALLEE bool translate_peer(
     const DeviceTransportContext& context, __gm__ TransportCommandQueue* queue,
     TransportTeam team, int peer, DeviceChannel channel,
-    TransportCommandOpcode opcode) {
+    TransportCommandOpcode opcode, int* world_peer) {
     if (channel != 0) {
         record_error(
-            queue, DeviceTransportError::kInvalidChannel, opcode, peer,
-            channel);
+            queue, DeviceTransportError::kInvalidChannel, opcode, team, peer,
+            -1, channel);
         return false;
     }
-    if (team == TransportTeam::kScaleOut) {
+    if (!checked_world_peer(
+            context.topology, team, peer, world_peer)) {
         record_error(
-            queue, DeviceTransportError::kUnsupportedOperation, opcode, peer,
+            queue, DeviceTransportError::kInvalidRank, opcode, team, peer, -1,
             channel);
-        return false;
-    }
-    if (peer < 0 || peer >= team_size(context, team)) {
-        record_error(
-            queue, DeviceTransportError::kInvalidRank, opcode, peer, channel);
         return false;
     }
     return true;
@@ -167,7 +211,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE bool append(
     if (count >= capacity) {
         record_error(
             queue, DeviceTransportError::kCommandOverflow,
-            transport_command.opcode, transport_command.peer,
+            transport_command.opcode, transport_command.team,
+            transport_command.peer, transport_command.world_peer,
             transport_command.channel);
         return false;
     }
@@ -192,10 +237,12 @@ DEEP_EP_ASCEND_SIMT_CALLEE bool append(
 
 DEEP_EP_ASCEND_SIMT_CALLEE __gm__ TransportCommandQueue* prepare(
     const DeviceTransportContext& context, DeviceChannel channel,
-    TransportTeam team, int peer, TransportCommandOpcode opcode) {
+    TransportTeam team, int peer, TransportCommandOpcode opcode,
+    int* world_peer) {
     auto* queue = command_queue(context);
     if (!validate_queue(queue, opcode, peer, channel) ||
-        !validate_peer(context, queue, team, peer, channel, opcode))
+        !translate_peer(
+            context, queue, team, peer, channel, opcode, world_peer))
         return nullptr;
     return queue;
 }
@@ -229,16 +276,18 @@ DEEP_EP_ASCEND_SIMT_CALLEE void put(
     const RemoteAction& remote_action) {
     if (threadIdx.x != 0)
         return;
+    int world_peer = -1;
     auto* queue = detail::prepare(
         context, channel, team, destination_rank,
-        TransportCommandOpcode::kPut);
+        TransportCommandOpcode::kPut, &world_peer);
     if (queue == nullptr)
         return;
     if (destination == kNullDeviceAddress || source == kNullDeviceAddress ||
         bytes == 0) {
         detail::record_error(
             queue, DeviceTransportError::kInvalidAddress,
-            TransportCommandOpcode::kPut, destination_rank, channel);
+            TransportCommandOpcode::kPut, team, destination_rank, world_peer,
+            channel);
         return;
     }
     if (scope != CooperationScope::kParticipant ||
@@ -246,7 +295,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE void put(
         remote_action.kind != RemoteActionKind::kNone) {
         detail::record_error(
             queue, DeviceTransportError::kUnsupportedOperation,
-            TransportCommandOpcode::kPut, destination_rank, channel);
+            TransportCommandOpcode::kPut, team, destination_rank, world_peer,
+            channel);
         return;
     }
 
@@ -256,6 +306,7 @@ DEEP_EP_ASCEND_SIMT_CALLEE void put(
     command.scope = scope;
     command.segment = segment;
     command.peer = destination_rank;
+    command.world_peer = world_peer;
     command.channel = channel;
     command.options = options;
     command.source = source;
@@ -275,22 +326,25 @@ DEEP_EP_ASCEND_SIMT_CALLEE void put_value(
     std::uint64_t value, std::uint32_t value_bytes, DeviceOptions options) {
     if (threadIdx.x != 0)
         return;
+    int world_peer = -1;
     auto* queue = detail::prepare(
         context, channel, team, destination_rank,
-        TransportCommandOpcode::kPutValue64);
+        TransportCommandOpcode::kPutValue64, &world_peer);
     if (queue == nullptr)
         return;
     if (destination == kNullDeviceAddress) {
         detail::record_error(
             queue, DeviceTransportError::kInvalidAddress,
-            TransportCommandOpcode::kPutValue64, destination_rank, channel);
+            TransportCommandOpcode::kPutValue64, team, destination_rank,
+            world_peer, channel);
         return;
     }
     if (value_bytes != sizeof(std::uint64_t) ||
         options != kDefaultOptions) {
         detail::record_error(
             queue, DeviceTransportError::kUnsupportedOperation,
-            TransportCommandOpcode::kPutValue64, destination_rank, channel);
+            TransportCommandOpcode::kPutValue64, team, destination_rank,
+            world_peer, channel);
         return;
     }
 
@@ -298,6 +352,7 @@ DEEP_EP_ASCEND_SIMT_CALLEE void put_value(
     command.opcode = TransportCommandOpcode::kPutValue64;
     command.team = team;
     command.peer = destination_rank;
+    command.world_peer = world_peer;
     command.channel = channel;
     command.options = options;
     command.value_bytes = value_bytes;
@@ -312,15 +367,17 @@ DEEP_EP_ASCEND_SIMT_CALLEE void remote_add_release(
     std::int64_t value) {
     if (threadIdx.x != 0)
         return;
+    int world_peer = -1;
     auto* queue = detail::prepare(
         context, channel, team, destination_rank,
-        TransportCommandOpcode::kRemoteAdd64);
+        TransportCommandOpcode::kRemoteAdd64, &world_peer);
     if (queue == nullptr)
         return;
     if (destination == kNullDeviceAddress) {
         detail::record_error(
             queue, DeviceTransportError::kInvalidAddress,
-            TransportCommandOpcode::kRemoteAdd64, destination_rank, channel);
+            TransportCommandOpcode::kRemoteAdd64, team, destination_rank,
+            world_peer, channel);
         return;
     }
 
@@ -329,6 +386,7 @@ DEEP_EP_ASCEND_SIMT_CALLEE void remote_add_release(
     command.opcode = TransportCommandOpcode::kRemoteAdd64;
     command.team = team;
     command.peer = destination_rank;
+    command.world_peer = world_peer;
     command.channel = channel;
     command.destination = destination;
     command.value = static_cast<std::uint64_t>(value);
@@ -341,16 +399,18 @@ DEEP_EP_ASCEND_SIMT_CALLEE void signal(
     const RemoteAction& remote_action) {
     if (threadIdx.x != 0)
         return;
+    int world_peer = -1;
     auto* queue = detail::prepare(
         context, channel, team, destination_rank,
-        TransportCommandOpcode::kSignal);
+        TransportCommandOpcode::kSignal, &world_peer);
     if (queue == nullptr)
         return;
     if (remote_action.kind != RemoteActionKind::kSignalAdd &&
         remote_action.kind != RemoteActionKind::kSignalIncrement) {
         detail::record_error(
             queue, DeviceTransportError::kUnsupportedOperation,
-            TransportCommandOpcode::kSignal, destination_rank, channel);
+            TransportCommandOpcode::kSignal, team, destination_rank,
+            world_peer, channel);
         return;
     }
 
@@ -360,6 +420,7 @@ DEEP_EP_ASCEND_SIMT_CALLEE void signal(
     command.team = team;
     command.action_kind = remote_action.kind;
     command.peer = destination_rank;
+    command.world_peer = world_peer;
     command.channel = channel;
     command.signal_index = remote_action.signal_index;
     command.symmetric_offset = remote_action.symmetric_offset;
@@ -370,9 +431,11 @@ DEEP_EP_ASCEND_SIMT_CALLEE void signal(
 DEEP_EP_ASCEND_SIMT_CALLEE SignalValue read_signal(
     const DeviceTransportContext& context, DeviceChannel channel,
     TransportTeam team, int source_rank, std::uint32_t signal_index) {
-    if (channel != 0 || team == TransportTeam::kScaleOut)
+    int world_peer = -1;
+    if (channel != 0 || !detail::checked_world_peer(
+            context.topology, team, source_rank, &world_peer))
         return 0;
-    auto* address = detail::signal_address(context, source_rank, signal_index);
+    auto* address = detail::signal_address(context, world_peer, signal_index);
     if (address == nullptr)
         return 0;
     const auto value = simt::load_observed(address);
@@ -384,14 +447,22 @@ DEEP_EP_ASCEND_SIMT_CALLEE void wait_signal(
     const DeviceTransportContext& context, DeviceChannel channel,
     TransportTeam team, int source_rank, std::uint32_t signal_index,
     SignalValue target, std::uint64_t timeout_cycles) {
-    if (channel != 0 || team == TransportTeam::kScaleOut)
-        return;
-    auto* address = detail::signal_address(context, source_rank, signal_index);
     auto* queue = detail::command_queue(context);
+    int world_peer = -1;
+    if (channel != 0 || !detail::checked_world_peer(
+            context.topology, team, source_rank, &world_peer)) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidRank,
+            TransportCommandOpcode::kSignal, team, source_rank, world_peer,
+            channel);
+        return;
+    }
+    auto* address = detail::signal_address(context, world_peer, signal_index);
     if (address == nullptr) {
         detail::record_error(
             queue, DeviceTransportError::kInvalidAddress,
-            TransportCommandOpcode::kSignal, source_rank, channel);
+            TransportCommandOpcode::kSignal, team, source_rank, world_peer,
+            channel);
         return;
     }
     const auto limit = timeout_cycles == 0 ?
@@ -402,7 +473,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE void wait_signal(
     if (retry >= limit) {
         detail::record_error(
             queue, DeviceTransportError::kCompletionTimeout,
-            TransportCommandOpcode::kSignal, source_rank, channel);
+            TransportCommandOpcode::kSignal, team, source_rank, world_peer,
+            channel);
         return;
     }
     simt::system_fence();

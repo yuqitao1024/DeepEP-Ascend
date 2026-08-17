@@ -102,11 +102,41 @@ void check_completion_timeout_is_finite() {
     CHECK(diagnostic.command_index == 1);
 }
 
+void check_service_uses_translated_world_peer() {
+    transport::TransportTopology topology{};
+    topology.world_rank = 1;
+    topology.world_size = 4;
+    topology.scale_up_rank = 1;
+    topology.scale_up_size = 2;
+    topology.scale_out_rank = 0;
+    topology.scale_out_size = 2;
+    auto command = transport::command::make_put_value64(
+        transport::TransportTeam::kScaleOut, 1, 0, 0x1000, 9,
+        transport::kDefaultOptions);
+    command.world_peer = 3;
+
+    auto state = service::model::make_state(topology, 8);
+    transport::DeviceTransportDiagnostic diagnostic{};
+    CHECK(service::model::execute(&command, 1, state, diagnostic));
+    CHECK(state.executed_count == 1);
+    CHECK(diagnostic.error == transport::DeviceTransportError::kNone);
+
+    command.world_peer = 2;
+    state = service::model::make_state(topology, 8);
+    diagnostic = {};
+    CHECK(!service::model::execute(&command, 1, state, diagnostic));
+    CHECK(diagnostic.error == transport::DeviceTransportError::kInvalidRank);
+    CHECK(diagnostic.team == transport::TransportTeam::kScaleOut);
+    CHECK(diagnostic.peer == 1);
+    CHECK(diagnostic.world_peer == 2);
+}
+
 }  // namespace
 
 int main() {
     check_order_flush_and_barrier();
     check_validation_stops_before_later_commands();
     check_completion_timeout_is_finite();
+    check_service_uses_translated_world_peer();
     return failures == 0 ? 0 : 1;
 }

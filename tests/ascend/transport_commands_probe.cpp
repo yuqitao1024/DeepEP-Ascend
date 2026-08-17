@@ -29,6 +29,7 @@ static_assert(offsetof(transport::TransportCommand, channel) == 12);
 static_assert(offsetof(transport::TransportCommand, options) == 16);
 static_assert(offsetof(transport::TransportCommand, value_bytes) == 20);
 static_assert(offsetof(transport::TransportCommand, signal_index) == 24);
+static_assert(offsetof(transport::TransportCommand, world_peer) == 28);
 static_assert(offsetof(transport::TransportCommand, source) == 32);
 static_assert(offsetof(transport::TransportCommand, destination) == 40);
 static_assert(offsetof(transport::TransportCommand, bytes) == 48);
@@ -38,7 +39,61 @@ static_assert(offsetof(transport::TransportCommand, timeout_cycles) == 72);
 static_assert(sizeof(transport::TransportCommandQueue) == 64);
 static_assert(sizeof(transport::TransportServiceState) == 64);
 static_assert(sizeof(transport::DeviceTransportDiagnostic) == 64);
+static_assert(offsetof(transport::DeviceTransportDiagnostic, peer) == 16);
+static_assert(offsetof(transport::DeviceTransportDiagnostic, world_peer) == 48);
+static_assert(offsetof(transport::DeviceTransportDiagnostic, team) == 52);
 static_assert(sizeof(transport::StagedTransportContext) == 64);
+
+void check_team_peer_translation() {
+    transport::TransportTopology topology{};
+    topology.world_rank = 1;
+    topology.world_size = 4;
+    topology.scale_up_rank = 1;
+    topology.scale_up_size = 2;
+    topology.scale_out_rank = 0;
+    topology.scale_out_size = 2;
+
+    int world_peer = -1;
+    CHECK(transport::command::checked_world_peer(
+        topology, transport::TransportTeam::kWorld, 3, &world_peer));
+    CHECK(world_peer == 3);
+    CHECK(transport::command::checked_world_peer(
+        topology, transport::TransportTeam::kScaleUp, 0, &world_peer));
+    CHECK(world_peer == 0);
+    CHECK(transport::command::checked_world_peer(
+        topology, transport::TransportTeam::kScaleOut, 1, &world_peer));
+    CHECK(world_peer == 3);
+
+    CHECK(!transport::command::checked_world_peer(
+        topology, transport::TransportTeam::kScaleOut, 2, &world_peer));
+    CHECK(!transport::command::checked_world_peer(
+        topology, static_cast<transport::TransportTeam>(99), 0, &world_peer));
+    CHECK(!transport::command::checked_world_peer(
+        topology, transport::TransportTeam::kWorld, 0, nullptr));
+
+    auto malformed = topology;
+    malformed.world_size = 5;
+    CHECK(!transport::command::checked_world_peer(
+        malformed, transport::TransportTeam::kScaleOut, 1, &world_peer));
+    malformed = topology;
+    malformed.scale_up_rank = 0;
+    CHECK(!transport::command::checked_world_peer(
+        malformed, transport::TransportTeam::kScaleUp, 0, &world_peer));
+
+    transport::TransportTopology flat{};
+    flat.world_rank = 2;
+    flat.world_size = 4;
+    flat.scale_up_rank = 2;
+    flat.scale_up_size = 4;
+    flat.scale_out_rank = 0;
+    flat.scale_out_size = 1;
+    CHECK(transport::command::checked_world_peer(
+        flat, transport::TransportTeam::kScaleUp, 3, &world_peer));
+    CHECK(world_peer == 3);
+    CHECK(transport::command::checked_world_peer(
+        flat, transport::TransportTeam::kScaleOut, 0, &world_peer));
+    CHECK(world_peer == 2);
+}
 
 void check_factories() {
     const auto put = transport::command::make_put(
@@ -48,6 +103,7 @@ void check_factories() {
     CHECK(put.opcode == transport::TransportCommandOpcode::kPut);
     CHECK(put.team == transport::TransportTeam::kWorld);
     CHECK(put.peer == 2);
+    CHECK(put.world_peer == 2);
     CHECK(put.source == 0x2220);
     CHECK(put.destination == 0x1110);
     CHECK(put.bytes == 96);
@@ -118,6 +174,9 @@ void check_queue_model() {
     CHECK(diagnostic.error ==
           transport::DeviceTransportError::kCommandOverflow);
     CHECK(diagnostic.command_index == 3);
+    CHECK(diagnostic.team == transport::TransportTeam::kWorld);
+    CHECK(diagnostic.peer == 0);
+    CHECK(diagnostic.world_peer == 0);
 
     transport::command::record_first_error(
         diagnostic, transport::DeviceTransportError::kInvalidRank, 1,
@@ -144,6 +203,7 @@ void check_barrier_poll_timeout() {
 }  // namespace
 
 int main() {
+    check_team_peer_translation();
     check_factories();
     check_queue_model();
     check_barrier_poll_timeout();

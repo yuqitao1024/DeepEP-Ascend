@@ -377,22 +377,23 @@ public:
                 write_error(
                     error, error_capacity,
                     "semantic failure: case=%u generation=%llu success=%u "
-                    "diagnostic=%u opcode=%u peer=%u channel=%u "
+                    "diagnostic=%u opcode=%u team=%u logical_peer=%u "
+                    "world_peer=%d channel=%u "
                     "sq_position=%u cq_expected=%u cq_tail=%u "
-                    "cqe_word0=0x%08x raw_sq_head=0x%llx sq_tail=%llu "
+                    "cqe_word0=0x%08x raw_sq_head=0x%llx "
                     "observed=0x%llx",
                     static_cast<unsigned>(runtime_case),
                     static_cast<unsigned long long>(generation), state.success,
                     static_cast<unsigned>(state.diagnostic.error),
                     static_cast<unsigned>(state.diagnostic.opcode),
-                    state.diagnostic.peer, state.diagnostic.channel,
+                    static_cast<unsigned>(state.diagnostic.team),
+                    state.diagnostic.peer, state.diagnostic.world_peer,
+                    state.diagnostic.channel,
                     state.diagnostic.sq_head, state.diagnostic.cq_head,
                     state.diagnostic.cq_tail,
                     state.diagnostic.backend_status,
                     static_cast<unsigned long long>(
-                        state.diagnostic.reserved[0]),
-                    static_cast<unsigned long long>(
-                        state.diagnostic.reserved[1]),
+                        state.diagnostic.reserved),
                     static_cast<unsigned long long>(state.observed));
                 return false;
             }
