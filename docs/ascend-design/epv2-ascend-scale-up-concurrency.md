@@ -9,10 +9,10 @@ also defines safe ownership and concurrency for multiple `ElasticBuffer`
 instances.
 
 The implementation is rank-parameterized and must not contain a production
-`world_size == 2` gate or fixed two-entry rank storage. The current acceptance
-environment provides two NPUs, so this phase records full runtime acceptance
-for two ranks only. Four-rank and eight-rank acceptance use the same code path
-and will be added when those environments are available.
+`world_size == 2` gate or fixed two-entry rank storage. NPU8P acceptance now
+covers the complete two-rank matrix plus four-rank and eight-rank public BF16
+smoke paths. The larger-rank smoke tests use the same production code path;
+their complete failure and lifecycle matrices remain open.
 
 ## Scope
 
@@ -26,7 +26,8 @@ Phase 3B includes:
 - concurrent operation of independent `ElasticBuffer` instances;
 - buffer-scoped queue, workspace, window, generation, diagnostic, poison, and
   destruction state; and
-- host/model coverage beyond two ranks plus full two-NPU runtime regression.
+- host/model coverage beyond two ranks, full two-NPU runtime regression, and
+  public four-NPU and eight-NPU scale-up smoke coverage.
 
 Phase 3B does not include:
 
@@ -222,12 +223,13 @@ including buffers with the same topology and shape.
 3. Parameterize public sizing, buffer validation, operator capacities,
    production runtime admission, and internal launch validation.
 4. Add a buffer operation coordinator and concurrency/lifecycle probes.
-5. Run local platform and host-model coverage, build all Ascend kernels, then
-   run the complete two-NPU barrier/dispatch/combine/lifecycle matrix.
+5. Run local platform and host-model coverage, build all Ascend kernels, run
+   the complete two-NPU barrier/dispatch/combine/lifecycle matrix, and run
+   public four-NPU and eight-NPU BF16 scale-up smoke tests.
 
 ## Acceptance
 
-### Required for the two-rank implementation closeout
+### Required for the implementation closeout
 
 - host layout and tiling probes pass for 2, 4, and 8 ranks, including
   asymmetric counts, empty ranks, near-capacity sizing, overflow, and malformed
@@ -244,15 +246,18 @@ including buffers with the same topology and shape.
 - two-NPU public BF16 barrier, dispatch, and combine reference matrices pass,
   including asymmetric routing, empty input, cached handles, expanded modes,
   near-capacity cases, repeated generations, and cross-buffer handle rejection;
-  and
-- two independent buffers pass a two-NPU interleaved operation matrix.
+- two independent buffers pass a two-NPU interleaved operation matrix; and
+- four-NPU and eight-NPU public smoke tests pass barrier followed by a BF16
+  dispatch/combine all-to-all round trip using rank-derived experts, tokens,
+  layouts, and routing.
 
 ### Full Phase 3B topology qualification
 
-Four-NPU and eight-NPU public BF16 barrier, dispatch, combine, repeated
-generation, failure, and teardown matrices remain required for full Phase 3B
-topology qualification. They are deferred until suitable environments are
-available. The implementation may be integrated after the two-rank closeout,
-but Phase 3B topology qualification remains explicitly open. This acceptance
-gap is not a production rank gate and is not evidence that a separate code
-path is needed.
+Four-NPU and eight-NPU public BF16 barrier and dispatch/combine round-trip
+smoke tests pass on NPU8P. Complete four-NPU and eight-NPU reference matrices,
+including asymmetric and near-capacity routing, repeated generations, failure
+injection, and teardown, remain required for full Phase 3B topology
+qualification. The implementation may be integrated after the current
+closeout, but this broader qualification remains explicitly open. This
+acceptance gap is not a production rank gate and is not evidence that a
+separate code path is needed.

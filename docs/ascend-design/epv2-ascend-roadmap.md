@@ -129,21 +129,22 @@ desirable, but are deferred and do not block Phase 3B.
 
 ### Acceptance
 
-- every selected scale-up topology passes public BF16 barrier, dispatch, and
+- the two-rank topology passes the complete public BF16 barrier, dispatch, and
   combine reference matrices;
+- the selected four-rank and eight-rank topologies pass public BF16 barrier and
+  dispatch/combine round-trip smoke tests;
 - concurrent operations cannot consume stale control or payload records;
 - timeout diagnostics identify rank, peer, operation, command, channel, and
   generation; and
 - repeated teardown is safe after success, timeout, launch failure, and
   partial initialization.
 
-The implementation is rank-parameterized and is not gated to the currently
-available device count. The current NPU8P agent policy permits at most two
-devices per submitted task, so the two-rank implementation closeout may land
-after its complete runtime matrix passes while full Phase 3B topology
-qualification remains open. Four-rank and eight-rank runtime acceptance still
-requires an explicitly approved test environment or a revised task policy.
-The roadmap does not authorize bypassing the current device limit.
+The implementation is rank-parameterized and is not gated to a selected device
+count. NPU8P has passed the complete two-rank matrix and public four-rank and
+eight-rank BF16 barrier/dispatch/combine smoke tests. Full four-rank and
+eight-rank asymmetric, near-capacity, repeated-generation, failure, and
+teardown matrices remain open for topology qualification; that gap is not a
+runtime rank gate.
 
 ## Phase 3C: Cross-Host Scale-Out And RoCE
 

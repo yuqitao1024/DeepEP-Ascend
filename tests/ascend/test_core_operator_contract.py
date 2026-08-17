@@ -32,6 +32,8 @@ TWO_RANK_DISPATCH = \
     ROOT / "tests/ascend/production/run_two_rank_dispatch.py"
 TWO_RANK_COMBINE = \
     ROOT / "tests/ascend/production/run_two_rank_combine.py"
+SCALE_UP_SMOKE = \
+    ROOT / "tests/ascend/production/run_scale_up_smoke.py"
 ELASTIC = ROOT / "csrc/backends/ascend/elastic"
 CORE_OPS = ROOT / "tests/ascend/core_ops"
 
@@ -473,8 +475,15 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         epilogue = source[producer_end:]
         self.assertRegex(
             epilogue,
+            r"observed_header\s*=\s*"
+            r"load_observed_combine_record_header\(header\)")
+        self.assertRegex(
+            epilogue,
             r"is_valid_combine_origin_token\(\s*"
-            r"header->origin_token,\s*num_tokens,\s*shard_capacity\)")
+            r"observed_header\.origin_token,\s*num_tokens,\s*"
+            r"shard_capacity\)")
+        self.assertNotIn("header->", epilogue)
+        self.assertNotIn("prior_header->", epilogue)
         self.assertIn("is_valid_combine_record_lanes(", epilogue)
 
     def test_rank_indexed_kernel_state_uses_workspace_views(self):
@@ -1466,6 +1475,26 @@ int main() {
                     "rank1": [[36.0, 38.0, 40.0, 42.0]],
                 },
                 "system_under_test": ["Buffer.dispatch", "Buffer.combine"],
+            })
+
+    def test_rank_parameterized_scale_up_smoke_contract(self):
+        result = subprocess.run(
+            ["python3", str(SCALE_UP_SMOKE), "--contract"],
+            cwd=ROOT, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "minimum_world_size": 2,
+                "rank_limit": None,
+                "cases": ["barrier", "bf16-all-to-all-round-trip"],
+                "num_experts": "world_size",
+                "num_tokens_per_rank": "world_size",
+                "system_under_test": [
+                    "ElasticBuffer.barrier",
+                    "ElasticBuffer.dispatch",
+                    "ElasticBuffer.combine",
+                ],
             })
 
 

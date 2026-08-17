@@ -17,22 +17,6 @@ def _check(condition, message):
         raise AssertionError(message)
 
 
-class _Poison:
-    def __getattr__(self, name):
-        raise AssertionError(f"deferred argument was inspected: {name}")
-
-
-def _expect_gate(operation, call):
-    try:
-        call()
-    except NotImplementedError as error:
-        message = str(error)
-        if not message.startswith(f"DeepEP Ascend backend: {operation} "):
-            raise AssertionError(message) from error
-    else:
-        raise AssertionError(f"{operation} was unexpectedly available")
-
-
 def _make_buffer(group):
     return deep_ep.ElasticBuffer(
         group,
@@ -50,6 +34,7 @@ def run(inject_diagnostic):
     dist.init_process_group(backend="hccl", timeout=timedelta(minutes=5))
     group = dist.group.WORLD
     rank = dist.get_rank(group)
+    world_size = dist.get_world_size(group)
 
     try:
         for _ in range(3):
@@ -60,9 +45,9 @@ def run(inject_diagnostic):
 
         buffer = _make_buffer(group)
         try:
-            _check(buffer.get_logical_domain_size() == (1, 2),
+            _check(buffer.get_logical_domain_size() == (1, world_size),
                    "unexpected logical domain")
-            _check(buffer.get_physical_domain_size() == (1, 2),
+            _check(buffer.get_physical_domain_size() == (1, world_size),
                    "unexpected physical domain")
             _check((buffer.scaleout_rank_idx, buffer.scaleup_rank_idx) ==
                    (0, rank), "unexpected rank mapping")
@@ -80,10 +65,6 @@ def run(inject_diagnostic):
                        "unexpected non-sequential barrier error")
             else:
                 raise AssertionError("non-sequential barrier was accepted")
-
-            poison = _Poison()
-            _expect_gate("dispatch", lambda: buffer.dispatch(poison))
-            _expect_gate("combine", lambda: buffer.combine(poison, poison))
 
             if inject_diagnostic:
                 os.environ["DEEP_EP_ASCEND_TEST_DIAGNOSTIC"] = \
@@ -119,7 +100,7 @@ def run(inject_diagnostic):
             group=group,
         )
         if rank == 0:
-            print(f"Phase 2E two-rank barrier validation passed: {gathered}",
+            print(f"Ascend {world_size}-rank barrier validation passed: {gathered}",
                   flush=True)
     finally:
         dist.destroy_process_group()
