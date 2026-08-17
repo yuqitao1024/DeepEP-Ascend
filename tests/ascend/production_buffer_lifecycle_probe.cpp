@@ -39,6 +39,11 @@ struct Trace {
     bool release_sync = false;
     std::atomic<int> sync_failures{0};
     std::atomic<int> barrier_launches{0};
+    std::atomic<int> current_device_calls{0};
+    std::atomic<int> current_stream_calls{0};
+    std::atomic<int> synchronize_stream_calls{0};
+    std::atomic<int> runtime_copy_to_host_calls{0};
+    std::atomic<int> transport_copy_from_device_calls{0};
     std::atomic<int> runtime_free_calls{0};
     std::atomic<int> host_free_calls{0};
     std::atomic<int> deregister_calls{0};
@@ -71,15 +76,20 @@ int runtime_free(void* data, void* pointer) {
     return 0;
 }
 
-int runtime_current_device(void*, int* device) {
+int runtime_current_device(void* data, int* device) {
+    ++self(data).current_device_calls;
     *device = 0;
     return 0;
 }
 
-void* runtime_current_stream(void* data) { return data; }
+void* runtime_current_stream(void* data) {
+    ++self(data).current_stream_calls;
+    return data;
+}
 
 int runtime_synchronize_stream(void* data, void*) {
     auto& trace = self(data);
+    ++trace.synchronize_stream_calls;
     {
         std::unique_lock<std::mutex> lock(trace.mutex);
         if (trace.block_sync) {
@@ -106,7 +116,8 @@ int runtime_copy_from_host(
 }
 
 int runtime_copy_to_host(
-    void*, void* destination, const void* source, std::uint64_t bytes) {
+    void* data, void* destination, const void* source, std::uint64_t bytes) {
+    ++self(data).runtime_copy_to_host_calls;
     std::memcpy(destination, source, static_cast<std::size_t>(bytes));
     return 0;
 }
@@ -173,7 +184,8 @@ int host_copy_to_device(
 }
 
 int host_copy_from_device(
-    void*, void* destination, const void* source, std::uint64_t bytes) {
+    void* data, void* destination, const void* source, std::uint64_t bytes) {
+    ++self(data).transport_copy_from_device_calls;
     std::memcpy(destination, source, static_cast<std::size_t>(bytes));
     return 0;
 }
@@ -254,6 +266,14 @@ bool error_contains(
 std::array<void*, 5> pointers(const ResourceIdentity& identity) {
     return {identity.window, identity.workspace, identity.transport_object,
             identity.queue, identity.diagnostic};
+}
+
+std::array<int, 5> resource_callback_snapshot(const Trace& trace) {
+    return {trace.current_device_calls.load(),
+            trace.current_stream_calls.load(),
+            trace.synchronize_stream_calls.load(),
+            trace.runtime_copy_to_host_calls.load(),
+            trace.transport_copy_from_device_calls.load()};
 }
 
 void check_two_live_buffer_resource_and_failure_isolation() {
@@ -365,6 +385,69 @@ void check_destroy_is_busy_while_real_operation_uses_resources() {
     CHECK(trace.destroy_team_calls == destroy_team_before + 1);
 }
 
+void check_cross_operation_busy_and_deferred_poison() {
+    Trace trace;
+    ResourceIdentity resource_identity;
+    auto buffer = make_buffer(trace, &resource_identity);
+    CHECK(buffer != nullptr);
+    if (buffer == nullptr)
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(trace.mutex);
+        trace.block_sync = true;
+    }
+    bool operation_ok = false;
+    bool operation_done = false;
+    std::thread operation([&] {
+        try {
+            buffer->barrier(false, false, true);
+            operation_ok = true;
+        } catch (...) {
+        }
+        {
+            std::lock_guard<std::mutex> lock(trace.mutex);
+            operation_done = true;
+        }
+        trace.cv.notify_all();
+    });
+    bool sync_entered = false;
+    {
+        std::unique_lock<std::mutex> lock(trace.mutex);
+        trace.cv.wait(lock, [&] { return trace.sync_entered || operation_done; });
+        sync_entered = trace.sync_entered;
+    }
+    if (!sync_entered) operation.join();
+    CHECK(sync_entered);
+    if (!sync_entered)
+        return;
+
+    const auto blocked_callbacks = resource_callback_snapshot(trace);
+    CHECK(error_contains(
+        [&] { (void)buffer->get_physical_domain_size(); },
+        "get_physical_domain_size is busy"));
+    CHECK(resource_callback_snapshot(trace) == blocked_callbacks);
+
+    {
+        std::lock_guard<std::mutex> lock(trace.mutex);
+        trace.release_sync = true;
+    }
+    trace.cv.notify_all();
+    operation.join();
+    CHECK(operation_ok);
+    CHECK(trace.barrier_launches == 1);
+
+    const auto completed_callbacks = resource_callback_snapshot(trace);
+    CHECK(error_contains(
+        [&] { (void)buffer->get_logical_domain_size(); }, "poisoned"));
+    CHECK(resource_callback_snapshot(trace) == completed_callbacks);
+    buffer->destroy();
+    CHECK(trace.runtime_free_calls > 0);
+    CHECK(trace.host_free_calls > 0);
+    CHECK(trace.deregister_calls == 1);
+    CHECK(trace.destroy_team_calls == 1);
+}
+
 }  // namespace
 
 extern "C" int deep_ep_ascend_launch_barrier(
@@ -401,5 +484,6 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 int main() {
     check_two_live_buffer_resource_and_failure_isolation();
     check_destroy_is_busy_while_real_operation_uses_resources();
+    check_cross_operation_busy_and_deferred_poison();
     return failures == 0 ? 0 : 1;
 }
