@@ -237,7 +237,7 @@ scale-up-team capabilities.
 
 Dispatch requires symmetric window, put, put-value64, signal, system ordering,
 device barrier, and scale-up team. Combine requires symmetric window, put,
-FAA, signal, system ordering, device barrier, and scale-up team.
+put-value64, signal, system ordering, device barrier, and scale-up team.
 
 Neither operation requires `kDirectPeerPointer`. Removing that bit from the
 Ascend production gate is allowed only after source and runtime tests prove
@@ -543,8 +543,8 @@ accumulated, and the result is cast once to one BF16 output token.
 
 The layout prevents two remote ranks from writing the same record. The final
 reduction is local to the origin rank, so no remote atomic floating-point
-reduction is required. Phase 2D FAA remains available for control publication,
-not payload reduction.
+reduction is required. Combine publishes generation-tagged counts with
+put-value64 and does not require FAA for control or payload publication.
 
 Combine owns a monotonic generation sequence independent of dispatch and
 barrier. Every attempted device launch consumes one generation; an incomplete
@@ -592,39 +592,43 @@ must match exactly, including zeroes for `-1` lanes. Both reduction modes must
 select the same contributors and satisfy the same reference tolerance even
 when their BF16 staging changes rounding.
 
-Acceptance includes normal and expanded inputs, aligned and near-capacity
-expanded inputs, cached dispatch handles with changed expert outputs, optional
-weights, zero/one/two biases, both reduction modes, duplicate same-rank
-experts, `-1` lanes, empty and asymmetric ranks, malformed and cross-buffer
-handles, bounded peer-failure diagnostics, repeated construct/destroy, and at
-least 100 dispatch/combine generations. The terminal NPU8P task clean-builds
-testing and production extensions, audits out CUDA/NCCL/NVSHMEM dependencies,
-and prints `PHASE2G_ACCEPTANCE=PASS` only after every case passes on both
-ranks.
+Acceptance includes normal and expanded inputs, padded extents strictly larger
+than the raw lane bound in both reduction modes, expanded weights, odd hidden
+widths with and without weights, cached dispatch handles with changed expert
+outputs, zero/one/two biases, duplicate same-rank experts, `-1` lanes, empty
+and asymmetric ranks, malformed and cross-buffer handles, bounded peer-failure
+diagnostics, repeated construct/destroy, and at least 100 dispatch/combine
+generations. The terminal NPU8P task clean-builds testing and production
+extensions, audits out CUDA/NCCL/NVSHMEM dependencies, and prints
+`PHASE2G_ACCEPTANCE=PASS` only after every case passes on both ranks.
 
-Final serialized task `task_20260817_100335_19495615895` on NPU8P devices 6
-and 7 clean-built testing and production `dav-3510` extensions from source
-commit `8d8ee64eb57810873ca5c6e064cf8b2e0d5c72b1`. It passed 74 Ascend tests,
-15 platform tests, 11 build tests, the production dependency audit, and all 19
-public two-rank cases for 38 rank-case executions. It also passed 100
+Final serialized task `task_20260817_111959_419358541` on NPU8P devices 6 and
+7 clean-built testing and production `dav-3510` extensions from source commit
+`eb46612e24bbedde1d9b60ca1931519b6117a351`. It passed 75 Ascend tests, 15
+platform tests, 11 build tests, the production dependency audit, and all 23
+public two-rank cases for 46 rank-case executions. It also passed 100
 dispatch/combine generations per rank, exact float32 routing weights, bounded
 invalid-peer diagnostics, sequence poisoning, and repeated teardown, then
 printed `PHASE2G_ACCEPTANCE=PASS` and exited zero.
 
 The accepted source archive SHA256 is
-`248a7bcabc0b0360b3905042636b357245793bbd5ef7850f62292041c46166a4`;
+`52efaa4fed3fc8a7e84a86f444ca36111e49c323a613484dd3cd246b8205b6c7`;
 the testing extension SHA256 is
-`316ef16695463ac048d171ef9345c266aa69bd257e9d5fc4b7c041b03ddcbe83`;
+`2ff7e80b4e6ab5ee14280bedb95f5a9e43fb4cb37352c80c2f14ffd2c63d25ed`;
 and the production extension SHA256 is
-`3a1b5f27f51af0aba4016de077506fe74921a386f84dbe72b86f1f66ec4597db`.
+`42e430fd2aec0174b1ba7fdbde9059d617da4790b535a020f905baa56f76dd55`.
 The production audit found no CUDA, NCCL, or NVSHMEM dependency.
 
 The task used patched HCOMM library SHA256
 `afb65298169b7810269322a32576429bcd67798a3336718a2642d2fb97332e77`,
+weekly HCOMM library SHA256
+`5be221e4a6c0e04af029f77f5b106c8f385eefcf8a2e5b0e9e5dcc8bf3c82118`,
 weekly-compatible `hccl_team.h` SHA256
 `b843960291727653cebd1f4453cb71c4ab3255743c5216e2ef17baaaf1be312b`,
 and archived lifecycle patch SHA256
 `7394982ec1c5432b3fe15898974e64441ba5a24a2bf5c110e49bb758174a9329`.
+The system CANN `set_env.sh` SHA256 was
+`ff907f2bfb0e94346489498bce054e79d591a2a9c6801544d69e88f5cf22116b`.
 The accepted protocol uses contributor-owned staging and receive shards,
 generation-tagged `{generation, count}` control slots, and an independent
 monotonic combine generation. Combined BF16 values use `rtol=1/128` and
