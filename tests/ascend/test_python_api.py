@@ -543,7 +543,9 @@ def _scenario_ascend_topology_preflight():
         group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
         explicitly_destroy=True)
     assert ("dist.all_gather_object",
-            ("logical_simulation", 2, 17, 4)) in events
+            {"ok": True,
+             "config": ("logical_simulation", 2, 17, 4),
+             "error_code": None}) in events
     assert (buffer.num_scaleout_ranks, buffer.num_scaleup_ranks) == (2, 2)
     assert (buffer.scaleout_rank_idx, buffer.scaleup_rank_idx) == (1, 1)
     assert len(extension.runtime_args) == 1
@@ -557,10 +559,18 @@ def _scenario_ascend_topology_preflight_mismatch():
     group = _FakeGroup(
         events, rank=0, size=4,
         gathered_objects=[
-            ("logical_simulation", 2, 1, 4),
-            ("logical_simulation", 2, 1, 4),
-            ("logical_simulation", 4, 1, 4),
-            ("logical_simulation", 2, 1, 4),
+            {"ok": True,
+             "config": ("logical_simulation", 2, 1, 4),
+             "error_code": None},
+            {"ok": True,
+             "config": ("logical_simulation", 2, 1, 4),
+             "error_code": None},
+            {"ok": True,
+             "config": ("logical_simulation", 4, 1, 4),
+             "error_code": None},
+            {"ok": True,
+             "config": ("logical_simulation", 2, 1, 4),
+             "error_code": None},
         ])
     try:
         deep_ep.ElasticBuffer(
@@ -570,6 +580,76 @@ def _scenario_ascend_topology_preflight_mismatch():
         assert "topology configuration differs across ranks" in str(error), error
     else:
         raise AssertionError("asymmetric Ascend topology was accepted")
+    assert not extension.runtime_args
+
+
+def _scenario_ascend_topology_preflight_local_parse_failure():
+    deep_ep, extension, events = _load_package("ascend", True)
+    os.environ["DEEP_EP_ASCEND_LOGICAL_SIMULATION"] = "1"
+    os.environ.pop("DEEP_EP_ASCEND_SCALE_UP_SIZE", None)
+    gathered = [
+        {"ok": True,
+         "config": ("logical_simulation", 2, 1, 4),
+         "error_code": None},
+        {"ok": False, "config": None,
+         "error_code": "missing_scale_up_size"},
+        {"ok": True,
+         "config": ("logical_simulation", 2, 1, 4),
+         "error_code": None},
+        {"ok": True,
+         "config": ("logical_simulation", 2, 1, 4),
+         "error_code": None},
+    ]
+    group = _FakeGroup(
+        events, rank=1, size=4, gathered_objects=gathered)
+    try:
+        deep_ep.ElasticBuffer(
+            group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+            explicitly_destroy=True)
+    except RuntimeError as error:
+        assert str(error) == (
+            "DeepEP Ascend backend: topology preflight failed on rank 1 "
+            "(missing_scale_up_size)"), error
+    else:
+        raise AssertionError("invalid local Ascend topology was accepted")
+    assert ("dist.all_gather_object", gathered[1]) in events
+    assert not extension.runtime_args
+
+
+def _scenario_ascend_topology_preflight_remote_parse_failure():
+    deep_ep, extension, events = _load_package("ascend", True)
+    os.environ["DEEP_EP_ASCEND_LOGICAL_SIMULATION"] = "1"
+    os.environ["DEEP_EP_ASCEND_SCALE_UP_SIZE"] = "2"
+    gathered = [
+        {"ok": True,
+         "config": ("logical_simulation", 2, 1, 4),
+         "error_code": None},
+        {"ok": False, "config": None,
+         "error_code": "invalid_topology_epoch"},
+        {"ok": True,
+         "config": ("logical_simulation", 2, 1, 4),
+         "error_code": None},
+        {"ok": False, "config": None,
+         "error_code": "invalid_scale_up_size"},
+    ]
+    errors = []
+    for rank in (0, 3):
+        group = _FakeGroup(
+            events, rank=rank, size=4, gathered_objects=gathered)
+        try:
+            deep_ep.ElasticBuffer(
+                group, num_bytes=2 * 1024 * 1024,
+                allow_hybrid_mode=False, explicitly_destroy=True)
+        except RuntimeError as error:
+            errors.append(str(error))
+        else:
+            raise AssertionError("remote Ascend topology failure was ignored")
+    assert errors == [
+        "DeepEP Ascend backend: topology preflight failed on rank 1 "
+        "(invalid_topology_epoch)",
+    ] * 2
+    assert sum(event[0] == "dist.all_gather_object"
+               for event in events if isinstance(event, tuple)) == 2
     assert not extension.runtime_args
 
 
@@ -1040,6 +1120,10 @@ SCENARIOS = {
     "ascend_topology_preflight": _scenario_ascend_topology_preflight,
     "ascend_topology_preflight_mismatch":
         _scenario_ascend_topology_preflight_mismatch,
+    "ascend_topology_preflight_local_parse_failure":
+        _scenario_ascend_topology_preflight_local_parse_failure,
+    "ascend_topology_preflight_remote_parse_failure":
+        _scenario_ascend_topology_preflight_remote_parse_failure,
     "ascend_implicit_size": _scenario_ascend_implicit_size,
     "ascend_method_gates": _scenario_ascend_method_gates,
     "ascend_contextmanager_gate": _scenario_ascend_contextmanager_gate,
@@ -1079,6 +1163,12 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_asymmetric_logical_topology_fails_before_construction(self):
         self.run_scenario("ascend_topology_preflight_mismatch")
+
+    def test_local_topology_parse_failure_is_gathered_before_rejection(self):
+        self.run_scenario("ascend_topology_preflight_local_parse_failure")
+
+    def test_remote_topology_parse_failure_is_rejected_identically(self):
+        self.run_scenario("ascend_topology_preflight_remote_parse_failure")
 
     def test_implicit_size_reaches_backend_transport_error_without_nccl(self):
         self.run_scenario("ascend_implicit_size")

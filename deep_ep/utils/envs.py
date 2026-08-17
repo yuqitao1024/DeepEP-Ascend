@@ -18,16 +18,52 @@ _local_seed = 0
 _global_seed = 0
 
 
-def _positive_env_integer(name: str, default: int) -> int:
+class _AscendTopologyConfigError(Exception):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _positive_env_integer(name: str, default: int, error_code: str) -> int:
     raw = os.environ.get(name)
     if raw is None:
         return default
     if not raw.isascii() or not raw.isdigit() or raw.startswith('0'):
-        raise RuntimeError(f"DeepEP Ascend backend: {name} must be a positive integer")
+        raise _AscendTopologyConfigError(error_code)
     value = int(raw)
     if value <= 0 or value > 0x7fffffff:
-        raise RuntimeError(f"DeepEP Ascend backend: {name} must be a positive integer")
+        raise _AscendTopologyConfigError(error_code)
     return value
+
+
+def _parse_ascend_topology(world_size: int) -> Tuple[str, int, int, int]:
+    simulation_raw = os.environ.get(
+        'DEEP_EP_ASCEND_LOGICAL_SIMULATION', '0')
+    if simulation_raw not in ('0', '1'):
+        raise _AscendTopologyConfigError('invalid_logical_simulation')
+    logical_simulation = simulation_raw == '1'
+    if (logical_simulation and
+            'DEEP_EP_ASCEND_SCALE_UP_SIZE' not in os.environ):
+        raise _AscendTopologyConfigError('missing_scale_up_size')
+    scale_up_default = world_size if not logical_simulation else 0
+    scale_up_size = _positive_env_integer(
+        'DEEP_EP_ASCEND_SCALE_UP_SIZE', scale_up_default,
+        'invalid_scale_up_size')
+    if world_size % scale_up_size != 0:
+        raise _AscendTopologyConfigError('scale_up_size_not_divisor')
+    if logical_simulation:
+        if scale_up_size >= world_size:
+            raise _AscendTopologyConfigError('insufficient_scale_out_ranks')
+        kind = 'logical_simulation'
+    else:
+        if scale_up_size != world_size:
+            raise _AscendTopologyConfigError(
+                'non_flat_requires_logical_simulation')
+        kind = 'flat_scale_up'
+
+    epoch = _positive_env_integer(
+        'DEEP_EP_ASCEND_TOPOLOGY_EPOCH', 1, 'invalid_topology_epoch')
+    return kind, scale_up_size, epoch, world_size
 
 
 def preflight_ascend_topology(group: dist.ProcessGroup) -> Tuple[str, int, int, int]:
@@ -37,46 +73,29 @@ def preflight_ascend_topology(group: dist.ProcessGroup) -> Tuple[str, int, int, 
         raise RuntimeError(
             "DeepEP Ascend backend: topology requires at least two ranks")
 
-    simulation_raw = os.environ.get(
-        'DEEP_EP_ASCEND_LOGICAL_SIMULATION', '0')
-    if simulation_raw not in ('0', '1'):
-        raise RuntimeError(
-            "DeepEP Ascend backend: DEEP_EP_ASCEND_LOGICAL_SIMULATION "
-            "must be 0 or 1")
-    logical_simulation = simulation_raw == '1'
-    if (logical_simulation and
-            'DEEP_EP_ASCEND_SCALE_UP_SIZE' not in os.environ):
-        raise RuntimeError(
-            "DeepEP Ascend backend: logical simulation requires "
-            "DEEP_EP_ASCEND_SCALE_UP_SIZE")
-    scale_up_default = world_size if not logical_simulation else 0
-    scale_up_size = _positive_env_integer(
-        'DEEP_EP_ASCEND_SCALE_UP_SIZE', scale_up_default)
-    if world_size % scale_up_size != 0:
-        raise RuntimeError(
-            "DeepEP Ascend backend: DEEP_EP_ASCEND_SCALE_UP_SIZE must "
-            "divide world_size")
-    if logical_simulation:
-        if scale_up_size >= world_size:
-            raise RuntimeError(
-                "DeepEP Ascend backend: logical simulation requires at "
-                "least two scale-out ranks")
-        kind = 'logical_simulation'
-    else:
-        if scale_up_size != world_size:
-            raise RuntimeError(
-                "DeepEP Ascend backend: non-flat topology requires "
-                "DEEP_EP_ASCEND_LOGICAL_SIMULATION=1")
-        kind = 'flat_scale_up'
+    try:
+        local_config = _parse_ascend_topology(world_size)
+        local = {"ok": True, "config": local_config, "error_code": None}
+    except _AscendTopologyConfigError as error:
+        local_config = None
+        local = {"ok": False, "config": None, "error_code": error.code}
 
-    epoch = _positive_env_integer('DEEP_EP_ASCEND_TOPOLOGY_EPOCH', 1)
-    local = (kind, scale_up_size, epoch, world_size)
     gathered = [None] * world_size
     dist.all_gather_object(gathered, local, group)
-    if any(value != local for value in gathered):
+    for rank, value in enumerate(gathered):
+        if not isinstance(value, dict) or value.get("ok") is not True:
+            error_code = (value.get("error_code", "invalid_preflight_record")
+                          if isinstance(value, dict)
+                          else "invalid_preflight_record")
+            raise RuntimeError(
+                "DeepEP Ascend backend: topology preflight failed on rank "
+                f"{rank} ({error_code})")
+
+    first_config = gathered[0].get("config")
+    if any(value.get("config") != first_config for value in gathered[1:]):
         raise RuntimeError(
             "DeepEP Ascend backend: topology configuration differs across ranks")
-    return local
+    return local_config
 
 # Default NIC name for RDMA operations, configurable via environment variable
 _DEFAULT_NIC_NAME = os.getenv('EP_NIC_NAME', 'mlx5_0')
