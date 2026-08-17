@@ -58,8 +58,13 @@ ADDITIONAL_CASE_NAMES = (
     "odd-hidden-weighted",
 )
 
+INTERLEAVED_CASE_NAMES = (
+    "interleaved-dual-buffer",
+)
+
 CASE_NAMES = (BASELINE_CASE_NAMES[:13] + ADDITIONAL_CASE_NAMES +
-              BASELINE_CASE_NAMES[13:])
+              BASELINE_CASE_NAMES[13:16] + INTERLEAVED_CASE_NAMES +
+              BASELINE_CASE_NAMES[16:])
 
 REGULAR_CASES = CASE_NAMES[:17]
 SPECIAL_CASES = CASE_NAMES[17:]
@@ -178,6 +183,9 @@ def _case_specs():
              ((0.625, 0.75), (0.875, 1.0)))),
         "cross-buffer-handle": CaseSpec(
             "cross-buffer-handle", _payloads((2, 2), 27), normal_routes),
+        "interleaved-dual-buffer": CaseSpec(
+            "interleaved-dual-buffer", _payloads((2, 2), 43),
+            (((0, 3), (1, -1)), ((2, 1), (3, -1)))),
         "malformed-handle": CaseSpec(
             "malformed-handle", _payloads((2, 2), 29), normal_routes),
         "bounded-peer-diagnostics": CaseSpec(
@@ -809,10 +817,13 @@ def _contract():
            "the system under test does not call public Buffer.dispatch")
     _check("buffer.combine" in combine_calls,
            "the system under test does not call public Buffer.combine")
-    for call in ("self._gather_routes", "self._expert_outputs",
-                 "self._expected", "self._verify"):
-        _check(call in _calls(methods["_round_trip"]),
-               f"round-trip path is missing {call}")
+    start_calls = _calls(methods["_start_round_trip"])
+    finish_calls = _calls(methods["_finish_round_trip"])
+    _check("self._gather_routes" in start_calls,
+           "round-trip start is missing route gathering")
+    for call in ("self._expert_outputs", "self._expected", "self._verify"):
+        _check(call in finish_calls,
+               f"round-trip finish is missing {call}")
     _check("self.dist.all_gather" in _calls(methods["_gather_routes"]),
            "original literal routes are not gathered")
     select_buffer_calls = _calls(methods["_select_buffer"])
@@ -822,8 +833,15 @@ def _contract():
            "buffer teardown and construction are not separate phases")
     _check("self.dist.all_reduce" in _calls(methods["_run_step"]),
            "sub-operations do not synchronize failures")
-    _check(_calls(methods["_round_trip"]).count("self._run_step") >= 6,
+    _check(_calls(methods["_start_round_trip"]).count("self._run_step") >= 3 and
+           _calls(methods["_finish_round_trip"]).count("self._run_step") >= 3,
            "round-trip phases do not synchronize failures")
+    interleaved_calls = _calls(methods["_run_interleaved_dual_buffer"])
+    for call in ("self._make_buffer", "self._start_round_trip",
+                 "self._finish_round_trip", "self._destroy_buffer",
+                 "self._round_trip"):
+        _check(call in interleaved_calls,
+               f"interleaved dual-buffer case is missing {call}")
     _check(_calls(methods["_run_bounded_peer_diagnostics"]).count(
                "self._run_step") >= 3,
            "bounded diagnostics phases do not synchronize failures")
@@ -893,6 +911,7 @@ def _contract():
             "best-effort-cleanup",
             "synchronized-buffer-mode-phases",
             "literal-expanded-layout-counts",
+            "interleaved-dual-buffer-isolation",
         ],
         "behavior_fixtures": _behavior_fixtures(),
         "expected_world_size": WORLD_SIZE,
@@ -1181,8 +1200,8 @@ class CombineMatrix:
                "synchronous combine returned deferred event state")
         return combined_x, combined_weights
 
-    def _round_trip(self, spec, variant=None, handle=None, payload_delta=0,
-                    weight_scale=1.0, buffer=None):
+    def _start_round_trip(self, spec, variant=None, handle=None,
+                          payload_delta=0, weight_scale=1.0, buffer=None):
         variant = spec.transform_variant if variant is None else variant
         selected_buffer = self._select_buffer(
             spec.allow_multiple_reduction,
@@ -1201,28 +1220,46 @@ class CombineMatrix:
             f"{spec.name}: dispatch")
         recv_x, _, recv_weights, returned_handle, dispatch_event = \
             dispatch_result
+        return {
+            "buffer": selected_buffer,
+            "dispatch_event": dispatch_event,
+            "gathered_routes": gathered_routes,
+            "handle": returned_handle,
+            "provided_handle": handle,
+            "recv_weights": recv_weights,
+            "recv_x": recv_x,
+            "routes": routes,
+            "spec": spec,
+            "variant": variant,
+            "weights": weights,
+        }
+
+    def _finish_round_trip(self, state):
+        spec = state["spec"]
 
         def prepare_combine():
-            _check(dispatch_event.event is None,
+            _check(state["dispatch_event"].event is None,
                    "synchronous dispatch returned an event")
             _validate_expansion_mode(
-                returned_handle.do_expand, spec.do_expand)
-            if handle is not None:
-                _check(returned_handle is handle,
+                state["handle"].do_expand, spec.do_expand)
+            if state["provided_handle"] is not None:
+                _check(state["handle"] is state["provided_handle"],
                        "cached dispatch replaced its public handle")
             expert_x = self._expert_outputs(
-                recv_x, returned_handle, gathered_routes, spec, variant)
-            biases = self._biases(spec, routes.shape[0])
+                state["recv_x"], state["handle"], state["gathered_routes"],
+                spec, state["variant"])
+            biases = self._biases(spec, state["routes"].shape[0])
             expected = self._expected(
-                gathered_routes, variant, weights, biases, spec.hidden)
+                state["gathered_routes"], state["variant"], state["weights"],
+                biases, spec.hidden)
             return expert_x, biases, expected
 
         expert_x, biases, expected = self._run_step(
             prepare_combine, f"{spec.name}: prepare combine")
         result = self._run_step(
             lambda: self._combine(
-                selected_buffer, expert_x, returned_handle,
-                recv_weights, biases),
+                state["buffer"], expert_x, state["handle"],
+                state["recv_weights"], biases),
             f"{spec.name}: combine")
         combined_x, combined_weights = self._run_step(
             lambda: self._verify(result, *expected),
@@ -1230,10 +1267,16 @@ class CombineMatrix:
         return {
             "combined_x": combined_x,
             "combined_weights": combined_weights,
-            "handle": returned_handle,
-            "recv_x": recv_x,
+            "handle": state["handle"],
+            "recv_x": state["recv_x"],
             "expert_x": expert_x,
         }
+
+    def _round_trip(self, spec, variant=None, handle=None, payload_delta=0,
+                    weight_scale=1.0, buffer=None):
+        return self._finish_round_trip(self._start_round_trip(
+            spec, variant=variant, handle=handle, payload_delta=payload_delta,
+            weight_scale=weight_scale, buffer=buffer))
 
     def _run_cached(self):
         spec = self.specs["cached-dispatch-changed-outputs"]
@@ -1311,6 +1354,36 @@ class CombineMatrix:
                         "cross-buffer: target teardown")
                 else:
                     self._destroy_buffer(target)
+
+    def _run_interleaved_dual_buffer(self):
+        spec_a = self.specs["interleaved-dual-buffer"]
+        spec_b = self.specs["weights"]
+        buffer_a = self._run_step(
+            lambda: self._make_buffer(True),
+            "interleaved-dual-buffer: A construction")
+        buffer_b = self._run_step(
+            lambda: self._make_buffer(True),
+            "interleaved-dual-buffer: B construction")
+        try:
+            state_a = self._start_round_trip(
+                spec_a, variant=3, buffer=buffer_a)
+            state_b = self._start_round_trip(
+                spec_b, variant=9, buffer=buffer_b)
+            self._finish_round_trip(state_b)
+            self._finish_round_trip(state_a)
+            self._run_step(
+                lambda: self._destroy_buffer(buffer_a),
+                "interleaved-dual-buffer: A teardown")
+            self._round_trip(spec_b, variant=11, buffer=buffer_b)
+        finally:
+            for label, buffer in (("A", buffer_a), ("B", buffer_b)):
+                if buffer in self.live_buffers:
+                    if self.collectives_usable:
+                        self._run_step(
+                            lambda buffer=buffer: self._destroy_buffer(buffer),
+                            f"interleaved-dual-buffer: {label} cleanup")
+                    else:
+                        self._destroy_buffer(buffer)
 
     def _run_malformed_handle(self):
         spec = self.specs["malformed-handle"]
@@ -1426,6 +1499,8 @@ class CombineMatrix:
             self._run_generations()
         elif name == "cross-buffer-handle":
             self._run_cross_buffer()
+        elif name == "interleaved-dual-buffer":
+            self._run_interleaved_dual_buffer()
         elif name == "malformed-handle":
             self._run_malformed_handle()
         elif name == "bounded-peer-diagnostics":

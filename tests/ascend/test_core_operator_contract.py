@@ -26,6 +26,8 @@ PRODUCTION_BARRIER_STATE_PROBE = \
     ROOT / "tests/ascend/production_barrier_state_probe.cpp"
 PRODUCTION_OPERATION_COORDINATOR_PROBE = \
     ROOT / "tests/ascend/production_operation_coordinator_probe.cpp"
+PRODUCTION_BUFFER_LIFECYCLE_PROBE = \
+    ROOT / "tests/ascend/production_buffer_lifecycle_probe.cpp"
 TWO_RANK_DISPATCH = \
     ROOT / "tests/ascend/production/run_two_rank_dispatch.py"
 TWO_RANK_COMBINE = \
@@ -577,6 +579,30 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                  "-pthread", f"-I{ROOT}",
                  str(PRODUCTION_OPERATION_COORDINATOR_PROBE),
+                 "-o", str(binary)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_elastic_buffer_resource_lifecycle_concurrency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            (directory / "pybind11").mkdir()
+            (directory / "torch").mkdir()
+            (directory / "pybind11/pybind11.h").write_text(PYBIND11_HEADER)
+            (directory / "torch/python.h").write_text(TORCH_HEADER)
+            binary = directory / "production_buffer_lifecycle_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 "-pthread", "-DDEEP_EP_ASCEND_TESTING=1",
+                 f"-I{directory}", f"-I{ROOT}",
+                 str(PRODUCTION_BUFFER_LIFECYCLE_PROBE),
+                 str(ELASTIC / "runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
                  "-o", str(binary)], capture_output=True, text=True,
                 check=False)
             self.assertEqual(compile_result.returncode, 0,
@@ -1284,6 +1310,7 @@ int main() {
             "cached-dispatch-changed-outputs",
             "sequential-100-generations",
             "cross-buffer-handle",
+            "interleaved-dual-buffer",
             "malformed-handle",
             "bounded-peer-diagnostics",
             "repeated-teardown",
@@ -1321,6 +1348,7 @@ int main() {
                     "best-effort-cleanup",
                     "synchronized-buffer-mode-phases",
                     "literal-expanded-layout-counts",
+                    "interleaved-dual-buffer-isolation",
                 ],
                 "behavior_fixtures": {
                     "buffer_modes": {
