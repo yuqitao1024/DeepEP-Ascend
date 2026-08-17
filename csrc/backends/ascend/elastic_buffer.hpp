@@ -19,6 +19,7 @@
 #include "elastic/barrier_state.hpp"
 #include "elastic/combine_state.hpp"
 #include "elastic/dispatch_state.hpp"
+#include "elastic/operation_coordinator.hpp"
 #include "elastic/runtime.hpp"
 #include "runtime/cann_runtime.hpp"
 
@@ -60,12 +61,9 @@ class ElasticBuffer {
     bool allow_hybrid_mode_;
     bool allow_multiple_reduction_;
     std::unique_ptr<runtime::CannRuntimeResources> resources_;
-    elastic::BarrierSequence barrier_sequence_;
-    mutable elastic::DispatchSequence dispatch_sequence_;
-    mutable elastic::CombineSequence combine_sequence_;
+    mutable elastic::BufferOperationCoordinator coordinator_;
     std::uint64_t dispatch_family_ = 0;
     std::uint64_t barrier_timeout_cycles_ = 0;
-    bool destroyed_ = false;
 
     inline static std::atomic_uint64_t next_dispatch_family_{0};
 
@@ -80,10 +78,40 @@ class ElasticBuffer {
         transport::capability_bit(transport::TransportCapability::kScaleUpTeam);
 
     transport::HostTransport* host_transport() const {
-        TORCH_CHECK(!destroyed_ && resources_ != nullptr &&
-                        resources_->transport() != nullptr,
+        TORCH_CHECK(resources_ != nullptr && resources_->transport() != nullptr,
                     "DeepEP Ascend backend: runtime is destroyed");
         return resources_->transport();
+    }
+
+    elastic::BufferOperationCoordinator::OperationLease reserve_operation(
+        elastic::BufferOperationKind kind, const char* operation) const {
+        auto lease = coordinator_.reserve(kind);
+        if (lease.valid())
+            return lease;
+        switch (lease.status()) {
+            case elastic::LeaseStatus::kBusy:
+                TORCH_CHECK(false, "DeepEP Ascend backend: ", operation,
+                            " is busy on this buffer");
+            case elastic::LeaseStatus::kPoisoned:
+            case elastic::LeaseStatus::kGenerationExhausted:
+                TORCH_CHECK(false, "DeepEP Ascend backend: ", operation,
+                            " cannot continue because this buffer is poisoned");
+            case elastic::LeaseStatus::kDestroyed:
+                TORCH_CHECK(false, "DeepEP Ascend backend: runtime is destroyed");
+            case elastic::LeaseStatus::kAdmitted:
+                break;
+        }
+        TORCH_CHECK(false, "DeepEP Ascend backend: ", operation,
+                    " operation admission failed");
+    }
+
+    static std::uint64_t activate_operation(
+        elastic::BufferOperationCoordinator::OperationLease& lease,
+        const char* operation) {
+        TORCH_CHECK(
+            lease.activate(), "DeepEP Ascend backend: ", operation,
+            " generation space is exhausted; this buffer is poisoned");
+        return lease.generation();
     }
 
     static constexpr auto kCombineCapabilities =
@@ -306,11 +334,13 @@ class ElasticBuffer {
 
 #if DEEP_EP_ASCEND_TESTING
     struct TestingTag {};
-    ElasticBuffer(TestingTag, int rank, std::unique_ptr<runtime::CannRuntimeResources> resources,
+    ElasticBuffer(TestingTag, int rank, int num_ranks,
+                  std::unique_ptr<runtime::CannRuntimeResources> resources,
                   std::int64_t buffer_bytes, std::uint64_t timeout_cycles,
                   bool allow_multiple_reduction,
                   std::uint64_t dispatch_family)
-        : rank_idx_(rank), num_ranks_(2), num_buffer_bytes_(buffer_bytes),
+        : rank_idx_(rank), num_ranks_(num_ranks),
+          num_buffer_bytes_(buffer_bytes),
           allow_hybrid_mode_(false),
           allow_multiple_reduction_(allow_multiple_reduction),
           resources_(std::move(resources)),
@@ -334,8 +364,8 @@ public:
           num_buffer_bytes_(num_buffer_bytes),
           allow_hybrid_mode_(allow_hybrid_mode),
           allow_multiple_reduction_(allow_multiple_reduction) {
-        TORCH_CHECK(num_ranks == 2,
-                    "DeepEP Ascend backend: exactly two ranks are required");
+        TORCH_CHECK(num_ranks >= 2,
+                    "DeepEP Ascend backend: world_size must be at least two");
         TORCH_CHECK(rank_idx >= 0 && rank_idx < num_ranks,
                     "DeepEP Ascend backend: rank must be in [0, world_size)");
         TORCH_CHECK(comm_handle != 0,
@@ -382,9 +412,20 @@ public:
         int rank, std::unique_ptr<runtime::CannRuntimeResources> resources,
         std::int64_t buffer_bytes, std::uint64_t timeout_cycles,
         bool allow_multiple_reduction = true,
-        std::uint64_t dispatch_family = 7) {
+        std::uint64_t dispatch_family = 7,
+        int num_ranks = 2) {
+        TORCH_CHECK(num_ranks >= 2 && rank >= 0 && rank < num_ranks,
+                    "DeepEP Ascend backend: invalid testing topology");
+        TORCH_CHECK(resources != nullptr && resources->initialized() &&
+                        resources->device_context().topology.world_rank == rank &&
+                        resources->device_context().topology.world_size == num_ranks &&
+                        resources->device_context().topology.scale_up_rank == rank &&
+                        resources->device_context().topology.scale_up_size == num_ranks &&
+                        resources->device_context().topology.scale_out_rank == 0 &&
+                        resources->device_context().topology.scale_out_size == 1,
+                    "DeepEP Ascend backend: testing topology must match runtime resources");
         return std::unique_ptr<ElasticBuffer>(new ElasticBuffer(
-            TestingTag{}, rank, std::move(resources), buffer_bytes,
+            TestingTag{}, rank, num_ranks, std::move(resources), buffer_bytes,
             timeout_cycles, allow_multiple_reduction, dispatch_family));
     }
 
@@ -394,13 +435,20 @@ public:
 #endif
 
     void destroy() {
-        if (resources_ == nullptr)
+        auto teardown = coordinator_.reserve_destroy();
+        if (teardown.status() == elastic::LeaseStatus::kDestroyed)
             return;
-        destroyed_ = true;
+        TORCH_CHECK(teardown.valid(),
+                    "DeepEP Ascend backend: destroy is busy on this buffer");
+        TORCH_CHECK(resources_ != nullptr,
+                    "DeepEP Ascend backend: runtime resources are unavailable");
         const auto status = resources_->destroy();
-        if (!status.ok())
+        if (!status.ok()) {
+            teardown.fail();
             raise_transport_status(status, rank_idx_);
+        }
         resources_.reset();
+        teardown.complete();
     }
 
     pybind11::object get_comm_stream() const {
@@ -410,22 +458,30 @@ public:
     }
 
     std::tuple<int, int> get_physical_domain_size() const {
+        auto lease = reserve_operation(
+            elastic::BufferOperationKind::kTopologyQuery,
+            "get_physical_domain_size");
         transport::TransportTopology topology;
         auto status = host_transport()->query_topology(&topology);
         if (!status.ok()) {
             status.operation = "get_physical_domain_size";
             raise_transport_status(status, rank_idx_);
         }
+        lease.complete();
         return {topology.scale_out_size, topology.scale_up_size};
     }
 
     std::tuple<int, int> get_logical_domain_size() const {
+        auto lease = reserve_operation(
+            elastic::BufferOperationKind::kTopologyQuery,
+            "get_logical_domain_size");
         transport::TransportTopology topology;
         auto status = host_transport()->query_topology(&topology);
         if (!status.ok()) {
             status.operation = "get_logical_domain_size";
             raise_transport_status(status, rank_idx_);
         }
+        lease.complete();
         return {topology.scale_out_size, topology.scale_up_size};
     }
 
@@ -434,6 +490,8 @@ public:
         TORCH_CHECK(sequential,
                     "DeepEP Ascend backend: barrier requires sequential=True");
         (void)use_comm_stream;
+        auto lease = reserve_operation(
+            elastic::BufferOperationKind::kBarrier, "barrier");
         require_transport("barrier", elastic::kBarrierTransportCapabilities);
 
         if (with_cpu_sync) {
@@ -442,22 +500,17 @@ public:
                 raise_transport_status(status, rank_idx_);
         }
 
-        elastic::BarrierAttempt attempt(barrier_sequence_);
-        TORCH_CHECK(
-            attempt.valid(),
-            "DeepEP Ascend backend: barrier cannot continue after a failed "
-            "or concurrent attempt");
         auto tiling = build_barrier_tiling();
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_),
             resources_->workspace_bytes()};
-        const elastic::BarrierArguments arguments{
-            resources_->workspace(), attempt.generation(),
-            barrier_timeout_cycles_};
         void* stream = nullptr;
         auto status = resources_->current_stream(&stream);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
+        const auto generation = activate_operation(lease, "barrier");
+        const elastic::BarrierArguments arguments{
+            resources_->workspace(), generation, barrier_timeout_cycles_};
         const auto launch_status = elastic::launch_internal_barrier(
             arguments, tiling, storage, stream);
         if (!launch_status.ok()) {
@@ -487,15 +540,18 @@ public:
             diagnostic.peer = static_cast<std::uint32_t>(rank_idx_);
             diagnostic.channel = 0;
             diagnostic.backend_status = 0;
-            diagnostic.generation = attempt.generation();
+            diagnostic.generation = generation;
         }
 #endif
 
         std::uint64_t completion = 0;
-        const auto completion_offset =
-            tiling.symmetric_window_layout.control_offset +
-            offsetof(elastic::SymmetricControlHeader, barrier_completion) +
-            static_cast<std::uint64_t>(rank_idx_) * sizeof(std::uint64_t);
+        std::uint64_t completion_offset = 0;
+        TORCH_CHECK(
+            elastic::checked_rank_slot_offset(
+                tiling.symmetric_window_layout.barrier_completion_offset,
+                tiling.symmetric_window_layout.barrier_completion_count,
+                rank_idx_, &completion_offset),
+            "Invalid Ascend barrier completion slot for rank ", rank_idx_);
         const auto* completion_address = reinterpret_cast<const void*>(
             reinterpret_cast<std::uintptr_t>(resources_->window_base()) +
             completion_offset);
@@ -513,11 +569,11 @@ public:
                 transport::kTransportCommandAbiVersion ||
             diagnostic.error != transport::DeviceTransportError::kNone)
             raise_barrier_diagnostic(diagnostic, "reported failure");
-        if (diagnostic.generation != attempt.generation())
+        if (diagnostic.generation != generation)
             raise_barrier_diagnostic(diagnostic, "generation mismatch");
-        if (completion != attempt.generation())
+        if (completion != generation)
             raise_barrier_diagnostic(diagnostic, "completion mismatch");
-        attempt.complete();
+        lease.complete();
     }
 
     static int64_t calculate_buffer_size(
@@ -541,8 +597,61 @@ public:
             "DeepEP Ascend backend: calculate_elastic_buffer_size requires "
             "positive token capacity and hidden size and nonnegative top-k");
 
+        std::uint32_t world_size = 0;
+        const auto query_status =
+            transport::query_cann_communicator_size(comm_handle, &world_size);
+        TORCH_CHECK(
+            query_status.ok(),
+            "DeepEP Ascend backend: calculate_elastic_buffer_size ",
+            query_status.operation, " failed with backend error ",
+            query_status.backend_code, ": ", query_status.message);
+        return calculate_buffer_size_for_world_size(
+            world_size, num_max_tokens_per_rank, hidden, num_topk,
+            allow_multiple_reduction);
+    }
+
+#if DEEP_EP_ASCEND_TESTING
+    static int64_t calculate_buffer_size_for_testing(
+        const int64_t& comm_handle, const int& num_max_tokens_per_rank,
+        const int& hidden, int num_topk, const bool& use_fp8_dispatch,
+        const bool& allow_hybrid_mode,
+        const bool& allow_multiple_reduction,
+        const transport::CannHostApi& host_api) {
+        TORCH_CHECK(
+            comm_handle != 0,
+            "DeepEP Ascend backend: calculate_elastic_buffer_size "
+            "communicator_handle must be nonzero");
+        if (use_fp8_dispatch)
+            raise_unsupported(
+                "calculate_elastic_buffer_size", "does not support FP8");
+        if (allow_hybrid_mode)
+            raise_unsupported(
+                "calculate_elastic_buffer_size",
+                "does not support hybrid mode");
+        TORCH_CHECK(
+            num_max_tokens_per_rank > 0 && hidden > 0 && num_topk >= 0,
+            "DeepEP Ascend backend: calculate_elastic_buffer_size requires "
+            "positive token capacity and hidden size and nonnegative top-k");
+        std::uint32_t world_size = 0;
+        const auto query_status = transport::query_cann_communicator_size(
+            comm_handle, &world_size, host_api);
+        TORCH_CHECK(
+            query_status.ok(),
+            "DeepEP Ascend backend: calculate_elastic_buffer_size ",
+            query_status.operation, " failed with backend error ",
+            query_status.backend_code, ": ", query_status.message);
+        return calculate_buffer_size_for_world_size(
+            world_size, num_max_tokens_per_rank, hidden, num_topk,
+            allow_multiple_reduction);
+    }
+#endif
+
+private:
+    static int64_t calculate_buffer_size_for_world_size(
+        std::uint32_t world_size, int num_max_tokens_per_rank, int hidden,
+        int num_topk, bool allow_multiple_reduction) {
         elastic::SymmetricWindowInput input{};
-        input.world_size = 2;
+        input.world_size = static_cast<int>(world_size);
         input.num_max_tokens_per_rank =
             static_cast<std::uint64_t>(num_max_tokens_per_rank);
         input.hidden = static_cast<std::uint64_t>(hidden);
@@ -563,6 +672,8 @@ public:
             "DeepEP Ascend backend: calculate_elastic_buffer_size overflow");
         return static_cast<std::int64_t>(layout.total_bytes);
     }
+
+public:
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>,
                std::optional<torch::Tensor>, std::optional<torch::Tensor>,
@@ -594,8 +705,7 @@ public:
              const bool& do_cpu_sync, const bool& do_expand,
              const bool& do_zero_padding,
              const bool& use_tma_aligned_col_major_sf) const {
-        require_transport("dispatch", kDispatchCapabilities);
-        TORCH_CHECK(!destroyed_ && !allow_hybrid_mode_,
+        TORCH_CHECK(!allow_hybrid_mode_,
                     "DeepEP Ascend backend: dispatch does not support hybrid mode");
         TORCH_CHECK(!sf.has_value() && !cumulative_local_expert_recv_stats.has_value(),
                     "DeepEP Ascend backend: dispatch does not support scale factors "
@@ -614,18 +724,13 @@ public:
         TORCH_CHECK(!do_zero_padding || do_expand,
                     "DeepEP Ascend backend: dispatch zero padding requires expansion");
         TORCH_CHECK(num_max_tokens_per_rank > 0 && num_experts > 0 &&
-                        expert_alignment > 0 && num_experts % 2 == 0,
-                    "DeepEP Ascend backend: dispatch requires positive, two-rank "
-                    "expert-aligned capacity");
+                        expert_alignment > 0 &&
+                        num_experts % num_ranks_ == 0 &&
+                        num_max_tokens_per_rank <=
+                            std::numeric_limits<int>::max() / num_ranks_,
+                    "DeepEP Ascend backend: dispatch requires positive, "
+                    "rank-partitioned expert capacity");
         const auto device = x.device();
-        int current_device = -1;
-        auto device_status = resources_->current_device(&current_device);
-        if (!device_status.ok())
-            raise_transport_status(device_status, rank_idx_);
-        TORCH_CHECK(device.index() == resources_->owning_device() &&
-                        current_device == resources_->owning_device(),
-                    "DeepEP Ascend backend: dispatch tensors and current NPU "
-                    "must match the buffer device");
         validate_npu_tensor(x, 2, torch::kBFloat16, device, "BF16 x");
         validate_npu_tensor(topk_idx, 2, torch::kLong, device, "int64 topk_idx");
         TORCH_CHECK(x.size(0) == topk_idx.size(0) && x.size(0) >= 0 &&
@@ -638,6 +743,17 @@ public:
             TORCH_CHECK(topk_weights->sizes() == topk_idx.sizes(),
                         "DeepEP Ascend backend: dispatch topk_weights shape mismatch");
         }
+        auto lease = reserve_operation(
+            elastic::BufferOperationKind::kDispatch, "dispatch");
+        require_transport("dispatch", kDispatchCapabilities);
+        int current_device = -1;
+        auto device_status = resources_->current_device(&current_device);
+        if (!device_status.ok())
+            raise_transport_status(device_status, rank_idx_);
+        TORCH_CHECK(device.index() == resources_->owning_device() &&
+                        current_device == resources_->owning_device(),
+                    "DeepEP Ascend backend: dispatch tensors and current NPU "
+                    "must match the buffer device");
 
         const bool any_cached_tensor = cached_num_expanded_tokens.has_value() ||
             cached_num_recv_tokens_per_expert_list.has_value() ||
@@ -900,10 +1016,8 @@ public:
             raise_transport_status(status, rank_idx_);
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_), resources_->workspace_bytes()};
-        elastic::DispatchAttempt attempt(dispatch_sequence_);
-        TORCH_CHECK(attempt.valid(), "DeepEP Ascend backend: dispatch cannot continue "
-                    "after a failed or concurrent attempt");
-        arguments.generation = attempt.generation();
+        const auto generation = activate_operation(lease, "dispatch");
+        arguments.generation = generation;
         const auto launch_status = elastic::launch_internal_dispatch(
             arguments, tiling, storage, stream);
         if (!launch_status.ok())
@@ -919,12 +1033,12 @@ public:
         if (std::getenv("DEEP_EP_ASCEND_TEST_DISPATCH_DIAGNOSTIC") != nullptr) {
             diagnostic.abi_version = transport::kTransportCommandAbiVersion;
             diagnostic.error = transport::DeviceTransportError::kCompletionTimeout;
-            diagnostic.generation = attempt.generation();
+            diagnostic.generation = generation;
         }
 #endif
         if (diagnostic.abi_version != transport::kTransportCommandAbiVersion ||
             diagnostic.error != transport::DeviceTransportError::kNone ||
-            diagnostic.generation != attempt.generation())
+            diagnostic.generation != generation)
             raise_dispatch_diagnostic(diagnostic, "reported failure");
         if (!cached_mode) {
             status = resources_->copy_to_host(
@@ -994,7 +1108,7 @@ public:
                         num_expanded_tokens >= 0 &&
                         num_expanded_tokens <= static_cast<int>(expanded_records),
                     "DeepEP Ascend backend: dispatch returned invalid output counts");
-        attempt.complete();
+        lease.complete();
         const int output_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
         auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
         auto narrowed_topk_idx = do_expand ? std::optional<torch::Tensor>() :
@@ -1030,8 +1144,7 @@ public:
             const bool& async_with_compute_stream,
             const bool& allocate_on_comm_stream,
             const bool& use_expanded_layout) const {
-        require_transport("combine", kCombineCapabilities);
-        TORCH_CHECK(!destroyed_ && !allow_hybrid_mode_,
+        TORCH_CHECK(!allow_hybrid_mode_,
                     "DeepEP Ascend backend: combine does not support hybrid mode");
         TORCH_CHECK(!previous_event.has_value() &&
                         !previous_event_before_epilogue.has_value() &&
@@ -1043,14 +1156,18 @@ public:
                     "DeepEP Ascend backend: combine requires num_sms=1");
         TORCH_CHECK(num_qps == 0,
                     "DeepEP Ascend backend: combine requires num_qps=0");
-        TORCH_CHECK(num_experts > 0 && num_experts % 2 == 0 &&
+        TORCH_CHECK(num_experts > 0 && num_experts % num_ranks_ == 0 &&
                         num_max_tokens_per_rank > 0 &&
                         num_max_tokens_per_rank <=
-                            std::numeric_limits<std::int32_t>::max() / 2,
-                    "DeepEP Ascend backend: combine requires positive two-rank "
-                    "expert capacity");
+                            std::numeric_limits<std::int32_t>::max() /
+                                num_ranks_,
+                    "DeepEP Ascend backend: combine requires positive, "
+                    "rank-partitioned expert capacity");
         TORCH_CHECK(token_metadata_at_forward.has_value(),
                     "DeepEP Ascend backend: combine requires a dispatch handle");
+        auto lease = reserve_operation(
+            elastic::BufferOperationKind::kCombine, "combine");
+        require_transport("combine", kCombineCapabilities);
 
         const auto device = x.device();
         int current_device = -1;
@@ -1098,7 +1215,8 @@ public:
             static_cast<std::uint64_t>(combined_topk_idx.size(1));
         const auto capacity =
             static_cast<std::uint64_t>(num_max_tokens_per_rank);
-        const auto maximum_source_rows = capacity * 2;
+        const auto maximum_source_rows =
+            capacity * static_cast<std::uint64_t>(num_ranks_);
         TORCH_CHECK(src_metadata.size(1) ==
                         static_cast<int64_t>(num_topk + 2) &&
                         num_source_rows <= maximum_source_rows &&
@@ -1262,10 +1380,6 @@ public:
         status = resources_->current_stream(&stream);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
-        elastic::CombineAttempt attempt(combine_sequence_);
-        TORCH_CHECK(attempt.valid(),
-                    "DeepEP Ascend backend: combine cannot continue after a "
-                    "failed or concurrent attempt");
         elastic::CombineArguments arguments{};
         arguments.x = x.data_ptr();
         arguments.topk_weights = topk_weights.has_value() ?
@@ -1282,7 +1396,8 @@ public:
         arguments.combined_x = combined_x.data_ptr();
         arguments.combined_topk_weights = combined_weights.has_value() ?
             combined_weights->data_ptr<float>() : nullptr;
-        arguments.generation = attempt.generation();
+        const auto generation = activate_operation(lease, "combine");
+        arguments.generation = generation;
         arguments.timeout_cycles = barrier_timeout_cycles_;
         arguments.num_source_rows = num_source_rows;
         arguments.num_input_rows = num_input_rows;
@@ -1305,7 +1420,7 @@ public:
         if (diagnostic.abi_version !=
                 transport::kTransportCommandAbiVersion ||
             diagnostic.error != transport::DeviceTransportError::kNone ||
-            diagnostic.generation != attempt.generation())
+            diagnostic.generation != generation)
             raise_combine_diagnostic(diagnostic, "reported failure");
         std::uint64_t completion = 0;
         const auto completion_offset =
@@ -1318,9 +1433,9 @@ public:
             &completion, completion_address, sizeof(completion));
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
-        if (completion != attempt.generation())
+        if (completion != generation)
             raise_combine_diagnostic(diagnostic, "completion mismatch");
-        attempt.complete();
+        lease.complete();
         return {combined_x, combined_weights, std::nullopt};
     }
 };

@@ -3,6 +3,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -29,6 +30,8 @@ struct Trace {
     elastic::CoreModeFlags mode_flags = 0;
     const void* bias_0 = nullptr;
     const void* bias_1 = nullptr;
+    std::uint32_t communicator_rank = 0;
+    std::uint32_t communicator_size = 2;
 } trace;
 
 int alloc(void*, std::uint64_t bytes, void** pointer) {
@@ -66,8 +69,14 @@ int d2h(void*, void* destination, const void* source, std::uint64_t bytes) {
     std::memcpy(destination, source, bytes);
     return 0;
 }
-int rank_(void*, std::int64_t, std::uint32_t* rank) { *rank = 0; return 0; }
-int size_(void*, std::int64_t, std::uint32_t* size) { *size = 2; return 0; }
+int rank_(void*, std::int64_t, std::uint32_t* rank) {
+    *rank = trace.communicator_rank;
+    return 0;
+}
+int size_(void*, std::int64_t, std::uint32_t* size) {
+    *size = trace.communicator_size;
+    return 0;
+}
 int team(void*, std::int64_t, std::uint32_t, std::uint32_t,
          const std::uint32_t*, std::uint32_t, std::uint32_t,
          std::uintptr_t* value) { *value = 2; return 0; }
@@ -90,7 +99,10 @@ int hf(void*, void* pointer) { return free_(nullptr, pointer); }
 int noop2(void*, std::uintptr_t, std::uintptr_t) { return 0; }
 int noop1(void*, std::uintptr_t) { return 0; }
 
-std::unique_ptr<runtime::CannRuntimeResources> resources() {
+std::unique_ptr<runtime::CannRuntimeResources> resources(
+    int world_size = 2, int rank = 0) {
+    trace.communicator_rank = static_cast<std::uint32_t>(rank);
+    trace.communicator_size = static_cast<std::uint32_t>(world_size);
     auto result = std::make_unique<runtime::CannRuntimeResources>();
     runtime::CannRuntimeApi runtime_api{
         nullptr, alloc, zero, free_, current_device, stream, sync, sync_device,
@@ -99,8 +111,8 @@ std::unique_ptr<runtime::CannRuntimeResources> resources() {
         nullptr, rank_, size_, team, window, channels, ha, hz, hd, dh, hf,
         noop2, noop1};
     transport::TransportConfig config{};
-    config.rank = 0;
-    config.world_size = 2;
+    config.rank = rank;
+    config.world_size = world_size;
     config.communicator_handle = 1;
     config.device_buffer_bytes = 2 * 1024 * 1024;
     config.requested_channels = 1;
@@ -230,10 +242,12 @@ Result call(Buffer& buffer, Inputs& inputs,
             int num_sms = 1, int num_qps = 0,
             const std::optional<Event>& event = std::nullopt,
             bool async = false, bool allocate_on_stream = false,
-            bool expanded = false) {
+            bool expanded = false, int num_experts = 2,
+            int capacity = 4) {
     return buffer.combine(
         inputs.x, weights, bias0, bias1, inputs.source, inputs.indices,
-        inputs.prefix, inputs.descriptor, channel, 2, 4, num_sms, num_qps,
+        inputs.prefix, inputs.descriptor, channel, num_experts, capacity,
+        num_sms, num_qps,
         event, event, async, allocate_on_stream, expanded);
 }
 
@@ -244,6 +258,56 @@ std::unique_ptr<Buffer> buffer(bool allow_multiple_reduction = true) {
     return Buffer::make_testing_buffer(
         0, std::move(owned), 2 * 1024 * 1024, 1,
         allow_multiple_reduction);
+}
+
+bool error_contains(
+    const std::function<void()>& operation, const char* expected);
+
+bool rank_parameterized_capacity() {
+    trace = {};
+    auto owned = resources(3);
+    if (!owned)
+        return false;
+    auto target = Buffer::make_testing_buffer(
+        0, std::move(owned), 2 * 1024 * 1024, 1, true, 7, 3);
+    Inputs inputs;
+    inputs.x = torch::empty(
+        {3, 8}, torch::TensorOptions().dtype(torch::kBFloat16));
+    inputs.weights = torch::empty(
+        {3, 2}, torch::TensorOptions().dtype(torch::kFloat));
+    inputs.source = torch::empty(
+        {3, 4}, torch::TensorOptions().dtype(torch::kInt));
+    inputs.prefix = torch::empty(
+        {3}, torch::TensorOptions().dtype(torch::kInt));
+    const std::array<std::int32_t, 12> metadata{
+        0, 0, -1, -1,
+        1, 2, -1, -1,
+        2, 4, -1, -1};
+    std::memcpy(inputs.source.data_ptr(), metadata.data(), sizeof(metadata));
+    const std::array<std::int32_t, 3> prefix{1, 2, 3};
+    std::memcpy(inputs.prefix.data_ptr(), prefix.data(), sizeof(prefix));
+    inputs.descriptor_value = elastic::make_attested_dispatch_handle_descriptor(
+        7, {0, 3, 0, 3, 0, 1}, 1, 8, 3, 2, 4, 1, 0);
+    inputs.write_descriptor();
+
+    if (std::get<2>(call(
+            *target, inputs, inputs.weights, std::nullopt, std::nullopt,
+            std::nullopt, 1, 0, std::nullopt, false, false, false, 3, 1))
+            .has_value() ||
+        trace.launches != 1)
+        return false;
+    if (!error_contains(
+            [&] { (void)call(
+                *target, inputs, inputs.weights, std::nullopt, std::nullopt,
+                std::nullopt, 1, 0, std::nullopt, false, false, false, 2, 1); },
+            "rank-partitioned expert capacity"))
+        return false;
+    return error_contains(
+        [&] { (void)call(
+            *target, inputs, inputs.weights, std::nullopt, std::nullopt,
+            std::nullopt, 1, 0, std::nullopt, false, false, false, 3,
+            std::numeric_limits<std::int32_t>::max() / 2); },
+        "rank-partitioned expert capacity");
 }
 
 std::unique_ptr<Buffer> stateless_buffer(std::uint64_t dispatch_family = 7) {
@@ -360,7 +424,7 @@ bool successful_dispatch_handle_is_statelessly_valid() {
     inputs.descriptor = *std::get<13>(dispatched);
     const auto result = call(*target, inputs);
     return !std::get<2>(result).has_value() && trace.launches == 1 &&
-        trace.generations == std::vector<std::uint64_t>{1};
+        trace.generations == std::vector<std::uint64_t>{2};
 }
 
 bool dispatch_descriptor_modes_are_exactly_compatible() {
@@ -470,7 +534,7 @@ bool long_lived_dispatch_validation_state_is_constant() {
     inputs.descriptor = *std::get<13>(cached);
     const auto result = call(*target, inputs);
     return !std::get<2>(result).has_value() && trace.launches == 1 &&
-        trace.generations == std::vector<std::uint64_t>{1};
+        trace.generations == std::vector<std::uint64_t>{67};
 }
 
 bool cross_buffer_dispatch_handle_is_retryable() {
@@ -490,7 +554,7 @@ bool cross_buffer_dispatch_handle_is_retryable() {
     inputs.descriptor = *std::get<13>(local);
     const auto result = call(*target, inputs);
     return !std::get<2>(result).has_value() && trace.launches == 1 &&
-        trace.generations == std::vector<std::uint64_t>{1};
+        trace.generations == std::vector<std::uint64_t>{2};
 }
 
 bool preflight_is_retryable() {
@@ -705,6 +769,7 @@ int main() {
         }
     };
     check(normal_and_expanded_success(), "normal and expanded outputs");
+    check(rank_parameterized_capacity(), "rank-parameterized capacity");
     check(successful_dispatch_handle_is_statelessly_valid(),
           "successful dispatch handle is statelessly valid");
     check(dispatch_descriptor_modes_are_exactly_compatible(),

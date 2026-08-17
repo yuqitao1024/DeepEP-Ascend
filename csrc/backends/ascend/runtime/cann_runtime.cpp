@@ -131,13 +131,17 @@ TransportStatus CannRuntimeResources::initialize_impl(
         return TransportStatus::runtime_failure(
             "initialize_runtime", 0,
             "CANN and Torch NPU runtime APIs are unavailable at build time");
-    if (config.world_size != 2 || config.rank < 0 || config.rank >= 2 ||
+    std::uint32_t command_capacity = 0;
+    if (config.world_size < 2 || config.rank < 0 ||
+        config.rank >= config.world_size ||
         config.communicator_handle == 0 || config.device_buffer_bytes <= 0 ||
         !config.cpu_communicator_empty || config.cpu_buffer_bytes != 0 ||
         config.allow_hybrid_mode || config.requested_channels != 1 ||
-        workspace_bytes == 0)
+        workspace_bytes == 0 ||
+        !transport::checked_scale_up_command_capacity(
+            config.world_size, &command_capacity))
         return TransportStatus::invalid(
-            "initialize_runtime", "invalid two-rank production configuration");
+            "initialize_runtime", "invalid scale-up production configuration");
 
     runtime_api_ = runtime_api;
     owns_resources_ = true;

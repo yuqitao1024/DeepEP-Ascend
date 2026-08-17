@@ -1,10 +1,26 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 
 #include "host_transport.hpp"
 
 namespace deep_ep::ascend::transport {
+
+constexpr bool checked_scale_up_command_capacity(
+    int world_size, std::uint32_t* capacity) noexcept {
+    if (capacity == nullptr || world_size <= 0)
+        return false;
+    const auto peers = static_cast<std::uint64_t>(world_size - 1);
+    constexpr std::uint64_t kCommandsPerPeer = 4;
+    if (peers >
+        (std::numeric_limits<std::uint32_t>::max() - 1ULL) /
+            kCommandsPerPeer)
+        return false;
+    *capacity = static_cast<std::uint32_t>(
+        peers * kCommandsPerPeer + 1ULL);
+    return true;
+}
 
 struct CannHostApi {
     void* user_data = nullptr;
@@ -32,6 +48,13 @@ struct CannHostApi {
     int (*destroy_team)(void*, std::uintptr_t) = nullptr;
     int (*host_barrier)(void*, std::int64_t) = nullptr;
 };
+
+TransportStatus query_cann_communicator_size(
+    std::int64_t communicator_handle, std::uint32_t* world_size,
+    const CannHostApi& api);
+
+TransportStatus query_cann_communicator_size(
+    std::int64_t communicator_handle, std::uint32_t* world_size);
 
 TransportCreateResult make_cann_transport(
     const TransportConfig& config, const CannHostApi& api);

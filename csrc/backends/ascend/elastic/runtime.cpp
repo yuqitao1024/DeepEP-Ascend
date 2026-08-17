@@ -80,6 +80,13 @@ bool same_workspace_layout(
            lhs.source_metadata_bytes == rhs.source_metadata_bytes &&
            lhs.scratch_offset == rhs.scratch_offset &&
            lhs.scratch_bytes == rhs.scratch_bytes &&
+           lhs.scratch_status_offset == rhs.scratch_status_offset &&
+           lhs.scratch_local_count_offset == rhs.scratch_local_count_offset &&
+           lhs.scratch_rank_counts_offset == rhs.scratch_rank_counts_offset &&
+           lhs.scratch_rank_values_offset == rhs.scratch_rank_values_offset &&
+           lhs.scratch_rank_indices_offset == rhs.scratch_rank_indices_offset &&
+           lhs.scratch_rank_flags_offset == rhs.scratch_rank_flags_offset &&
+           lhs.scratch_rank_count == rhs.scratch_rank_count &&
            lhs.total_bytes == rhs.total_bytes;
 }
 
@@ -135,7 +142,13 @@ bool same_symmetric_window_layout(
            lhs.combine_staging_shard_count ==
                rhs.combine_staging_shard_count &&
            lhs.combine_staging_bytes == rhs.combine_staging_bytes &&
-           lhs.combine_weight_offset == rhs.combine_weight_offset;
+           lhs.combine_weight_offset == rhs.combine_weight_offset &&
+           lhs.barrier_generation_offset == rhs.barrier_generation_offset &&
+           lhs.barrier_generation_bytes == rhs.barrier_generation_bytes &&
+           lhs.barrier_generation_count == rhs.barrier_generation_count &&
+           lhs.barrier_completion_offset == rhs.barrier_completion_offset &&
+           lhs.barrier_completion_bytes == rhs.barrier_completion_bytes &&
+           lhs.barrier_completion_count == rhs.barrier_completion_count;
 }
 
 bool context_topology_matches(
@@ -151,21 +164,21 @@ bool context_topology_matches(
 
 CoreRuntimeStatus validate_operation_topology(const CoreTiling& tiling) {
     if (tiling.operation == OperationKind::kBarrier) {
-        if (!is_two_rank_scale_up_topology(tiling.topology))
+        if (!is_scale_up_topology(tiling.topology))
             return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
-                    "barrier requires exactly two scale-up ranks"};
+                    "barrier requires a pure scale-up topology"};
         return {};
     }
     if (tiling.operation == OperationKind::kDispatch &&
         (is_single_rank_topology(tiling.topology) ||
-         is_two_rank_scale_up_topology(tiling.topology)))
+         is_scale_up_topology(tiling.topology)))
         return {};
     if (tiling.operation == OperationKind::kCombine &&
-        is_two_rank_scale_up_topology(tiling.topology))
+        is_scale_up_topology(tiling.topology))
         return {};
     if (tiling.operation == OperationKind::kCombine)
         return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
-                "combine requires exactly two scale-up ranks"};
+                "combine requires a pure scale-up topology"};
     return {CoreRuntimeStatusCode::kUnsupportedTopology, 0,
             "unsupported operation topology"};
 }
@@ -176,12 +189,12 @@ CoreRuntimeStatus validate_transport_context(const CoreTiling& tiling) {
         context.struct_size != sizeof(transport::DeviceTransportContext) ||
         !context_topology_matches(context.topology, tiling.topology))
         return invalid("transport context does not match tiling topology");
-    const bool fixed_shard_operation =
+    const bool scale_up_operation =
         (tiling.operation == OperationKind::kDispatch ||
          tiling.operation == OperationKind::kCombine) &&
-        is_two_rank_scale_up_topology(tiling.topology);
+        is_scale_up_topology(tiling.topology);
     if (tiling.operation != OperationKind::kBarrier &&
-        !fixed_shard_operation)
+        !scale_up_operation)
         return {};
     const auto required = tiling.operation == OperationKind::kDispatch ?
         kDispatchTransportCapabilities :

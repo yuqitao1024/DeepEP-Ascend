@@ -595,9 +595,19 @@ def _scenario_ascend_method_gates():
         _assert_transport_error(operation, calls[method])
 
     envs = importlib.import_module("deep_ep.utils.envs")
-    group = _FakeGroup(events, rank=1, size=2)
-    assert envs.get_physical_domain_size(group) == (1, 2)
-    assert envs.get_logical_domain_size(group, False) == (1, 2)
+    group = _FakeGroup(events, rank=2, size=3)
+    assert envs.get_physical_domain_size(group) == (1, 3)
+    assert envs.get_logical_domain_size(group, False) == (1, 3)
+    undersized = _FakeGroup(events, rank=0, size=1)
+    for query in (
+            lambda: envs.get_physical_domain_size(undersized),
+            lambda: envs.get_logical_domain_size(undersized, False)):
+        try:
+            query()
+        except RuntimeError as error:
+            assert "at least two ranks" in str(error)
+        else:
+            raise AssertionError("single-rank Ascend domain was accepted")
     buffer.destroy()
 
 
@@ -1139,7 +1149,7 @@ class RealAscendPythonApiTest(unittest.TestCase):
             return 0
 
         def size(self):
-            return 1
+            return 0
 
         def barrier(self):
             raise AssertionError(
@@ -1160,9 +1170,9 @@ class RealAscendPythonApiTest(unittest.TestCase):
         self.assertFalse(hasattr(self.extension, "init_jit"))
         API_SURFACE.assert_no_testing_diagnostic_surface(self.extension)
 
-    def test_constructor_rejects_non_two_rank_group_before_hccl_use(self):
+    def test_constructor_rejects_empty_group_before_hccl_use(self):
         with self.assertRaisesRegex(
-                RuntimeError, "exactly two ranks are required"):
+                RuntimeError, "world_size must be at least two"):
             self.deep_ep.ElasticBuffer(
                 self.FakeGroup(), num_bytes=2 * 1024 * 1024,
                 allow_hybrid_mode=False, explicitly_destroy=True)

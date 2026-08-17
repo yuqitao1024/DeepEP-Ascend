@@ -23,7 +23,6 @@
 namespace deep_ep::ascend::transport {
 namespace {
 
-constexpr std::uint32_t kCommandCapacity = 256;
 constexpr std::uint64_t kDefaultRetryLimit = 1ULL << 20U;
 constexpr TransportCapabilities kValidatedCapabilities =
     capability_bit(TransportCapability::kSymmetricWindow) |
@@ -54,9 +53,11 @@ class CannHostTransport final : public HostTransport {
 public:
     CannHostTransport(
         TransportConfig config, CannHostApi api, std::uint32_t rank,
-        std::uint32_t world_size, std::uintptr_t team)
+        std::uint32_t world_size, std::uint32_t command_capacity,
+        std::uintptr_t team)
         : config_(std::move(config)), api_(api), rank_(rank),
-          world_size_(world_size), team_(team) {}
+          world_size_(world_size), command_capacity_(command_capacity),
+          team_(team) {}
 
     ~CannHostTransport() override { (void)destroy(); }
 
@@ -86,7 +87,7 @@ public:
         if (!status.ok()) return status;
 
         TransportCommandQueue queue_state;
-        queue_state.capacity = kCommandCapacity;
+        queue_state.capacity = command_capacity_;
         queue_state.commands = pointer_value(commands_);
         queue_state.service_state = pointer_value(service_);
         queue_state.diagnostic = pointer_value(diagnostic_);
@@ -291,8 +292,8 @@ public:
     }
 
 private:
-    static constexpr std::uint64_t command_capacity_bytes() {
-        return static_cast<std::uint64_t>(kCommandCapacity) *
+    constexpr std::uint64_t command_capacity_bytes() const {
+        return static_cast<std::uint64_t>(command_capacity_) *
             sizeof(TransportCommand);
     }
 
@@ -367,6 +368,7 @@ private:
     CannHostApi api_;
     std::uint32_t rank_ = 0;
     std::uint32_t world_size_ = 0;
+    std::uint32_t command_capacity_ = 0;
     std::uintptr_t team_ = 0;
     std::uintptr_t window_ = 0;
     std::uintptr_t local_window_base_ = 0;
@@ -542,10 +544,52 @@ TransportStatus validate_config(const TransportConfig& config) {
     if (config.requested_channels != 1)
         return TransportStatus::invalid(
             "make_cann_transport", "exactly one channel is required");
+    std::uint32_t command_capacity = 0;
+    if (!checked_scale_up_command_capacity(
+            config.world_size, &command_capacity))
+        return TransportStatus::invalid(
+            "make_cann_transport",
+            "rank count exceeds transport command capacity");
     return TransportStatus::success();
 }
 
 }  // namespace
+
+TransportStatus query_cann_communicator_size(
+    std::int64_t communicator_handle, std::uint32_t* world_size,
+    const CannHostApi& api) {
+    if (communicator_handle == 0)
+        return TransportStatus::invalid(
+            "query_communicator_size",
+            "communicator_handle must not be zero");
+    if (world_size == nullptr)
+        return TransportStatus::invalid(
+            "query_communicator_size", "world_size must not be null");
+    if (api.get_size == nullptr)
+        return TransportStatus::runtime_failure(
+            "query_communicator_size", 0,
+            "CANN public host headers are unavailable at build time");
+
+    std::uint32_t queried_size = 0;
+    const int result = api.get_size(
+        api.user_data, communicator_handle, &queried_size);
+    if (result != 0)
+        return backend_failure("query_communicator_size", result);
+    if (queried_size == 0 ||
+        queried_size > static_cast<std::uint32_t>(
+            std::numeric_limits<int>::max()))
+        return TransportStatus::runtime_failure(
+            "query_communicator_size", 0,
+            "CANN returned an invalid communicator size");
+    *world_size = queried_size;
+    return TransportStatus::success();
+}
+
+TransportStatus query_cann_communicator_size(
+    std::int64_t communicator_handle, std::uint32_t* world_size) {
+    return query_cann_communicator_size(
+        communicator_handle, world_size, default_api());
+}
 
 TransportCreateResult make_cann_transport(
     const TransportConfig& config, const CannHostApi& api) {
@@ -576,6 +620,15 @@ TransportCreateResult make_cann_transport(
                 "communicator rank/size do not match TransportConfig"),
             nullptr};
 
+    std::uint32_t command_capacity = 0;
+    if (!checked_scale_up_command_capacity(
+            config.world_size, &command_capacity))
+        return {
+            TransportStatus::invalid(
+                "make_cann_transport",
+                "rank count exceeds transport command capacity"),
+            nullptr};
+
     std::vector<std::uint32_t> rank_ids(world_size);
     for (std::uint32_t index = 0; index < world_size; ++index)
         rank_ids[index] = index;
@@ -593,7 +646,7 @@ TransportCreateResult make_cann_transport(
             nullptr};
 
     auto transport = std::make_unique<CannHostTransport>(
-        config, api, rank, world_size, team);
+        config, api, rank, world_size, command_capacity, team);
     return {TransportStatus::success(), std::move(transport)};
 }
 

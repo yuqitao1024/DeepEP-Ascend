@@ -492,6 +492,11 @@ bool raises_transport_error(const char* operation, const char* detail, Call call
     return false;
 }
 
+int fake_get_size(void*, std::int64_t, std::uint32_t* size) {
+    *size = 3;
+    return 0;
+}
+
 int main() {
     pybind11::module_ module;
     deep_ep::elastic::register_apis(module);
@@ -503,11 +508,32 @@ int main() {
             "get_logical_domain_size", "barrier", "dispatch", "combine"})
         return 2;
 
-    const auto buffer_bytes = Buffer::calculate_buffer_size(
-        7, 128, 7168, 8, false, false, true);
-    if (buffer_bytes <= 0 ||
-        buffer_bytes % deep_ep::ascend::elastic::kPublicElasticBufferAlignment != 0)
+    deep_ep::ascend::transport::CannHostApi host_api{};
+    host_api.get_size = fake_get_size;
+    const auto buffer_bytes = Buffer::calculate_buffer_size_for_testing(
+        7, 128, 7168, 8, false, false, true, host_api);
+    deep_ep::ascend::elastic::SymmetricWindowInput input{};
+    input.world_size = 3;
+    input.num_max_tokens_per_rank = 128;
+    input.hidden = 7168;
+    input.num_topk = 8;
+    input.element_bytes = 2;
+    input.expanded = true;
+    input.allow_multiple_reduction = true;
+    deep_ep::ascend::elastic::SymmetricWindowLayout layout{};
+    if (!deep_ep::ascend::elastic::build_symmetric_window_layout(
+            input, &layout).ok() ||
+        buffer_bytes != static_cast<std::int64_t>(layout.total_bytes))
         return 3;
+    try {
+        Buffer::calculate_buffer_size(
+            7, 128, 7168, 8, false, false, true);
+        return 7;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find(
+                "CANN public host headers are unavailable") == std::string::npos)
+            return 8;
+    }
     if (!raises_transport_error(
             "calculate_elastic_buffer_size", "does not support FP8", [] {
                 Buffer::calculate_buffer_size(7, 128, 7168, 8, true, false, true);
@@ -542,6 +568,7 @@ class AscendStubSourceTest(unittest.TestCase):
             compile_result = subprocess.run(
                 ["c++", "-std=c++17", "-Werror=return-type",
                  "-DDEEP_EP_PLATFORM_ASCEND=1",
+                 "-DDEEP_EP_ASCEND_TESTING=1",
                  f"-I{include}", f"-I{ROOT}",
                  str(probe),
                  str(ROOT / "csrc/backends/ascend/elastic/runtime.cpp"),
@@ -562,6 +589,21 @@ class AscendStubSourceTest(unittest.TestCase):
         for forbidden in ("cuda", "nccl", "nvshmem", "hccl", "torch_npu",
                           "acl/", "hcomm"):
             self.assertFalse(any(forbidden in include for include in includes), forbidden)
+
+    def test_elastic_buffer_uses_one_operation_coordinator(self):
+        source = HEADER.read_text()
+        self.assertIn('"elastic/operation_coordinator.hpp"', source)
+        self.assertIn("elastic::BufferOperationCoordinator coordinator_", source)
+        for legacy_state in (
+                "barrier_sequence_", "dispatch_sequence_", "combine_sequence_",
+                "destroyed_"):
+            self.assertNotIn(legacy_state, source)
+        for operation_kind in (
+                "kTopologyQuery", "kBarrier", "kDispatch", "kCombine"):
+            self.assertIn(
+                f"elastic::BufferOperationKind::{operation_kind}", source)
+        self.assertIn("coordinator_.reserve(kind)", source)
+        self.assertIn("coordinator_.reserve_destroy()", source)
 
     def test_contract_defines_exact_public_allowlists(self):
         spec = importlib.util.spec_from_file_location("api_contract", API_CONTRACT)

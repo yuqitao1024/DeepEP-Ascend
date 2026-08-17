@@ -149,5 +149,50 @@ int main() {
         tiling.communication_buffer_bytes % kPublicElasticBufferAlignment != 0)
         return 16;
 
+    struct ScratchFixture {
+        int world_size;
+        std::uint64_t bytes;
+    };
+    for (const auto fixture : {
+             ScratchFixture{2, 64}, ScratchFixture{4, 128},
+             ScratchFixture{8, 192}}) {
+        for (const auto operation : {
+                 OperationKind::kDispatch, OperationKind::kCombine}) {
+            input = valid_input();
+            input.operation = operation;
+            input.topology.world_size = fixture.world_size;
+            input.topology.scale_up_size = fixture.world_size;
+            input.num_experts =
+                static_cast<std::uint64_t>(fixture.world_size) * 2;
+            status = build_core_tiling(input, &tiling);
+            if (!status.ok())
+                return 17;
+            const auto& rank_scratch = tiling.workspace_layout;
+            const auto count =
+                static_cast<std::uint64_t>(fixture.world_size);
+            if (rank_scratch.scratch_bytes != fixture.bytes ||
+                rank_scratch.scratch_rank_count != count ||
+                rank_scratch.scratch_status_offset !=
+                    rank_scratch.scratch_offset ||
+                rank_scratch.scratch_local_count_offset !=
+                    rank_scratch.scratch_status_offset + sizeof(std::uint64_t) ||
+                rank_scratch.scratch_rank_counts_offset !=
+                    rank_scratch.scratch_local_count_offset +
+                        sizeof(std::uint64_t) ||
+                rank_scratch.scratch_rank_values_offset !=
+                    rank_scratch.scratch_rank_counts_offset +
+                        count * sizeof(std::uint64_t) ||
+                rank_scratch.scratch_rank_indices_offset !=
+                    rank_scratch.scratch_rank_values_offset +
+                        count * sizeof(std::uint64_t) ||
+                rank_scratch.scratch_rank_flags_offset !=
+                    rank_scratch.scratch_rank_indices_offset +
+                        count * sizeof(std::int32_t) ||
+                rank_scratch.scratch_rank_flags_offset + count >
+                    rank_scratch.scratch_offset + rank_scratch.scratch_bytes)
+                return 18;
+        }
+    }
+
     return 0;
 }

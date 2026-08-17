@@ -42,7 +42,7 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 4;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 6;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -167,7 +167,40 @@ inline bool build_workspace_layout(
                           sizeof(std::int32_t),
                           &layout.source_metadata_bytes))
         return false;
-    layout.scratch_bytes = kAscendElasticAlignment;
+    layout.scratch_rank_count =
+        static_cast<std::uint64_t>(input.topology.world_size);
+    std::uint64_t rank_u64_bytes = 0;
+    std::uint64_t rank_i32_bytes = 0;
+    std::uint64_t scratch_cursor = 0;
+    if (!checked_multiply(
+            layout.scratch_rank_count, sizeof(std::uint64_t),
+            &rank_u64_bytes) ||
+        !checked_multiply(
+            layout.scratch_rank_count, sizeof(std::int32_t),
+            &rank_i32_bytes) ||
+        !checked_add(scratch_cursor, sizeof(std::uint64_t),
+                     &scratch_cursor))
+        return false;
+    layout.scratch_local_count_offset = scratch_cursor;
+    if (!checked_add(scratch_cursor, sizeof(std::uint64_t),
+                     &scratch_cursor))
+        return false;
+    layout.scratch_rank_counts_offset = scratch_cursor;
+    if (!checked_add(scratch_cursor, rank_u64_bytes, &scratch_cursor))
+        return false;
+    layout.scratch_rank_values_offset = scratch_cursor;
+    if (!checked_add(scratch_cursor, rank_u64_bytes, &scratch_cursor))
+        return false;
+    layout.scratch_rank_indices_offset = scratch_cursor;
+    if (!checked_add(scratch_cursor, rank_i32_bytes, &scratch_cursor))
+        return false;
+    layout.scratch_rank_flags_offset = scratch_cursor;
+    if (!checked_add(
+            scratch_cursor, layout.scratch_rank_count, &scratch_cursor) ||
+        !checked_align(
+            scratch_cursor, kAscendElasticAlignment,
+            &layout.scratch_bytes))
+        return false;
     if (!builder.append(layout.barrier_bytes, &layout.barrier_offset) ||
         !builder.append(layout.block_count_bytes, &layout.block_count_offset) ||
         !builder.append(layout.reduced_count_bytes,
@@ -178,6 +211,23 @@ inline bool build_workspace_layout(
                         &layout.source_metadata_offset) ||
         !builder.append(layout.scratch_bytes, &layout.scratch_offset) ||
         !builder.finish(&layout.total_bytes))
+        return false;
+    layout.scratch_status_offset = layout.scratch_offset;
+    if (!checked_add(
+            layout.scratch_offset, layout.scratch_local_count_offset,
+            &layout.scratch_local_count_offset) ||
+        !checked_add(
+            layout.scratch_offset, layout.scratch_rank_counts_offset,
+            &layout.scratch_rank_counts_offset) ||
+        !checked_add(
+            layout.scratch_offset, layout.scratch_rank_values_offset,
+            &layout.scratch_rank_values_offset) ||
+        !checked_add(
+            layout.scratch_offset, layout.scratch_rank_indices_offset,
+            &layout.scratch_rank_indices_offset) ||
+        !checked_add(
+            layout.scratch_offset, layout.scratch_rank_flags_offset,
+            &layout.scratch_rank_flags_offset))
         return false;
     *output = layout;
     return true;
@@ -268,9 +318,10 @@ inline TilingStatus build_core_tiling(
             input, &tiling.dispatch_output_capacity))
         return TilingStatus::overflow("layout size overflow");
 
-    if (input.topology.world_size == 2) {
+    if (is_scale_up_topology(input.topology)) {
         SymmetricWindowInput window_input{};
-        window_input.world_size = 2;
+        window_input.world_size =
+            static_cast<std::uint32_t>(input.topology.world_size);
         window_input.num_max_tokens_per_rank = input.num_max_tokens_per_rank;
         window_input.hidden = input.hidden;
         window_input.num_topk = input.num_topk;

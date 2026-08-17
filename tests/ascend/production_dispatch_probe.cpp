@@ -502,6 +502,22 @@ bool empty_probe() {
         std::get<5>(result) == 0 && std::get<6>(result) == 0;
 }
 
+bool testing_topology_mismatch_probe() {
+    auto runtime_resources = resources();
+    if (!runtime_resources)
+        return false;
+    try {
+        (void)Buffer::make_testing_buffer(
+            0, std::move(runtime_resources), 2 * 1024 * 1024, 1,
+            true, 7, 3);
+    } catch (const std::runtime_error& error) {
+        return std::string(error.what()).find(
+                   "testing topology must match runtime resources") !=
+            std::string::npos;
+    }
+    return false;
+}
+
 int main() {
     int failures = 0;
     const auto check = [&failures](bool passed, const char* name) {
@@ -517,5 +533,6 @@ int main() {
     check(launch_poison_probe(), "launch failure poisoning");
     check(diagnostic_order_probe(), "diagnostic ordering");
     check(empty_probe(), "empty dispatch");
+    check(testing_topology_mismatch_probe(), "testing topology mismatch");
     return failures == 0 ? 0 : 1;
 }

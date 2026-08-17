@@ -7,7 +7,7 @@ namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kAscendElasticAlignment = 32;
 inline constexpr std::uint64_t kPublicElasticBufferAlignment = 2ULL << 20U;
-inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 3;
+inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 4;
 inline constexpr std::uint64_t kCombineControlSlotBytes =
     2 * sizeof(std::uint64_t);
 inline constexpr std::uint64_t kCombineRecordHeaderBytes =
@@ -50,10 +50,10 @@ constexpr bool is_single_rank_topology(const CoreTopology& topology) {
            topology.scale_out_rank == 0 && topology.scale_out_size == 1;
 }
 
-constexpr bool is_two_rank_scale_up_topology(
-    const CoreTopology& topology) {
-    return topology.world_size == 2 && topology.world_rank >= 0 &&
-           topology.world_rank < 2 && topology.scale_up_size == 2 &&
+constexpr bool is_scale_up_topology(const CoreTopology& topology) {
+    return topology.world_size >= 2 && topology.world_rank >= 0 &&
+           topology.world_rank < topology.world_size &&
+           topology.scale_up_size == topology.world_size &&
            topology.scale_up_rank == topology.world_rank &&
            topology.scale_out_rank == 0 && topology.scale_out_size == 1;
 }
@@ -88,6 +88,19 @@ constexpr bool checked_align(
     return true;
 }
 
+constexpr bool checked_rank_slot_offset(
+    std::uint64_t region_offset, std::uint64_t region_count, int rank,
+    std::uint64_t* result) {
+    if (result == nullptr || rank < 0 ||
+        static_cast<std::uint64_t>(rank) >= region_count)
+        return false;
+    std::uint64_t rank_bytes = 0;
+    return checked_multiply(
+               static_cast<std::uint64_t>(rank), sizeof(std::uint64_t),
+               &rank_bytes) &&
+           checked_add(region_offset, rank_bytes, result);
+}
+
 struct TokenLayout {
     std::uint64_t hidden_offset = 0;
     std::uint64_t hidden_bytes = 0;
@@ -117,18 +130,23 @@ struct WorkspaceLayout {
     std::uint64_t source_metadata_bytes = 0;
     std::uint64_t scratch_offset = 0;
     std::uint64_t scratch_bytes = 0;
+    std::uint64_t scratch_status_offset = 0;
+    std::uint64_t scratch_local_count_offset = 0;
+    std::uint64_t scratch_rank_counts_offset = 0;
+    std::uint64_t scratch_rank_values_offset = 0;
+    std::uint64_t scratch_rank_indices_offset = 0;
+    std::uint64_t scratch_rank_flags_offset = 0;
+    std::uint64_t scratch_rank_count = 0;
     std::uint64_t total_bytes = 0;
 };
 
 struct alignas(32) SymmetricControlHeader {
     std::uint64_t dispatch_generation = 0;
     std::uint64_t combine_generation = 0;
-    std::uint64_t barrier_generation[2]{};
-    std::uint64_t barrier_completion[2]{};
     std::uint64_t reserved[2]{};
 };
 
-static_assert(sizeof(SymmetricControlHeader) == 64);
+static_assert(sizeof(SymmetricControlHeader) == 32);
 
 struct alignas(16) DispatchControlSlot {
     std::uint64_t generation = 0;
@@ -208,6 +226,12 @@ struct SymmetricWindowLayout {
     std::uint64_t combine_staging_shard_count = 0;
     std::uint64_t combine_staging_bytes = 0;
     std::uint64_t combine_weight_offset = 0;
+    std::uint64_t barrier_generation_offset = 0;
+    std::uint64_t barrier_generation_bytes = 0;
+    std::uint64_t barrier_generation_count = 0;
+    std::uint64_t barrier_completion_offset = 0;
+    std::uint64_t barrier_completion_bytes = 0;
+    std::uint64_t barrier_completion_count = 0;
 };
 
 class LayoutBuilder {
@@ -241,8 +265,9 @@ inline LayoutStatus build_symmetric_window_layout(
     if (output == nullptr)
         return LayoutStatus::invalid("output must not be null");
     *output = {};
-    if (input.world_size != 2)
-        return LayoutStatus::invalid("production layout requires two ranks");
+    if (input.world_size < 2)
+        return LayoutStatus::invalid(
+            "production layout requires at least two ranks");
 
     const bool barrier_only = input.num_max_tokens_per_rank == 0 &&
                               input.hidden == 0 && input.num_topk == 0;
@@ -255,13 +280,32 @@ inline LayoutStatus build_symmetric_window_layout(
     layout.struct_size = sizeof(SymmetricWindowLayout);
     layout.dispatch_source_shard_count = input.world_size;
     layout.combine_contributor_shard_count = input.world_size;
+    layout.barrier_generation_count = input.world_size;
+    layout.barrier_completion_count = input.world_size;
 
-    if (!checked_multiply(input.world_size, sizeof(DispatchControlSlot),
-                          &layout.dispatch_control_bytes) ||
-        !checked_add(sizeof(SymmetricControlHeader),
-                     layout.dispatch_control_bytes,
-                     &layout.control_bytes))
+    if (!checked_multiply(input.world_size, sizeof(std::uint64_t),
+                          &layout.barrier_generation_bytes) ||
+        !checked_multiply(input.world_size, sizeof(std::uint64_t),
+                          &layout.barrier_completion_bytes) ||
+        !checked_multiply(input.world_size, sizeof(DispatchControlSlot),
+                          &layout.dispatch_control_bytes))
         return LayoutStatus::overflow("control region size overflow");
+    LayoutBuilder control;
+    std::uint64_t ignored_control_header_offset = 0;
+    if (!control.append(
+            sizeof(SymmetricControlHeader),
+            &ignored_control_header_offset) ||
+        !control.append(
+            layout.barrier_generation_bytes,
+            &layout.barrier_generation_offset) ||
+        !control.append(
+            layout.barrier_completion_bytes,
+            &layout.barrier_completion_offset) ||
+        !control.append(
+            layout.dispatch_control_bytes,
+            &layout.dispatch_control_offset) ||
+        !control.finish(&layout.control_bytes))
+        return LayoutStatus::overflow("control region layout overflow");
 
     if (!barrier_only) {
         const std::uint64_t effective_topk =
@@ -367,7 +411,11 @@ inline LayoutStatus build_symmetric_window_layout(
         !window.append(layout.reserve_bytes, &layout.reserve_offset) ||
         !window.finish(&layout.total_bytes, kPublicElasticBufferAlignment))
         return LayoutStatus::overflow("symmetric window size overflow");
-    if (!checked_add(layout.control_offset, sizeof(SymmetricControlHeader),
+    if (!checked_add(layout.control_offset, layout.barrier_generation_offset,
+                     &layout.barrier_generation_offset) ||
+        !checked_add(layout.control_offset, layout.barrier_completion_offset,
+                     &layout.barrier_completion_offset) ||
+        !checked_add(layout.control_offset, layout.dispatch_control_offset,
                      &layout.dispatch_control_offset) ||
         !checked_add(layout.dispatch_offset, layout.dispatch_receive_bytes,
                      &layout.dispatch_staging_offset) ||

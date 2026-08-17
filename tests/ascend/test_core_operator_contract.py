@@ -24,6 +24,8 @@ PRODUCTION_DISPATCH_STATE_PROBE = \
     ROOT / "tests/ascend/production_dispatch_state_probe.cpp"
 PRODUCTION_BARRIER_STATE_PROBE = \
     ROOT / "tests/ascend/production_barrier_state_probe.cpp"
+PRODUCTION_OPERATION_COORDINATOR_PROBE = \
+    ROOT / "tests/ascend/production_operation_coordinator_probe.cpp"
 TWO_RANK_DISPATCH = \
     ROOT / "tests/ascend/production/run_two_rank_dispatch.py"
 TWO_RANK_COMBINE = \
@@ -155,15 +157,22 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                     r"(?<![\w.])tiling\.transport_context(?![\w.])",
                     function_name)
 
-        for function_name in (
-                "barrier_producer_vf", "barrier_continuation_vf"):
+        barrier_region_arguments = {
+            "barrier_producer_vf": (
+                "std::uint64_t generation_offset",
+                "std::uint64_t generation_count"),
+            "barrier_continuation_vf": (
+                "std::uint64_t completion_offset",
+                "std::uint64_t completion_count"),
+        }
+        for function_name, region_arguments in barrier_region_arguments.items():
             signature = signatures[function_name]
             for argument in (
                     "std::uint32_t transport_abi_version",
                     "std::uint32_t transport_struct_size",
                     "std::uintptr_t transport_local_window_base",
                     "std::uintptr_t transport_backend_context",
-                    "std::uint64_t control_offset", "int world_rank",
+                    *region_arguments, "int world_rank",
                     "std::uint64_t generation"):
                 self.assertIn(argument, signature, function_name)
         self.assertIn(
@@ -252,7 +261,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "std::uint64_t combine_staging_shard_bytes",
             "std::uint64_t combine_staging_shard_count",
             "std::uint64_t combine_staging_bytes",
-            "std::uint64_t workspace_scratch_offset",
+            "std::uint64_t workspace_scratch_status_offset",
+            "std::uint64_t workspace_scratch_rank_counts_offset",
+            "std::uint64_t workspace_scratch_rank_values_offset",
+            "std::uint64_t workspace_scratch_rank_count",
             "std::uint64_t hidden_elements",
         ]
         self.assertEqual(
@@ -294,7 +306,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "tiling.symmetric_window_layout.combine_staging_shard_bytes",
             "tiling.symmetric_window_layout.combine_staging_shard_count",
             "tiling.symmetric_window_layout.combine_staging_bytes",
-            "tiling.workspace_layout.scratch_offset",
+            "tiling.workspace_layout.scratch_status_offset",
+            "tiling.workspace_layout.scratch_rank_counts_offset",
+            "tiling.workspace_layout.scratch_rank_values_offset",
+            "tiling.workspace_layout.scratch_rank_count",
             "tiling.hidden",
         ]
         self.assertEqual(
@@ -460,6 +475,36 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             r"header->origin_token,\s*num_tokens,\s*shard_capacity\)")
         self.assertIn("is_valid_combine_record_lanes(", epilogue)
 
+    def test_rank_indexed_kernel_state_uses_workspace_views(self):
+        """Catches fixed-rank SIMT arrays and two-rank device admission."""
+        sources = {
+            name: (ELASTIC / name).read_text()
+            for name in ("dispatch.asc", "combine.asc")
+        }
+        fixed_rank_array = re.compile(r"\[\s*(?:2|8)\s*\]")
+        for name, source in sources.items():
+            self.assertIsNone(fixed_rank_array.search(source), name)
+            self.assertNotRegex(source, r"(?:world|scale_up)_size\s*!=\s*2")
+            for argument in (
+                    "workspace_scratch_status_offset",
+                    "workspace_scratch_rank_counts_offset",
+                    "workspace_scratch_rank_values_offset",
+                    "workspace_scratch_rank_count"):
+                self.assertIn(argument, source, f"{name}: {argument}")
+
+        dispatch = sources["dispatch.asc"]
+        for argument in ("workspace_scratch_local_count_offset",
+                         "workspace_scratch_rank_indices_offset",
+                         "workspace_scratch_rank_flags_offset"):
+            self.assertIn(argument, dispatch, argument)
+
+        combine = sources["combine.asc"]
+        self.assertIn(
+            "__gm__ const std::uint64_t* contributor_counts", combine)
+        self.assertIn("std::uint64_t contributor_count", combine)
+        self.assertNotIn("{contributor_counts[0], contributor_counts[1]}",
+                         combine)
+
     def test_production_combine_semantics(self):
         self._run_production_combine_semantics_probe()
 
@@ -517,6 +562,21 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             compile_result = subprocess.run(
                 ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                  f"-I{ROOT}", str(PRODUCTION_BARRIER_STATE_PROBE),
+                 "-o", str(binary)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_buffer_operation_coordinator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "production_operation_coordinator"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 "-pthread", f"-I{ROOT}",
+                 str(PRODUCTION_OPERATION_COORDINATOR_PROBE),
                  "-o", str(binary)], capture_output=True, text=True,
                 check=False)
             self.assertEqual(compile_result.returncode, 0,
@@ -976,7 +1036,7 @@ int main() {
                 "validate_cached_dispatch_state",
                 "dispatch_output_capacity",
                 "arguments.workspace",
-                "tiling.workspace_layout.scratch_offset"):
+                "tiling.workspace_layout.scratch_status_offset"):
             self.assertIn(marker, source)
         self.assertIn("observed_transport_error", source)
         diagnostic_check = source.index("observed_transport_error")
@@ -1073,9 +1133,23 @@ int main() {
         self.assertIn("launch_internal_dispatch", production)
         self.assertIn("launch_internal_combine", production)
         for marker in ("read_diagnostic", "copy_to_host",
-                       "barrier_completion", "BarrierSequence",
+                       "barrier_completion", "BufferOperationCoordinator",
                        "timeout_cycles_from_seconds"):
             self.assertIn(marker, production)
+
+    def test_public_runtime_rank_parameterization_source_contract(self):
+        production = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        runtime = (ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp").read_text()
+        transport = (ROOT / "csrc/backends/ascend/transport/cann_transport.cpp").read_text()
+        self.assertGreaterEqual(production.count("num_experts % num_ranks_"), 2)
+        self.assertIn(
+            "capacity * static_cast<std::uint64_t>(num_ranks_)", production)
+        self.assertIn("query_cann_communicator_size(comm_handle", production)
+        self.assertNotIn("num_ranks == 2", production)
+        self.assertNotIn("input.world_size = 2", production)
+        self.assertNotIn("config.world_size != 2", runtime)
+        self.assertIn("config.world_size < 2", runtime)
+        self.assertIn("query_cann_communicator_size", transport)
         self.assertIn("#if DEEP_EP_ASCEND_TESTING", production)
         self.assertIn("DEEP_EP_ASCEND_TEST_DIAGNOSTIC", production)
         for marker in (
@@ -1086,8 +1160,8 @@ int main() {
                 "diagnostic.peer = static_cast<std::uint32_t>(rank_idx_)",
                 "diagnostic.channel = 0",
                 "diagnostic.backend_status = 0",
-                       "diagnostic.generation = attempt.generation()",
-                       "attempt.complete()"):
+                       "diagnostic.generation = generation",
+                       "lease.complete()"):
             self.assertIn(marker, production)
         for operation in ("barrier", "dispatch", "combine"):
             marker = f'require_transport("{operation}"'
@@ -1099,7 +1173,7 @@ int main() {
         self.assertNotIn("kDirectPeerPointer", dispatch_capabilities)
         self.assertNotIn("kRemoteAtomicAddRelease", dispatch_capabilities)
         for marker in (
-                "DispatchSequence", "DispatchHandleDescriptor",
+                "BufferOperationCoordinator", "DispatchHandleDescriptor",
                 "copy_from_host", "copy_to_host", "synchronize_stream",
                 "read_diagnostic", "num_sms == 1", "num_qps == 0",
                 "do_expand", "do_zero_padding",

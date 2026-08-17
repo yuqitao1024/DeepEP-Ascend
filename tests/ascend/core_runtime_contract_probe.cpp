@@ -65,7 +65,8 @@ CoreTiling valid_tiling(
     input.mode_flags = mode_flags;
     input.num_tokens = operation == OperationKind::kBarrier ? 0 : num_tokens;
     input.hidden = 64;
-    input.num_experts = 4;
+    input.num_experts = world_size <= 2 ? 4 :
+        static_cast<std::uint64_t>(world_size) * 2;
     input.num_topk = 2;
     input.expert_alignment = 4;
     input.num_max_tokens_per_rank = 8;
@@ -85,9 +86,10 @@ CoreTiling valid_tiling(
     return tiling;
 }
 
-CoreTiling valid_barrier_tiling(int world_rank) {
+CoreTiling valid_barrier_tiling(int world_rank, int world_size = 2) {
     auto tiling = valid_tiling(
-        OperationKind::kBarrier, ElementKind::kBFloat16, world_rank, 2);
+        OperationKind::kBarrier, ElementKind::kBFloat16, world_rank,
+        world_size);
     tiling.transport_context.capabilities =
         transport::capability_bit(
             transport::TransportCapability::kRemoteSignal) |
@@ -322,11 +324,11 @@ bool combine_runner_allocation_contract_matches() {
         required_core_launch_storage(dispatch),
         required_core_launch_storage(combine));
     return dispatch.communication_buffer_bytes == 3584 &&
-           dispatch.workspace_bytes == 416 &&
+           dispatch.workspace_bytes == 448 &&
            combine.communication_buffer_bytes == 2097152 &&
-           combine.workspace_bytes == 416 &&
+           combine.workspace_bytes == 448 &&
            allocation.communication_buffer_bytes == 2097152 &&
-           allocation.workspace_bytes == 416 &&
+           allocation.workspace_bytes == 448 &&
            combine.topology.world_size == 2;
 }
 
@@ -376,6 +378,7 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 }
 
 int main() {
+    static_assert(kCoreTilingAbiVersion == 6);
     auto barrier_rank_zero = valid_barrier_tiling(0);
     auto barrier_rank_one = valid_barrier_tiling(1);
     const auto barrier_storage =
@@ -384,11 +387,36 @@ int main() {
         !validate_internal_launch(barrier_rank_one, barrier_storage).ok())
         return 30;
 
-    auto malformed_barrier = barrier_rank_zero;
-    malformed_barrier.topology.world_size = 3;
-    malformed_barrier.topology.scale_up_size = 3;
-    malformed_barrier.transport_context.topology.world_size = 3;
-    malformed_barrier.transport_context.topology.scale_up_size = 3;
+    for (const int world_size : {3, 4, 8}) {
+        auto parameterized_barrier =
+            valid_barrier_tiling(world_size - 1, world_size);
+        if (!validate_internal_launch(
+                parameterized_barrier,
+                required_core_launch_storage(parameterized_barrier)).ok())
+            return 67;
+    }
+
+    for (const int world_size : {4, 8}) {
+        auto parameterized_dispatch = valid_tiling(
+            OperationKind::kDispatch, ElementKind::kBFloat16,
+            world_size - 1, world_size);
+        auto parameterized_combine = valid_tiling(
+            OperationKind::kCombine, ElementKind::kBFloat16,
+            world_size - 2, world_size);
+        export_transport(&parameterized_dispatch);
+        export_transport(&parameterized_combine);
+        if (!validate_internal_launch(
+                parameterized_dispatch,
+                required_core_launch_storage(parameterized_dispatch)).ok() ||
+            !validate_internal_launch(
+                parameterized_combine,
+                required_core_launch_storage(parameterized_combine)).ok())
+            return 68;
+    }
+
+    auto malformed_barrier = valid_barrier_tiling(2, 3);
+    malformed_barrier.topology.scale_up_size = 4;
+    malformed_barrier.transport_context.topology.scale_up_size = 4;
     if (validate_internal_launch(malformed_barrier, barrier_storage).code !=
         CoreRuntimeStatusCode::kUnsupportedTopology)
         return 31;
@@ -425,6 +453,17 @@ int main() {
     if (validate_internal_launch(malformed_barrier, barrier_storage).code !=
         CoreRuntimeStatusCode::kInvalidArgument)
         return 46;
+    malformed_barrier = barrier_rank_zero;
+    ++malformed_barrier.symmetric_window_layout.barrier_generation_count;
+    if (validate_internal_launch(malformed_barrier, barrier_storage).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 69;
+    malformed_barrier = barrier_rank_zero;
+    malformed_barrier.symmetric_window_layout.barrier_completion_offset +=
+        kAscendElasticAlignment;
+    if (validate_internal_launch(malformed_barrier, barrier_storage).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 70;
 
     auto insufficient_barrier = barrier_storage;
     --insufficient_barrier.workspace_bytes;
@@ -557,6 +596,17 @@ int main() {
     if (validate_internal_launch(malformed, storage).code !=
         CoreRuntimeStatusCode::kInvalidArgument)
         return 11;
+    malformed = dispatch_tiling;
+    malformed.workspace_layout.scratch_rank_values_offset +=
+        sizeof(std::uint64_t);
+    if (validate_internal_launch(malformed, storage).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 71;
+    malformed = dispatch_tiling;
+    --malformed.workspace_layout.scratch_rank_count;
+    if (validate_internal_launch(malformed, storage).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 72;
     malformed = dispatch_tiling;
     malformed.launch.num_threads = 0;
     if (validate_internal_launch(malformed, storage).code !=

@@ -26,7 +26,7 @@ class AscendStubTest(unittest.TestCase):
         self.assertEqual(str(exception), message)
 
     def test_constructor_rejects_invalid_production_preconditions(self):
-        with self.assertRaisesRegex(RuntimeError, "exactly two ranks are required"):
+        with self.assertRaisesRegex(RuntimeError, "world_size must be at least two"):
             _C.ElasticBuffer(0, 1, *ARGS[2:])
         with self.assertRaisesRegex(RuntimeError, r"rank must be in \[0, world_size\)"):
             _C.ElasticBuffer(2, 2, *ARGS[2:])
@@ -53,10 +53,6 @@ class AscendStubTest(unittest.TestCase):
                                     _C.EventHandle().current_stream_wait, unavailable)
 
     def test_size_calculation_enforces_production_preconditions(self):
-        size = _C.calculate_elastic_buffer_size(
-            7, 128, 7168, 8, False, False, True)
-        self.assertGreater(size, 0)
-        self.assertEqual(size % ALIGNMENT, 0)
         with self.assertRaisesRegex(RuntimeError,
                                     "communicator_handle must be nonzero"):
             _C.calculate_elastic_buffer_size(

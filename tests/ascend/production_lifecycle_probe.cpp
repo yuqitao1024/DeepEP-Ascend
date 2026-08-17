@@ -39,6 +39,8 @@ struct Trace {
     int runtime_copy_from_host_failures_remaining = 0;
     int runtime_sync_failures_remaining = 0;
     bool null_stream = false;
+    std::uint32_t communicator_rank = 0;
+    std::uint32_t communicator_size = 2;
 
     bool runtime_fail() {
         return runtime_fail_call >= 0 && runtime_calls++ == runtime_fail_call;
@@ -138,7 +140,7 @@ int get_rank(void* data, std::int64_t, std::uint32_t* rank) {
     auto& trace = self(data);
     trace.events.emplace_back("get_rank");
     if (trace.host_fail()) return 71;
-    *rank = 0;
+    *rank = trace.communicator_rank;
     return 0;
 }
 
@@ -146,7 +148,7 @@ int get_size(void* data, std::int64_t, std::uint32_t* size) {
     auto& trace = self(data);
     trace.events.emplace_back("get_size");
     if (trace.host_fail()) return 72;
-    *size = 2;
+    *size = trace.communicator_size;
     return 0;
 }
 
@@ -240,14 +242,37 @@ transport::CannHostApi host_api(Trace& trace) {
             copy_from_device, host_free, deregister_window, destroy_team};
 }
 
-transport::TransportConfig config() {
+transport::TransportConfig config(int rank = 0, int world_size = 2) {
     transport::TransportConfig value{};
-    value.rank = 0;
-    value.world_size = 2;
+    value.rank = rank;
+    value.world_size = world_size;
     value.communicator_handle = 0x1234;
     value.device_buffer_bytes = 2 * 1024 * 1024;
     value.requested_channels = 1;
     return value;
+}
+
+void check_rank_parameterized_admission() {
+    Trace trace;
+    trace.communicator_rank = 2;
+    trace.communicator_size = 3;
+    runtime::CannRuntimeResources resources;
+    auto status = resources.initialize(
+        config(2, 3), 4096, runtime_api(trace), host_api(trace));
+    CHECK(status.ok());
+    CHECK(resources.device_context().topology.world_rank == 2);
+    CHECK(resources.device_context().topology.world_size == 3);
+    CHECK(resources.destroy().ok());
+
+    Trace mismatch;
+    mismatch.communicator_rank = 1;
+    mismatch.communicator_size = 3;
+    runtime::CannRuntimeResources rejected;
+    status = rejected.initialize(
+        config(2, 3), 4096, runtime_api(mismatch), host_api(mismatch));
+    CHECK(!status.ok());
+    CHECK(status.operation == "make_cann_transport");
+    CHECK(!rejected.initialized());
 }
 
 void check_success_and_idempotent_cleanup() {
@@ -455,6 +480,7 @@ void check_runtime_free_failure_is_retryable() {
 }  // namespace
 
 int main() {
+    check_rank_parameterized_admission();
     check_success_and_idempotent_cleanup();
     check_runtime_failures_cleanup();
     check_host_failure_cleans_outer_allocation();

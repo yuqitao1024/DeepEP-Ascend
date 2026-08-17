@@ -137,10 +137,13 @@ desirable, but are deferred and do not block Phase 3B.
 - repeated teardown is safe after success, timeout, launch failure, and
   partial initialization.
 
-The current NPU8P agent policy permits at most two devices per submitted task.
-Acceptance of 4-rank or 8-rank work therefore requires an explicitly approved
-test environment or a revised task policy before that phase starts. The
-roadmap does not authorize bypassing the current device limit.
+The implementation is rank-parameterized and is not gated to the currently
+available device count. The current NPU8P agent policy permits at most two
+devices per submitted task, so the two-rank implementation closeout may land
+after its complete runtime matrix passes while full Phase 3B topology
+qualification remains open. Four-rank and eight-rank runtime acceptance still
+requires an explicitly approved test environment or a revised task policy.
+The roadmap does not authorize bypassing the current device limit.
 
 ## Phase 3C: Cross-Host Scale-Out And RoCE
 

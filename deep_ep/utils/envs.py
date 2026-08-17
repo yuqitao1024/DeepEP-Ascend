@@ -125,10 +125,11 @@ def get_physical_domain_size(group: dist.ProcessGroup) -> Tuple[int, int]:
         num_nvlink_ranks: the number of physical NVLink ranks.
     """
     if not is_cuda():
-        if group.size() != 2:
+        group_size = group.size()
+        if group_size < 2:
             raise RuntimeError(
-                "DeepEP Ascend backend: physical domain requires exactly two ranks")
-        return 1, 2
+                "DeepEP Ascend backend: physical domain requires at least two ranks")
+        return 1, group_size
     return _C.get_physical_domain_size(
         comm_handle_value(get_comm_handle(group)))
 
@@ -149,10 +150,11 @@ def get_logical_domain_size(group: dist.ProcessGroup, allow_hybrid_mode: bool = 
         if allow_hybrid_mode:
             raise NotImplementedError(
                 "DeepEP Ascend backend: logical domain does not support hybrid mode")
-        if group.size() != 2:
+        group_size = group.size()
+        if group_size < 2:
             raise RuntimeError(
-                "DeepEP Ascend backend: logical domain requires exactly two ranks")
-        return 1, 2
+                "DeepEP Ascend backend: logical domain requires at least two ranks")
+        return 1, group_size
     return _C.get_logical_domain_size(
         comm_handle_value(get_comm_handle(group)), allow_hybrid_mode)
 

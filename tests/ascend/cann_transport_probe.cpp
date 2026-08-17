@@ -1,6 +1,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 
 #include "csrc/backends/ascend/transport/cann_transport.hpp"
@@ -48,6 +49,10 @@ struct FakeApi {
     int destroy_team_failures_remaining = 0;
     transport::StagedTransportContext staged{};
     std::uint32_t staged_copy_count = 0;
+    transport::TransportCommandQueue queue{};
+    std::uint32_t queue_copy_count = 0;
+    std::uint64_t allocation_bytes[8]{};
+    std::uint32_t allocation_count = 0;
 
     bool fail_now() {
         return fail_event >= 0 && event_calls++ == fail_event;
@@ -98,11 +103,11 @@ struct FakeApi {
         std::uint32_t barrier_count, std::uintptr_t* team) {
         auto& fake = self(data);
         fake.record(Event::kCreateTeam);
-        CHECK(rank == 1);
-        CHECK(size == 2);
+        CHECK(rank == fake.rank);
+        CHECK(size == fake.size);
         CHECK(rank_ids != nullptr);
-        CHECK(rank_ids[0] == 0);
-        CHECK(rank_ids[1] == 1);
+        for (std::uint32_t index = 0; index < size; ++index)
+            CHECK(rank_ids[index] == index);
         CHECK(signal_count == 0);
         CHECK(barrier_count == 5);
         if (fake.fail_now()) return 73;
@@ -129,10 +134,12 @@ struct FakeApi {
         return 0;
     }
 
-    static int allocate(void* data, std::uint64_t, void** pointer) {
+    static int allocate(void* data, std::uint64_t bytes, void** pointer) {
         auto& fake = self(data);
         fake.record(Event::kAllocate);
         if (fake.fail_now()) return 76;
+        CHECK(fake.allocation_count < 8);
+        fake.allocation_bytes[fake.allocation_count++] = bytes;
         *pointer = reinterpret_cast<void*>(fake.next_pointer);
         fake.next_pointer += 0x1000;
         return 0;
@@ -146,7 +153,8 @@ struct FakeApi {
     }
 
     static int copy(
-        void* data, void*, const void* source, std::uint64_t bytes) {
+        void* data, void* destination, const void* source,
+        std::uint64_t bytes) {
         auto& fake = self(data);
         fake.record(Event::kCopy);
         if (fake.fail_now()) return 78;
@@ -160,6 +168,12 @@ struct FakeApi {
                 fake.staged = *candidate;
                 ++fake.staged_copy_count;
             }
+        }
+        if (destination == reinterpret_cast<void*>(0x101000) &&
+            bytes == sizeof(transport::TransportCommandQueue)) {
+            fake.queue =
+                *static_cast<const transport::TransportCommandQueue*>(source);
+            ++fake.queue_copy_count;
         }
         return 0;
     }
@@ -213,14 +227,76 @@ struct FakeApi {
     }
 };
 
-transport::TransportConfig valid_config() {
+transport::TransportConfig valid_config(int rank = 1, int world_size = 2) {
     transport::TransportConfig config;
-    config.rank = 1;
-    config.world_size = 2;
+    config.rank = rank;
+    config.world_size = world_size;
     config.communicator_handle = 0x1234;
     config.device_buffer_bytes = 4096;
     config.requested_channels = 1;
     return config;
+}
+
+void check_rank_sized_command_queue() {
+    struct Fixture {
+        std::uint32_t world_size;
+        std::uint32_t command_capacity;
+    };
+    for (const auto fixture : {
+             Fixture{2, 5}, Fixture{4, 13}, Fixture{8, 29}}) {
+        FakeApi fake;
+        fake.rank = fixture.world_size - 1;
+        fake.size = fixture.world_size;
+        auto created = transport::make_cann_transport(
+            valid_config(
+                static_cast<int>(fake.rank),
+                static_cast<int>(fake.size)),
+            fake.api());
+        CHECK(created.status.ok());
+        CHECK(created.transport != nullptr);
+        alignas(64) std::uint8_t window[4096]{};
+        CHECK(created.transport->register_symmetric_window(
+            window, sizeof(window)).ok());
+        CHECK(created.transport->acquire_channels(
+            1, transport::CooperationScope::kParticipant).ok());
+        transport::DeviceTransportContext context{};
+        CHECK(created.transport->export_device_context(&context).ok());
+        CHECK(fake.allocation_count == 5);
+        CHECK(fake.allocation_bytes[0] ==
+              static_cast<std::uint64_t>(fixture.command_capacity) *
+                  sizeof(transport::TransportCommand));
+        CHECK(fake.queue_copy_count == 1);
+        CHECK(fake.queue.capacity == fixture.command_capacity);
+        CHECK(created.transport->destroy().ok());
+    }
+
+    std::uint32_t capacity = 0;
+    CHECK(transport::checked_scale_up_command_capacity(2, &capacity));
+    CHECK(capacity == 5);
+    CHECK(!transport::checked_scale_up_command_capacity(
+        std::numeric_limits<int>::max(), &capacity));
+}
+
+void check_communicator_size_query() {
+    FakeApi fake;
+    fake.size = 3;
+    std::uint32_t world_size = 0;
+    auto status = transport::query_cann_communicator_size(
+        0x1234, &world_size, fake.api());
+    CHECK(status.ok());
+    CHECK(world_size == 3);
+
+    status = transport::query_cann_communicator_size(
+        0, &world_size, fake.api());
+    CHECK(!status.ok());
+    CHECK(status.operation == "query_communicator_size");
+
+    fake.fail_event = 0;
+    fake.event_calls = 0;
+    status = transport::query_cann_communicator_size(
+        0x1234, &world_size, fake.api());
+    CHECK(!status.ok());
+    CHECK(status.backend_code == 72);
 }
 
 void check_success_and_reverse_cleanup() {
@@ -368,6 +444,8 @@ void check_team_destroy_failure_is_retryable() {
 }  // namespace
 
 int main() {
+    check_communicator_size_query();
+    check_rank_sized_command_queue();
     check_success_and_reverse_cleanup();
     check_partial_failure_cleans_up();
     check_deregister_failure_is_retryable();

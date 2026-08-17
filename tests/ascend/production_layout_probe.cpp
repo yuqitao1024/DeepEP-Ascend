@@ -14,8 +14,8 @@ int main() {
     static_assert(std::is_trivially_copyable_v<SymmetricWindowLayout>);
     static_assert(std::is_standard_layout_v<SymmetricControlHeader>);
     static_assert(std::is_trivially_copyable_v<SymmetricControlHeader>);
-    static_assert(offsetof(SymmetricControlHeader, barrier_generation) == 16);
-    static_assert(offsetof(SymmetricControlHeader, barrier_completion) == 32);
+    static_assert(sizeof(SymmetricControlHeader) == 32);
+    static_assert(kSymmetricWindowAbiVersion == 4);
     static_assert(offsetof(SymmetricWindowLayout, abi_version) == 0);
     static_assert(offsetof(SymmetricWindowLayout, struct_size) == 4);
     static_assert(offsetof(SymmetricWindowLayout, control_offset) == 8);
@@ -79,6 +79,38 @@ int main() {
           input.num_max_tokens_per_rank * layout.combine_record_bytes);
     CHECK(layout.control_offset % kAscendElasticAlignment == 0);
     CHECK(layout.control_bytes >= sizeof(SymmetricControlHeader));
+    CHECK(layout.barrier_generation_count == input.world_size);
+    CHECK(layout.barrier_generation_bytes ==
+          input.world_size * sizeof(std::uint64_t));
+    CHECK(layout.barrier_completion_count == input.world_size);
+    CHECK(layout.barrier_completion_bytes ==
+          input.world_size * sizeof(std::uint64_t));
+    CHECK(layout.barrier_generation_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.barrier_completion_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.control_offset + sizeof(SymmetricControlHeader) <=
+          layout.barrier_generation_offset);
+    CHECK(layout.barrier_generation_offset +
+              layout.barrier_generation_bytes <=
+          layout.barrier_completion_offset);
+    CHECK(layout.barrier_completion_offset +
+              layout.barrier_completion_bytes <=
+          layout.dispatch_control_offset);
+    std::uint64_t rank_slot = 0;
+    CHECK(checked_rank_slot_offset(
+        layout.barrier_completion_offset,
+        layout.barrier_completion_count, 1, &rank_slot));
+    CHECK(rank_slot ==
+          layout.barrier_completion_offset + sizeof(std::uint64_t));
+    CHECK(!checked_rank_slot_offset(
+        layout.barrier_completion_offset,
+        layout.barrier_completion_count, -1, &rank_slot));
+    CHECK(!checked_rank_slot_offset(
+        layout.barrier_completion_offset,
+        layout.barrier_completion_count,
+        static_cast<int>(layout.barrier_completion_count), &rank_slot));
+    CHECK(!checked_rank_slot_offset(
+        std::numeric_limits<std::uint64_t>::max() - 4, 2, 1,
+        &rank_slot));
     CHECK(layout.dispatch_offset % kAscendElasticAlignment == 0);
     CHECK(layout.dispatch_receive_offset % kAscendElasticAlignment == 0);
     CHECK(layout.dispatch_staging_offset % kAscendElasticAlignment == 0);
@@ -156,8 +188,34 @@ int main() {
     CHECK(expanded_multiple_reduction_layout.combine_receive_shard_bytes <
           expanded_single_reduction_layout.combine_receive_shard_bytes);
 
+    std::uint64_t previous_control_bytes = 0;
+    for (const std::uint32_t world_size : {2U, 3U, 4U, 8U}) {
+        auto parameterized = input;
+        parameterized.world_size = world_size;
+        SymmetricWindowLayout parameterized_layout{};
+        CHECK(build_symmetric_window_layout(
+                  parameterized, &parameterized_layout).ok());
+        CHECK(parameterized_layout.barrier_generation_count == world_size);
+        CHECK(parameterized_layout.barrier_generation_bytes ==
+              world_size * sizeof(std::uint64_t));
+        CHECK(parameterized_layout.barrier_completion_count == world_size);
+        CHECK(parameterized_layout.barrier_completion_bytes ==
+              world_size * sizeof(std::uint64_t));
+        CHECK(parameterized_layout.dispatch_control_bytes ==
+              world_size * sizeof(DispatchControlSlot));
+        CHECK(parameterized_layout.dispatch_receive_shard_count == world_size);
+        CHECK(parameterized_layout.dispatch_staging_shard_count == world_size);
+        CHECK(parameterized_layout.combine_receive_shard_count == world_size);
+        CHECK(parameterized_layout.combine_staging_shard_count == world_size);
+        CHECK(parameterized_layout.control_bytes >= previous_control_bytes);
+        previous_control_bytes = parameterized_layout.control_bytes;
+    }
+
     auto invalid = input;
     invalid.world_size = 1;
+    CHECK(build_symmetric_window_layout(invalid, &layout).code ==
+          LayoutStatusCode::kInvalidArgument);
+    invalid.world_size = 0;
     CHECK(build_symmetric_window_layout(invalid, &layout).code ==
           LayoutStatusCode::kInvalidArgument);
     CHECK(build_symmetric_window_layout(input, nullptr).code ==
