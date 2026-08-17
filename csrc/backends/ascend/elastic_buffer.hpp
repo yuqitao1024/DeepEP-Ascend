@@ -22,6 +22,7 @@
 #include "elastic/operation_coordinator.hpp"
 #include "elastic/runtime.hpp"
 #include "runtime/cann_runtime.hpp"
+#include "transport/topology_config.hpp"
 
 namespace deep_ep::ascend {
 
@@ -224,6 +225,8 @@ class ElasticBuffer {
         input.topology.scale_up_size = context.topology.scale_up_size;
         input.topology.scale_out_rank = context.topology.scale_out_rank;
         input.topology.scale_out_size = context.topology.scale_out_size;
+        input.topology.kind = context.topology.kind;
+        input.topology.epoch = context.topology.epoch;
         elastic::CoreTiling tiling{};
         const auto status = elastic::build_core_tiling(input, &tiling);
         TORCH_CHECK(status.ok(), "DeepEP Ascend backend: barrier ",
@@ -257,6 +260,8 @@ class ElasticBuffer {
         input.topology.scale_up_size = context.topology.scale_up_size;
         input.topology.scale_out_rank = context.topology.scale_out_rank;
         input.topology.scale_out_size = context.topology.scale_out_size;
+        input.topology.kind = context.topology.kind;
+        input.topology.epoch = context.topology.epoch;
         elastic::CoreTiling tiling{};
         const auto status = elastic::build_core_tiling(input, &tiling);
         TORCH_CHECK(status.ok(), "DeepEP Ascend backend: dispatch ",
@@ -399,6 +404,10 @@ public:
         transport::TransportConfig config{
             rank_idx, num_ranks, comm_handle, cpu_comm.empty(), num_buffer_bytes,
             num_cpu_buffer_bytes, allow_hybrid_mode, sl_idx, 1};
+        const auto topology_status =
+            transport::configure_transport_topology_from_environment(&config);
+        if (!topology_status.ok())
+            raise_transport_status(topology_status, rank_idx_);
         auto resources = std::make_unique<runtime::CannRuntimeResources>();
         const auto status = resources->initialize(
             config, 2 * elastic::kPublicElasticBufferAlignment);

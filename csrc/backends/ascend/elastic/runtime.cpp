@@ -47,7 +47,8 @@ bool same_topology(const CoreTopology& lhs, const CoreTopology& rhs) {
            lhs.scale_up_rank == rhs.scale_up_rank &&
            lhs.scale_up_size == rhs.scale_up_size &&
            lhs.scale_out_rank == rhs.scale_out_rank &&
-           lhs.scale_out_size == rhs.scale_out_size;
+           lhs.scale_out_size == rhs.scale_out_size &&
+           lhs.kind == rhs.kind && lhs.epoch == rhs.epoch;
 }
 
 bool same_token_layout(const TokenLayout& lhs, const TokenLayout& rhs) {
@@ -154,12 +155,14 @@ bool same_symmetric_window_layout(
 bool context_topology_matches(
     const transport::TransportTopology& context,
     const CoreTopology& tiling) {
-    return context.world_rank == tiling.world_rank &&
+    return transport::valid_transport_topology(context) &&
+           context.world_rank == tiling.world_rank &&
            context.world_size == tiling.world_size &&
            context.scale_up_rank == tiling.scale_up_rank &&
            context.scale_up_size == tiling.scale_up_size &&
            context.scale_out_rank == tiling.scale_out_rank &&
-           context.scale_out_size == tiling.scale_out_size;
+           context.scale_out_size == tiling.scale_out_size &&
+           context.kind == tiling.kind && context.epoch == tiling.epoch;
 }
 
 CoreRuntimeStatus validate_operation_topology(const CoreTiling& tiling) {

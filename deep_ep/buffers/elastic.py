@@ -27,7 +27,7 @@ from ..utils.semantic import value_or, weak_lru
 from ..utils.envs import (
     check_fast_rdma_atomic_support,
     check_nvlink_connections, check_torch_deterministic,
-    get_nvlink_gbs, get_rdma_gbs
+    get_nvlink_gbs, get_rdma_gbs, preflight_ascend_topology
 )
 
 
@@ -284,6 +284,9 @@ class ElasticBuffer:
         self.allow_multiple_reduction = allow_multiple_reduction
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
         self.deterministic = deterministic
+
+        if not is_cuda():
+            preflight_ascend_topology(group)
 
         if is_cuda():
             if os.environ.get('NCCL_GIN_CROSS_NIC') == '0':

@@ -17,6 +17,67 @@ _local_rank = None
 _local_seed = 0
 _global_seed = 0
 
+
+def _positive_env_integer(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    if not raw.isascii() or not raw.isdigit() or raw.startswith('0'):
+        raise RuntimeError(f"DeepEP Ascend backend: {name} must be a positive integer")
+    value = int(raw)
+    if value <= 0 or value > 0x7fffffff:
+        raise RuntimeError(f"DeepEP Ascend backend: {name} must be a positive integer")
+    return value
+
+
+def preflight_ascend_topology(group: dist.ProcessGroup) -> Tuple[str, int, int, int]:
+    """Validate and aggregate the explicit Ascend topology configuration."""
+    world_size = group.size()
+    if world_size < 2:
+        raise RuntimeError(
+            "DeepEP Ascend backend: topology requires at least two ranks")
+
+    simulation_raw = os.environ.get(
+        'DEEP_EP_ASCEND_LOGICAL_SIMULATION', '0')
+    if simulation_raw not in ('0', '1'):
+        raise RuntimeError(
+            "DeepEP Ascend backend: DEEP_EP_ASCEND_LOGICAL_SIMULATION "
+            "must be 0 or 1")
+    logical_simulation = simulation_raw == '1'
+    if (logical_simulation and
+            'DEEP_EP_ASCEND_SCALE_UP_SIZE' not in os.environ):
+        raise RuntimeError(
+            "DeepEP Ascend backend: logical simulation requires "
+            "DEEP_EP_ASCEND_SCALE_UP_SIZE")
+    scale_up_default = world_size if not logical_simulation else 0
+    scale_up_size = _positive_env_integer(
+        'DEEP_EP_ASCEND_SCALE_UP_SIZE', scale_up_default)
+    if world_size % scale_up_size != 0:
+        raise RuntimeError(
+            "DeepEP Ascend backend: DEEP_EP_ASCEND_SCALE_UP_SIZE must "
+            "divide world_size")
+    if logical_simulation:
+        if scale_up_size >= world_size:
+            raise RuntimeError(
+                "DeepEP Ascend backend: logical simulation requires at "
+                "least two scale-out ranks")
+        kind = 'logical_simulation'
+    else:
+        if scale_up_size != world_size:
+            raise RuntimeError(
+                "DeepEP Ascend backend: non-flat topology requires "
+                "DEEP_EP_ASCEND_LOGICAL_SIMULATION=1")
+        kind = 'flat_scale_up'
+
+    epoch = _positive_env_integer('DEEP_EP_ASCEND_TOPOLOGY_EPOCH', 1)
+    local = (kind, scale_up_size, epoch, world_size)
+    gathered = [None] * world_size
+    dist.all_gather_object(gathered, local, group)
+    if any(value != local for value in gathered):
+        raise RuntimeError(
+            "DeepEP Ascend backend: topology configuration differs across ranks")
+    return local
+
 # Default NIC name for RDMA operations, configurable via environment variable
 _DEFAULT_NIC_NAME = os.getenv('EP_NIC_NAME', 'mlx5_0')
 

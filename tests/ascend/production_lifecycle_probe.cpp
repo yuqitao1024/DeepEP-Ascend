@@ -264,6 +264,30 @@ void check_rank_parameterized_admission() {
     CHECK(resources.device_context().topology.world_size == 3);
     CHECK(resources.destroy().ok());
 
+    Trace two_dimensional;
+    two_dimensional.communicator_rank = 3;
+    two_dimensional.communicator_size = 4;
+    auto two_dimensional_config = config(3, 4);
+    two_dimensional_config.scale_up_size = 2;
+    two_dimensional_config.topology_kind =
+        transport::TransportTopologyKind::kLogicalSimulation;
+    two_dimensional_config.topology_epoch = 17;
+    runtime::CannRuntimeResources logical_resources;
+    status = logical_resources.initialize(
+        two_dimensional_config, 4096, runtime_api(two_dimensional),
+        host_api(two_dimensional));
+    CHECK(status.ok());
+    const auto& topology = logical_resources.device_context().topology;
+    CHECK(topology.kind ==
+          transport::TransportTopologyKind::kLogicalSimulation);
+    CHECK(topology.epoch == 17);
+    CHECK(topology.scale_up_rank == 1 && topology.scale_up_size == 2);
+    CHECK(topology.scale_out_rank == 1 && topology.scale_out_size == 2);
+    CHECK(!transport::has_capability(
+        logical_resources.device_context().capabilities,
+        transport::TransportCapability::kScaleOutTeam));
+    CHECK(logical_resources.destroy().ok());
+
     Trace mismatch;
     mismatch.communicator_rank = 1;
     mismatch.communicator_size = 3;

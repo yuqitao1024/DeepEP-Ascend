@@ -42,7 +42,7 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 6;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 7;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -97,13 +97,31 @@ struct TilingStatus {
 namespace detail {
 
 inline bool valid_topology(const CoreTopology& topology) {
-    return topology.world_size > 0 && topology.scale_up_size > 0 &&
-           topology.scale_out_size > 0 && topology.world_rank >= 0 &&
-           topology.world_rank < topology.world_size &&
-           topology.scale_up_rank >= 0 &&
-           topology.scale_up_rank < topology.scale_up_size &&
-           topology.scale_out_rank >= 0 &&
-           topology.scale_out_rank < topology.scale_out_size;
+    const bool dimensions_valid =
+        topology.world_size > 0 && topology.scale_up_size > 0 &&
+        topology.scale_out_size > 0 && topology.world_rank >= 0 &&
+        topology.world_rank < topology.world_size &&
+        topology.scale_up_rank >= 0 &&
+        topology.scale_up_rank < topology.scale_up_size &&
+        topology.scale_out_rank >= 0 &&
+        topology.scale_out_rank < topology.scale_out_size &&
+        topology.epoch > 0 &&
+        static_cast<std::int64_t>(topology.scale_up_size) *
+                topology.scale_out_size ==
+            topology.world_size &&
+        topology.scale_up_rank ==
+            topology.world_rank % topology.scale_up_size &&
+        topology.scale_out_rank ==
+            topology.world_rank / topology.scale_up_size;
+    if (!dimensions_valid)
+        return false;
+    if (topology.kind == transport::TransportTopologyKind::kFlatScaleUp)
+        return topology.scale_up_size == topology.world_size &&
+               topology.scale_out_size == 1;
+    return (topology.kind == transport::TransportTopologyKind::kPhysical2D ||
+            topology.kind ==
+                transport::TransportTopologyKind::kLogicalSimulation) &&
+           topology.scale_out_size >= 2;
 }
 
 inline bool build_token_layout(
@@ -374,6 +392,10 @@ inline TilingStatus build_core_tiling(
         input.topology.scale_out_rank;
     tiling.transport_context.topology.scale_out_size =
         input.topology.scale_out_size;
+    tiling.transport_context.topology.struct_size =
+        sizeof(transport::TransportTopology);
+    tiling.transport_context.topology.kind = input.topology.kind;
+    tiling.transport_context.topology.epoch = input.topology.epoch;
     *output = tiling;
     return {};
 }

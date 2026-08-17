@@ -114,6 +114,12 @@ enum class CooperationScope : std::uint8_t {
 };
 enum class MemorySegment : std::uint8_t { kDevice, kMixed };
 
+enum class TransportTopologyKind : std::uint8_t {
+    kFlatScaleUp,
+    kPhysical2D,
+    kLogicalSimulation,
+};
+
 using DeviceOptions = std::uint32_t;
 inline constexpr DeviceOptions kDefaultOptions = 0;
 inline constexpr DeviceOptions kAggregateRequests = DeviceOptions{1} << 0;
@@ -149,7 +155,11 @@ struct RemoteAction {
 
 using SignalValue = std::uint64_t;
 
+inline constexpr std::uint32_t kTransportTopologyAbiVersion = 1;
+
 struct TransportTopology {
+    std::uint32_t abi_version = kTransportTopologyAbiVersion;
+    std::uint32_t struct_size = 0;
     int world_rank = 0;
     int world_size = 1;
     int scale_up_rank = 0;
@@ -157,7 +167,137 @@ struct TransportTopology {
     int scale_out_rank = 0;
     int scale_out_size = 1;
     bool scale_up_direct = false;
+    TransportTopologyKind kind = TransportTopologyKind::kFlatScaleUp;
+    std::uint64_t epoch = 1;
 };
+
+inline TransportStatus build_transport_topology(
+    int world_rank, int world_size, int scale_up_size,
+    TransportTopologyKind kind, std::uint64_t epoch,
+    TransportTopology* topology) {
+    if (topology == nullptr)
+        return TransportStatus::invalid(
+            "build_transport_topology", "topology must not be null");
+    if (world_size <= 0 || world_rank < 0 || world_rank >= world_size)
+        return TransportStatus::invalid(
+            "build_transport_topology", "invalid world rank or size");
+    if (scale_up_size <= 0 || world_size % scale_up_size != 0)
+        return TransportStatus::invalid(
+            "build_transport_topology",
+            "scale_up_size must be a positive divisor of world_size");
+    if (epoch == 0)
+        return TransportStatus::invalid(
+            "build_transport_topology", "topology epoch must be positive");
+
+    const int scale_out_size = world_size / scale_up_size;
+    switch (kind) {
+        case TransportTopologyKind::kFlatScaleUp:
+            if (scale_up_size != world_size)
+                return TransportStatus::invalid(
+                    "build_transport_topology",
+                    "flat scale-up topology must contain the whole world");
+            break;
+        case TransportTopologyKind::kPhysical2D:
+        case TransportTopologyKind::kLogicalSimulation:
+            if (scale_out_size < 2)
+                return TransportStatus::invalid(
+                    "build_transport_topology",
+                    "2D topology requires at least two scale-out ranks");
+            break;
+        default:
+            return TransportStatus::invalid(
+                "build_transport_topology", "unknown topology kind");
+    }
+
+    TransportTopology result;
+    result.struct_size = sizeof(TransportTopology);
+    result.world_rank = world_rank;
+    result.world_size = world_size;
+    result.scale_up_rank = world_rank % scale_up_size;
+    result.scale_up_size = scale_up_size;
+    result.scale_out_rank = world_rank / scale_up_size;
+    result.scale_out_size = scale_out_size;
+    result.kind = kind;
+    result.epoch = epoch;
+    *topology = result;
+    return TransportStatus::success();
+}
+
+constexpr bool valid_transport_topology(
+    const TransportTopology& topology) noexcept {
+    if (topology.abi_version != kTransportTopologyAbiVersion ||
+        topology.struct_size != sizeof(TransportTopology) ||
+        topology.epoch == 0 || topology.world_size <= 0 ||
+        topology.world_rank < 0 || topology.world_rank >= topology.world_size ||
+        topology.scale_up_size <= 0 || topology.scale_out_size <= 0 ||
+        topology.scale_up_rank < 0 ||
+        topology.scale_up_rank >= topology.scale_up_size ||
+        topology.scale_out_rank < 0 ||
+        topology.scale_out_rank >= topology.scale_out_size ||
+        static_cast<std::int64_t>(topology.scale_up_size) *
+                topology.scale_out_size !=
+            topology.world_size ||
+        topology.scale_up_rank !=
+            topology.world_rank % topology.scale_up_size ||
+        topology.scale_out_rank !=
+            topology.world_rank / topology.scale_up_size)
+        return false;
+    switch (topology.kind) {
+        case TransportTopologyKind::kFlatScaleUp:
+            return topology.scale_up_size == topology.world_size &&
+                   topology.scale_out_size == 1;
+        case TransportTopologyKind::kPhysical2D:
+        case TransportTopologyKind::kLogicalSimulation:
+            return topology.scale_out_size >= 2;
+        default:
+            return false;
+    }
+}
+
+constexpr bool checked_team_world_rank(
+    const TransportTopology& topology, TransportTeam team, int peer,
+    int* world_peer) noexcept {
+    if (world_peer == nullptr || peer < 0 ||
+        !valid_transport_topology(topology))
+        return false;
+    std::int64_t translated = -1;
+    switch (team) {
+        case TransportTeam::kWorld:
+            if (peer >= topology.world_size)
+                return false;
+            translated = peer;
+            break;
+        case TransportTeam::kScaleUp:
+            if (peer >= topology.scale_up_size)
+                return false;
+            translated =
+                static_cast<std::int64_t>(topology.scale_out_rank) *
+                    topology.scale_up_size + peer;
+            break;
+        case TransportTeam::kScaleOut:
+            if (peer >= topology.scale_out_size)
+                return false;
+            translated = static_cast<std::int64_t>(peer) *
+                             topology.scale_up_size +
+                         topology.scale_up_rank;
+            break;
+        default:
+            return false;
+    }
+    if (translated < 0 || translated >= topology.world_size)
+        return false;
+    *world_peer = static_cast<int>(translated);
+    return true;
+}
+
+constexpr bool same_transport_topology_identity(
+    const TransportTopology& lhs, const TransportTopology& rhs) noexcept {
+    return lhs.abi_version == rhs.abi_version &&
+           lhs.struct_size == rhs.struct_size && lhs.kind == rhs.kind &&
+           lhs.epoch == rhs.epoch && lhs.world_size == rhs.world_size &&
+           lhs.scale_up_size == rhs.scale_up_size &&
+           lhs.scale_out_size == rhs.scale_out_size;
+}
 
 struct TransportConfig {
     int rank = 0;
@@ -169,9 +309,25 @@ struct TransportConfig {
     bool allow_hybrid_mode = false;
     int service_level = 0;
     int requested_channels = 0;
+    int scale_up_size = 0;
+    TransportTopologyKind topology_kind =
+        TransportTopologyKind::kFlatScaleUp;
+    std::uint64_t topology_epoch = 1;
 };
 
-inline constexpr std::uint32_t kDeviceTransportAbiVersion = 1;
+inline TransportStatus build_configured_transport_topology(
+    const TransportConfig& config, TransportTopology* topology) {
+    const int scale_up_size =
+        config.scale_up_size == 0 &&
+                config.topology_kind == TransportTopologyKind::kFlatScaleUp
+            ? config.world_size
+            : config.scale_up_size;
+    return build_transport_topology(
+        config.rank, config.world_size, scale_up_size,
+        config.topology_kind, config.topology_epoch, topology);
+}
+
+inline constexpr std::uint32_t kDeviceTransportAbiVersion = 2;
 
 struct DeviceTransportContext {
     std::uint32_t abi_version = kDeviceTransportAbiVersion;
@@ -187,6 +343,7 @@ struct DeviceTransportContext {
 inline DeviceTransportContext make_device_transport_context() {
     DeviceTransportContext context;
     context.struct_size = sizeof(DeviceTransportContext);
+    context.topology.struct_size = sizeof(TransportTopology);
     return context;
 }
 

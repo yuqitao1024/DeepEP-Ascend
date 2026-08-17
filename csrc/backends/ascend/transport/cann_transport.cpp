@@ -303,12 +303,10 @@ private:
 
     TransportTopology topology_value() const {
         TransportTopology topology;
-        topology.world_rank = static_cast<int>(rank_);
-        topology.world_size = static_cast<int>(world_size_);
-        topology.scale_up_rank = static_cast<int>(rank_);
-        topology.scale_up_size = static_cast<int>(world_size_);
-        topology.scale_out_rank = 0;
-        topology.scale_out_size = 1;
+        const auto status = build_configured_transport_topology(
+            config_, &topology);
+        if (!status.ok())
+            return {};
         topology.scale_up_direct = false;
         return topology;
     }
@@ -544,6 +542,13 @@ TransportStatus validate_config(const TransportConfig& config) {
     if (config.requested_channels != 1)
         return TransportStatus::invalid(
             "make_cann_transport", "exactly one channel is required");
+    TransportTopology topology;
+    auto topology_status = build_configured_transport_topology(
+        config, &topology);
+    if (!topology_status.ok()) {
+        topology_status.operation = "make_cann_transport";
+        return topology_status;
+    }
     std::uint32_t command_capacity = 0;
     if (!checked_scale_up_command_capacity(
             config.world_size, &command_capacity))

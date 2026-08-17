@@ -91,11 +91,13 @@ class _ForbiddenImportFinder(importlib.abc.MetaPathFinder):
 
 
 class _FakeGroup:
-    def __init__(self, events, rank=0, size=1, comm_pointer=4242):
+    def __init__(self, events, rank=0, size=1, comm_pointer=4242,
+                 gathered_objects=None):
         self.events = events
         self._rank = rank
         self._size = size
         self.comm_pointer = comm_pointer
+        self.gathered_objects = gathered_objects
 
     def rank(self):
         self.events.append("group.rank")
@@ -195,7 +197,9 @@ def _install_fake_torch(platform, events):
     distributed.init_process_group = lambda **kwargs: None
     distributed.barrier = lambda: events.append("dist.barrier")
     def all_gather_object(output, value, group):
-        output[:] = [value] * len(output)
+        events.append(("dist.all_gather_object", value))
+        output[:] = (group.gathered_objects if group.gathered_objects is not None
+                     else [value] * len(output))
 
     distributed.all_gather_object = all_gather_object
     torch.distributed = distributed
@@ -236,6 +240,9 @@ def _install_fake_extension(platform, events):
 
         def get_logical_domain_size(self):
             events.append("runtime.get_logical_domain_size")
+            if (platform == "ascend" and
+                    os.environ.get("DEEP_EP_ASCEND_LOGICAL_SIMULATION") == "1"):
+                return (2, 2)
             return (1, 2) if platform == "ascend" else (2, 4)
 
         def get_physical_domain_size(self):
@@ -257,7 +264,7 @@ def _install_fake_extension(platform, events):
             cloned_topk_idx = _FakeTensor(
                 args[2].device.type, args[2].shape)
             token_metadata_at_forward = (
-                _FakeTensor(shape=(96,)) if platform == "ascend" else None)
+                _FakeTensor(shape=(112,)) if platform == "ascend" else None)
             return (args[0], args[1], args[2], args[3], cloned_topk_idx,
                     1, 1, [], _FakeTensor(), _FakeTensor(), _FakeTensor(),
                     recv_src_metadata, _FakeTensor(), token_metadata_at_forward,
@@ -526,6 +533,46 @@ def _scenario_ascend_construction():
             raise AssertionError(f"non-positive buffer size {num_bytes} was accepted")
 
 
+def _scenario_ascend_topology_preflight():
+    deep_ep, extension, events = _load_package("ascend", True)
+    os.environ["DEEP_EP_ASCEND_SCALE_UP_SIZE"] = "2"
+    os.environ["DEEP_EP_ASCEND_LOGICAL_SIMULATION"] = "1"
+    os.environ["DEEP_EP_ASCEND_TOPOLOGY_EPOCH"] = "17"
+    group = _FakeGroup(events, rank=3, size=4)
+    buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+        explicitly_destroy=True)
+    assert ("dist.all_gather_object",
+            ("logical_simulation", 2, 17, 4)) in events
+    assert (buffer.num_scaleout_ranks, buffer.num_scaleup_ranks) == (2, 2)
+    assert (buffer.scaleout_rank_idx, buffer.scaleup_rank_idx) == (1, 1)
+    assert len(extension.runtime_args) == 1
+    buffer.destroy()
+
+
+def _scenario_ascend_topology_preflight_mismatch():
+    deep_ep, extension, events = _load_package("ascend", True)
+    os.environ["DEEP_EP_ASCEND_SCALE_UP_SIZE"] = "2"
+    os.environ["DEEP_EP_ASCEND_LOGICAL_SIMULATION"] = "1"
+    group = _FakeGroup(
+        events, rank=0, size=4,
+        gathered_objects=[
+            ("logical_simulation", 2, 1, 4),
+            ("logical_simulation", 2, 1, 4),
+            ("logical_simulation", 4, 1, 4),
+            ("logical_simulation", 2, 1, 4),
+        ])
+    try:
+        deep_ep.ElasticBuffer(
+            group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+            explicitly_destroy=True)
+    except RuntimeError as error:
+        assert "topology configuration differs across ranks" in str(error), error
+    else:
+        raise AssertionError("asymmetric Ascend topology was accepted")
+    assert not extension.runtime_args
+
+
 def _scenario_ascend_implicit_size():
     deep_ep, extension, events = _load_package("ascend", True)
     group = _FakeGroup(events, rank=0, size=2)
@@ -764,7 +811,7 @@ def _scenario_ascend_combine():
     recv_src_metadata = _FakeTensor("npu", (2, 4))
     topk_idx = _FakeTensor("npu", (1, 2))
     rank_prefix = _FakeTensor("npu", (2,))
-    descriptor = _FakeTensor("npu", (96,))
+    descriptor = _FakeTensor("npu", (112,))
     handle = deep_ep.EPHandle(
         False, 2, 4, 4, 1, topk_idx, 2, 2, [], rank_prefix,
         _FakeTensor("npu", (1,)), _FakeTensor("npu", (1,)),
@@ -990,6 +1037,9 @@ SCENARIOS = {
     "ascend_import": _scenario_ascend_import,
     "invalid_platform": _scenario_invalid_platform,
     "ascend_construction": _scenario_ascend_construction,
+    "ascend_topology_preflight": _scenario_ascend_topology_preflight,
+    "ascend_topology_preflight_mismatch":
+        _scenario_ascend_topology_preflight_mismatch,
     "ascend_implicit_size": _scenario_ascend_implicit_size,
     "ascend_method_gates": _scenario_ascend_method_gates,
     "ascend_contextmanager_gate": _scenario_ascend_contextmanager_gate,
@@ -1023,6 +1073,12 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_explicit_size_constructs_without_cuda_or_topology(self):
         self.run_scenario("ascend_construction")
+
+    def test_explicit_logical_topology_is_aggregated_before_construction(self):
+        self.run_scenario("ascend_topology_preflight")
+
+    def test_asymmetric_logical_topology_fails_before_construction(self):
+        self.run_scenario("ascend_topology_preflight_mismatch")
 
     def test_implicit_size_reaches_backend_transport_error_without_nccl(self):
         self.run_scenario("ascend_implicit_size")

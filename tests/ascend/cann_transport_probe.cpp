@@ -277,6 +277,45 @@ void check_rank_sized_command_queue() {
         std::numeric_limits<int>::max(), &capacity));
 }
 
+void check_explicit_two_dimensional_topology() {
+    FakeApi fake;
+    fake.rank = 3;
+    fake.size = 4;
+    auto config = valid_config(3, 4);
+    config.scale_up_size = 2;
+    config.topology_kind =
+        transport::TransportTopologyKind::kLogicalSimulation;
+    config.topology_epoch = 17;
+    auto created = transport::make_cann_transport(config, fake.api());
+    CHECK(created.status.ok());
+    transport::TransportTopology topology{};
+    CHECK(created.transport->query_topology(&topology).ok());
+    CHECK(topology.kind ==
+          transport::TransportTopologyKind::kLogicalSimulation);
+    CHECK(topology.epoch == 17);
+    CHECK(topology.world_rank == 3 && topology.world_size == 4);
+    CHECK(topology.scale_up_rank == 1 && topology.scale_up_size == 2);
+    CHECK(topology.scale_out_rank == 1 && topology.scale_out_size == 2);
+    CHECK(!transport::has_capability(
+        created.transport->capabilities(),
+        transport::TransportCapability::kScaleOutTeam));
+    CHECK(created.transport->destroy().ok());
+
+    for (const auto scale_up_size : {0, 3, 4}) {
+        FakeApi invalid_fake;
+        invalid_fake.rank = 0;
+        invalid_fake.size = 4;
+        auto invalid = valid_config(0, 4);
+        invalid.scale_up_size = scale_up_size;
+        invalid.topology_kind =
+            transport::TransportTopologyKind::kLogicalSimulation;
+        auto rejected = transport::make_cann_transport(
+            invalid, invalid_fake.api());
+        CHECK(!rejected.status.ok());
+        CHECK(rejected.transport == nullptr);
+    }
+}
+
 void check_communicator_size_query() {
     FakeApi fake;
     fake.size = 3;
@@ -446,6 +485,7 @@ void check_team_destroy_failure_is_retryable() {
 int main() {
     check_communicator_size_query();
     check_rank_sized_command_queue();
+    check_explicit_two_dimensional_topology();
     check_success_and_reverse_cleanup();
     check_partial_failure_cleans_up();
     check_deregister_failure_is_retryable();

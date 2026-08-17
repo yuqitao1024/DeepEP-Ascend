@@ -34,6 +34,8 @@ constexpr CoreTopology core_topology_from_transport(
         topology.scale_up_size,
         topology.scale_out_rank,
         topology.scale_out_size,
+        topology.kind,
+        topology.epoch,
     };
 }
 

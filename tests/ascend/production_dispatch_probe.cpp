@@ -265,23 +265,30 @@ bool has_exact_result(
         !has_shape(std::get<12>(result), {1, 2}) ||
         !has_values(std::get<12>(result), slots) ||
         !std::get<13>(result).has_value() ||
-        !has_shape(*std::get<13>(result), {96}) ||
+        !has_shape(*std::get<13>(result), {
+            static_cast<std::int64_t>(sizeof(elastic::DispatchHandleDescriptor))}) ||
         std::get<13>(result)->scalar_type() != torch::kByte ||
         std::get<14>(result).has_value() || std::get<15>(result).has_value())
         return false;
 
     elastic::DispatchHandleDescriptor descriptor{};
-    std::memcpy(&descriptor, std::get<13>(result)->data_ptr(), 96);
+    std::memcpy(
+        &descriptor, std::get<13>(result)->data_ptr(), sizeof(descriptor));
     const std::uint64_t expected_family = expanded ?
-        0x7324d91615b33c39ULL : 0xae1c4b7d7735a758ULL;
-    return descriptor.abi_version == 1 && descriptor.struct_size == 96 &&
+        0x34c68e658004e440ULL : 0xe20f7c80618f7da3ULL;
+    return descriptor.abi_version ==
+               elastic::kDispatchHandleDescriptorAbiVersion &&
+        descriptor.struct_size == sizeof(elastic::DispatchHandleDescriptor) &&
         descriptor.family == expected_family &&
         descriptor.topology.world_rank == 0 &&
         descriptor.topology.world_size == 2 &&
         descriptor.topology.scale_up_rank == 0 &&
         descriptor.topology.scale_up_size == 2 &&
         descriptor.topology.scale_out_rank == 0 &&
-        descriptor.topology.scale_out_size == 1 && descriptor.num_tokens == 1 &&
+        descriptor.topology.scale_out_size == 1 &&
+        descriptor.topology.kind ==
+            transport::TransportTopologyKind::kFlatScaleUp &&
+        descriptor.topology.epoch == 1 && descriptor.num_tokens == 1 &&
         descriptor.hidden == 8 && descriptor.num_experts == 2 &&
         descriptor.num_topk == 2 && descriptor.expert_alignment == 4 &&
         descriptor.num_max_tokens_per_rank == 4 &&

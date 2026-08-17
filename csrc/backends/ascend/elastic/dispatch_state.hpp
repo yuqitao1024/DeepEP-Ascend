@@ -14,7 +14,7 @@
 
 namespace deep_ep::ascend::elastic {
 
-inline constexpr std::uint32_t kDispatchHandleDescriptorAbiVersion = 1;
+inline constexpr std::uint32_t kDispatchHandleDescriptorAbiVersion = 2;
 
 class DispatchAttempt;
 
@@ -166,6 +166,9 @@ constexpr std::uint64_t attest_dispatch_handle_family(
         state, static_cast<std::uint32_t>(topology.scale_out_rank));
     state = mix_dispatch_handle_attestation(
         state, static_cast<std::uint32_t>(topology.scale_out_size));
+    state = mix_dispatch_handle_attestation(
+        state, static_cast<std::uint32_t>(topology.kind));
+    state = mix_dispatch_handle_attestation(state, topology.epoch);
     state = mix_dispatch_handle_attestation(state, num_tokens);
     state = mix_dispatch_handle_attestation(state, hidden);
     state = mix_dispatch_handle_attestation(state, num_experts);
@@ -197,7 +200,8 @@ constexpr bool same_topology(
            lhs.scale_up_rank == rhs.scale_up_rank &&
            lhs.scale_up_size == rhs.scale_up_size &&
            lhs.scale_out_rank == rhs.scale_out_rank &&
-           lhs.scale_out_size == rhs.scale_out_size;
+           lhs.scale_out_size == rhs.scale_out_size &&
+           lhs.kind == rhs.kind && lhs.epoch == rhs.epoch;
 }
 
 DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr bool

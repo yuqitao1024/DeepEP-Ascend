@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <limits>
 
+#include "../transport/types.hpp"
+
 namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kAscendElasticAlignment = 32;
@@ -42,12 +44,17 @@ struct CoreTopology {
     int scale_up_size = 1;
     int scale_out_rank = 0;
     int scale_out_size = 1;
+    transport::TransportTopologyKind kind =
+        transport::TransportTopologyKind::kFlatScaleUp;
+    std::uint64_t epoch = 1;
 };
 
 constexpr bool is_single_rank_topology(const CoreTopology& topology) {
     return topology.world_rank == 0 && topology.world_size == 1 &&
            topology.scale_up_rank == 0 && topology.scale_up_size == 1 &&
-           topology.scale_out_rank == 0 && topology.scale_out_size == 1;
+           topology.scale_out_rank == 0 && topology.scale_out_size == 1 &&
+           topology.kind == transport::TransportTopologyKind::kFlatScaleUp &&
+           topology.epoch > 0;
 }
 
 constexpr bool is_scale_up_topology(const CoreTopology& topology) {
@@ -55,7 +62,9 @@ constexpr bool is_scale_up_topology(const CoreTopology& topology) {
            topology.world_rank < topology.world_size &&
            topology.scale_up_size == topology.world_size &&
            topology.scale_up_rank == topology.world_rank &&
-           topology.scale_out_rank == 0 && topology.scale_out_size == 1;
+           topology.scale_out_rank == 0 && topology.scale_out_size == 1 &&
+           topology.kind == transport::TransportTopologyKind::kFlatScaleUp &&
+           topology.epoch > 0;
 }
 
 constexpr bool checked_add(

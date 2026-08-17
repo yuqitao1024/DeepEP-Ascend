@@ -378,7 +378,7 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 }
 
 int main() {
-    static_assert(kCoreTilingAbiVersion == 6);
+    static_assert(kCoreTilingAbiVersion == 7);
     auto barrier_rank_zero = valid_barrier_tiling(0);
     auto barrier_rank_one = valid_barrier_tiling(1);
     const auto barrier_storage =
@@ -418,13 +418,13 @@ int main() {
     malformed_barrier.topology.scale_up_size = 4;
     malformed_barrier.transport_context.topology.scale_up_size = 4;
     if (validate_internal_launch(malformed_barrier, barrier_storage).code !=
-        CoreRuntimeStatusCode::kUnsupportedTopology)
+        CoreRuntimeStatusCode::kInvalidArgument)
         return 31;
     malformed_barrier = barrier_rank_zero;
     malformed_barrier.topology.scale_out_size = 2;
     malformed_barrier.transport_context.topology.scale_out_size = 2;
     if (validate_internal_launch(malformed_barrier, barrier_storage).code !=
-        CoreRuntimeStatusCode::kUnsupportedTopology)
+        CoreRuntimeStatusCode::kInvalidArgument)
         return 32;
     malformed_barrier = barrier_rank_zero;
     malformed_barrier.transport_context.topology.world_rank = 1;
@@ -544,17 +544,17 @@ int main() {
     auto invalid_topology = dispatch_tiling;
     invalid_topology.topology.world_size = 2;
     if (validate_internal_launch(invalid_topology, storage).code !=
-        CoreRuntimeStatusCode::kUnsupportedTopology)
+        CoreRuntimeStatusCode::kInvalidArgument)
         return 3;
     invalid_topology = dispatch_tiling;
     invalid_topology.topology.scale_up_size = 2;
     if (validate_internal_launch(invalid_topology, storage).code !=
-        CoreRuntimeStatusCode::kUnsupportedTopology)
+        CoreRuntimeStatusCode::kInvalidArgument)
         return 4;
     invalid_topology = dispatch_tiling;
     invalid_topology.topology.scale_out_size = 2;
     if (validate_internal_launch(invalid_topology, storage).code !=
-        CoreRuntimeStatusCode::kUnsupportedTopology)
+        CoreRuntimeStatusCode::kInvalidArgument)
         return 5;
     invalid_topology = dispatch_tiling;
     invalid_topology.topology.world_rank = 1;
