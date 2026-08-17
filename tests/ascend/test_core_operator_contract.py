@@ -417,6 +417,17 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "combine_fill_normal_record_routing_weights(")
         self.assertLess(identity_check, normal_weight_fill)
         self.assertNotIn("combined_topk_indices", producer)
+        self.assertRegex(
+            producer,
+            r"is_valid_combine_source_identity\(\s*"
+            r"metadata\[0\],\s*destination_rank,\s*"
+            r"transport_world_rank,\s*shard_capacity,\s*num_tokens\)")
+        host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        self.assertRegex(
+            host,
+            r"is_valid_combine_source_identity\(\s*"
+            r"metadata\[0\],\s*destination_rank,\s*rank_idx_,\s*"
+            r"capacity,\s*descriptor\.num_tokens\)")
         epilogue = source[producer_end:]
         self.assertRegex(
             epilogue,
