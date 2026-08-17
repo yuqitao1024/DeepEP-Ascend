@@ -704,3 +704,6 @@ implementation plan and completion commit sequence.
 The final Phase 2G state is a correctness baseline, not a performance claim.
 Async execution, broader topology, FP8, and other EPv2 modules are planned only
 after this baseline is stable.
+
+Follow-on scope, dependency order, permanent exclusions, and acceptance policy
+are defined in `epv2-ascend-roadmap.md`.
