@@ -385,7 +385,8 @@ localize_dispatch_expert(
         expert - static_cast<std::int64_t>(first_local_expert) : -1;
 }
 
-constexpr bool is_complete_hybrid_route_stage_flags(
+DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr bool
+is_complete_hybrid_route_stage_flags(
     HybridRouteStageFlags flags) noexcept {
     return flags == kHybridRouteCompleteStageFlags;
 }
@@ -409,7 +410,7 @@ inline bool is_valid_dispatch_handle_descriptor(
            has_mode(descriptor.mode_flags, CoreMode::kHybrid) &&
            descriptor.route_layout_version == kHybridRouteLayoutVersion &&
            descriptor.route_record_stride == sizeof(HybridRouteRecord) &&
-           is_complete_hybrid_route_stage_flags(descriptor.route_stage_flags);
+           descriptor.route_stage_flags == kHybridRouteCompleteStageFlags;
 }
 
 inline DispatchHandleStatus validate_dispatch_handle(
@@ -470,7 +471,7 @@ inline DispatchHandleStatus validate_hybrid_route_table(
              record.forwarded_slot >= max_slots) ||
             record.generation != descriptor.dispatch_generation ||
             record.topology_epoch != descriptor.topology.epoch ||
-            !is_complete_hybrid_route_stage_flags(record.stage_flags))
+            record.stage_flags != kHybridRouteCompleteStageFlags)
             return {DispatchHandleStatusCode::kMismatch,
                     "hybrid route record does not match the dispatch handle"};
 

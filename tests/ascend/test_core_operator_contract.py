@@ -117,7 +117,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "TransportTeam::kScaleUp, destination_rank", source,
                 source_name)
             self.assertIn(signal_name, source, source_name)
-            self.assertEqual(source.count("transport.device_barrier("), 1,
+            self.assertEqual(source.count("transport.device_barrier("), 2,
                              source_name)
         barrier = (ELASTIC / "barrier.asc").read_text()
         self.assertEqual(barrier.count("transport.device_barrier("), 1)
@@ -402,6 +402,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "__gm__ const bfloat16_t* x",
             "__gm__ const float* topk_weights",
             "__gm__ const std::int32_t* source_metadata",
+            "__gm__ const HybridRouteRecord* route_records",
+            "std::uint64_t route_record_count",
             "__gm__ const std::int32_t* prefix_per_rank",
             "__gm__ std::uint8_t* workspace",
             "std::uint32_t transport_abi_version",
@@ -443,6 +445,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "std::uint64_t combine_staging_shard_bytes",
             "std::uint64_t combine_staging_shard_count",
             "std::uint64_t combine_staging_bytes",
+            "std::uint64_t reverse_forward_control_offset",
+            "std::uint64_t reverse_forward_control_bytes",
+            "std::uint64_t reverse_forward_shard_offset",
+            "std::uint64_t reverse_forward_shard_bytes",
+            "std::uint64_t reverse_forward_shard_count",
+            "std::uint64_t reverse_forward_bytes",
             "std::uint64_t workspace_scratch_status_offset",
             "std::uint64_t workspace_scratch_rank_counts_offset",
             "std::uint64_t workspace_scratch_rank_values_offset",
@@ -458,6 +466,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "reinterpret_cast<__gm__ const bfloat16_t*>(x)",
             "topk_weights",
             "source_metadata",
+            "route_records",
+            "route_record_count",
             "prefix_per_rank",
             "workspace",
             "tiling.transport_context.abi_version",
@@ -499,6 +509,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "tiling.symmetric_window_layout.combine_staging_shard_bytes",
             "tiling.symmetric_window_layout.combine_staging_shard_count",
             "tiling.symmetric_window_layout.combine_staging_bytes",
+            "tiling.symmetric_window_layout .hybrid_combine_reverse_forward_control_offset",
+            "tiling.symmetric_window_layout .hybrid_combine_reverse_forward_control_bytes",
+            "tiling.symmetric_window_layout .hybrid_combine_reverse_forward_shard_offset",
+            "tiling.symmetric_window_layout .hybrid_combine_reverse_forward_shard_bytes",
+            "tiling.symmetric_window_layout .hybrid_combine_reverse_forward_shard_count",
+            "tiling.symmetric_window_layout .hybrid_combine_reverse_forward_bytes",
             "tiling.workspace_layout.scratch_status_offset",
             "tiling.workspace_layout.scratch_rank_counts_offset",
             "tiling.workspace_layout.scratch_rank_values_offset",
@@ -674,6 +690,29 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("header->", epilogue)
         self.assertNotIn("prior_header->", epilogue)
         self.assertIn("is_valid_combine_record_lanes(", epilogue)
+
+    def test_hybrid_route_stage_helper_is_device_callable(self):
+        """Separates AICore route checks from same-TU host validators."""
+        source = (ELASTIC / "dispatch_state.hpp").read_text()
+        self.assertRegex(
+            source,
+            r"DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE\s+constexpr\s+bool\s+"
+            r"is_complete_hybrid_route_stage_flags\s*\(")
+        descriptor_validator = source[
+            source.index("inline bool is_valid_dispatch_handle_descriptor"):
+            source.index("inline DispatchHandleStatus validate_dispatch_handle")]
+        table_validator = source[
+            source.index("inline DispatchHandleStatus validate_hybrid_route_table"):
+            source.index("}  // namespace deep_ep::ascend::elastic")]
+        self.assertNotIn(
+            "is_complete_hybrid_route_stage_flags(", descriptor_validator)
+        self.assertNotIn(
+            "is_complete_hybrid_route_stage_flags(", table_validator)
+        combine = (ELASTIC / "combine.asc").read_text()
+        producer = combine[
+            combine.index("__simt_vf__ inline void combine_producer_vf"):
+            combine.index("__simt_vf__ inline void hybrid_combine_return_vf")]
+        self.assertIn("is_complete_hybrid_route_stage_flags(", producer)
 
     def test_rank_indexed_kernel_state_uses_workspace_views(self):
         """Catches fixed-rank SIMT arrays and two-rank device admission."""
@@ -1184,7 +1223,8 @@ int main() {
         cli_wrapper_begin = runner.index("bool run_combine_cli_case")
         combine_case = runner[combine_begin:cli_wrapper_begin]
         self.assertIn(
-            "const transport::DeviceTransportContext& transport_context",
+            "const deep_ep::ascend::transport::DeviceTransportContext& "
+            "transport_context",
             combine_case)
         self.assertIn("launch_internal_combine(", combine_case)
 
@@ -1242,7 +1282,8 @@ int main() {
             "static_cast<std::uint64_t>(combine_tiling.topology.world_size)",
             combine_case)
         self.assertIn(
-            "const transport::DeviceTransportContext& transport_context",
+            "const deep_ep::ascend::transport::DeviceTransportContext& "
+            "transport_context",
             combine_case)
         self.assertIn(
             "combine_tiling.transport_context.local_window_base",
@@ -1710,6 +1751,27 @@ int main() {
                     "ElasticBuffer.combine",
                 ],
             })
+
+    def test_hybrid_core_runner_covers_two_stage_reverse_routes(self):
+        runner = (CORE_OPS / "core_operator_runner.asc").read_text()
+        qualified_context = (
+            "deep_ep::ascend::transport::DeviceTransportContext")
+        self.assertEqual(runner.count(qualified_context), 3)
+        self.assertNotIn("const transport::DeviceTransportContext", runner)
+        for marker in (
+                "hybrid_route_probe_kernel<<<", "run_hybrid_route_probe(",
+                "classify_world_route(", "combine_expanded_record_count("):
+            self.assertIn(marker, runner)
+        for case_name in (
+                "hybrid-route-local", "hybrid-route-scale-up",
+                "hybrid-route-scale-out", "hybrid-route-diagonal",
+                "hybrid-route-empty", "hybrid-route-cached",
+                "hybrid-combine-single", "hybrid-combine-multiple"):
+            self.assertIn(case_name, runner)
+        for marker in (
+                "HybridRouteRecord", "kInvalidHybridRouteSlot",
+                "TransportTeam::kScaleOut", "TransportTeam::kScaleUp"):
+            self.assertIn(marker, runner)
 
 
 if __name__ == "__main__":

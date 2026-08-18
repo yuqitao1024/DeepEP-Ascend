@@ -126,6 +126,13 @@ class ElasticBuffer {
         transport::capability_bit(transport::TransportCapability::kDeviceBarrier) |
         transport::capability_bit(transport::TransportCapability::kScaleUpTeam);
 
+    transport::TransportCapabilities operation_capabilities(
+        transport::TransportCapabilities base) const {
+        return allow_hybrid_mode_ ?
+            base | transport::capability_bit(
+                transport::TransportCapability::kScaleOutTeam) : base;
+    }
+
     void require_transport(
         const char* operation, transport::TransportCapabilities required) const {
         const auto status =
@@ -360,10 +367,11 @@ class ElasticBuffer {
                   std::int64_t buffer_bytes, std::uint64_t timeout_cycles,
                   bool allow_multiple_reduction,
                   std::uint64_t dispatch_family,
-                  std::uint64_t last_dispatch_generation)
+                  std::uint64_t last_dispatch_generation,
+                  bool allow_hybrid_mode)
         : rank_idx_(rank), num_ranks_(num_ranks),
           num_buffer_bytes_(buffer_bytes),
-          allow_hybrid_mode_(false),
+          allow_hybrid_mode_(allow_hybrid_mode),
           allow_multiple_reduction_(allow_multiple_reduction),
           resources_(std::move(resources)),
           last_dispatch_generation_(last_dispatch_generation),
@@ -397,8 +405,6 @@ public:
                     "DeepEP Ascend backend: cpu communicator must be empty");
         TORCH_CHECK(num_cpu_buffer_bytes == 0,
                     "DeepEP Ascend backend: cpu_buffer_bytes must be zero");
-        TORCH_CHECK(!allow_hybrid_mode,
-                    "DeepEP Ascend backend: hybrid mode is unsupported");
         TORCH_CHECK(num_allocated_qps == 0,
                     "DeepEP Ascend backend: CUDA QP count must be zero");
         TORCH_CHECK(
@@ -432,6 +438,13 @@ public:
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         resources_ = std::move(resources);
+        if (allow_hybrid_mode_) {
+            const auto& topology = resources_->device_context().topology;
+            TORCH_CHECK(topology.scale_up_size == 2 &&
+                            topology.scale_out_size == 2,
+                        "DeepEP Ascend backend: hybrid mode requires the "
+                        "supported 2x2 scale-out/scale-up topology");
+        }
     }
 
 #if DEEP_EP_ASCEND_TESTING
@@ -441,7 +454,8 @@ public:
         bool allow_multiple_reduction = true,
         std::uint64_t dispatch_family = 7,
         int num_ranks = 2,
-        std::uint64_t last_dispatch_generation = 0) {
+        std::uint64_t last_dispatch_generation = 0,
+        bool allow_hybrid_mode = false) {
         TORCH_CHECK(num_ranks >= 2 && rank >= 0 && rank < num_ranks,
                     "DeepEP Ascend backend: invalid testing topology");
         TORCH_CHECK(resources != nullptr && resources->initialized() &&
@@ -455,7 +469,7 @@ public:
         return std::unique_ptr<ElasticBuffer>(new ElasticBuffer(
             TestingTag{}, rank, num_ranks, std::move(resources), buffer_bytes,
             timeout_cycles, allow_multiple_reduction, dispatch_family,
-            last_dispatch_generation));
+            last_dispatch_generation, allow_hybrid_mode));
     }
 
     std::size_t testing_dispatch_validation_state_bytes() const noexcept {
@@ -619,10 +633,6 @@ public:
         if (use_fp8_dispatch)
             raise_unsupported(
                 "calculate_elastic_buffer_size", "does not support FP8");
-        if (allow_hybrid_mode)
-            raise_unsupported(
-                "calculate_elastic_buffer_size",
-                "does not support hybrid mode");
         TORCH_CHECK(
             num_max_tokens_per_rank > 0 && hidden > 0 && num_topk >= 0,
             "DeepEP Ascend backend: calculate_elastic_buffer_size requires "
@@ -638,7 +648,7 @@ public:
             query_status.backend_code, ": ", query_status.message);
         return calculate_buffer_size_for_world_size(
             world_size, num_max_tokens_per_rank, hidden, num_topk,
-            allow_multiple_reduction);
+            allow_multiple_reduction, allow_hybrid_mode);
     }
 
 #if DEEP_EP_ASCEND_TESTING
@@ -655,10 +665,6 @@ public:
         if (use_fp8_dispatch)
             raise_unsupported(
                 "calculate_elastic_buffer_size", "does not support FP8");
-        if (allow_hybrid_mode)
-            raise_unsupported(
-                "calculate_elastic_buffer_size",
-                "does not support hybrid mode");
         TORCH_CHECK(
             num_max_tokens_per_rank > 0 && hidden > 0 && num_topk >= 0,
             "DeepEP Ascend backend: calculate_elastic_buffer_size requires "
@@ -673,14 +679,14 @@ public:
             query_status.backend_code, ": ", query_status.message);
         return calculate_buffer_size_for_world_size(
             world_size, num_max_tokens_per_rank, hidden, num_topk,
-            allow_multiple_reduction);
+            allow_multiple_reduction, allow_hybrid_mode);
     }
 #endif
 
 private:
     static int64_t calculate_buffer_size_for_world_size(
         std::uint32_t world_size, int num_max_tokens_per_rank, int hidden,
-        int num_topk, bool allow_multiple_reduction) {
+        int num_topk, bool allow_multiple_reduction, bool hybrid) {
         elastic::SymmetricWindowInput input{};
         input.world_size = static_cast<int>(world_size);
         input.num_max_tokens_per_rank =
@@ -690,6 +696,10 @@ private:
         input.element_bytes = 2;
         input.expanded = true;
         input.allow_multiple_reduction = allow_multiple_reduction;
+        input.hybrid = hybrid;
+        input.hybrid_route_capacity =
+            static_cast<std::uint64_t>(world_size) *
+            static_cast<std::uint64_t>(num_max_tokens_per_rank);
         elastic::SymmetricWindowLayout layout{};
         const auto status =
             elastic::build_symmetric_window_layout(input, &layout);
@@ -736,8 +746,6 @@ public:
              const bool& do_cpu_sync, const bool& do_expand,
              const bool& do_zero_padding,
              const bool& use_tma_aligned_col_major_sf) const {
-        TORCH_CHECK(!allow_hybrid_mode_,
-                    "DeepEP Ascend backend: dispatch does not support hybrid mode");
         TORCH_CHECK(!sf.has_value() && !cumulative_local_expert_recv_stats.has_value(),
                     "DeepEP Ascend backend: dispatch does not support scale factors "
                     "or cumulative expert stats");
@@ -776,7 +784,8 @@ public:
         }
         auto lease = reserve_operation(
             elastic::BufferOperationKind::kDispatch, "dispatch");
-        require_transport("dispatch", kDispatchCapabilities);
+        require_transport("dispatch",
+                          operation_capabilities(kDispatchCapabilities));
         int current_device = -1;
         auto device_status = resources_->current_device(&current_device);
         if (!device_status.ok())
@@ -806,6 +815,8 @@ public:
             mode_flags |= elastic::mode_bit(elastic::CoreMode::kExpanded);
         if (do_zero_padding)
             mode_flags |= elastic::mode_bit(elastic::CoreMode::kZeroPadding);
+        if (allow_hybrid_mode_)
+            mode_flags |= elastic::mode_bit(elastic::CoreMode::kHybrid);
         const auto num_tokens = static_cast<std::uint64_t>(x.size(0));
         const auto hidden = static_cast<std::uint64_t>(x.size(1));
         const auto num_topk = static_cast<std::uint64_t>(topk_idx.size(1));
@@ -821,11 +832,25 @@ public:
 
         const auto descriptor_mode_flags = mode_flags & ~elastic::mode_bit(
             elastic::CoreMode::kCached);
+        const auto routing_mode = allow_hybrid_mode_ ?
+            elastic::DispatchRoutingMode::kHybrid :
+            elastic::DispatchRoutingMode::kDirect;
+        const auto cached_route_count = allow_hybrid_mode_ && cached_mode ?
+            static_cast<std::uint64_t>(*cached_num_recv_tokens) : 0;
         const auto expected_descriptor =
+            allow_hybrid_mode_ ?
             elastic::make_attested_dispatch_handle_descriptor(
-            dispatch_family_, tiling.topology, last_dispatch_generation_,
-            num_tokens, hidden, experts, num_topk, alignment, capacity,
-            descriptor_mode_flags);
+                dispatch_family_, tiling.topology, last_dispatch_generation_,
+                num_tokens, hidden, experts, num_topk, alignment, capacity,
+                descriptor_mode_flags, routing_mode,
+                elastic::kHybridRouteLayoutVersion, cached_route_count,
+                sizeof(elastic::HybridRouteRecord),
+                last_dispatch_generation_,
+                elastic::kHybridRouteCompleteStageFlags) :
+            elastic::make_attested_dispatch_handle_descriptor(
+                dispatch_family_, tiling.topology, last_dispatch_generation_,
+                num_tokens, hidden, experts, num_topk, alignment, capacity,
+                descriptor_mode_flags);
         const auto int_options = x.options().dtype(torch::kInt);
         const auto metadata_options = x.options().dtype(torch::kByte);
         const auto max_recv_tokens = capacity * static_cast<std::uint64_t>(num_ranks_);
@@ -894,7 +919,10 @@ public:
                             cached_recv_src_metadata->size(1) ==
                                 static_cast<int64_t>(num_topk + 2) &&
                             cached_token_metadata_at_forward->numel() ==
-                                static_cast<int64_t>(sizeof(elastic::DispatchHandleDescriptor)),
+                                static_cast<int64_t>(
+                                    sizeof(elastic::DispatchHandleDescriptor) +
+                                    cached_route_count *
+                                        sizeof(elastic::HybridRouteRecord)),
                         "DeepEP Ascend backend: dispatch cached handle shape mismatch");
             elastic::DispatchHandleDescriptor descriptor{};
             auto status = resources_->copy_to_host(
@@ -1012,7 +1040,11 @@ public:
         auto descriptor_tensor = cached_mode ?
             *cached_token_metadata_at_forward :
             torch::empty(
-                {static_cast<int64_t>(sizeof(elastic::DispatchHandleDescriptor))},
+                {static_cast<int64_t>(
+                    sizeof(elastic::DispatchHandleDescriptor) +
+                    (allow_hybrid_mode_ ?
+                         max_recv_tokens * sizeof(elastic::HybridRouteRecord) :
+                         0))},
                 metadata_options);
         auto status = transport::TransportStatus{};
 
@@ -1034,6 +1066,13 @@ public:
             kernel_unaligned.data_ptr<std::int32_t>();
         arguments.destination_slots = destination_slots.data_ptr<std::int32_t>();
         arguments.source_metadata = source_metadata.data_ptr<std::int32_t>();
+        if (allow_hybrid_mode_) {
+            arguments.route_records =
+                reinterpret_cast<elastic::HybridRouteRecord*>(
+                    static_cast<std::uint8_t*>(descriptor_tensor.data_ptr()) +
+                    sizeof(elastic::DispatchHandleDescriptor));
+            arguments.route_record_capacity = max_recv_tokens;
+        }
         arguments.timeout_cycles = barrier_timeout_cycles_;
         void* stream = nullptr;
         status = resources_->current_stream(&stream);
@@ -1043,11 +1082,6 @@ public:
             static_cast<std::uint64_t>(num_buffer_bytes_), resources_->workspace_bytes()};
         const auto generation = activate_operation(lease, "dispatch");
         arguments.generation = generation;
-        const auto committed_descriptor =
-            elastic::make_attested_dispatch_handle_descriptor(
-                dispatch_family_, tiling.topology, generation, num_tokens,
-                hidden, experts, num_topk, alignment, capacity,
-                descriptor_mode_flags);
         const auto launch_status = elastic::launch_internal_dispatch(
             arguments, tiling, storage, stream);
         if (!launch_status.ok())
@@ -1138,6 +1172,19 @@ public:
                         num_expanded_tokens >= 0 &&
                         num_expanded_tokens <= static_cast<int>(expanded_records),
                     "DeepEP Ascend backend: dispatch returned invalid output counts");
+        const auto committed_descriptor = allow_hybrid_mode_ ?
+            elastic::make_attested_dispatch_handle_descriptor(
+                dispatch_family_, tiling.topology, generation, num_tokens,
+                hidden, experts, num_topk, alignment, capacity,
+                descriptor_mode_flags, routing_mode,
+                elastic::kHybridRouteLayoutVersion,
+                static_cast<std::uint64_t>(num_recv_tokens),
+                sizeof(elastic::HybridRouteRecord), generation,
+                elastic::kHybridRouteCompleteStageFlags) :
+            elastic::make_attested_dispatch_handle_descriptor(
+                dispatch_family_, tiling.topology, generation, num_tokens,
+                hidden, experts, num_topk, alignment, capacity,
+                descriptor_mode_flags);
         status = resources_->copy_from_host(
             descriptor_tensor.data_ptr(), &committed_descriptor,
             sizeof(committed_descriptor));
@@ -1154,11 +1201,18 @@ public:
                 recv_topk_weights->narrow(0, 0, output_tokens)) :
             std::optional<torch::Tensor>();
         auto narrowed_metadata = source_metadata.narrow(0, 0, num_recv_tokens);
+        auto handle_tensor = allow_hybrid_mode_ && !cached_mode ?
+            descriptor_tensor.narrow(
+                0, 0, static_cast<int64_t>(
+                    sizeof(elastic::DispatchHandleDescriptor) +
+                    static_cast<std::uint64_t>(num_recv_tokens) *
+                        sizeof(elastic::HybridRouteRecord))) :
+            descriptor_tensor;
         return {narrowed_x, std::nullopt, narrowed_topk_idx,
                 narrowed_topk_weights, copied_topk_idx, num_recv_tokens,
                 num_expanded_tokens, per_expert_list, rank_prefix,
                 expert_prefix, unaligned, narrowed_metadata,
-                destination_slots, descriptor_tensor, std::nullopt, std::nullopt};
+                destination_slots, handle_tensor, std::nullopt, std::nullopt};
     }
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>,
@@ -1180,8 +1234,6 @@ public:
             const bool& async_with_compute_stream,
             const bool& allocate_on_comm_stream,
             const bool& use_expanded_layout) const {
-        TORCH_CHECK(!allow_hybrid_mode_,
-                    "DeepEP Ascend backend: combine does not support hybrid mode");
         TORCH_CHECK(!previous_event.has_value() &&
                         !previous_event_before_epilogue.has_value() &&
                         !async_with_compute_stream && !allocate_on_comm_stream,
@@ -1203,7 +1255,8 @@ public:
                     "DeepEP Ascend backend: combine requires a dispatch handle");
         auto lease = reserve_operation(
             elastic::BufferOperationKind::kCombine, "combine");
-        require_transport("combine", kCombineCapabilities);
+        require_transport("combine",
+                          operation_capabilities(kCombineCapabilities));
 
         const auto device = x.device();
         int current_device = -1;
@@ -1240,7 +1293,7 @@ public:
                         combined_topk_idx.size(1) <= num_experts &&
                         psum_num_recv_tokens_per_scaleup_rank.size(0) ==
                             num_ranks_ &&
-                        token_metadata_at_forward->numel() ==
+                        token_metadata_at_forward->numel() >=
                             static_cast<int64_t>(
                                 sizeof(elastic::DispatchHandleDescriptor)),
                     "DeepEP Ascend backend: combine handle tensor shape mismatch");
@@ -1295,18 +1348,39 @@ public:
             elastic::mode_bit(elastic::CoreMode::kExpanded);
         const auto zero_padding_dispatch_mode =
             elastic::mode_bit(elastic::CoreMode::kZeroPadding);
-        const elastic::CoreModeFlags dispatch_mode = use_expanded_layout ?
+        const auto hybrid_dispatch_mode =
+            elastic::mode_bit(elastic::CoreMode::kHybrid);
+        elastic::CoreModeFlags dispatch_mode = use_expanded_layout ?
             expanded_dispatch_mode : 0;
+        if (allow_hybrid_mode_)
+            dispatch_mode |= hybrid_dispatch_mode;
+        const auto descriptor_base_mode = allow_hybrid_mode_ ?
+            hybrid_dispatch_mode : 0;
         const bool compatible_descriptor_mode = use_expanded_layout ?
-            descriptor.mode_flags == expanded_dispatch_mode ||
+            descriptor.mode_flags ==
+                    (descriptor_base_mode | expanded_dispatch_mode) ||
                 descriptor.mode_flags ==
-                    (expanded_dispatch_mode | zero_padding_dispatch_mode) :
-            descriptor.mode_flags == 0;
+                    (descriptor_base_mode | expanded_dispatch_mode |
+                     zero_padding_dispatch_mode) :
+            descriptor.mode_flags == descriptor_base_mode;
         TORCH_CHECK(
             compatible_descriptor_mode,
             "DeepEP Ascend backend: combine dispatch handle does not match "
             "the current call");
-        const auto expected_descriptor =
+        const auto expected_descriptor = allow_hybrid_mode_ ?
+            elastic::make_attested_dispatch_handle_descriptor(
+                dispatch_family_,
+                elastic::core_topology_from_transport(context.topology),
+                last_dispatch_generation_,
+                static_cast<std::uint64_t>(combined_topk_idx.size(0)),
+                static_cast<std::uint64_t>(x.size(1)),
+                static_cast<std::uint64_t>(num_experts), num_topk,
+                descriptor.expert_alignment, capacity,
+                descriptor.mode_flags, elastic::DispatchRoutingMode::kHybrid,
+                elastic::kHybridRouteLayoutVersion, num_source_rows,
+                sizeof(elastic::HybridRouteRecord),
+                last_dispatch_generation_,
+                elastic::kHybridRouteCompleteStageFlags) :
             elastic::make_attested_dispatch_handle_descriptor(
                 dispatch_family_,
                 elastic::core_topology_from_transport(context.topology),
@@ -1320,6 +1394,35 @@ public:
             expected_descriptor, descriptor);
         TORCH_CHECK(descriptor_status.ok(), "DeepEP Ascend backend: combine ",
                     descriptor_status.message);
+        TORCH_CHECK(
+            token_metadata_at_forward->numel() == static_cast<int64_t>(
+                sizeof(elastic::DispatchHandleDescriptor) +
+                descriptor.route_record_count * descriptor.route_record_stride),
+            "DeepEP Ascend backend: combine handle tensor shape mismatch");
+        std::vector<elastic::HybridRouteRecord> host_route_records;
+        if (allow_hybrid_mode_) {
+            host_route_records.resize(
+                static_cast<std::size_t>(descriptor.route_record_count));
+            if (!host_route_records.empty()) {
+                const auto* device_records =
+                    static_cast<const std::uint8_t*>(
+                        token_metadata_at_forward->data_ptr()) +
+                    sizeof(elastic::DispatchHandleDescriptor);
+                status = resources_->copy_to_host(
+                    host_route_records.data(), device_records,
+                    host_route_records.size() *
+                        sizeof(elastic::HybridRouteRecord));
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
+            }
+            const auto route_status = elastic::validate_hybrid_route_table(
+                descriptor,
+                {host_route_records.data(), host_route_records.size()},
+                capacity, maximum_source_rows,
+                static_cast<std::uint64_t>(num_experts / num_ranks_));
+            TORCH_CHECK(route_status.ok(), "DeepEP Ascend backend: combine ",
+                        route_status.message);
+        }
 
         elastic::CoreModeFlags combine_mode = dispatch_mode;
         if (use_expanded_layout && allow_multiple_reduction_)
@@ -1422,6 +1525,14 @@ public:
         arguments.topk_weights = topk_weights.has_value() ?
             topk_weights->data_ptr<float>() : nullptr;
         arguments.source_metadata = src_metadata.data_ptr<std::int32_t>();
+        if (allow_hybrid_mode_) {
+            arguments.route_records =
+                reinterpret_cast<const elastic::HybridRouteRecord*>(
+                    static_cast<const std::uint8_t*>(
+                        token_metadata_at_forward->data_ptr()) +
+                    sizeof(elastic::DispatchHandleDescriptor));
+            arguments.route_record_count = descriptor.route_record_count;
+        }
         arguments.combined_topk_indices =
             combined_topk_idx.data_ptr<std::int64_t>();
         arguments.prefix_per_rank =

@@ -35,7 +35,6 @@ bool has_deferred_mode(CoreModeFlags flags) {
     constexpr CoreModeFlags deferred =
         mode_bit(CoreMode::kAsyncEvent) |
         mode_bit(CoreMode::kCpuSync) |
-        mode_bit(CoreMode::kHybrid) |
         mode_bit(CoreMode::kPipeline) |
         mode_bit(CoreMode::kEngram);
     return (flags & deferred) != 0;
@@ -149,7 +148,66 @@ bool same_symmetric_window_layout(
            lhs.barrier_generation_count == rhs.barrier_generation_count &&
            lhs.barrier_completion_offset == rhs.barrier_completion_offset &&
            lhs.barrier_completion_bytes == rhs.barrier_completion_bytes &&
-           lhs.barrier_completion_count == rhs.barrier_completion_count;
+           lhs.barrier_completion_count == rhs.barrier_completion_count &&
+           lhs.hybrid_route_record_offset == rhs.hybrid_route_record_offset &&
+           lhs.hybrid_route_record_bytes == rhs.hybrid_route_record_bytes &&
+           lhs.hybrid_route_record_count == rhs.hybrid_route_record_count &&
+           lhs.hybrid_dispatch_ingress_control_offset ==
+               rhs.hybrid_dispatch_ingress_control_offset &&
+           lhs.hybrid_dispatch_ingress_control_bytes ==
+               rhs.hybrid_dispatch_ingress_control_bytes &&
+           lhs.hybrid_dispatch_ingress_control_count ==
+               rhs.hybrid_dispatch_ingress_control_count &&
+           lhs.hybrid_dispatch_ingress_shard_offset ==
+               rhs.hybrid_dispatch_ingress_shard_offset &&
+           lhs.hybrid_dispatch_ingress_shard_bytes ==
+               rhs.hybrid_dispatch_ingress_shard_bytes &&
+           lhs.hybrid_dispatch_ingress_shard_count ==
+               rhs.hybrid_dispatch_ingress_shard_count &&
+           lhs.hybrid_dispatch_ingress_bytes ==
+               rhs.hybrid_dispatch_ingress_bytes &&
+           lhs.hybrid_dispatch_forward_control_offset ==
+               rhs.hybrid_dispatch_forward_control_offset &&
+           lhs.hybrid_dispatch_forward_control_bytes ==
+               rhs.hybrid_dispatch_forward_control_bytes &&
+           lhs.hybrid_dispatch_forward_control_count ==
+               rhs.hybrid_dispatch_forward_control_count &&
+           lhs.hybrid_dispatch_forward_shard_offset ==
+               rhs.hybrid_dispatch_forward_shard_offset &&
+           lhs.hybrid_dispatch_forward_shard_bytes ==
+               rhs.hybrid_dispatch_forward_shard_bytes &&
+           lhs.hybrid_dispatch_forward_shard_count ==
+               rhs.hybrid_dispatch_forward_shard_count &&
+           lhs.hybrid_dispatch_forward_bytes ==
+               rhs.hybrid_dispatch_forward_bytes &&
+           lhs.hybrid_combine_reverse_forward_control_offset ==
+               rhs.hybrid_combine_reverse_forward_control_offset &&
+           lhs.hybrid_combine_reverse_forward_control_bytes ==
+               rhs.hybrid_combine_reverse_forward_control_bytes &&
+           lhs.hybrid_combine_reverse_forward_control_count ==
+               rhs.hybrid_combine_reverse_forward_control_count &&
+           lhs.hybrid_combine_reverse_forward_shard_offset ==
+               rhs.hybrid_combine_reverse_forward_shard_offset &&
+           lhs.hybrid_combine_reverse_forward_shard_bytes ==
+               rhs.hybrid_combine_reverse_forward_shard_bytes &&
+           lhs.hybrid_combine_reverse_forward_shard_count ==
+               rhs.hybrid_combine_reverse_forward_shard_count &&
+           lhs.hybrid_combine_reverse_forward_bytes ==
+               rhs.hybrid_combine_reverse_forward_bytes &&
+           lhs.hybrid_combine_return_control_offset ==
+               rhs.hybrid_combine_return_control_offset &&
+           lhs.hybrid_combine_return_control_bytes ==
+               rhs.hybrid_combine_return_control_bytes &&
+           lhs.hybrid_combine_return_control_count ==
+               rhs.hybrid_combine_return_control_count &&
+           lhs.hybrid_combine_return_shard_offset ==
+               rhs.hybrid_combine_return_shard_offset &&
+           lhs.hybrid_combine_return_shard_bytes ==
+               rhs.hybrid_combine_return_shard_bytes &&
+           lhs.hybrid_combine_return_shard_count ==
+               rhs.hybrid_combine_return_shard_count &&
+           lhs.hybrid_combine_return_bytes ==
+               rhs.hybrid_combine_return_bytes;
 }
 
 bool context_topology_matches(
@@ -203,8 +261,8 @@ CoreRuntimeStatus validate_transport_context(const CoreTiling& tiling) {
         kDispatchTransportCapabilities :
         (tiling.operation == OperationKind::kCombine ?
              kCombineTransportCapabilities : kBarrierTransportCapabilities);
-    if (tiling.topology.kind ==
-        transport::TransportTopologyKind::kPhysical2D)
+    if (has_mode(tiling.mode_flags, CoreMode::kHybrid) ||
+        tiling.topology.kind == transport::TransportTopologyKind::kPhysical2D)
         required |= transport::capability_bit(
             transport::TransportCapability::kScaleOutTeam);
     if ((context.capabilities & required) != required)
@@ -256,11 +314,13 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
         case OperationKind::kDispatch:
             operation_modes = mode_bit(CoreMode::kCached) |
                               mode_bit(CoreMode::kExpanded) |
-                              mode_bit(CoreMode::kZeroPadding);
+                              mode_bit(CoreMode::kZeroPadding) |
+                              mode_bit(CoreMode::kHybrid);
             break;
         case OperationKind::kCombine:
             operation_modes = mode_bit(CoreMode::kExpanded) |
-                              mode_bit(CoreMode::kAllowMultipleReduction);
+                              mode_bit(CoreMode::kAllowMultipleReduction) |
+                              mode_bit(CoreMode::kHybrid);
             break;
         default:
             return invalid("invalid operation kind");
@@ -368,7 +428,11 @@ CoreRuntimeStatus launch_internal_dispatch(
         arguments.prefix_per_rank == nullptr ||
         arguments.prefix_per_expert == nullptr ||
         arguments.unaligned_per_expert == nullptr ||
-        arguments.source_metadata == nullptr)
+        arguments.source_metadata == nullptr ||
+        (has_mode(tiling.mode_flags, CoreMode::kHybrid) &&
+         (arguments.route_records == nullptr ||
+          arguments.route_record_capacity <
+              tiling.symmetric_window_layout.hybrid_route_record_count)))
         return invalid("dispatch required argument is null");
     if (!is_aligned(arguments.communication_buffer) ||
         !is_aligned(arguments.workspace))
@@ -426,7 +490,10 @@ CoreRuntimeStatus launch_internal_combine(
           arguments.combined_x == nullptr)) ||
         arguments.prefix_per_rank == nullptr ||
         arguments.communication_buffer == nullptr ||
-        arguments.workspace == nullptr)
+        arguments.workspace == nullptr ||
+        (has_mode(tiling.mode_flags, CoreMode::kHybrid) &&
+         arguments.route_record_count != 0 &&
+         arguments.route_records == nullptr))
         return invalid("combine required argument is null");
     if ((arguments.topk_weights == nullptr) !=
         (arguments.combined_topk_weights == nullptr))

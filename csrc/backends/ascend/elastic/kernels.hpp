@@ -6,6 +6,43 @@
 
 namespace deep_ep::ascend::elastic {
 
+struct HybridRouteRecord;
+
+enum class WorldRouteKind : std::uint32_t {
+    kLocal,
+    kScaleUp,
+    kScaleOut,
+    kDiagonal,
+};
+
+struct WorldRoute {
+    WorldRouteKind kind = WorldRouteKind::kLocal;
+    int ingress_world_rank = 0;
+};
+
+#if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
+#define DEEP_EP_ASCEND_KERNEL_CALLEE __SIMT_DEVICE_FUNCTIONS_DECL__ inline
+#else
+#define DEEP_EP_ASCEND_KERNEL_CALLEE inline constexpr
+#endif
+
+DEEP_EP_ASCEND_KERNEL_CALLEE WorldRoute classify_world_route(
+    int origin_world_rank, int destination_world_rank,
+    int scale_up_size) noexcept {
+    if (origin_world_rank == destination_world_rank)
+        return {WorldRouteKind::kLocal, destination_world_rank};
+    const int origin_domain = origin_world_rank / scale_up_size;
+    const int destination_domain = destination_world_rank / scale_up_size;
+    const int origin_rail = origin_world_rank % scale_up_size;
+    const int destination_rail = destination_world_rank % scale_up_size;
+    if (origin_domain == destination_domain)
+        return {WorldRouteKind::kScaleUp, destination_world_rank};
+    if (origin_rail == destination_rail)
+        return {WorldRouteKind::kScaleOut, destination_world_rank};
+    return {WorldRouteKind::kDiagonal,
+            destination_domain * scale_up_size + origin_rail};
+}
+
 struct BarrierArguments {
     void* workspace = nullptr;
     std::uint64_t generation = 0;
@@ -28,6 +65,8 @@ struct DispatchArguments {
     std::int32_t* unaligned_per_expert = nullptr;
     std::int32_t* destination_slots = nullptr;
     std::int32_t* source_metadata = nullptr;
+    HybridRouteRecord* route_records = nullptr;
+    std::uint64_t route_record_capacity = 0;
     std::uint64_t generation = 0;
     std::uint64_t timeout_cycles = 0;
 };
@@ -36,6 +75,8 @@ struct CombineArguments {
     const void* x = nullptr;
     const float* topk_weights = nullptr;
     const std::int32_t* source_metadata = nullptr;
+    const HybridRouteRecord* route_records = nullptr;
+    std::uint64_t route_record_count = 0;
     const std::int64_t* combined_topk_indices = nullptr;
     const std::int32_t* prefix_per_rank = nullptr;
     const void* bias_0 = nullptr;
@@ -52,6 +93,8 @@ struct CombineArguments {
 };
 
 }  // namespace deep_ep::ascend::elastic
+
+#undef DEEP_EP_ASCEND_KERNEL_CALLEE
 
 extern "C" int deep_ep_ascend_launch_barrier(
     deep_ep::ascend::elastic::BarrierArguments arguments,
