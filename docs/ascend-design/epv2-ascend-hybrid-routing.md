@@ -110,6 +110,31 @@ reading. NPU producers establish transport and system visibility before a CPU
 completion marker; CPU consumers acquire the marker before reading. A host
 barrier alone is not accepted as a cache-coherency proof.
 
+### Pinned CANN Capability Audit
+
+The 2026-08-18 NPU8P login-node audit used only the sourced system CANN
+`/usr/local/Ascend/cann-9.2.0` and the pinned project HCOMM package
+`/home/pyptouser/yuqitao/Ascend/hcomm-deepep-current/cann`; it did not access
+an NPU or submit a TaskQueue job. The audit is deliberately limited to public
+headers and dynamic-library exports.
+
+| Required edge | Public evidence | Decision |
+| --- | --- | --- |
+| Pinned host allocation and free | `acl/acl_rt.h` declares `aclrtMallocHost` and `aclrtFreeHost`; `/usr/local/Ascend/cann-9.2.0/aarch64-linux/lib64/libascendcl.so` exports both (with implementation symbols in `libruntime.so`). | Available. |
+| Host allocation to NPU address mapping and unmapping | `aclrtMemMapNoAccess` maps an `aclrtDrvMemHandle` into a reserved virtual range, and `aclrtMemMapSelectedLink` maps one virtual address to another link. Neither public signature accepts an `aclrtMallocHost` allocation or returns a device address for it. No public host-pointer mapping/unmapping pair was found. | Missing. |
+| Transport registration, deregistration, import, and release | Pinned `hccl/hccl_team.h` declares `HcclTeamWindowRegister`/`HcclTeamWindowDeregister`; `hcomm/hcomm_res.h` declares `HcommMemReg`/`HcommMemUnreg` and `HcommMemExport`/`HcommMemImport`/`HcommMemUnimport`. Pinned `aarch64-linux/lib64/libhcomm.so` exports the team-window and import symbols. | Individually available, but cannot register a proven mapped host-to-NPU segment. |
+| Cache/system visibility acquire and release | `acl/acl_rt.h` declares `aclrtMemFlush` and `aclrtMemInvalidate` for `devPtr`. The audited public headers provide no documented CPU release marker plus NPU acquire, or NPU release plus CPU acquire, for an `aclrtMallocHost` mapping. | Missing. |
+| CPU-visible completion | `aclrtSynchronizeStream` and `aclrtSynchronizeDevice` are declared in `acl/acl_rt.h` and exported by `libascendcl.so`, but they only establish task completion; without the missing mapped-address and visibility contracts they do not prove CPU-visible completion of shared mapped memory. | Insufficient. |
+
+Consequently `mapped_cpu_memory_supported()` is false. A nonzero
+`cpu_buffer_bytes` remains an explicit construction error; zero CPU bytes make
+no mapped-provider calls, and device-only direct and hybrid behavior is
+unchanged. `MappedSegmentOwner` retains the required transactional contract
+for a future provider: allocate, map, register, publish a release generation,
+provider-defined acquire, invalidate before teardown, then deregister, unmap,
+and free. It is not a claim that the current CANN installation can implement
+those operations.
+
 ## Hybrid Dispatch
 
 1. Validate the public inputs and dispatch handle mode collectively.
@@ -189,4 +214,3 @@ device segment bounds; asymmetric preflight rejection; bounded CPU/NPU
 visibility; repeated generations; and cleanup after injected failures. Until
 then, logical device-only routing may land behind its explicit mode, while
 physical hybrid and mapped-CPU capability bits remain disabled.
-

@@ -1,5 +1,7 @@
 #include "cann_runtime.hpp"
 
+#include "mapped_memory.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -135,7 +137,8 @@ TransportStatus CannRuntimeResources::initialize_impl(
     if (config.world_size < 2 || config.rank < 0 ||
         config.rank >= config.world_size ||
         config.communicator_handle == 0 || config.device_buffer_bytes <= 0 ||
-        !config.cpu_communicator_empty || config.cpu_buffer_bytes != 0 ||
+        !config.cpu_communicator_empty ||
+        (config.cpu_buffer_bytes != 0 && !mapped_cpu_memory_supported()) ||
         config.allow_hybrid_mode || config.requested_channels != 1 ||
         workspace_bytes == 0 ||
         !transport::checked_scale_up_command_capacity(

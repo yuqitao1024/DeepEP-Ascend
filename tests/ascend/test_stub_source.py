@@ -12,6 +12,7 @@ HEADER = ROOT / "csrc/backends/ascend/elastic_buffer.hpp"
 API_CONTRACT = ROOT / "tests/platform/api_contract.py"
 EXTENSION_CONTRACT = ROOT / "tests/platform/test_extension_contract.py"
 STUB_TEST = ROOT / "tests/ascend/test_stub.py"
+MAPPED_MEMORY_PROBE = ROOT / "tests/ascend/mapped_memory_probe.cpp"
 
 
 PYBIND11_HEADER = r"""
@@ -555,6 +556,20 @@ int main() {
 
 
 class AscendStubSourceTest(unittest.TestCase):
+    def test_mapped_memory_owner_lifecycle_probe(self):
+        """Catches a missing lifetime edge or any out-of-order mapped teardown."""
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "mapped_memory_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(MAPPED_MEMORY_PROBE),
+                 str(ROOT / "csrc/backends/ascend/runtime/mapped_memory.cpp"),
+                 "-o", str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
     def test_header_type_checks_and_host_behavior_executes(self):
         with tempfile.TemporaryDirectory() as directory:
             include = pathlib.Path(directory)

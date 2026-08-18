@@ -44,13 +44,15 @@ class AscendStubTest(unittest.TestCase):
         with self.assertRaisesRegex(
                 RuntimeError, "device buffer must be positive and 2 MiB-aligned"):
             _C.ElasticBuffer(0, 2, 1, [], 0, *ARGS[5:])
-        with self.assertRaisesRegex(RuntimeError,
-                                    "cpu_buffer_bytes must be zero"):
-            _C.ElasticBuffer(0, 2, 1, [], ALIGNMENT, 1, *ARGS[6:])
         with self.assertRaisesRegex(RuntimeError, "hybrid mode is unsupported"):
             _C.ElasticBuffer(*ARGS[:6], True, *ARGS[7:])
         with self.assertRaisesRegex(RuntimeError, "CUDA QP count must be zero"):
             _C.ElasticBuffer(*ARGS[:10], 1, *ARGS[11:])
+
+    def test_constructor_rejects_nonzero_cpu_buffer_when_mapping_is_disabled(self):
+        with self.assertRaisesRegex(RuntimeError,
+                                    "cpu_buffer_bytes must be zero"):
+            _C.ElasticBuffer(0, 2, 1, [], ALIGNMENT, 1, *ARGS[6:])
 
     def test_event_wait_remains_unavailable(self):
         unavailable = "is unavailable until the Ascend device transport is implemented"

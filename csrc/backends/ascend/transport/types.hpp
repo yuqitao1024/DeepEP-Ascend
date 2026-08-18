@@ -118,7 +118,7 @@ enum class CooperationScope : std::uint8_t {
     kWorkgroup,
     kDevice,
 };
-enum class MemorySegment : std::uint8_t { kDevice, kMixed };
+enum class MemorySegment : std::uint8_t { kDevice, kMixed, kMappedCpu };
 
 enum class TransportTopologyKind : std::uint8_t {
     kFlatScaleUp,
