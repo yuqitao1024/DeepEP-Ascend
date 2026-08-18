@@ -288,6 +288,13 @@ void check_two_live_buffer_resource_and_failure_isolation() {
     if (first == nullptr || second == nullptr)
         return;
 
+    CHECK(first->testing_operation_generation() == 0);
+    CHECK(error_contains(
+        [&] { first->barrier(false, false, false); }, "sequential=True"));
+    CHECK(first->testing_operation_generation() == 0);
+    first->barrier(false, false, true);
+    CHECK(first->testing_operation_generation() == 1);
+
     const auto first_pointers = pointers(first_identity);
     const auto second_pointers = pointers(second_identity);
     for (auto* pointer : first_pointers)
@@ -308,7 +315,7 @@ void check_two_live_buffer_resource_and_failure_isolation() {
     CHECK(error_contains(
         [&] { first->barrier(false, false, true); }, "poisoned"));
     second->barrier(false, false, true);
-    CHECK(first_trace.barrier_launches == 2);
+    CHECK(first_trace.barrier_launches == 3);
     CHECK(second_trace.barrier_launches == 2);
 
     first->destroy();

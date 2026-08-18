@@ -486,6 +486,10 @@ public:
     std::size_t testing_dispatch_validation_state_bytes() const noexcept {
         return sizeof(dispatch_family_) + sizeof(last_dispatch_generation_);
     }
+
+    std::uint64_t testing_operation_generation() const noexcept {
+        return coordinator_.last_generation();
+    }
 #endif
 
     void destroy() {

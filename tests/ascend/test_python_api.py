@@ -992,64 +992,105 @@ def _scenario_ascend_hybrid_collective_preflight():
     ] * 2, cpu_errors
     assert not extension.runtime_args
 
-    group = _FakeGroup(events, rank=0, size=4, gathered_objects=valid_gather)
-    buffer = deep_ep.ElasticBuffer(
-        group, num_bytes=2 * 1024 * 1024,
-        allow_hybrid_mode=True, explicitly_destroy=True)
-    runtime = extension.runtime_instances[-1]
-    torch = sys.modules["torch"]
-    x = _FakeTensor("npu", (1, 16), torch.bfloat16)
-    topk_idx = _FakeTensor("npu", (1, 1), torch.int64)
-    _, _, _, handle, _ = buffer.dispatch(
-        x, topk_idx=topk_idx, num_experts=4, num_max_tokens_per_rank=1)
-    dispatch_calls = len(runtime.dispatch_calls)
+    def rank_invariant_gather(world_size):
+        def gather(value):
+            if value[0] in ("dispatch", "combine"):
+                contract = _fixed_preflight_contract(value)
+                assert "cached_handle_descriptor" not in contract, contract
+                assert "dispatch_handle_descriptor" not in contract, contract
+            return [value] * world_size
+        return gather
 
-    def cached_descriptor_gather(value):
-        if value[0] == "topology":
-            return [value] * 4
-        assert value[0] == "dispatch", value
-        remote = mutate_record(value, "cached_handle_descriptor", "foreign")
-        return [value, remote, value, value]
-
-    group.gathered_objects = cached_descriptor_gather
-    cached_errors = []
-    for rank in (0, 3):
-        group._rank = rank
-        try:
-            buffer.dispatch(x, handle=handle)
-        except RuntimeError as error:
-            cached_errors.append(str(error))
+    def run_distinct_rank_handles(world_size, hybrid):
+        saved_simulation = os.environ.get("DEEP_EP_ASCEND_LOGICAL_SIMULATION")
+        saved_scale_up = os.environ.get("DEEP_EP_ASCEND_SCALE_UP_SIZE")
+        if hybrid:
+            os.environ["DEEP_EP_ASCEND_LOGICAL_SIMULATION"] = "1"
+            os.environ["DEEP_EP_ASCEND_SCALE_UP_SIZE"] = "2"
         else:
-            raise AssertionError("asymmetric cached descriptor was accepted")
-    assert cached_errors == [
+            os.environ["DEEP_EP_ASCEND_LOGICAL_SIMULATION"] = "0"
+            os.environ.pop("DEEP_EP_ASCEND_SCALE_UP_SIZE", None)
+        try:
+            buffers = []
+            handles = []
+            for rank in range(world_size):
+                group = _FakeGroup(events, rank=rank, size=world_size,
+                                   gathered_objects=valid_gather)
+                buffer = deep_ep.ElasticBuffer(
+                    group, num_bytes=2 * 1024 * 1024,
+                    allow_hybrid_mode=hybrid, explicitly_destroy=True)
+                torch = sys.modules["torch"]
+                x = _FakeTensor("npu", (1, 16), torch.bfloat16)
+                topk_idx = _FakeTensor("npu", (1, 1), torch.int64)
+                _, _, _, handle, _ = buffer.dispatch(
+                    x, topk_idx=topk_idx, num_experts=world_size,
+                    num_max_tokens_per_rank=1)
+                handle.token_metadata_at_forward._values[0] = rank + 1
+                handle._ascend_descriptor_fingerprint = tuple(
+                    handle.token_metadata_at_forward._values)
+                buffers.append((buffer, group, x))
+                handles.append(handle)
+
+            assert len({tuple(handle.token_metadata_at_forward._values)
+                        for handle in handles}) == world_size
+            for (buffer, group, x), handle in zip(buffers, handles):
+                runtime = buffer.runtime
+                dispatch_calls = len(runtime.dispatch_calls)
+                combine_calls = len(runtime.combine_calls)
+                group.gathered_objects = rank_invariant_gather(world_size)
+                buffer.dispatch(x, handle=handle)
+                buffer.combine(x, handle)
+                assert len(runtime.dispatch_calls) == dispatch_calls + 1
+                assert len(runtime.combine_calls) == combine_calls + 1
+            return buffers, handles
+        finally:
+            if saved_simulation is None:
+                os.environ.pop("DEEP_EP_ASCEND_LOGICAL_SIMULATION", None)
+            else:
+                os.environ["DEEP_EP_ASCEND_LOGICAL_SIMULATION"] = saved_simulation
+            if saved_scale_up is None:
+                os.environ.pop("DEEP_EP_ASCEND_SCALE_UP_SIZE", None)
+            else:
+                os.environ["DEEP_EP_ASCEND_SCALE_UP_SIZE"] = saved_scale_up
+
+    direct_buffers, direct_handles = run_distinct_rank_handles(2, False)
+    hybrid_buffers, _ = run_distinct_rank_handles(4, True)
+
+    def invalid_handle_gather(rank):
+        def gather(value):
+            if rank == 1:
+                assert value[1:3] == (0, "invalid_dispatch_handle"), value
+            else:
+                assert value[1] == 1, value
+            return [
+                _fixed_preflight_record("dispatch", {}),
+                _fixed_preflight_record(
+                    "dispatch", error_code="invalid_dispatch_handle"),
+            ]
+        return gather
+
+    direct_handles[1].token_metadata_at_forward._values[1] = 99
+    invalid_errors = []
+    for buffer, group, x in direct_buffers:
+        runtime = buffer.runtime
+        dispatch_calls = len(runtime.dispatch_calls)
+        generation = buffer._ascend_handle_generation
+        group.gathered_objects = invalid_handle_gather(buffer.rank_idx)
+        try:
+            buffer.dispatch(x, handle=direct_handles[buffer.rank_idx])
+        except RuntimeError as error:
+            invalid_errors.append(str(error))
+        else:
+            raise AssertionError("invalid local descriptor was accepted")
+        assert len(runtime.dispatch_calls) == dispatch_calls
+        assert buffer._ascend_handle_generation == generation
+    assert invalid_errors == [
         "DeepEP Ascend backend: dispatch preflight failed on rank 1 "
-        "(cached_handle_descriptor_mismatch)",
-    ] * 2, cached_errors
-    assert len(runtime.dispatch_calls) == dispatch_calls
-    assert buffer._ascend_handle_generation == 1
+        "(invalid_dispatch_handle)",
+    ] * 2, invalid_errors
 
-    def combine_descriptor_gather(value):
-        assert value[0] == "combine", value
-        remote = mutate_record(value, "dispatch_handle_descriptor", "foreign")
-        return [value, remote, value, value]
-
-    group.gathered_objects = combine_descriptor_gather
-    combine_calls = len(runtime.combine_calls)
-    combine_errors = []
-    for rank in (0, 3):
-        group._rank = rank
-        try:
-            buffer.combine(x, handle)
-        except RuntimeError as error:
-            combine_errors.append(str(error))
-        else:
-            raise AssertionError("asymmetric combine descriptor was accepted")
-    assert combine_errors == [
-        "DeepEP Ascend backend: combine preflight failed on rank 1 "
-        "(dispatch_handle_descriptor_mismatch)",
-    ] * 2, combine_errors
-    assert len(runtime.combine_calls) == combine_calls
-    buffer.destroy()
+    for buffer, _, _ in direct_buffers + hybrid_buffers:
+        buffer.destroy()
 
 
 def _scenario_ascend_implicit_size():

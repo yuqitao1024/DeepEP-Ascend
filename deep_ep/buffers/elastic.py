@@ -1,5 +1,4 @@
 import functools
-import hashlib
 import os
 import math
 import torch
@@ -226,13 +225,6 @@ def _ascend_descriptor_fingerprint(tensor):
         return tuple(int(value) for value in values)
     except (AttributeError, RuntimeError, TypeError, ValueError):
         return None
-
-
-def _ascend_descriptor_identity(tensor):
-    fingerprint = _ascend_descriptor_fingerprint(tensor)
-    if fingerprint is None:
-        return ""
-    return hashlib.sha256(repr(fingerprint).encode("ascii")).hexdigest()
 
 
 def _first_error(*errors):
@@ -602,10 +594,6 @@ class ElasticBuffer:
             "scale_out_team_available": int(
                 not self.allow_hybrid_mode or self.num_scaleout_ranks > 1),
             "transport_capabilities": _ASCEND_DEVICE_TRANSPORT_CAPABILITIES,
-            "cached_handle_descriptor": (
-                _ascend_descriptor_identity(
-                    getattr(handle, 'token_metadata_at_forward', None))
-                if cached else ""),
         }
         preflight_ascend_contract(self.group, "dispatch", contract, error)
 
@@ -685,8 +673,6 @@ class ElasticBuffer:
             "scale_out_team_available": int(
                 not self.allow_hybrid_mode or self.num_scaleout_ranks > 1),
             "transport_capabilities": _ASCEND_DEVICE_TRANSPORT_CAPABILITIES,
-            "dispatch_handle_descriptor": _ascend_descriptor_identity(
-                getattr(handle, 'token_metadata_at_forward', None)),
         }
         preflight_ascend_contract(self.group, "combine", contract, error)
 
