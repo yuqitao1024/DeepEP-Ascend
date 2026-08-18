@@ -12,6 +12,7 @@
 
 #include "csrc/backends/ascend/transport/cann_compat.hpp"
 #include "csrc/backends/ascend/transport/cann_transport.hpp"
+#include "csrc/backends/ascend/transport/topology_config.hpp"
 
 namespace transport = deep_ep::ascend::transport;
 namespace probe = deep_ep::ascend::transport::runtime_probe;
@@ -295,6 +296,15 @@ public:
         config.communicator_handle = communicator_handle;
         config.device_buffer_bytes = kWindowBytes;
         config.requested_channels = 1;
+        auto topology_status =
+            transport::configure_transport_topology_from_environment(&config);
+        if (!topology_status.ok()) {
+            write_error(
+                error, error_capacity, "%s failed: backend=%d %s",
+                topology_status.operation.c_str(), topology_status.backend_code,
+                topology_status.message.c_str());
+            return false;
+        }
         auto created = transport::make_cann_transport(config);
         if (!created.status.ok()) {
             write_error(
@@ -468,7 +478,7 @@ extern "C" int deep_ep_ascend_urma_run_case(
     std::uint64_t iterations, char* error, std::size_t error_capacity) {
     if (error != nullptr && error_capacity != 0)
         error[0] = '\0';
-    if (communicator_handle == 0 || world_size != 2 || rank >= world_size) {
+    if (communicator_handle == 0 || world_size < 2 || rank >= world_size) {
         write_error(error, error_capacity, "invalid communicator topology");
         return 2;
     }

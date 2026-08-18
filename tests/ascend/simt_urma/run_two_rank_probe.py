@@ -151,7 +151,7 @@ def run_case_sequence(
         if failures:
             raise RuntimeError(f"case {case_name} failed: {failures}")
         if rank == 0:
-            print(f"case={case_name} ranks=2 diagnostics=kNone PASS",
+            print(f"case={case_name} ranks={world_size} diagnostics=kNone PASS",
                   flush=True)
 
     def execute_case(case_name):
@@ -201,8 +201,8 @@ def run_runtime(args, cases):
     local_rank = int(os.environ["LOCAL_RANK"])
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    if world_size != 2:
-        raise RuntimeError(f"runtime probe requires two ranks, got {world_size}")
+    if world_size < 2:
+        raise RuntimeError(f"runtime probe requires at least two ranks, got {world_size}")
 
     torch.npu.set_device(local_rank)
     dist.init_process_group(
