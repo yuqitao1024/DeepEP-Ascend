@@ -2,6 +2,7 @@
 
 #include "cann_compat.hpp"
 #include "device_topology.hpp"
+#include "execution_domain_helpers.hpp"
 #include "simt_intrinsics.hpp"
 #include "sync_layout.hpp"
 #include "transport_commands.hpp"
@@ -519,9 +520,9 @@ DEEP_EP_ASCEND_SIMT_CALLEE void device_barrier(
             queue, TransportCommandOpcode::kBarrier, 0, 0))
         return;
     if (team_mask == 0 || (team_mask & ~kWorldTeamMask) != 0 ||
-        (!command::barrier_team_enabled(
+        (!command::simt_barrier_team_enabled(
              context.topology, team_mask, TransportTeam::kScaleOut) &&
-         !command::barrier_team_enabled(
+         !command::simt_barrier_team_enabled(
              context.topology, team_mask, TransportTeam::kScaleUp))) {
         detail::record_error(
             queue, DeviceTransportError::kUnsupportedOperation,

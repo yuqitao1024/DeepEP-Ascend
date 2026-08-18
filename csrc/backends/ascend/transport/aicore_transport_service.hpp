@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "cann_compat.hpp"
+#include "execution_domain_helpers.hpp"
 #include "sync_layout.hpp"
 #include "transport_commands.hpp"
 #include "urma_wqe.hpp"
@@ -359,17 +360,17 @@ __aicore__ inline bool valid_registered_queue(
     if (staged == nullptr || queue == nullptr)
         return false;
     aicore::flush_cacheline(staged);
-    if (!command::valid_staged_context_header(
+    if (!command::aicore_valid_staged_context_header(
             staged->abi_version, staged->struct_size,
             staged->cann_compatibility, staged->command_queue) ||
         staged->command_queue != reinterpret_cast<std::uintptr_t>(queue))
         return false;
     aicore::flush_cacheline(queue);
-    if (!command::valid_command_queue_header(
+    if (!command::aicore_valid_command_queue_header(
             queue->abi_version, queue->struct_size, queue->commands,
             queue->capacity, queue->count, queue->service_state,
             queue->diagnostic) ||
-        !command::valid_registration_cookie(
+        !command::aicore_valid_registration_cookie(
             staged->reserved, staged->command_queue, queue->commands,
             queue->service_state, queue->diagnostic, queue->capacity))
         return false;
@@ -377,9 +378,9 @@ __aicore__ inline bool valid_registered_queue(
     auto* output = diagnostic(queue);
     aicore::flush_cacheline(state);
     aicore::flush_cacheline(output);
-    return command::valid_service_state_header(
+    return command::aicore_valid_service_state_header(
                state->abi_version, state->struct_size) &&
-           command::valid_diagnostic_header(output->abi_version);
+           command::aicore_valid_diagnostic_header(output->abi_version);
 }
 
 __aicore__ inline void record_error(
@@ -903,7 +904,7 @@ __aicore__ inline bool execute_barrier(
             if (!command::aicore_barrier_peer_in_team(
                     context.topology, phase_team, static_cast<int>(peer)))
                 continue;
-            const auto offset = sync_layout::barrier_offset(
+            const auto offset = sync_layout::aicore_barrier_offset(
                 transport_team->member_count, barrier_index,
                 transport_team->self_member);
             if (!post_faa(
@@ -924,7 +925,7 @@ __aicore__ inline bool execute_barrier(
             if (!command::aicore_barrier_peer_in_team(
                     context.topology, phase_team, static_cast<int>(peer)))
                 continue;
-            const auto offset = sync_layout::barrier_offset(
+            const auto offset = sync_layout::aicore_barrier_offset(
                 transport_team->member_count, barrier_index, peer);
             auto* signal = reinterpret_cast<__gm__ std::uint64_t*>(
                 memories[transport_team->self_member].address + offset);
