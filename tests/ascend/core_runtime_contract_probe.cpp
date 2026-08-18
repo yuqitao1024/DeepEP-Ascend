@@ -137,7 +137,8 @@ CoreTiling valid_two_dimensional_tiling(
     if (!build_core_tiling(input, &tiling).ok())
         return {};
     export_transport(&tiling);
-    if (has_mode(mode_flags, CoreMode::kHybrid))
+    if (has_mode(mode_flags, CoreMode::kHybrid) &&
+        kind == transport::TransportTopologyKind::kPhysical2D)
         tiling.transport_context.capabilities |=
             transport::capability_bit(
                 transport::TransportCapability::kScaleOutTeam);
@@ -471,6 +472,25 @@ int main() {
                   << launch_trace_size << ':' << launch_trace[0] << '\n';
         return 75;
     }
+    auto physical_hybrid_tiling = valid_two_dimensional_tiling(
+        OperationKind::kDispatch, 0,
+        transport::TransportTopologyKind::kPhysical2D,
+        mode_bit(CoreMode::kHybrid));
+    physical_hybrid_tiling.transport_context.capabilities &=
+        ~transport::capability_bit(
+            transport::TransportCapability::kScaleOutTeam);
+    if (validate_internal_launch(
+            physical_hybrid_tiling,
+            required_core_launch_storage(physical_hybrid_tiling)).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 77;
+    physical_hybrid_tiling.transport_context.capabilities |=
+        transport::capability_bit(
+            transport::TransportCapability::kScaleOutTeam);
+    if (!validate_internal_launch(
+            physical_hybrid_tiling,
+            required_core_launch_storage(physical_hybrid_tiling)).ok())
+        return 78;
     auto cached_hybrid_tiling = valid_two_dimensional_tiling(
         OperationKind::kDispatch, 0,
         transport::TransportTopologyKind::kLogicalSimulation,

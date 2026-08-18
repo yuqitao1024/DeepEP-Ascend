@@ -128,7 +128,8 @@ class ElasticBuffer {
 
     transport::TransportCapabilities operation_capabilities(
         transport::TransportCapabilities base) const {
-        return allow_hybrid_mode_ ?
+        return resources_->device_context().topology.kind ==
+                transport::TransportTopologyKind::kPhysical2D ?
             base | transport::capability_bit(
                 transport::TransportCapability::kScaleOutTeam) : base;
     }

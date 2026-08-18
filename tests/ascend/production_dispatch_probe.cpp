@@ -93,7 +93,8 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
     c.device_buffer_bytes=2*1024*1024; c.requested_channels=1;
     if (hybrid) {
         c.scale_up_size = 2;
-        c.topology_kind = transport::TransportTopologyKind::kPhysical2D;
+        c.topology_kind =
+            transport::TransportTopologyKind::kLogicalSimulation;
     }
     if (!result->initialize(c, 4096, r, h).ok()) return {};
     return result;
@@ -481,6 +482,10 @@ bool cached_hybrid_route_validation_probe() {
     trace.world_size = 4;
     auto runtime_resources = resources(4, true);
     if (!runtime_resources) return false;
+    if (transport::has_capability(
+            runtime_resources->transport()->capabilities(),
+            transport::TransportCapability::kScaleOutTeam))
+        return false;
     std::unique_ptr<Buffer> buffer;
     try {
         buffer = Buffer::make_testing_buffer(

@@ -261,8 +261,7 @@ CoreRuntimeStatus validate_transport_context(const CoreTiling& tiling) {
         kDispatchTransportCapabilities :
         (tiling.operation == OperationKind::kCombine ?
              kCombineTransportCapabilities : kBarrierTransportCapabilities);
-    if (has_mode(tiling.mode_flags, CoreMode::kHybrid) ||
-        tiling.topology.kind == transport::TransportTopologyKind::kPhysical2D)
+    if (tiling.topology.kind == transport::TransportTopologyKind::kPhysical2D)
         required |= transport::capability_bit(
             transport::TransportCapability::kScaleOutTeam);
     if ((context.capabilities & required) != required)
