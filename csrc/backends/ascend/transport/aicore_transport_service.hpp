@@ -304,10 +304,10 @@ __aicore__ inline DeviceTransportError validate_command(
                 current->team != TransportTeam::kWorld ||
                 current->peer != 0 || current->world_peer != 0)
                 return DeviceTransportError::kInvalidProtocol;
-            if (!command::barrier_team_enabled(
+            if (!command::aicore_barrier_team_enabled(
                     context.topology, current->options,
                     TransportTeam::kScaleOut) &&
-                !command::barrier_team_enabled(
+                !command::aicore_barrier_team_enabled(
                     context.topology, current->options,
                     TransportTeam::kScaleUp))
                 return DeviceTransportError::kInvalidProtocol;
@@ -891,7 +891,7 @@ __aicore__ inline bool execute_barrier(
     const auto generation = state->barrier_generation + 1;
     for (const auto phase_team : {
              TransportTeam::kScaleOut, TransportTeam::kScaleUp}) {
-        if (!command::barrier_team_enabled(
+        if (!command::aicore_barrier_team_enabled(
                 context.topology, current->options, phase_team))
             continue;
         const std::uint32_t barrier_index =
@@ -900,7 +900,7 @@ __aicore__ inline bool execute_barrier(
                 sync_layout::kScaleUpBarrierIndex;
         for (std::uint32_t peer = 0;
              peer < transport_team->member_count; ++peer) {
-            if (!command::barrier_peer_in_team(
+            if (!command::aicore_barrier_peer_in_team(
                     context.topology, phase_team, static_cast<int>(peer)))
                 continue;
             const auto offset = sync_layout::barrier_offset(
@@ -921,7 +921,7 @@ __aicore__ inline bool execute_barrier(
             AscendC::GetSystemCycle());
         for (std::uint32_t peer = 0;
              peer < transport_team->member_count; ++peer) {
-            if (!command::barrier_peer_in_team(
+            if (!command::aicore_barrier_peer_in_team(
                     context.topology, phase_team, static_cast<int>(peer)))
                 continue;
             const auto offset = sync_layout::barrier_offset(

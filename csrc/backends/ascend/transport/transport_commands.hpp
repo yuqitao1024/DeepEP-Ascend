@@ -196,14 +196,7 @@ inline constexpr bool is_remote_operation(TransportCommandOpcode opcode) {
            opcode == TransportCommandOpcode::kSignal;
 }
 
-#if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && \
-    DEEP_EP_ASCEND_AICORE_URMA_SERVICE
-#define DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE __aicore__
-#else
-#define DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE
-#endif
-
-DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE inline constexpr bool barrier_team_enabled(
+inline constexpr bool barrier_team_enabled(
     const TransportTopology& topology, std::uint32_t team_mask,
     TransportTeam team) {
     if (team == TransportTeam::kScaleOut)
@@ -215,7 +208,7 @@ DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE inline constexpr bool barrier_team_enabled(
     return false;
 }
 
-DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE inline constexpr bool barrier_peer_in_team(
+inline constexpr bool barrier_peer_in_team(
     const TransportTopology& topology, TransportTeam team, int world_peer) {
     if (world_peer < 0 || world_peer >= topology.world_size ||
         world_peer == topology.world_rank)
@@ -227,7 +220,38 @@ DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE inline constexpr bool barrier_peer_in_team(
     return false;
 }
 
-#undef DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE
+#if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && \
+    DEEP_EP_ASCEND_AICORE_URMA_SERVICE
+#define DEEP_EP_ASCEND_AICORE_COMMAND_INLINE __aicore__ inline
+#else
+#define DEEP_EP_ASCEND_AICORE_COMMAND_INLINE inline constexpr
+#endif
+
+DEEP_EP_ASCEND_AICORE_COMMAND_INLINE bool aicore_barrier_team_enabled(
+    const TransportTopology& topology, std::uint32_t team_mask,
+    TransportTeam team) {
+    if (team == TransportTeam::kScaleOut)
+        return topology.scale_out_size > 1 &&
+            (team_mask & kScaleOutTeamMask) != 0;
+    if (team == TransportTeam::kScaleUp)
+        return topology.scale_up_size > 1 &&
+            (team_mask & kScaleUpTeamMask) != 0;
+    return false;
+}
+
+DEEP_EP_ASCEND_AICORE_COMMAND_INLINE bool aicore_barrier_peer_in_team(
+    const TransportTopology& topology, TransportTeam team, int world_peer) {
+    if (world_peer < 0 || world_peer >= topology.world_size ||
+        world_peer == topology.world_rank)
+        return false;
+    if (team == TransportTeam::kScaleOut)
+        return world_peer % topology.scale_up_size == topology.scale_up_rank;
+    if (team == TransportTeam::kScaleUp)
+        return world_peer / topology.scale_up_size == topology.scale_out_rank;
+    return false;
+}
+
+#undef DEEP_EP_ASCEND_AICORE_COMMAND_INLINE
 
 inline constexpr DeviceTransportError validate_for_dispatch(
     const TransportCommand& transport_command,

@@ -363,7 +363,7 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
                 [str(executable)], capture_output=True, text=True, check=False)
             self.assertEqual(run_probe.returncode, 0, run_probe.stderr)
 
-    def test_barrier_helpers_are_aicore_callees(self):
+    def test_barrier_predicates_split_host_and_aicore_callees(self):
         with tempfile.TemporaryDirectory() as directory:
             executable = pathlib.Path(directory) / "aicore_callee_probe"
             compile_probe = subprocess.run(
