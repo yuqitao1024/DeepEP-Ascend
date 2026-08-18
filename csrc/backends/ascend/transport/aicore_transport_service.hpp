@@ -387,7 +387,8 @@ __aicore__ inline void record_error(
     __gm__ TransportCommandQueue* queue, DeviceTransportError error,
     std::uint32_t command_index, TransportCommandOpcode opcode,
     TransportTeam transport_team, int peer, int world_peer,
-    std::uint32_t channel, std::uint32_t backend_status = 0) {
+    std::uint32_t channel, std::uint32_t backend_status = 0,
+    std::uint64_t reserved = 0) {
     auto* output = diagnostic(queue);
     if (output == nullptr)
         return;
@@ -401,6 +402,7 @@ __aicore__ inline void record_error(
     output->team = transport_team;
     output->channel = channel;
     output->backend_status = backend_status;
+    output->reserved = reserved;
     output->error = error;
     aicore::system_fence();
     aicore::flush_cacheline(output);
@@ -409,10 +411,11 @@ __aicore__ inline void record_error(
 __aicore__ inline void record_error(
     __gm__ TransportCommandQueue* queue, DeviceTransportError error,
     std::uint32_t command_index, TransportCommandOpcode opcode, int world_peer,
-    std::uint32_t channel, std::uint32_t backend_status = 0) {
+    std::uint32_t channel, std::uint32_t backend_status = 0,
+    std::uint64_t reserved = 0) {
     record_error(
         queue, error, command_index, opcode, TransportTeam::kWorld,
-        world_peer, world_peer, channel, backend_status);
+        world_peer, world_peer, channel, backend_status, reserved);
 }
 
 __aicore__ inline __gm__ cann_abi::Team* team(
@@ -811,21 +814,47 @@ __aicore__ inline bool execute_signal(
     const AscendC::LocalTensor<std::uint32_t>& wqe_scratch) {
     auto* transport_team = team(context);
     if (transport_team == nullptr || current->world_peer < 0 ||
-        static_cast<std::uint32_t>(current->world_peer) >=
-            transport_team->member_count)
+        (transport_team != nullptr &&
+         static_cast<std::uint32_t>(current->world_peer) >=
+             transport_team->member_count)) {
+        record_error(
+            queue, DeviceTransportError::kInvalidRank, command_index,
+            current->opcode, current->team, current->peer,
+            current->world_peer, current->channel, 1);
         return false;
+    }
     std::uint64_t remote_address = 0;
     if (current->action_kind == RemoteActionKind::kSignalIncrement ||
         current->action_kind == RemoteActionKind::kSignalSet) {
+        std::uint32_t failure_stage = 0;
+        std::uint64_t failure_value = 0;
         if (transport_team->signal_count !=
-                sync_layout::kWorldTeamSignalCount ||
-            transport_team->counter_count !=
-                sync_layout::kWorldTeamCounterCount ||
-            transport_team->barrier_count <
-                sync_layout::kWorldTeamBarrierCount ||
-            current->signal_index >= sync_layout::kLogicalSignalCount ||
-            transport_team->remote_sync_memories == 0)
+                sync_layout::kWorldTeamSignalCount) {
+            failure_stage = 2;
+            failure_value = transport_team->signal_count;
+        } else if (transport_team->counter_count !=
+                       sync_layout::kWorldTeamCounterCount) {
+            failure_stage = 3;
+            failure_value = transport_team->counter_count;
+        } else if (transport_team->barrier_count <
+                       sync_layout::kWorldTeamBarrierCount) {
+            failure_stage = 4;
+            failure_value = transport_team->barrier_count;
+        } else if (current->signal_index >=
+                       sync_layout::kLogicalSignalCount) {
+            failure_stage = 5;
+            failure_value = current->signal_index;
+        } else if (transport_team->remote_sync_memories == 0) {
+            failure_stage = 6;
+        }
+        if (failure_stage != 0) {
+            record_error(
+                queue, DeviceTransportError::kInvalidProtocol,
+                command_index, current->opcode, current->team, current->peer,
+                current->world_peer, current->channel, failure_stage,
+                failure_value);
             return false;
+        }
         auto* memories = reinterpret_cast<__gm__ cann_abi::Memory*>(
             transport_team->remote_sync_memories);
         const auto offset =
@@ -838,9 +867,19 @@ __aicore__ inline bool execute_signal(
             current->symmetric_offset;
         if (!resolve_remote_target(
                 context, static_cast<std::uint32_t>(current->world_peer), logical,
-                sizeof(std::uint64_t), remote_address))
+                sizeof(std::uint64_t), remote_address)) {
+            record_error(
+                queue, DeviceTransportError::kInvalidAddress, command_index,
+                current->opcode, current->team, current->peer,
+                current->world_peer, current->channel, 7, logical);
             return false;
+        }
     } else {
+        record_error(
+            queue, DeviceTransportError::kUnsupportedOperation,
+            command_index, current->opcode, current->team, current->peer,
+            current->world_peer, current->channel, 8,
+            static_cast<std::uint64_t>(current->action_kind));
         return false;
     }
     if (current->action_kind == RemoteActionKind::kSignalSet) {
@@ -849,8 +888,13 @@ __aicore__ inline bool execute_signal(
         auto* remote = peer.channel == nullptr ? nullptr : resolve_buffer(
             peer.channel->remote_buffers, peer.channel->remote_buffer_count,
             remote_address, sizeof(std::uint64_t));
-        if (remote == nullptr)
+        if (remote == nullptr) {
+            record_error(
+                queue, DeviceTransportError::kInvalidAddress, command_index,
+                current->opcode, current->team, current->peer,
+                current->world_peer, current->channel, 9, remote_address);
             return false;
+        }
         const auto request = urma::make_inline_write64(
             snapshot_sq(peer.sq), snapshot_buffer(remote), 0,
             remote_address, current->value);

@@ -171,7 +171,12 @@ class ElasticBuffer {
             " opcode=" + std::to_string(
                 static_cast<std::uint32_t>(diagnostic.opcode)) +
             " peer=" + std::to_string(diagnostic.peer) +
+            " world_peer=" + std::to_string(diagnostic.world_peer) +
+            " team=" + std::to_string(
+                static_cast<std::uint32_t>(diagnostic.team)) +
             " channel=" + std::to_string(diagnostic.channel) +
+            " backend_status=" + std::to_string(diagnostic.backend_status) +
+            " reserved=" + std::to_string(diagnostic.reserved) +
             " generation=" + std::to_string(diagnostic.generation);
         raise_transport_status(
             transport::TransportStatus::runtime_failure(
@@ -189,7 +194,12 @@ class ElasticBuffer {
             " opcode=" + std::to_string(
                 static_cast<std::uint32_t>(diagnostic.opcode)) +
             " peer=" + std::to_string(diagnostic.peer) +
+            " world_peer=" + std::to_string(diagnostic.world_peer) +
+            " team=" + std::to_string(
+                static_cast<std::uint32_t>(diagnostic.team)) +
             " channel=" + std::to_string(diagnostic.channel) +
+            " backend_status=" + std::to_string(diagnostic.backend_status) +
+            " reserved=" + std::to_string(diagnostic.reserved) +
             " generation=" + std::to_string(diagnostic.generation);
         raise_transport_status(
             transport::TransportStatus::runtime_failure(
@@ -207,7 +217,12 @@ class ElasticBuffer {
             " opcode=" + std::to_string(
                 static_cast<std::uint32_t>(diagnostic.opcode)) +
             " peer=" + std::to_string(diagnostic.peer) +
+            " world_peer=" + std::to_string(diagnostic.world_peer) +
+            " team=" + std::to_string(
+                static_cast<std::uint32_t>(diagnostic.team)) +
             " channel=" + std::to_string(diagnostic.channel) +
+            " backend_status=" + std::to_string(diagnostic.backend_status) +
+            " reserved=" + std::to_string(diagnostic.reserved) +
             " generation=" + std::to_string(diagnostic.generation);
         raise_transport_status(
             transport::TransportStatus::runtime_failure(

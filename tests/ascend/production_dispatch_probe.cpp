@@ -50,7 +50,14 @@ int d2h(void*, void* d, const void* s, std::uint64_t n) {
         *diagnostic = {};
         diagnostic->abi_version = transport::kTransportCommandAbiVersion;
         diagnostic->generation = trace.generation;
-        if (trace.bad_diagnostic) diagnostic->error = transport::DeviceTransportError::kCompletionFailure;
+        if (trace.bad_diagnostic) {
+            diagnostic->error =
+                transport::DeviceTransportError::kCompletionFailure;
+            diagnostic->world_peer = 1;
+            diagnostic->team = transport::TransportTeam::kScaleOut;
+            diagnostic->backend_status = 37;
+            diagnostic->reserved = 0x1234;
+        }
         return 0;
     }
     if (trace.fail_d2h) return 91;
@@ -495,8 +502,13 @@ bool diagnostic_order_probe() {
         (void)uncached_dispatch(*buffer, inputs, no_weights);
         return false;
     } catch (const std::runtime_error& error) {
-        return std::string(error.what()).find("device diagnostic reported failure") !=
+        const std::string message(error.what());
+        return message.find("device diagnostic reported failure") !=
                 std::string::npos &&
+            message.find("world_peer=1") != std::string::npos &&
+            message.find("team=2") != std::string::npos &&
+            message.find("backend_status=37") != std::string::npos &&
+            message.find("reserved=4660") != std::string::npos &&
             trace.d2h_copies == copies_before_diagnostic + 1;
     }
 }
