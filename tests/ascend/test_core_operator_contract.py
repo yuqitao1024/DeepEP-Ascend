@@ -52,6 +52,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "transport_scale_up_direct",
             "transport_topology_kind",
             "transport_topology_epoch",
+            "std::uintptr_t transport_channel_table",
+            "std::uintptr_t transport_peer_address_table",
             "std::uint64_t timeout_cycles",
         )
         required_arguments = (
@@ -66,6 +68,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "topology.scale_up_direct",
             "topology.kind",
             "topology.epoch",
+            "tiling.transport_context.channel_table",
+            "tiling.transport_context.peer_address_table",
             "timeout_cycles",
         )
         for source_name in ("dispatch.asc", "combine.asc"):
@@ -319,6 +323,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "tiling.transport_context.abi_version",
                 "tiling.transport_context.struct_size",
                 "tiling.transport_context.local_window_base",
+                "tiling.transport_context.channel_table",
+                "tiling.transport_context.peer_address_table",
                 "tiling.transport_context.topology.abi_version",
                 "tiling.transport_context.topology.struct_size",
                 "tiling.transport_context.topology.world_rank",
@@ -335,6 +341,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "combine_producer_vf": {
                 "tiling.transport_context.abi_version",
                 "tiling.transport_context.struct_size",
+                "tiling.transport_context.channel_table",
+                "tiling.transport_context.peer_address_table",
                 "tiling.transport_context.topology.abi_version",
                 "tiling.transport_context.topology.struct_size",
                 "tiling.transport_context.topology.world_rank",
@@ -366,6 +374,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "std::uint32_t transport_abi_version",
             "std::uint32_t transport_struct_size",
             "std::uintptr_t transport_local_window_base",
+            "std::uintptr_t transport_channel_table",
+            "std::uintptr_t transport_peer_address_table",
             "std::uint32_t transport_topology_abi_version",
             "std::uint32_t transport_topology_struct_size",
             "int transport_world_rank",
@@ -419,6 +429,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "tiling.transport_context.abi_version",
             "tiling.transport_context.struct_size",
             "local_window_base",
+            "tiling.transport_context.channel_table",
+            "tiling.transport_context.peer_address_table",
             "tiling.transport_context.topology.abi_version",
             "tiling.transport_context.topology.struct_size",
             "tiling.transport_context.topology.world_rank",
@@ -1068,7 +1080,7 @@ int main() {
             r"transport::TransportTeam::k(?:World|ScaleUp),\s*0,")
         for forbidden in (
                 "transport.remote_add_release(",
-                "transport.get_symmetric_pointer(", "peer_address_table"):
+                "transport.get_symmetric_pointer("):
             self.assertNotIn(forbidden, source)
         self.assertNotRegex(
             source, r"transport\.device_barrier\([^;]*,\s*0\s*\)")
