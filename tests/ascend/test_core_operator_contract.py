@@ -1028,24 +1028,61 @@ int main() {
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
-    def test_hybrid_epilogues_use_observed_release_boundary(self):
-        """Catches bypassing the behaviorally tested release boundary."""
-        dispatch = (ELASTIC / "dispatch.asc").read_text()
-        dispatch = dispatch[
-            dispatch.index("__simt_vf__ inline void dispatch_epilogue_vf"):
-            dispatch.index(
+    def test_hybrid_prepare_and_epilogues_use_release_boundaries(self):
+        """Catches misplaced ingress acquire and raw canonical publication."""
+        dispatch_source = (ELASTIC / "dispatch.asc").read_text()
+        dispatch_prepare = dispatch_source[
+            dispatch_source.index(
+                "__simt_vf__ inline void hybrid_dispatch_prepare_epilogue_vf"):
+            dispatch_source.index(
+                "__simt_vf__ inline void hybrid_dispatch_record_routes_vf")]
+        self.assertIn("dispatch_prepare_release_boundary(", dispatch_prepare)
+        self.assertLess(
+            dispatch_prepare.index(
+                "release_protocol::observe_release_control("),
+            dispatch_prepare.index("auto* source"))
+        self.assertLess(
+            dispatch_prepare.index("destination[byte] = source[byte]"),
+            dispatch_prepare.index("release_protocol::publish_local_control("))
+        self.assertNotIn(
+            "direct_control[origin_rank].count =", dispatch_prepare)
+        self.assertNotIn(
+            "direct_control[origin_rank].generation =", dispatch_prepare)
+        dispatch_epilogue = dispatch_source[
+            dispatch_source.index("__simt_vf__ inline void dispatch_epilogue_vf"):
+            dispatch_source.index(
                 'extern "C" int deep_ep_ascend_launch_dispatch')]
-        self.assertIn("dispatch_release_boundary(", dispatch)
-        self.assertIn("release_protocol::observe_release_control(", dispatch)
-        self.assertNotIn("release_protocol::acquire_release(", dispatch)
+        self.assertIn("dispatch_release_boundary(", dispatch_epilogue)
+        self.assertIn(
+            "release_protocol::observe_release_control(", dispatch_epilogue)
+        self.assertNotIn(
+            "release_protocol::acquire_release(", dispatch_epilogue)
 
-        combine = (ELASTIC / "combine.asc").read_text()
-        combine = combine[
-            combine.index("__simt_vf__ inline void combine_epilogue_vf"):
-            combine.index('extern "C" int deep_ep_ascend_launch_combine')]
-        self.assertIn("combine_release_boundary(", combine)
-        self.assertIn("release_protocol::observe_release_control(", combine)
-        self.assertNotIn("release_protocol::acquire_release(", combine)
+        combine_source = (ELASTIC / "combine.asc").read_text()
+        combine_prepare = combine_source[
+            combine_source.index(
+                "__simt_vf__ inline void hybrid_combine_prepare_epilogue_vf"):
+            combine_source.index("struct CombineOriginDeviceRecordSource")]
+        self.assertIn("combine_prepare_release_boundary(", combine_prepare)
+        self.assertLess(
+            combine_prepare.index(
+                "release_protocol::observe_release_control("),
+            combine_prepare.index("auto* source"))
+        self.assertLess(
+            combine_prepare.index("destination[byte] = source[byte]"),
+            combine_prepare.index("release_protocol::publish_local_control("))
+        self.assertNotIn(
+            "direct_control[contributor_rank].count =", combine_prepare)
+        self.assertNotIn(
+            "direct_control[contributor_rank].generation =", combine_prepare)
+        combine_epilogue = combine_source[
+            combine_source.index("__simt_vf__ inline void combine_epilogue_vf"):
+            combine_source.index('extern "C" int deep_ep_ascend_launch_combine')]
+        self.assertIn("combine_release_boundary(", combine_epilogue)
+        self.assertIn(
+            "release_protocol::observe_release_control(", combine_epilogue)
+        self.assertNotIn(
+            "release_protocol::acquire_release(", combine_epilogue)
 
     def test_pure_cpp_runtime_contract(self):
         runtime = ELASTIC / "runtime.cpp"

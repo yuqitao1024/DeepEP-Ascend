@@ -23,6 +23,7 @@ struct WorldRoute {
 struct ReleaseBoundary {
     int control_slot_world_rank = 0;
     int signal_sender_world_rank = 0;
+    bool remote_acquire_required = false;
 };
 
 #if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
@@ -62,6 +63,21 @@ DEEP_EP_ASCEND_KERNEL_CALLEE ReleaseBoundary dispatch_release_boundary(
     return {
         source_world_rank,
         final_release_sender_world_rank(route, source_world_rank),
+        route.kind != WorldRouteKind::kLocal &&
+            route.kind != WorldRouteKind::kDiagonal,
+    };
+}
+
+DEEP_EP_ASCEND_KERNEL_CALLEE ReleaseBoundary
+dispatch_prepare_release_boundary(
+    int source_world_rank, int destination_world_rank,
+    int scale_up_size) noexcept {
+    const auto route = classify_world_route(
+        source_world_rank, destination_world_rank, scale_up_size);
+    return {
+        source_world_rank,
+        route.ingress_world_rank,
+        route.kind == WorldRouteKind::kDiagonal,
     };
 }
 
@@ -73,6 +89,21 @@ DEEP_EP_ASCEND_KERNEL_CALLEE ReleaseBoundary combine_release_boundary(
     return {
         contributor_world_rank,
         final_release_sender_world_rank(route, contributor_world_rank),
+        route.kind != WorldRouteKind::kLocal &&
+            route.kind != WorldRouteKind::kDiagonal,
+    };
+}
+
+DEEP_EP_ASCEND_KERNEL_CALLEE ReleaseBoundary
+combine_prepare_release_boundary(
+    int origin_world_rank, int contributor_world_rank,
+    int scale_up_size) noexcept {
+    const auto route = classify_world_route(
+        origin_world_rank, contributor_world_rank, scale_up_size);
+    return {
+        contributor_world_rank,
+        route.ingress_world_rank,
+        route.kind == WorldRouteKind::kDiagonal,
     };
 }
 

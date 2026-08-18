@@ -57,6 +57,16 @@ DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void publish_control_and_release(
 }
 
 template <typename Transport>
+DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void publish_local_control(
+    Transport& facade, transport::DeviceAddress count_address,
+    std::uint64_t count, transport::DeviceAddress generation_address,
+    std::uint64_t generation) {
+    facade.system_fence();
+    facade.store_release(count_address, count);
+    facade.store_release(generation_address, generation);
+}
+
+template <typename Transport>
 DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE bool acquire_release(
     Transport& facade, const transport::TransportTopology& topology,
     int signal_sender_world_rank, std::uint32_t signal_index,
@@ -85,7 +95,8 @@ observe_release_control(
         control_slots == nullptr ||
         sizeof(*control_slots) < 2 * sizeof(std::uint64_t))
         return observation;
-    if (boundary.control_slot_world_rank != local_world_rank &&
+    if (boundary.remote_acquire_required &&
+        boundary.control_slot_world_rank != local_world_rank &&
         !acquire_release(
             facade, topology, boundary.signal_sender_world_rank,
             signal_index, generation, timeout_cycles))

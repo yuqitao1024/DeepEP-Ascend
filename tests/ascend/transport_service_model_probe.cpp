@@ -212,9 +212,18 @@ struct ReleaseProtocolModel {
     int waited_peer = -1;
     std::uint32_t waited_signal_index = 0;
     int wait_count = 0;
+    int event_index = 0;
+    int fence_event = 0;
+    int wait_event = 0;
+    int first_load_event = 0;
+    transport::DeviceAddress store_addresses[2]{};
+    std::uint64_t store_values[2]{};
+    int store_events[2]{};
+    int store_count = 0;
 
     void system_fence() {
         staging_fenced = true;
+        fence_event = ++event_index;
     }
 
     void put(
@@ -250,6 +259,7 @@ struct ReleaseProtocolModel {
         waited_peer = peer;
         waited_signal_index = signal_index;
         ++wait_count;
+        wait_event = ++event_index;
         if (release_generation >= target)
             acquired_generation = target;
     }
@@ -259,8 +269,23 @@ struct ReleaseProtocolModel {
         return release_generation;
     }
 
-    std::uint64_t load_acquire(transport::DeviceAddress address) const {
+    std::uint64_t load_acquire(transport::DeviceAddress address) {
+        const int event = ++event_index;
+        if (first_load_event == 0)
+            first_load_event = event;
         return *reinterpret_cast<const std::uint64_t*>(address);
+    }
+
+    void store_release(
+        transport::DeviceAddress address, std::uint64_t value) {
+        CHECK(store_count < 2);
+        if (store_count < 2) {
+            store_addresses[store_count] = address;
+            store_values[store_count] = value;
+            store_events[store_count] = ++event_index;
+            ++store_count;
+        }
+        *reinterpret_cast<std::uint64_t*>(address) = value;
     }
 };
 
@@ -285,8 +310,8 @@ void reset_release_fixture(
 void check_wait_peer(
     const ReleaseProtocolModel& protocol,
     const transport::TransportTopology& topology, int expected_world_sender,
-    std::uint32_t expected_signal_index, bool local) {
-    if (local) {
+    std::uint32_t expected_signal_index, bool should_wait) {
+    if (!should_wait) {
         CHECK(protocol.wait_count == 0);
         return;
     }
@@ -300,17 +325,11 @@ void check_wait_peer(
 }
 
 void check_hybrid_release_observation_boundaries() {
-    constexpr int dispatch_senders[4][4] = {
-        {0, 1, 2, 1},
-        {0, 1, 0, 3},
-        {0, 3, 2, 3},
-        {2, 1, 2, 3},
-    };
-    constexpr int combine_senders[4][4] = {
-        {0, 1, 2, 2},
-        {0, 1, 3, 3},
-        {0, 0, 2, 3},
-        {1, 1, 2, 3},
+    constexpr bool epilogue_waits[4][4] = {
+        {false, true, true, false},
+        {true, false, false, true},
+        {true, false, false, true},
+        {false, true, true, false},
     };
 
     for (int receiver = 0; receiver < 4; ++receiver) {
@@ -329,13 +348,15 @@ void check_hybrid_release_observation_boundaries() {
                 protocol, topology, boundary, receiver, slots,
                 sync_layout::kDispatchReleaseSignalIndex, 7, 64);
             CHECK(boundary.control_slot_world_rank == source);
+            CHECK(boundary.remote_acquire_required ==
+                  epilogue_waits[receiver][source]);
             CHECK(observation.acquired);
             CHECK(observation.generation == 7);
             CHECK(observation.count == 0);
             check_wait_peer(
-                protocol, topology, dispatch_senders[receiver][source],
+                protocol, topology, source,
                 sync_layout::kDispatchReleaseSignalIndex,
-                source == receiver);
+                epilogue_waits[receiver][source]);
         }
 
         for (int contributor = 0; contributor < 4; ++contributor) {
@@ -348,14 +369,104 @@ void check_hybrid_release_observation_boundaries() {
                 protocol, topology, boundary, receiver, slots,
                 sync_layout::kCombineReleaseSignalIndex, 7, 64);
             CHECK(boundary.control_slot_world_rank == contributor);
+            CHECK(boundary.remote_acquire_required ==
+                  epilogue_waits[receiver][contributor]);
             CHECK(observation.acquired);
             CHECK(observation.generation == 7);
             CHECK(observation.count == 0);
             check_wait_peer(
-                protocol, topology, combine_senders[receiver][contributor],
+                protocol, topology, contributor,
                 sync_layout::kCombineReleaseSignalIndex,
-                contributor == receiver);
+                epilogue_waits[receiver][contributor]);
         }
+    }
+}
+
+void check_hybrid_prepare_observes_ingress_before_control() {
+    for (int receiver = 0; receiver < 4; ++receiver) {
+        transport::TransportTopology topology{};
+        CHECK(transport::build_transport_topology(
+            receiver, 4, 2,
+            transport::TransportTopologyKind::kLogicalSimulation,
+            1, &topology).ok());
+        for (int source = 0; source < 4; ++source) {
+            const auto route = elastic::classify_world_route(
+                source, receiver, 2);
+            if (route.kind != elastic::WorldRouteKind::kDiagonal)
+                continue;
+            ReleaseProtocolModel protocol;
+            ReleaseControlFixture slots[4]{};
+            reset_release_fixture(&protocol, slots, source);
+            const auto boundary =
+                elastic::dispatch_prepare_release_boundary(
+                    source, receiver, 2);
+            const auto observation = release_protocol::observe_release_control(
+                protocol, topology, boundary, receiver, slots,
+                sync_layout::kDispatchReleaseSignalIndex, 7, 64);
+            CHECK(boundary.control_slot_world_rank == source);
+            CHECK(boundary.signal_sender_world_rank ==
+                  route.ingress_world_rank);
+            CHECK(boundary.remote_acquire_required);
+            CHECK(observation.acquired);
+            CHECK(observation.generation == 7);
+            CHECK(observation.count == 0);
+            CHECK(protocol.wait_event > 0);
+            CHECK(protocol.first_load_event > protocol.wait_event);
+            check_wait_peer(
+                protocol, topology, route.ingress_world_rank,
+                sync_layout::kDispatchReleaseSignalIndex, true);
+        }
+
+        for (int contributor = 0; contributor < 4; ++contributor) {
+            const auto route = elastic::classify_world_route(
+                receiver, contributor, 2);
+            if (route.kind != elastic::WorldRouteKind::kDiagonal)
+                continue;
+            ReleaseProtocolModel protocol;
+            ReleaseControlFixture slots[4]{};
+            reset_release_fixture(&protocol, slots, contributor);
+            const auto boundary =
+                elastic::combine_prepare_release_boundary(
+                    receiver, contributor, 2);
+            const auto observation = release_protocol::observe_release_control(
+                protocol, topology, boundary, receiver, slots,
+                sync_layout::kCombineReleaseSignalIndex, 7, 64);
+            CHECK(boundary.control_slot_world_rank == contributor);
+            CHECK(boundary.signal_sender_world_rank ==
+                  route.ingress_world_rank);
+            CHECK(boundary.remote_acquire_required);
+            CHECK(observation.acquired);
+            CHECK(observation.generation == 7);
+            CHECK(observation.count == 0);
+            CHECK(protocol.wait_event > 0);
+            CHECK(protocol.first_load_event > protocol.wait_event);
+            check_wait_peer(
+                protocol, topology, route.ingress_world_rank,
+                sync_layout::kCombineReleaseSignalIndex, true);
+        }
+    }
+}
+
+void check_local_canonical_control_publication() {
+    for (const std::uint64_t count : {std::uint64_t{0}, std::uint64_t{1}}) {
+        ReleaseProtocolModel protocol;
+        ReleaseControlFixture slot{99, 88};
+        const auto generation_address =
+            reinterpret_cast<transport::DeviceAddress>(&slot.generation);
+        const auto count_address =
+            reinterpret_cast<transport::DeviceAddress>(&slot.count);
+        release_protocol::publish_local_control(
+            protocol, count_address, count, generation_address, 7);
+        CHECK(protocol.fence_event > 0);
+        CHECK(protocol.store_count == 2);
+        CHECK(protocol.store_addresses[0] == count_address);
+        CHECK(protocol.store_values[0] == count);
+        CHECK(protocol.store_addresses[1] == generation_address);
+        CHECK(protocol.store_values[1] == 7);
+        CHECK(protocol.store_events[0] > protocol.fence_event);
+        CHECK(protocol.store_events[1] > protocol.store_events[0]);
+        CHECK(slot.count == count);
+        CHECK(slot.generation == 7);
     }
 }
 
@@ -404,6 +515,8 @@ int main() {
     check_service_uses_translated_world_peer();
     check_protocol_validation_precedes_dispatch();
     check_hybrid_release_observation_boundaries();
+    check_hybrid_prepare_observes_ingress_before_control();
+    check_local_canonical_control_publication();
     check_release_acquire_and_selected_barrier_sequence();
     return failures == 0 ? 0 : 1;
 }
