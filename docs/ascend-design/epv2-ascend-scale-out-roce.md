@@ -210,6 +210,17 @@ task is submitted until the previous task completes.
 The report labels this evidence `logical-single-host`. It proves functional
 2D routing through HCOMM on one host, not physical RoCE.
 
+Final NPU8P evidence for commit `4913fb6`:
+
+- `task_20260818_133032_194277931616`: Bisheng production-extension rebuild
+  with the pinned `hcomm-deepep-current` package, `exit=0`;
+- `task_20260818_133336_197028830316`: four-rank `0,1,6,7` logical 2x2 smoke,
+  `exit=0`, including 100 barrier generations and the independent BF16
+  dispatch/combine reference; and
+- the runner released all four device locks after completion. The CANN
+  ownership and HCCL timeout messages in the task log are environment warnings,
+  not qualification failures.
+
 ### Real multi-host gate
 
 Phase 3C is production-complete only after a coordinated two-host, four-rank
@@ -217,4 +228,3 @@ run passes the same public BF16 reference, 100 generations, bounded failures,
 and teardown while using actual RoCE endpoints. Until that environment exists,
 the code and logical simulation may land, but the roadmap status remains
 partially qualified and `kScaleOutTeam` stays physically unqualified.
-
