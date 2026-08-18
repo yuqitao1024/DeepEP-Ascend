@@ -52,6 +52,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "transport_scale_up_direct",
             "transport_topology_kind",
             "transport_topology_epoch",
+            "std::uint64_t transport_capabilities",
             "std::uintptr_t transport_channel_table",
             "std::uintptr_t transport_peer_address_table",
             "std::uint64_t timeout_cycles",
@@ -68,6 +69,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "topology.scale_up_direct",
             "topology.kind",
             "topology.epoch",
+            "tiling.transport_context.capabilities",
             "tiling.transport_context.channel_table",
             "tiling.transport_context.peer_address_table",
             "timeout_cycles",
@@ -260,7 +262,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             for argument in (
                     "std::uint32_t transport_abi_version",
                     "std::uint32_t transport_struct_size",
+                    "std::uint64_t transport_capabilities",
                     "std::uintptr_t transport_local_window_base",
+                    "std::uintptr_t transport_channel_table",
+                    "std::uintptr_t transport_peer_address_table",
                     "std::uintptr_t transport_backend_context",
                     *region_arguments, "int world_rank",
                     "std::uint64_t generation"):
@@ -278,8 +283,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                     "std::uintptr_t transport_backend_context"):
                 self.assertIn(argument, signature, function_name)
 
-        barrier_producer_signature = signatures["barrier_producer_vf"]
-        for argument in (
+        for function_name in barrier_region_arguments:
+            signature = signatures[function_name]
+            for argument in (
                 "std::uint32_t transport_topology_abi_version",
                 "std::uint32_t transport_topology_struct_size",
                 "int transport_world_size",
@@ -290,16 +296,18 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "std::uint32_t transport_scale_up_direct",
                 "std::uint32_t transport_topology_kind",
                 "std::uint64_t transport_topology_epoch"):
-            self.assertIn(
-                argument, barrier_producer_signature,
-                "barrier producer must reconstruct the topology used by "
-                "SIMT team validation")
+                self.assertIn(
+                    argument, signature,
+                    f"{function_name} must reconstruct the complete topology")
 
         expected_transport_arguments = {
             "barrier_producer_vf": {
                 "tiling.transport_context.abi_version",
                 "tiling.transport_context.struct_size",
+                "tiling.transport_context.capabilities",
                 "tiling.transport_context.local_window_base",
+                "tiling.transport_context.channel_table",
+                "tiling.transport_context.peer_address_table",
                 "tiling.transport_context.topology.abi_version",
                 "tiling.transport_context.topology.struct_size",
                 "tiling.transport_context.topology.world_rank",
@@ -316,12 +324,27 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "barrier_continuation_vf": {
                 "tiling.transport_context.abi_version",
                 "tiling.transport_context.struct_size",
+                "tiling.transport_context.capabilities",
                 "tiling.transport_context.local_window_base",
+                "tiling.transport_context.channel_table",
+                "tiling.transport_context.peer_address_table",
+                "tiling.transport_context.topology.abi_version",
+                "tiling.transport_context.topology.struct_size",
+                "tiling.transport_context.topology.world_rank",
+                "tiling.transport_context.topology.world_size",
+                "tiling.transport_context.topology.scale_up_rank",
+                "tiling.transport_context.topology.scale_up_size",
+                "tiling.transport_context.topology.scale_out_rank",
+                "tiling.transport_context.topology.scale_out_size",
+                "tiling.transport_context.topology.scale_up_direct",
+                "tiling.transport_context.topology.kind",
+                "tiling.transport_context.topology.epoch",
                 "tiling.transport_context.backend_context",
             },
             "dispatch_producer_vf": {
                 "tiling.transport_context.abi_version",
                 "tiling.transport_context.struct_size",
+                "tiling.transport_context.capabilities",
                 "tiling.transport_context.local_window_base",
                 "tiling.transport_context.channel_table",
                 "tiling.transport_context.peer_address_table",
@@ -341,6 +364,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "combine_producer_vf": {
                 "tiling.transport_context.abi_version",
                 "tiling.transport_context.struct_size",
+                "tiling.transport_context.capabilities",
                 "tiling.transport_context.channel_table",
                 "tiling.transport_context.peer_address_table",
                 "tiling.transport_context.topology.abi_version",
@@ -362,6 +386,15 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             observed = set(re.findall(
                 r"tiling\.transport_context(?:\.topology)?\.\w+", call))
             self.assertEqual(observed, expected, function_name)
+        for source_name in ("barrier.asc", "dispatch.asc", "combine.asc"):
+            source = sources[source_name]
+            for assignment in (
+                    "context.capabilities = transport_capabilities;",
+                    "context.channel_table = transport_channel_table;",
+                    "context.peer_address_table = transport_peer_address_table;",
+                    "context.topology.epoch = transport_topology_epoch;"):
+                self.assertEqual(source.count(assignment), 2,
+                                 f"{source_name}: {assignment}")
         self.assertIn(
             "ElementKind element_kind",
             signatures["core_operator_compile_probe_vf"])
@@ -373,6 +406,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "__gm__ std::uint8_t* workspace",
             "std::uint32_t transport_abi_version",
             "std::uint32_t transport_struct_size",
+            "std::uint64_t transport_capabilities",
             "std::uintptr_t transport_local_window_base",
             "std::uintptr_t transport_channel_table",
             "std::uintptr_t transport_peer_address_table",
@@ -428,6 +462,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "workspace",
             "tiling.transport_context.abi_version",
             "tiling.transport_context.struct_size",
+            "tiling.transport_context.capabilities",
             "local_window_base",
             "tiling.transport_context.channel_table",
             "tiling.transport_context.peer_address_table",
