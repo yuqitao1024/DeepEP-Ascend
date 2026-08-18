@@ -339,6 +339,7 @@ void check_explicit_two_dimensional_topology() {
     config.topology_kind =
         transport::TransportTopologyKind::kLogicalSimulation;
     config.topology_epoch = 17;
+    config.allow_hybrid_mode = true;
     auto created = transport::make_cann_transport(config, fake.api());
     CHECK(created.status.ok());
     transport::TransportTopology topology{};

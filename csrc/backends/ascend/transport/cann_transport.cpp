@@ -555,9 +555,6 @@ TransportStatus validate_config(const TransportConfig& config) {
         return TransportStatus::invalid(
             "make_cann_transport",
             "cpu_buffer_bytes must be zero because mapped CPU memory is unsupported");
-    if (config.allow_hybrid_mode)
-        return TransportStatus::invalid(
-            "make_cann_transport", "hybrid host memory is unsupported");
     if (config.requested_channels != 1)
         return TransportStatus::invalid(
             "make_cann_transport", "exactly one channel is required");

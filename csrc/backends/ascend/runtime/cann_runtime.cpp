@@ -139,8 +139,7 @@ TransportStatus CannRuntimeResources::initialize_impl(
         config.communicator_handle == 0 || config.device_buffer_bytes <= 0 ||
         !config.cpu_communicator_empty ||
         (config.cpu_buffer_bytes != 0 && !mapped_cpu_memory_supported()) ||
-        config.allow_hybrid_mode || config.requested_channels != 1 ||
-        workspace_bytes == 0 ||
+        config.requested_channels != 1 || workspace_bytes == 0 ||
         !transport::checked_scale_up_command_capacity(
             config.world_size, &command_capacity))
         return TransportStatus::invalid(

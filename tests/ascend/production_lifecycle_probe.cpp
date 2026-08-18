@@ -272,6 +272,7 @@ void check_rank_parameterized_admission() {
     two_dimensional_config.topology_kind =
         transport::TransportTopologyKind::kLogicalSimulation;
     two_dimensional_config.topology_epoch = 17;
+    two_dimensional_config.allow_hybrid_mode = true;
     runtime::CannRuntimeResources logical_resources;
     status = logical_resources.initialize(
         two_dimensional_config, 4096, runtime_api(two_dimensional),
