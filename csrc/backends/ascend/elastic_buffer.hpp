@@ -458,13 +458,24 @@ public:
         bool allow_hybrid_mode = false) {
         TORCH_CHECK(num_ranks >= 2 && rank >= 0 && rank < num_ranks,
                     "DeepEP Ascend backend: invalid testing topology");
-        TORCH_CHECK(resources != nullptr && resources->initialized() &&
-                        resources->device_context().topology.world_rank == rank &&
-                        resources->device_context().topology.world_size == num_ranks &&
-                        resources->device_context().topology.scale_up_rank == rank &&
-                        resources->device_context().topology.scale_up_size == num_ranks &&
-                        resources->device_context().topology.scale_out_rank == 0 &&
-                        resources->device_context().topology.scale_out_size == 1,
+        const auto topology_matches = [&] {
+            if (resources == nullptr || !resources->initialized())
+                return false;
+            const auto& topology = resources->device_context().topology;
+            if (topology.world_rank != rank ||
+                topology.world_size != num_ranks)
+                return false;
+            return allow_hybrid_mode ?
+                topology.scale_up_size == 2 &&
+                    topology.scale_out_size == 2 &&
+                    topology.scale_up_rank == rank % 2 &&
+                    topology.scale_out_rank == rank / 2 :
+                topology.scale_up_rank == rank &&
+                    topology.scale_up_size == num_ranks &&
+                    topology.scale_out_rank == 0 &&
+                    topology.scale_out_size == 1;
+        }();
+        TORCH_CHECK(topology_matches,
                     "DeepEP Ascend backend: testing topology must match runtime resources");
         return std::unique_ptr<ElasticBuffer>(new ElasticBuffer(
             TestingTag{}, rank, num_ranks, std::move(resources), buffer_bytes,
@@ -853,7 +864,9 @@ public:
                 descriptor_mode_flags);
         const auto int_options = x.options().dtype(torch::kInt);
         const auto metadata_options = x.options().dtype(torch::kByte);
-        const auto max_recv_tokens = capacity * static_cast<std::uint64_t>(num_ranks_);
+        const auto max_recv_tokens = allow_hybrid_mode_ ?
+            tiling.hybrid_route_capacity :
+            capacity * static_cast<std::uint64_t>(num_ranks_);
         const auto local_experts = experts / static_cast<std::uint64_t>(num_ranks_);
         const auto expanded_records = tiling.dispatch_output_capacity;
         TORCH_CHECK(max_recv_tokens <= static_cast<std::uint64_t>(
@@ -876,6 +889,7 @@ public:
         std::vector<std::int32_t> host_kernel_unaligned(num_experts);
         std::vector<std::int32_t> host_expert_prefix(local_experts);
         std::vector<std::int32_t> host_unaligned(local_experts);
+        std::vector<elastic::HybridRouteRecord> host_route_records;
         std::vector<int> per_expert_list;
         int num_expanded_tokens = 0;
         const int first_local_expert =
@@ -934,6 +948,29 @@ public:
                 expected_descriptor, descriptor);
             TORCH_CHECK(descriptor_status.ok(), "DeepEP Ascend backend: dispatch ",
                         descriptor_status.message);
+            if (allow_hybrid_mode_) {
+                host_route_records.resize(
+                    static_cast<std::size_t>(descriptor.route_record_count));
+                if (!host_route_records.empty()) {
+                    const auto* device_records =
+                        static_cast<const std::uint8_t*>(
+                            cached_token_metadata_at_forward->data_ptr()) +
+                        sizeof(elastic::DispatchHandleDescriptor);
+                    status = resources_->copy_to_host(
+                        host_route_records.data(), device_records,
+                        host_route_records.size() *
+                            sizeof(elastic::HybridRouteRecord));
+                    if (!status.ok())
+                        raise_transport_status(status, rank_idx_);
+                }
+                const auto route_status = elastic::validate_hybrid_route_table(
+                    descriptor,
+                    {host_route_records.data(), host_route_records.size()},
+                    capacity, max_recv_tokens, local_experts);
+                TORCH_CHECK(route_status.ok(),
+                            "DeepEP Ascend backend: dispatch ",
+                            route_status.message);
+            }
             rank_prefix = *cached_psum_num_recv_tokens_per_scaleup_rank;
             expert_prefix = *cached_psum_num_recv_tokens_per_expert;
             unaligned = *cached_num_unaligned_recv_tokens_per_expert;
@@ -1071,7 +1108,8 @@ public:
                 reinterpret_cast<elastic::HybridRouteRecord*>(
                     static_cast<std::uint8_t*>(descriptor_tensor.data_ptr()) +
                     sizeof(elastic::DispatchHandleDescriptor));
-            arguments.route_record_capacity = max_recv_tokens;
+            arguments.route_record_capacity = cached_mode ?
+                cached_route_count : tiling.hybrid_route_capacity;
         }
         arguments.timeout_cycles = barrier_timeout_cycles_;
         void* stream = nullptr;
@@ -1185,6 +1223,56 @@ public:
                 dispatch_family_, tiling.topology, generation, num_tokens,
                 hidden, experts, num_topk, alignment, capacity,
                 descriptor_mode_flags);
+        if (allow_hybrid_mode_) {
+            host_route_records.resize(
+                static_cast<std::size_t>(committed_descriptor.route_record_count));
+            if (!host_route_records.empty()) {
+                const auto* device_records =
+                    static_cast<const std::uint8_t*>(descriptor_tensor.data_ptr()) +
+                    sizeof(elastic::DispatchHandleDescriptor);
+                status = resources_->copy_to_host(
+                    host_route_records.data(), device_records,
+                    host_route_records.size() *
+                        sizeof(elastic::HybridRouteRecord));
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
+            }
+            const auto route_status = elastic::validate_hybrid_route_table(
+                committed_descriptor,
+                {host_route_records.data(), host_route_records.size()},
+                capacity, max_recv_tokens, local_experts);
+            TORCH_CHECK(route_status.ok(), "DeepEP Ascend backend: dispatch ",
+                        route_status.message);
+
+            std::vector<std::int32_t> host_source_metadata(
+                static_cast<std::size_t>(num_recv_tokens) *
+                static_cast<std::size_t>(num_topk + 2));
+            std::vector<std::int64_t> host_received_topk(
+                static_cast<std::size_t>(num_recv_tokens) *
+                static_cast<std::size_t>(num_topk));
+            if (num_recv_tokens != 0) {
+                status = resources_->copy_to_host(
+                    host_source_metadata.data(), source_metadata.data_ptr(),
+                    host_source_metadata.size() * sizeof(std::int32_t));
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
+                status = resources_->copy_to_host(
+                    host_received_topk.data(), recv_topk_indices.data_ptr(),
+                    host_received_topk.size() * sizeof(std::int64_t));
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
+            }
+            const elastic::HybridRouteBindingView bindings{
+                host_source_metadata.data(), host_received_topk.data(),
+                static_cast<std::uint64_t>(num_recv_tokens), num_topk,
+                capacity};
+            const auto binding_status = elastic::validate_hybrid_route_bindings(
+                committed_descriptor,
+                {host_route_records.data(), host_route_records.size()}, bindings);
+            TORCH_CHECK(binding_status.ok(),
+                        "DeepEP Ascend backend: dispatch ",
+                        binding_status.message);
+        }
         status = resources_->copy_from_host(
             descriptor_tensor.data_ptr(), &committed_descriptor,
             sizeof(committed_descriptor));

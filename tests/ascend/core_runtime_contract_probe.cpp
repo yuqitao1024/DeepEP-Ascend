@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 
 #include "csrc/backends/ascend/elastic/combine_state.hpp"
 #include "csrc/backends/ascend/elastic/dispatch_state.hpp"
@@ -111,10 +112,13 @@ void export_transport(CoreTiling* tiling);
 CoreTiling valid_two_dimensional_tiling(
     OperationKind operation, int world_rank,
     transport::TransportTopologyKind kind =
-        transport::TransportTopologyKind::kLogicalSimulation) {
+        transport::TransportTopologyKind::kLogicalSimulation,
+    CoreModeFlags mode_flags = 0) {
     CoreTilingInput input{};
     input.operation = operation;
     input.element_kind = ElementKind::kBFloat16;
+    input.mode_flags = mode_flags;
+    input.has_reusable_slots = has_mode(mode_flags, CoreMode::kCached);
     input.num_tokens = operation == OperationKind::kBarrier ? 0 : 4;
     input.hidden = 64;
     input.num_experts = 8;
@@ -133,6 +137,10 @@ CoreTiling valid_two_dimensional_tiling(
     if (!build_core_tiling(input, &tiling).ok())
         return {};
     export_transport(&tiling);
+    if (has_mode(mode_flags, CoreMode::kHybrid))
+        tiling.transport_context.capabilities |=
+            transport::capability_bit(
+                transport::TransportCapability::kScaleOutTeam);
     return tiling;
 }
 
@@ -408,20 +416,73 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 }
 
 int main() {
-    static_assert(kCoreTilingAbiVersion == 8);
-    const auto hybrid_tiling = valid_tiling(
-        OperationKind::kDispatch, ElementKind::kBFloat16, 0, 4,
+    static_assert(kCoreTilingAbiVersion == 9);
+    auto hybrid_tiling = valid_two_dimensional_tiling(
+        OperationKind::kDispatch, 0,
+        transport::TransportTopologyKind::kLogicalSimulation,
         mode_bit(CoreMode::kHybrid));
+    constexpr std::uint64_t expected_hybrid_route_capacity = 4 * 8;
     if (hybrid_tiling.symmetric_window_layout.hybrid_route_record_count !=
-            hybrid_tiling.dispatch_output_capacity ||
+            expected_hybrid_route_capacity ||
+        hybrid_tiling.hybrid_route_capacity !=
+            expected_hybrid_route_capacity ||
         hybrid_tiling.symmetric_window_layout.hybrid_route_record_bytes !=
-            hybrid_tiling.dispatch_output_capacity *
+            expected_hybrid_route_capacity *
                 kHybridRouteRecordBytes ||
+        hybrid_tiling.dispatch_output_capacity <=
+            expected_hybrid_route_capacity ||
         hybrid_tiling.symmetric_window_layout
                 .hybrid_dispatch_ingress_shard_count != 4 ||
         hybrid_tiling.symmetric_window_layout
                 .hybrid_combine_return_shard_count != 4)
         return 74;
+    alignas(kAscendElasticAlignment) std::uint8_t hybrid_storage[32]{};
+    HybridRouteRecord hybrid_routes[expected_hybrid_route_capacity]{};
+    DispatchArguments hybrid_dispatch{};
+    hybrid_dispatch.x = hybrid_storage;
+    hybrid_dispatch.topk_indices =
+        reinterpret_cast<const std::int64_t*>(hybrid_storage);
+    hybrid_dispatch.communication_buffer = hybrid_storage;
+    hybrid_dispatch.workspace = hybrid_storage;
+    hybrid_dispatch.destination_slots =
+        reinterpret_cast<std::int32_t*>(hybrid_storage);
+    hybrid_dispatch.recv_x = hybrid_storage;
+    hybrid_dispatch.recv_topk_indices =
+        reinterpret_cast<std::int64_t*>(hybrid_storage);
+    hybrid_dispatch.prefix_per_rank =
+        reinterpret_cast<std::int32_t*>(hybrid_storage);
+    hybrid_dispatch.prefix_per_expert =
+        reinterpret_cast<std::int32_t*>(hybrid_storage);
+    hybrid_dispatch.unaligned_per_expert =
+        reinterpret_cast<std::int32_t*>(hybrid_storage);
+    hybrid_dispatch.source_metadata =
+        reinterpret_cast<std::int32_t*>(hybrid_storage);
+    hybrid_dispatch.route_records = hybrid_routes;
+    hybrid_dispatch.route_record_capacity = expected_hybrid_route_capacity;
+    hybrid_dispatch.generation = 1;
+    hybrid_dispatch.timeout_cycles = 64;
+    reset_launches();
+    const auto hybrid_launch_status = launch_internal_dispatch(
+        hybrid_dispatch, hybrid_tiling,
+        required_core_launch_storage(hybrid_tiling),
+        reinterpret_cast<void*>(0x6161));
+    if (!hybrid_launch_status.ok() || !trace_is(kDispatchLaunch)) {
+        std::cerr << hybrid_launch_status.message << " trace="
+                  << launch_trace_size << ':' << launch_trace[0] << '\n';
+        return 75;
+    }
+    auto cached_hybrid_tiling = valid_two_dimensional_tiling(
+        OperationKind::kDispatch, 0,
+        transport::TransportTopologyKind::kLogicalSimulation,
+        mode_bit(CoreMode::kHybrid) | mode_bit(CoreMode::kCached));
+    hybrid_dispatch.route_record_capacity = 0;
+    reset_launches();
+    const auto cached_hybrid_launch_status = launch_internal_dispatch(
+        hybrid_dispatch, cached_hybrid_tiling,
+        required_core_launch_storage(cached_hybrid_tiling),
+        reinterpret_cast<void*>(0x6161));
+    if (!cached_hybrid_launch_status.ok() || !trace_is(kDispatchLaunch))
+        return 76;
     auto barrier_rank_zero = valid_barrier_tiling(0);
     auto barrier_rank_one = valid_barrier_tiling(1);
     const auto barrier_storage =

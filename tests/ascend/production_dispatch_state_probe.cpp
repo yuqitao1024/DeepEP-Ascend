@@ -31,6 +31,27 @@ int main() {
     static_assert(offsetof(HybridRouteRecord, stage_flags) == 56);
     static_assert(offsetof(HybridRouteRecord, reserved) == 60);
 
+    CHECK(validate_hybrid_route_control(29, 29, 8, 8) ==
+          DispatchProtocolError::kNone);
+    CHECK(validate_hybrid_route_control(29, 28, 8, 8) ==
+          DispatchProtocolError::kInvalidControl);
+    CHECK(validate_hybrid_route_control(29, 29, 9, 8) ==
+          DispatchProtocolError::kCapacityOverflow);
+    const auto prepare_failure = make_dispatch_protocol_failure(
+        3, DispatchProtocolStage::kPrepareEpilogue, 29,
+        DispatchProtocolError::kInvalidControl);
+    CHECK(prepare_failure.world_rank == 3);
+    CHECK(prepare_failure.generation == 29);
+    CHECK(prepare_failure.scratch_status ==
+          ((std::uint64_t{4} << 32U) |
+           static_cast<std::uint32_t>(
+               DispatchProtocolError::kInvalidControl)));
+    CHECK(prepare_failure.backend_status ==
+          ((static_cast<std::uint32_t>(
+                DispatchProtocolStage::kPrepareEpilogue) << 16U) |
+           static_cast<std::uint32_t>(
+               DispatchProtocolError::kInvalidControl)));
+
     DispatchSequence sequence;
     {
         DispatchAttempt first(sequence);
@@ -57,8 +78,11 @@ int main() {
     CHECK(exhausted.poisoned());
 
     CoreTopology topology{};
+    topology.world_rank = 3;
     topology.world_size = 4;
+    topology.scale_up_rank = 1;
     topology.scale_up_size = 2;
+    topology.scale_out_rank = 1;
     topology.scale_out_size = 2;
     topology.epoch = 9;
     DispatchHandleDescriptor expected = make_dispatch_handle_descriptor(
@@ -95,7 +119,7 @@ int main() {
     mismatch.family += 1;
     CHECK(!validate_dispatch_handle(expected, mismatch).ok());
     mismatch = expected;
-    mismatch.topology.scale_up_rank = 1;
+    mismatch.topology.scale_up_rank = 0;
     CHECK(!validate_dispatch_handle(expected, mismatch).ok());
     mismatch = expected;
     mismatch.generation = 10;
@@ -183,8 +207,8 @@ int main() {
     diagonal.ingress_world_rank = 2;
     diagonal.destination_world_rank = 3;
     diagonal.destination_local_expert = 1;
-    diagonal.ingress_slot = 5;
-    diagonal.forwarded_slot = 4;
+    diagonal.ingress_slot = 0;
+    diagonal.forwarded_slot = 0;
     diagonal.generation = 11;
     diagonal.topology_epoch = 9;
     diagonal.stage_flags = hybrid_stage_bit(HybridRouteStage::kIngressComplete) |
@@ -192,6 +216,49 @@ int main() {
     HybridRouteTableView route_table{&diagonal, 1};
     CHECK(validate_hybrid_route_table(hybrid, route_table, 8, 8, 2).ok());
     CHECK(!validate_hybrid_route_table(expected, route_table, 8, 8, 2).ok());
+
+    std::int32_t source_metadata[] = {
+        encode_dispatch_source_index(0, 8, 7),
+        encode_dispatch_source_index(0, 2, 1), -1, -1};
+    std::int64_t received_topk[] = {-1, 1};
+    HybridRouteBindingView binding{};
+    binding.source_metadata = source_metadata;
+    binding.received_topk_indices = received_topk;
+    binding.row_count = 1;
+    binding.num_topk = 2;
+    binding.shard_capacity = 8;
+    CHECK(validate_hybrid_route_bindings(hybrid, route_table, binding).ok());
+
+    auto wrong_binding_record = diagonal;
+    wrong_binding_record.destination_world_rank = 2;
+    CHECK(!validate_hybrid_route_bindings(
+        hybrid, {&wrong_binding_record, 1}, binding).ok());
+    wrong_binding_record = diagonal;
+    wrong_binding_record.ingress_world_rank = 1;
+    CHECK(!validate_hybrid_route_bindings(
+        hybrid, {&wrong_binding_record, 1}, binding).ok());
+    wrong_binding_record = diagonal;
+    wrong_binding_record.ingress_slot = 1;
+    CHECK(!validate_hybrid_route_bindings(
+        hybrid, {&wrong_binding_record, 1}, binding).ok());
+    wrong_binding_record = diagonal;
+    wrong_binding_record.forwarded_slot = 1;
+    CHECK(!validate_hybrid_route_bindings(
+        hybrid, {&wrong_binding_record, 1}, binding).ok());
+    wrong_binding_record = diagonal;
+    wrong_binding_record.destination_local_expert = 0;
+    CHECK(!validate_hybrid_route_bindings(
+        hybrid, {&wrong_binding_record, 1}, binding).ok());
+    source_metadata[0] = encode_dispatch_source_index(1, 8, 7);
+    CHECK(!validate_hybrid_route_bindings(hybrid, route_table, binding).ok());
+    source_metadata[0] = encode_dispatch_source_index(0, 8, 7);
+    received_topk[1] = 0;
+    CHECK(!validate_hybrid_route_bindings(hybrid, route_table, binding).ok());
+    received_topk[1] = 1;
+    auto invalid_binding_descriptor = hybrid;
+    invalid_binding_descriptor.topology.scale_up_size = 0;
+    CHECK(!validate_hybrid_route_bindings(
+        invalid_binding_descriptor, route_table, binding).ok());
 
     auto invalid_hybrid = hybrid;
     invalid_hybrid.dispatch_generation = 10;

@@ -28,6 +28,9 @@ struct Trace {
     bool fail_h2d = false;
     bool fail_launch = false;
     bool fail_stream = false;
+    bool corrupt_fresh_route = false;
+    bool pending_diagnostic = false;
+    int world_size = 2;
 } trace;
 
 int alloc(void*, std::uint64_t n, void** p) { *p = std::malloc(n); return *p ? 0 : 1; }
@@ -45,7 +48,9 @@ int h2d(void*, void* d, const void* s, std::uint64_t n) {
 }
 int d2h(void*, void* d, const void* s, std::uint64_t n) {
     ++trace.d2h_copies;
-    if (n == sizeof(transport::DeviceTransportDiagnostic)) {
+    if (trace.pending_diagnostic &&
+        n == sizeof(transport::DeviceTransportDiagnostic)) {
+        trace.pending_diagnostic = false;
         auto* diagnostic = static_cast<transport::DeviceTransportDiagnostic*>(d);
         *diagnostic = {};
         diagnostic->abi_version = transport::kTransportCommandAbiVersion;
@@ -64,7 +69,10 @@ int d2h(void*, void* d, const void* s, std::uint64_t n) {
     std::memcpy(d, s, n); return 0;
 }
 int rank_(void*, std::int64_t, std::uint32_t* v) { *v = 0; return 0; }
-int size_(void*, std::int64_t, std::uint32_t* v) { *v = 2; return 0; }
+int size_(void*, std::int64_t, std::uint32_t* v) {
+    *v = static_cast<std::uint32_t>(trace.world_size);
+    return 0;
+}
 int team(void*, std::int64_t, std::uint32_t, std::uint32_t, const std::uint32_t*, std::uint32_t, std::uint32_t, std::uintptr_t* v) { *v = 2; return 0; }
 int window(void*, std::int64_t, std::uintptr_t, void*, std::uint64_t, std::uintptr_t* v) { *v = 3; return 0; }
 int channels(void*, std::int64_t, std::uintptr_t, std::uint32_t) { return 0; }
@@ -76,12 +84,17 @@ int hf(void*, void* p) { return free_(nullptr,p); }
 int noop2(void*, std::uintptr_t, std::uintptr_t) { return 0; }
 int noop1(void*, std::uintptr_t) { return 0; }
 
-std::unique_ptr<runtime::CannRuntimeResources> resources() {
+std::unique_ptr<runtime::CannRuntimeResources> resources(
+    int world_size = 2, bool hybrid = false) {
     auto result = std::make_unique<runtime::CannRuntimeResources>();
     runtime::CannRuntimeApi r{nullptr,alloc,zero,free_,current_device,stream,sync,sync_device,h2d,d2h};
     transport::CannHostApi h{nullptr,rank_,size_,team,window,channels,ha,hz,hd,dh,hf,noop2,noop1};
-    transport::TransportConfig c{}; c.rank=0; c.world_size=2; c.communicator_handle=1;
+    transport::TransportConfig c{}; c.rank=0; c.world_size=world_size; c.communicator_handle=1;
     c.device_buffer_bytes=2*1024*1024; c.requested_channels=1;
+    if (hybrid) {
+        c.scale_up_size = 2;
+        c.topology_kind = transport::TransportTopologyKind::kPhysical2D;
+    }
     if (!result->initialize(c, 4096, r, h).ok()) return {};
     return result;
 }
@@ -94,8 +107,44 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
     trace.kernel_expert_prefixes.push_back(a.prefix_per_expert);
     trace.kernel_unaligned_counts.push_back(a.unaligned_per_expert);
     if (trace.fail_launch) return 73;
+    trace.pending_diagnostic = true;
     const bool cached = elastic::has_mode(t.mode_flags, elastic::CoreMode::kCached);
     const bool expanded = elastic::has_mode(t.mode_flags, elastic::CoreMode::kExpanded);
+    const bool hybrid = elastic::has_mode(t.mode_flags, elastic::CoreMode::kHybrid);
+    if (hybrid) {
+        if (a.route_records == nullptr || a.route_record_capacity < 1)
+            return 74;
+        const std::array<std::uint16_t, 8> payload{
+            0x0101, 0x0102, 0x0103, 0x0104,
+            0x0105, 0x0106, 0x0107, 0x0108};
+        std::memcpy(a.recv_x, payload.data(), payload.size() * sizeof(payload[0]));
+        a.recv_topk_indices[0] = 0;
+        a.recv_topk_indices[1] = -1;
+        if (a.recv_topk_weights != nullptr) {
+            a.recv_topk_weights[0] = 0.25F;
+            a.recv_topk_weights[1] = 0.75F;
+        }
+        for (int rank = 0; rank < t.topology.world_size; ++rank)
+            a.prefix_per_rank[rank] = 1;
+        const std::array<std::int32_t, 5> private_expert_prefix{0, 4, 4, 4, 4};
+        const std::array<std::int32_t, 4> private_unaligned{1, 0, 0, 0};
+        std::memcpy(a.prefix_per_expert, private_expert_prefix.data(),
+                    sizeof(private_expert_prefix));
+        std::memcpy(a.unaligned_per_expert, private_unaligned.data(),
+                    sizeof(private_unaligned));
+        a.destination_slots[0] = 0;
+        a.destination_slots[1] = 0;
+        const std::array<std::int32_t, 4> metadata{0, 0, -1, -1};
+        std::memcpy(a.source_metadata, metadata.data(), sizeof(metadata));
+        a.route_records[0] = {
+            0, 0, 0, 0,
+            trace.corrupt_fresh_route ? 4U : 0U,
+            elastic::kInvalidHybridRouteSlot,
+            elastic::kInvalidHybridRouteSlot,
+            a.generation, t.topology.epoch,
+            elastic::kHybridRouteCompleteStageFlags, 0};
+        return 0;
+    }
     const std::array<std::int32_t, 3> private_expert_prefix{0, 4, 4};
     const std::array<std::int32_t, 2> private_unaligned{2, 0};
     if (t.num_tokens == 0) {
@@ -183,6 +232,33 @@ auto uncached_dispatch(
         inputs.x, none, inputs.idx, weights, none, no_int, no_int, no_list,
         none, none, none, none, none, none, none, 4, 2, 4, 1, 0, no_event, no_event,
         false, false, copy_handle, true, expanded, false, false);
+}
+
+auto uncached_hybrid_dispatch(
+    Buffer& buffer, const Inputs& inputs,
+    const std::optional<Tensor>& weights) {
+    const std::optional<torch::Tensor> none;
+    const std::optional<int> no_int;
+    const std::optional<std::vector<int>> no_list;
+    const std::optional<deep_ep::ascend::EventHandle> no_event;
+    return buffer.dispatch(
+        inputs.x, none, inputs.idx, weights, none, no_int, no_int, no_list,
+        none, none, none, none, none, none, none, 4, 4, 4, 1, 0,
+        no_event, no_event, false, false, true, true, false, false, false);
+}
+
+template <typename Result>
+auto cached_hybrid_dispatch(
+    Buffer& buffer, const Inputs& inputs, const Result& handle) {
+    const std::optional<Tensor> none;
+    const std::optional<deep_ep::ascend::EventHandle> no_event;
+    return buffer.dispatch(
+        inputs.x, none, inputs.idx, inputs.weights, none,
+        std::get<5>(handle), std::get<6>(handle), std::get<7>(handle),
+        std::get<8>(handle), std::get<9>(handle), std::get<10>(handle),
+        std::get<12>(handle), std::get<13>(handle), std::get<11>(handle), none,
+        4, 4, 4, 1, 0, no_event, no_event, false, false, false, false,
+        false, false, false);
 }
 
 template <typename Result>
@@ -398,6 +474,95 @@ bool expanded_public_contract_probe() {
         trace.kernel_unaligned_counts[1] != std::get<10>(result).data_ptr();
 }
 
+bool cached_hybrid_route_validation_probe() {
+    trace = {};
+    trace.world_size = 4;
+    auto runtime_resources = resources(4, true);
+    if (!runtime_resources) return false;
+    std::unique_ptr<Buffer> buffer;
+    try {
+        buffer = Buffer::make_testing_buffer(
+            0, std::move(runtime_resources), 2 * 1024 * 1024, 1,
+            true, 7, 4, 0, true);
+    } catch (const std::runtime_error&) {
+        return false;
+    }
+    Inputs inputs;
+    const std::optional<Tensor> weights = inputs.weights;
+    decltype(uncached_hybrid_dispatch(*buffer, inputs, weights)) first;
+    try {
+        first = uncached_hybrid_dispatch(*buffer, inputs, weights);
+    } catch (const std::exception& error) {
+        std::cerr << "initial hybrid dispatch: " << error.what() << '\n';
+        return false;
+    }
+    if (trace.launches != 1 || !std::get<13>(first).has_value())
+        return false;
+
+    auto corrupted = first;
+    std::get<13>(corrupted) = std::get<13>(first)->clone();
+    auto* record = reinterpret_cast<elastic::HybridRouteRecord*>(
+        static_cast<std::uint8_t*>(std::get<13>(corrupted)->data_ptr()) +
+        sizeof(elastic::DispatchHandleDescriptor));
+    record->origin_source_row = 4;
+    try {
+        (void)cached_hybrid_dispatch(*buffer, inputs, corrupted);
+        std::cerr << "corrupted cached hybrid dispatch was accepted\n";
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("hybrid route record") ==
+                std::string::npos ||
+            trace.launches != 1) {
+            std::cerr << "corrupted cached hybrid dispatch: "
+                      << error.what() << '\n';
+            return false;
+        }
+    }
+
+    try {
+        (void)cached_hybrid_dispatch(*buffer, inputs, first);
+    } catch (const std::runtime_error& error) {
+        std::cerr << "valid cached hybrid dispatch: " << error.what() << '\n';
+        return false;
+    }
+    return trace.launches == 2;
+}
+
+bool failed_fresh_hybrid_route_poisons_probe() {
+    trace = {};
+    trace.world_size = 4;
+    auto runtime_resources = resources(4, true);
+    if (!runtime_resources) return false;
+    std::unique_ptr<Buffer> buffer;
+    try {
+        buffer = Buffer::make_testing_buffer(
+            0, std::move(runtime_resources), 2 * 1024 * 1024, 1,
+            true, 7, 4, 0, true);
+    } catch (const std::runtime_error&) {
+        return false;
+    }
+    Inputs inputs;
+    const std::optional<Tensor> weights = inputs.weights;
+    trace.corrupt_fresh_route = true;
+    try {
+        (void)uncached_hybrid_dispatch(*buffer, inputs, weights);
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("hybrid route record") ==
+                std::string::npos ||
+            trace.launches != 1)
+            return false;
+    }
+    trace.corrupt_fresh_route = false;
+    try {
+        (void)uncached_hybrid_dispatch(*buffer, inputs, weights);
+        return false;
+    } catch (const std::runtime_error& error) {
+        return std::string(error.what()).find("cannot continue") !=
+                std::string::npos && trace.launches == 1;
+    }
+}
+
 bool post_activation_copy_failure_poisons_probe() {
     trace = {};
     auto runtime_resources = resources();
@@ -554,6 +719,10 @@ int main() {
     };
     check(exact_and_cached_probe(), "exact outputs and cached preflight retry");
     check(expanded_public_contract_probe(), "expanded public expert prefix");
+    check(cached_hybrid_route_validation_probe(),
+          "cached hybrid route validation before activation");
+    check(failed_fresh_hybrid_route_poisons_probe(),
+          "failed fresh hybrid route poisoning");
     check(post_activation_copy_failure_poisons_probe(),
           "post-activation copy failure poisoning");
     check(stream_retry_probe(), "stream acquisition retry");

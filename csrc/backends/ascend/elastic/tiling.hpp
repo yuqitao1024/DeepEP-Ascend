@@ -42,7 +42,7 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 8;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 9;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -57,6 +57,7 @@ struct CoreTiling {
     std::uint64_t expert_alignment = 1;
     std::uint64_t num_max_tokens_per_rank = 0;
     std::uint64_t dispatch_output_capacity = 0;
+    std::uint64_t hybrid_route_capacity = 0;
     std::uint64_t num_scale_factor_packs = 0;
     std::uint64_t scale_factor_pack_bytes = 0;
     CoreTopology topology{};
@@ -335,6 +336,12 @@ inline TilingStatus build_core_tiling(
         !detail::build_dispatch_output_capacity(
             input, &tiling.dispatch_output_capacity))
         return TilingStatus::overflow("layout size overflow");
+    if (has_mode(input.mode_flags, CoreMode::kHybrid) &&
+        !checked_multiply(
+            input.num_max_tokens_per_rank,
+            static_cast<std::uint64_t>(input.topology.world_size),
+            &tiling.hybrid_route_capacity))
+        return TilingStatus::overflow("hybrid route capacity overflow");
 
     if (!is_single_rank_topology(input.topology)) {
         SymmetricWindowInput window_input{};
@@ -349,7 +356,7 @@ inline TilingStatus build_core_tiling(
         window_input.allow_multiple_reduction = has_mode(
             input.mode_flags, CoreMode::kAllowMultipleReduction);
         window_input.hybrid = has_mode(input.mode_flags, CoreMode::kHybrid);
-        window_input.hybrid_route_capacity = tiling.dispatch_output_capacity;
+        window_input.hybrid_route_capacity = tiling.hybrid_route_capacity;
         const auto layout_status = build_symmetric_window_layout(
             window_input, &tiling.symmetric_window_layout);
         if (!layout_status.ok())

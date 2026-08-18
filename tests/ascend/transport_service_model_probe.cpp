@@ -200,10 +200,24 @@ void check_protocol_validation_precedes_dispatch() {
 }
 
 struct ReleaseProtocolModel {
+    bool staging_fenced = false;
+    bool put_observed_staging_fence = false;
     bool payload_visible = false;
     bool control_published_after_payload = false;
     std::uint64_t release_generation = 0;
     std::uint64_t acquired_generation = 0;
+
+    void system_fence() {
+        staging_fenced = true;
+    }
+
+    void put(
+        transport::TransportTeam, int, transport::DeviceAddress,
+        transport::DeviceAddress, std::size_t,
+        transport::CooperationScope, transport::MemorySegment,
+        transport::DeviceOptions, const transport::RemoteAction&) {
+        put_observed_staging_fence = staging_fenced;
+    }
 
     void flush(transport::CooperationScope scope) {
         CHECK(scope == transport::CooperationScope::kDevice);
@@ -245,6 +259,9 @@ void check_release_acquire_and_selected_barrier_sequence() {
     ReleaseProtocolModel protocol;
     const transport::TeamPeer rail{
         transport::TransportTeam::kScaleOut, 1, 2};
+    release_protocol::put_staged_payload(
+        protocol, rail, 0x2000, 0x3000, 64);
+    CHECK(protocol.put_observed_staging_fence);
     release_protocol::flush_payload(protocol);
     release_protocol::publish_control_and_release(
         protocol, rail, 0x1000, 3, 0x1008, 7,

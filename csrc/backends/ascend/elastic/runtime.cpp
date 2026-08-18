@@ -357,6 +357,7 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
             expected.symmetric_window_layout) ||
         tiling.dispatch_output_capacity !=
             expected.dispatch_output_capacity ||
+        tiling.hybrid_route_capacity != expected.hybrid_route_capacity ||
         tiling.communication_buffer_bytes !=
             expected.communication_buffer_bytes ||
         tiling.workspace_bytes != expected.workspace_bytes)
@@ -431,8 +432,9 @@ CoreRuntimeStatus launch_internal_dispatch(
         arguments.source_metadata == nullptr ||
         (has_mode(tiling.mode_flags, CoreMode::kHybrid) &&
          (arguments.route_records == nullptr ||
-          arguments.route_record_capacity <
-              tiling.symmetric_window_layout.hybrid_route_record_count)))
+          (!has_mode(tiling.mode_flags, CoreMode::kCached) &&
+           arguments.route_record_capacity <
+               tiling.hybrid_route_capacity))))
         return invalid("dispatch required argument is null");
     if (!is_aligned(arguments.communication_buffer) ||
         !is_aligned(arguments.workspace))

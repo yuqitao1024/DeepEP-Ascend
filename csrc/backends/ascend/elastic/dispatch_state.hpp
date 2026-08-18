@@ -26,6 +26,56 @@ enum class HybridRouteStage : std::uint32_t {
     kForwardComplete = 1,
 };
 
+enum class DispatchProtocolError : std::uint32_t {
+    kNone = 0,
+    kInvalidTopk,
+    kInvalidCachedSlot,
+    kInvalidCachedPrefix,
+    kInvalidCachedMetadata,
+    kCapacityOverflow,
+    kInvalidControl,
+    kInvalidLayout,
+};
+
+enum class DispatchProtocolStage : std::uint32_t {
+    kProducer = 1,
+    kForward = 2,
+    kPrepareEpilogue = 3,
+    kEpilogue = 4,
+    kRouteRecord = 5,
+};
+
+struct DispatchProtocolFailure {
+    int world_rank = -1;
+    std::uint64_t generation = 0;
+    std::uint64_t scratch_status = 0;
+    std::uint32_t backend_status = 0;
+};
+
+DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr DispatchProtocolError
+validate_hybrid_route_control(
+    std::uint64_t expected_generation, std::uint64_t observed_generation,
+    std::uint64_t count, std::uint64_t capacity) noexcept {
+    if (observed_generation != expected_generation)
+        return DispatchProtocolError::kInvalidControl;
+    return count <= capacity ? DispatchProtocolError::kNone :
+        DispatchProtocolError::kCapacityOverflow;
+}
+
+DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr DispatchProtocolFailure
+make_dispatch_protocol_failure(
+    int world_rank, DispatchProtocolStage stage, std::uint64_t generation,
+    DispatchProtocolError error) noexcept {
+    return {
+        world_rank,
+        generation,
+        (static_cast<std::uint64_t>(world_rank + 1) << 32U) |
+            static_cast<std::uint32_t>(error),
+        (static_cast<std::uint32_t>(stage) << 16U) |
+            static_cast<std::uint32_t>(error),
+    };
+}
+
 using HybridRouteStageFlags = std::uint32_t;
 
 constexpr HybridRouteStageFlags hybrid_stage_bit(HybridRouteStage stage) {
@@ -55,6 +105,14 @@ static_assert(sizeof(HybridRouteRecord) == kHybridRouteRecordBytes);
 struct HybridRouteTableView {
     const HybridRouteRecord* records;
     std::uint64_t count;
+};
+
+struct HybridRouteBindingView {
+    const std::int32_t* source_metadata = nullptr;
+    const std::int64_t* received_topk_indices = nullptr;
+    std::uint64_t row_count = 0;
+    std::uint64_t num_topk = 0;
+    std::uint64_t shard_capacity = 0;
 };
 
 class DispatchAttempt;
@@ -489,6 +547,97 @@ inline DispatchHandleStatus validate_hybrid_route_table(
                      other.destination_world_rank))
                 return {DispatchHandleStatusCode::kMismatch,
                         "hybrid route table contains duplicate slots"};
+        }
+    }
+    return {};
+}
+
+inline DispatchHandleStatus validate_hybrid_route_bindings(
+    const DispatchHandleDescriptor& descriptor,
+    HybridRouteTableView route_table,
+    const HybridRouteBindingView& bindings) {
+    if (descriptor.routing_mode != DispatchRoutingMode::kHybrid ||
+        descriptor.topology.world_size <= 0 ||
+        descriptor.topology.scale_up_size <= 0 ||
+        descriptor.topology.world_rank < 0 ||
+        descriptor.topology.world_rank >= descriptor.topology.world_size ||
+        descriptor.topology.world_size %
+                descriptor.topology.scale_up_size != 0 ||
+        route_table.count != descriptor.route_record_count ||
+        bindings.row_count != route_table.count || bindings.num_topk == 0 ||
+        bindings.shard_capacity == 0 ||
+        (route_table.count != 0 &&
+         (route_table.records == nullptr || bindings.source_metadata == nullptr ||
+          bindings.received_topk_indices == nullptr)))
+        return {DispatchHandleStatusCode::kInvalidDescriptor,
+                "invalid hybrid route binding descriptor"};
+
+    const int scale_up_size = descriptor.topology.scale_up_size;
+    for (std::uint64_t index = 0; index < route_table.count; ++index) {
+        const auto& record = route_table.records[index];
+        const auto* metadata = bindings.source_metadata +
+            index * (bindings.num_topk + 2);
+        const int metadata_origin = decode_dispatch_source_rank(
+            metadata[0], bindings.shard_capacity);
+        const std::int32_t metadata_row = decode_dispatch_local_index(
+            metadata[0], bindings.shard_capacity);
+        const int lane_origin = decode_dispatch_source_rank(
+            metadata[1], bindings.num_topk);
+        const std::int32_t master_lane = decode_dispatch_local_index(
+            metadata[1], bindings.num_topk);
+        if (metadata_origin != record.origin_world_rank ||
+            lane_origin != record.origin_world_rank || metadata_row < 0 ||
+            static_cast<std::uint64_t>(metadata_row) !=
+                record.origin_source_row ||
+            !is_dispatch_local_index(master_lane, bindings.num_topk) ||
+            record.destination_world_rank != descriptor.topology.world_rank)
+            return {DispatchHandleStatusCode::kMismatch,
+                    "hybrid route record does not match source metadata"};
+
+        const auto expected_local_expert = bindings.received_topk_indices[
+            index * bindings.num_topk +
+            static_cast<std::uint64_t>(master_lane)];
+        if (expected_local_expert < 0 ||
+            expected_local_expert != record.destination_local_expert)
+            return {DispatchHandleStatusCode::kMismatch,
+                    "hybrid route record does not match received top-k"};
+
+        const int origin_domain = record.origin_world_rank / scale_up_size;
+        const int destination_domain =
+            record.destination_world_rank / scale_up_size;
+        const int origin_rail = record.origin_world_rank % scale_up_size;
+        const int destination_rail =
+            record.destination_world_rank % scale_up_size;
+        const bool diagonal = origin_domain != destination_domain &&
+            origin_rail != destination_rail;
+        const int expected_ingress = diagonal ?
+            destination_domain * scale_up_size + origin_rail :
+            record.destination_world_rank;
+        if (record.ingress_world_rank != expected_ingress ||
+            (diagonal &&
+             (record.ingress_slot == kInvalidHybridRouteSlot ||
+              record.forwarded_slot == kInvalidHybridRouteSlot)) ||
+            (!diagonal &&
+             (record.ingress_slot != kInvalidHybridRouteSlot ||
+              record.forwarded_slot != kInvalidHybridRouteSlot)))
+            return {DispatchHandleStatusCode::kMismatch,
+                    "hybrid route record has invalid stage slots"};
+
+        if (diagonal) {
+            std::uint64_t prior_origin_rows = 0;
+            for (std::uint64_t prior = 0; prior < index; ++prior) {
+                if (route_table.records[prior].origin_world_rank ==
+                    record.origin_world_rank)
+                    ++prior_origin_rows;
+            }
+            const std::uint64_t expected_forwarded_slot =
+                static_cast<std::uint64_t>(record.origin_world_rank) *
+                    bindings.shard_capacity +
+                prior_origin_rows;
+            if (record.ingress_slot != expected_forwarded_slot ||
+                record.forwarded_slot != expected_forwarded_slot)
+                return {DispatchHandleStatusCode::kMismatch,
+                        "hybrid route record has invalid staged slot"};
         }
     }
     return {};

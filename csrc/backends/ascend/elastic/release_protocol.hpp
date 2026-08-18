@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 #include "../transport/device_topology.hpp"
 
 #if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
@@ -9,6 +11,21 @@
 #endif
 
 namespace deep_ep::ascend::elastic::release_protocol {
+
+template <typename Transport>
+DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void put_staged_payload(
+    Transport& facade, const transport::TeamPeer& route,
+    transport::DeviceAddress destination, transport::DeviceAddress source,
+    std::size_t bytes) {
+    facade.system_fence();
+    if (bytes == 0)
+        return;
+    facade.put(
+        route.team, route.peer, destination, source, bytes,
+        transport::CooperationScope::kParticipant,
+        transport::MemorySegment::kDevice, transport::kDefaultOptions,
+        transport::RemoteAction::none());
+}
 
 template <typename Transport>
 DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void flush_payload(

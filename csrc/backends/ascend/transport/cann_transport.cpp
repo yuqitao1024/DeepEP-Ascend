@@ -24,6 +24,12 @@ namespace deep_ep::ascend::transport {
 namespace {
 
 constexpr std::uint64_t kDefaultRetryLimit = 1ULL << 20U;
+#if DEEP_EP_ASCEND_TESTING
+constexpr TransportCapabilities kTestingCapabilities =
+    capability_bit(TransportCapability::kScaleOutTeam);
+#else
+constexpr TransportCapabilities kTestingCapabilities = kNoCapabilities;
+#endif
 constexpr TransportCapabilities kValidatedCapabilities =
     capability_bit(TransportCapability::kSymmetricWindow) |
     capability_bit(TransportCapability::kDevicePut) |
@@ -32,7 +38,8 @@ constexpr TransportCapabilities kValidatedCapabilities =
     capability_bit(TransportCapability::kRemoteSignal) |
     capability_bit(TransportCapability::kSystemMemoryOrdering) |
     capability_bit(TransportCapability::kDeviceBarrier) |
-    capability_bit(TransportCapability::kScaleUpTeam);
+    capability_bit(TransportCapability::kScaleUpTeam) |
+    kTestingCapabilities;
 
 TransportStatus backend_failure(
     const char* operation, int backend_code) {

@@ -1316,10 +1316,12 @@ int main() {
                 "arguments.workspace",
                 "tiling.workspace_layout.scratch_status_offset"):
             self.assertIn(marker, source)
-        self.assertIn("observed_transport_error", source)
-        diagnostic_check = source.index("observed_transport_error")
-        backend_status_write = source.index("&diagnostic->backend_status")
-        self.assertLess(diagnostic_check, backend_status_write)
+        self.assertIn("make_dispatch_protocol_failure", source)
+        self.assertIn("failure.backend_status, failure.generation", source)
+        failure_build = source.index("make_dispatch_protocol_failure")
+        diagnostic_write = source.index(
+            "failure.backend_status, failure.generation")
+        self.assertLess(failure_build, diagnostic_write)
         self.assertNotIn("RemoteAction::signal_add", source + release)
         self.assertNotIn("RemoteAction::signal_increment", source + release)
         self.assertIn(
