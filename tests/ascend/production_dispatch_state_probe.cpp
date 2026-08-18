@@ -19,6 +19,17 @@ int main() {
     static_assert(std::is_standard_layout_v<HybridRouteRecord>);
     static_assert(std::is_trivially_copyable_v<HybridRouteRecord>);
     static_assert(sizeof(HybridRouteRecord) == 64);
+    static_assert(offsetof(HybridRouteRecord, origin_world_rank) == 0);
+    static_assert(offsetof(HybridRouteRecord, destination_world_rank) == 4);
+    static_assert(offsetof(HybridRouteRecord, ingress_world_rank) == 8);
+    static_assert(offsetof(HybridRouteRecord, destination_local_expert) == 12);
+    static_assert(offsetof(HybridRouteRecord, origin_source_row) == 16);
+    static_assert(offsetof(HybridRouteRecord, ingress_slot) == 24);
+    static_assert(offsetof(HybridRouteRecord, forwarded_slot) == 32);
+    static_assert(offsetof(HybridRouteRecord, generation) == 40);
+    static_assert(offsetof(HybridRouteRecord, topology_epoch) == 48);
+    static_assert(offsetof(HybridRouteRecord, stage_flags) == 56);
+    static_assert(offsetof(HybridRouteRecord, reserved) == 60);
 
     DispatchSequence sequence;
     {
@@ -135,6 +146,36 @@ int main() {
     CHECK(hybrid.dispatch_generation == 11);
     CHECK(hybrid.route_stage_flags == complete_stages);
     CHECK(!validate_dispatch_handle(expected, hybrid).ok());
+    const auto hybrid_family = attest_dispatch_handle_family(
+        99, topology, 11, 3, 128, 8, 2, 4, 256, hybrid_mode,
+        DispatchRoutingMode::kHybrid, kHybridRouteLayoutVersion, 1,
+        sizeof(HybridRouteRecord), 11, complete_stages);
+    CHECK(hybrid.family == hybrid_family);
+    CHECK(hybrid_family != attest_dispatch_handle_family(
+        99, topology, 11, 3, 128, 8, 2, 4, 256, hybrid_mode,
+        DispatchRoutingMode::kDirect, kHybridRouteLayoutVersion, 1,
+        sizeof(HybridRouteRecord), 11, complete_stages));
+    CHECK(hybrid_family != attest_dispatch_handle_family(
+        99, topology, 11, 3, 128, 8, 2, 4, 256, hybrid_mode,
+        DispatchRoutingMode::kHybrid, kHybridRouteLayoutVersion + 1, 1,
+        sizeof(HybridRouteRecord), 11, complete_stages));
+    CHECK(hybrid_family != attest_dispatch_handle_family(
+        99, topology, 11, 3, 128, 8, 2, 4, 256, hybrid_mode,
+        DispatchRoutingMode::kHybrid, kHybridRouteLayoutVersion, 2,
+        sizeof(HybridRouteRecord), 11, complete_stages));
+    CHECK(hybrid_family != attest_dispatch_handle_family(
+        99, topology, 11, 3, 128, 8, 2, 4, 256, hybrid_mode,
+        DispatchRoutingMode::kHybrid, kHybridRouteLayoutVersion, 1,
+        sizeof(HybridRouteRecord) + 8, 11, complete_stages));
+    CHECK(hybrid_family != attest_dispatch_handle_family(
+        99, topology, 11, 3, 128, 8, 2, 4, 256, hybrid_mode,
+        DispatchRoutingMode::kHybrid, kHybridRouteLayoutVersion, 1,
+        sizeof(HybridRouteRecord), 10, complete_stages));
+    CHECK(hybrid_family != attest_dispatch_handle_family(
+        99, topology, 11, 3, 128, 8, 2, 4, 256, hybrid_mode,
+        DispatchRoutingMode::kHybrid, kHybridRouteLayoutVersion, 1,
+        sizeof(HybridRouteRecord), 11,
+        hybrid_stage_bit(HybridRouteStage::kIngressComplete)));
 
     HybridRouteRecord diagonal{};
     diagonal.origin_world_rank = 0;
@@ -186,7 +227,31 @@ int main() {
     CHECK(!validate_hybrid_route_table(
         hybrid, {&invalid_record, 1}, 8, 8, 2).ok());
     invalid_record = diagonal;
+    invalid_record.origin_world_rank = -1;
+    CHECK(!validate_hybrid_route_table(
+        hybrid, {&invalid_record, 1}, 8, 8, 2).ok());
+    invalid_record = diagonal;
+    invalid_record.destination_world_rank = -1;
+    CHECK(!validate_hybrid_route_table(
+        hybrid, {&invalid_record, 1}, 8, 8, 2).ok());
+    invalid_record = diagonal;
+    invalid_record.destination_world_rank = 4;
+    CHECK(!validate_hybrid_route_table(
+        hybrid, {&invalid_record, 1}, 8, 8, 2).ok());
+    invalid_record = diagonal;
+    invalid_record.ingress_world_rank = -1;
+    CHECK(!validate_hybrid_route_table(
+        hybrid, {&invalid_record, 1}, 8, 8, 2).ok());
+    invalid_record = diagonal;
+    invalid_record.ingress_world_rank = 4;
+    CHECK(!validate_hybrid_route_table(
+        hybrid, {&invalid_record, 1}, 8, 8, 2).ok());
+    invalid_record = diagonal;
     invalid_record.origin_source_row = 8;
+    CHECK(!validate_hybrid_route_table(
+        hybrid, {&invalid_record, 1}, 8, 8, 2).ok());
+    invalid_record = diagonal;
+    invalid_record.destination_local_expert = -1;
     CHECK(!validate_hybrid_route_table(
         hybrid, {&invalid_record, 1}, 8, 8, 2).ok());
     invalid_record = diagonal;
@@ -195,6 +260,10 @@ int main() {
         hybrid, {&invalid_record, 1}, 8, 8, 2).ok());
     invalid_record = diagonal;
     invalid_record.ingress_slot = 8;
+    CHECK(!validate_hybrid_route_table(
+        hybrid, {&invalid_record, 1}, 8, 8, 2).ok());
+    invalid_record = diagonal;
+    invalid_record.forwarded_slot = 8;
     CHECK(!validate_hybrid_route_table(
         hybrid, {&invalid_record, 1}, 8, 8, 2).ok());
 
