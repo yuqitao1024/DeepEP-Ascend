@@ -9,28 +9,36 @@ byte formulas.
 The exhaustive case table and the statistical definitions are in
 [`docs/superpowers/specs/2026-08-18-ascend-epv2-benchmark-parity-design.md`](../../../docs/superpowers/specs/2026-08-18-ascend-epv2-benchmark-parity-design.md).
 
-## Supported intersection
+## Suite classification
 
 | Classification | Cases | Ascend behavior | Reason |
 | --- | ---: | --- | --- |
-| Synchronous BF16 | 12 | Correctness and performance | |
-| FP8 | 72 | Reported, not executed | `fp8_runtime_deferred` |
-| Previous event | 24 | Reported, not executed | `event_chaining_deferred` |
-| Async compute overlap | 24 | Reported, not executed | `async_overlap_deferred` |
-| Communication-stream allocation | 12 | Reported, not executed | `comm_stream_allocation_deferred` |
-| Total | 144 | 12 supported, 132 unsupported | |
+| Current BF16 performance | 12 | Correctness preflight and timing | |
+| Deferred FP8 performance | 12 | Listed, not executed | `fp8_runtime_deferred` |
+| Functional previous event | 48 | Listed, not executed | `event_chaining_deferred` |
+| Functional async without previous event | 48 | Listed, not executed | `async_overlap_deferred` |
+| Functional comm allocation only | 24 | Listed, not executed | `comm_stream_allocation_deferred` |
+| Total inventory | 144 | 12 current performance, 132 deferred | |
 
 Each supported case checks normal dispatch, expanded dispatch, cached dispatch,
 cached expanded dispatch with zero padding, combine, and reduced/expanded
-combine. The five operations other than cached expanded padding are timed.
-FP8 remains deferred while its separate implementation is in progress.
+combine. The correctness work is a preflight gate for each performance case,
+not a separate functional case. The five operations other than cached expanded
+padding are timed, producing 60 performance records per complete run. FP8
+remains deferred while its separate implementation is in progress.
 
-List every case without importing torch or torch_npu:
+List cases without importing torch or torch_npu:
 
 ```bash
-python3 tests/ascend/benchmark/bench_ep.py --list-cases
-python3 tests/ascend/benchmark/bench_ep.py --list-cases --format json
+python3 tests/ascend/benchmark/bench_ep.py --list-cases --suite all
+python3 tests/ascend/benchmark/bench_ep.py \
+  --list-cases --suite performance --format json
+python3 tests/ascend/benchmark/bench_ep.py \
+  --list-cases --suite functional --format json
 ```
+
+The inventory has 24 performance rows: 12 current BF16 and 12 deferred FP8.
+The 120 functional rows never appear in a performance report.
 
 ## Ascend environment
 
@@ -84,8 +92,9 @@ export PYTHONPATH="$HCOMM_ROOT/python/site-packages${PYTHONPATH:+:$PYTHONPATH}" 
 DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace &&
 python -m torch.distributed.run --standalone --nproc-per-node=2 \
   tests/ascend/benchmark/bench_ep.py \
-  --warmups 2 --iterations 3 \
-  --output /tmp/ascend-ep2-smoke.json
+  --num-tokens 16 --hidden 128 --num-topk 2 --num-experts 4 \
+  --warmups 1 --iterations 1 \
+  --output /tmp/ascend-ep2-performance-smoke.json
 '
 ```
 
@@ -117,8 +126,8 @@ torchrun --standalone --nproc-per-node=8 \
   --warmups 1 --iterations 1 --output /tmp/ascend-ep8-smoke.json
 ```
 
-These short runs qualify launch and supported-case coverage only. They are not
-full topology performance qualification.
+These short runs qualify launch and current-performance case coverage only.
+They are not full topology performance qualification.
 
 ## CUDA parity and manifests
 
@@ -163,12 +172,15 @@ workload fingerprint, passed case IDs, or operation IDs differ.
 
 ## JSON interpretation
 
-Every report contains all 144 cases. Top-level identity fields include
-`schema_version`, `formula_version`, `platform`, `world_size`, `workload`, and
-`workload_fingerprint`. Each passed operation records raw device/wall samples,
-mean/p50/p95 summaries, logical bytes, formula version, per-rank summaries,
-and aggregated logical GB/s. Rank latency uses the maximum for each sample;
-logical bytes are summed over ranks.
+The default report contains exactly 12 current BF16 performance cases and 60
+operation records; the 144-row inventory is available separately through
+`--list-cases`. Top-level identity fields include `schema_version`,
+`formula_version`, `platform`, `world_size`, `workload`, and
+`workload_fingerprint`. `case_summary` reports `total`, `pending`, `passed`,
+and `failed` for cases actually present. Each passed operation records raw
+device/wall samples, mean/p50/p95 summaries, logical bytes, formula version,
+per-rank summaries, and aggregated logical GB/s. Rank latency uses the maximum
+for each sample; logical bytes are summed over ranks.
 
 Do not compare internal kernel-stage profiler times across platforms. The
 canonical comparable latency is the end-to-end CUDA/NPU event interval around
