@@ -220,6 +220,8 @@ int main() {
                 static_cast<std::uint64_t>(fixture.world_size);
             if (rank_scratch.scratch_bytes != fixture.bytes ||
                 rank_scratch.scratch_rank_count != count ||
+                rank_scratch.scratch_outbound_ingress_counts_offset != 0 ||
+                rank_scratch.scratch_outbound_ingress_count != 0 ||
                 rank_scratch.scratch_status_offset !=
                     rank_scratch.scratch_offset ||
                 rank_scratch.scratch_local_count_offset !=
@@ -241,6 +243,34 @@ int main() {
                 return 18;
         }
     }
+
+    input = valid_input();
+    input.mode_flags = mode_bit(CoreMode::kHybrid);
+    input.num_experts = 8;
+    input.topology.world_rank = 0;
+    input.topology.world_size = 4;
+    input.topology.scale_up_rank = 0;
+    input.topology.scale_up_size = 2;
+    input.topology.scale_out_rank = 0;
+    input.topology.scale_out_size = 2;
+    input.topology.kind =
+        deep_ep::ascend::transport::TransportTopologyKind::kLogicalSimulation;
+    status = build_core_tiling(input, &tiling);
+    if (!status.ok())
+        return 21;
+    const auto& hybrid_scratch = tiling.workspace_layout;
+    if (hybrid_scratch.scratch_outbound_ingress_count != 4 ||
+        hybrid_scratch.scratch_outbound_ingress_counts_offset !=
+            hybrid_scratch.scratch_rank_values_offset +
+                4 * sizeof(std::uint64_t) ||
+        hybrid_scratch.scratch_rank_indices_offset !=
+            hybrid_scratch.scratch_outbound_ingress_counts_offset +
+                4 * sizeof(std::uint64_t) ||
+        hybrid_scratch.scratch_bytes != 160 ||
+        hybrid_scratch.scratch_outbound_ingress_counts_offset +
+                4 * sizeof(std::uint64_t) >
+            hybrid_scratch.scratch_offset + hybrid_scratch.scratch_bytes)
+        return 22;
 
     return 0;
 }

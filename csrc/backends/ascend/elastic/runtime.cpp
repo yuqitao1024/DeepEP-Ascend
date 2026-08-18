@@ -84,6 +84,10 @@ bool same_workspace_layout(
            lhs.scratch_local_count_offset == rhs.scratch_local_count_offset &&
            lhs.scratch_rank_counts_offset == rhs.scratch_rank_counts_offset &&
            lhs.scratch_rank_values_offset == rhs.scratch_rank_values_offset &&
+           lhs.scratch_outbound_ingress_counts_offset ==
+               rhs.scratch_outbound_ingress_counts_offset &&
+           lhs.scratch_outbound_ingress_count ==
+               rhs.scratch_outbound_ingress_count &&
            lhs.scratch_rank_indices_offset == rhs.scratch_rank_indices_offset &&
            lhs.scratch_rank_flags_offset == rhs.scratch_rank_flags_offset &&
            lhs.scratch_rank_count == rhs.scratch_rank_count &&

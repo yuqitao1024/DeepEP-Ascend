@@ -417,7 +417,7 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 }
 
 int main() {
-    static_assert(kCoreTilingAbiVersion == 9);
+    static_assert(kCoreTilingAbiVersion == 10);
     auto hybrid_tiling = valid_two_dimensional_tiling(
         OperationKind::kDispatch, 0,
         transport::TransportTopologyKind::kLogicalSimulation,
@@ -434,6 +434,13 @@ int main() {
             expected_hybrid_route_capacity ||
         hybrid_tiling.symmetric_window_layout
                 .hybrid_dispatch_ingress_shard_count != 4 ||
+        hybrid_tiling.workspace_layout
+                .scratch_outbound_ingress_count != 4 ||
+        hybrid_tiling.workspace_layout
+                .scratch_outbound_ingress_counts_offset +
+                    4 * sizeof(std::uint64_t) >
+            hybrid_tiling.workspace_layout.scratch_offset +
+                hybrid_tiling.workspace_layout.scratch_bytes ||
         hybrid_tiling.symmetric_window_layout
                 .hybrid_combine_return_shard_count != 4)
         return 74;
@@ -763,6 +770,12 @@ int main() {
     if (validate_internal_launch(malformed, storage).code !=
         CoreRuntimeStatusCode::kInvalidArgument)
         return 72;
+    malformed = hybrid_tiling;
+    --malformed.workspace_layout.scratch_outbound_ingress_count;
+    if (validate_internal_launch(
+            malformed, required_core_launch_storage(malformed)).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 79;
     malformed = dispatch_tiling;
     malformed.launch.num_threads = 0;
     if (validate_internal_launch(malformed, storage).code !=

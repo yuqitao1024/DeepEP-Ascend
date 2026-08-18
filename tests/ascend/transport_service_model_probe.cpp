@@ -3,6 +3,7 @@
 
 #include "csrc/backends/ascend/elastic/kernels.hpp"
 #include "csrc/backends/ascend/elastic/release_protocol.hpp"
+#include "csrc/backends/ascend/elastic/tiling.hpp"
 #include "csrc/backends/ascend/transport/aicore_transport_service.hpp"
 #include "csrc/backends/ascend/transport/sync_layout.hpp"
 
@@ -470,6 +471,50 @@ void check_local_canonical_control_publication() {
     }
 }
 
+void check_outbound_ingress_counts_survive_reset_after_publish() {
+    elastic::CoreTilingInput input{};
+    input.operation = elastic::OperationKind::kDispatch;
+    input.element_kind = elastic::ElementKind::kBFloat16;
+    input.mode_flags = elastic::mode_bit(elastic::CoreMode::kHybrid);
+    input.num_tokens = 4;
+    input.hidden = 4;
+    input.num_experts = 4;
+    input.num_topk = 1;
+    input.expert_alignment = 1;
+    input.num_max_tokens_per_rank = 4;
+    input.topology.world_rank = 2;
+    input.topology.world_size = 4;
+    input.topology.scale_up_rank = 0;
+    input.topology.scale_up_size = 2;
+    input.topology.scale_out_rank = 1;
+    input.topology.scale_out_size = 2;
+    input.topology.kind =
+        transport::TransportTopologyKind::kLogicalSimulation;
+    input.topology.epoch = 1;
+
+    elastic::CoreTiling tiling{};
+    CHECK(elastic::build_core_tiling(input, &tiling).ok());
+    const auto& layout = tiling.workspace_layout;
+    CHECK(layout.scratch_outbound_ingress_count == 4);
+    CHECK(layout.scratch_outbound_ingress_counts_offset >=
+          layout.scratch_offset);
+    CHECK(layout.scratch_outbound_ingress_counts_offset +
+              layout.scratch_outbound_ingress_count * sizeof(std::uint64_t) <=
+          layout.scratch_offset + layout.scratch_bytes);
+
+    alignas(elastic::kAscendElasticAlignment) std::uint8_t workspace[1024]{};
+    ReleaseControlFixture receive_owned{7, 1};
+    auto* outbound = reinterpret_cast<std::uint64_t*>(
+        workspace + layout.scratch_outbound_ingress_counts_offset);
+
+    // Model an early peer publication followed by this rank's late local reset.
+    for (std::uint64_t rank = 0;
+         rank < layout.scratch_outbound_ingress_count; ++rank)
+        outbound[rank] = 0;
+    CHECK(receive_owned.generation == 7);
+    CHECK(receive_owned.count == 1);
+}
+
 void check_release_acquire_and_selected_barrier_sequence() {
     transport::TransportTopology topology{};
     CHECK(transport::build_transport_topology(
@@ -517,6 +562,7 @@ int main() {
     check_hybrid_release_observation_boundaries();
     check_hybrid_prepare_observes_ingress_before_control();
     check_local_canonical_control_publication();
+    check_outbound_ingress_counts_survive_reset_after_publish();
     check_release_acquire_and_selected_barrier_sequence();
     return failures == 0 ? 0 : 1;
 }

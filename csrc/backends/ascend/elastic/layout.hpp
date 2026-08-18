@@ -144,6 +144,8 @@ struct WorkspaceLayout {
     std::uint64_t scratch_local_count_offset = 0;
     std::uint64_t scratch_rank_counts_offset = 0;
     std::uint64_t scratch_rank_values_offset = 0;
+    std::uint64_t scratch_outbound_ingress_counts_offset = 0;
+    std::uint64_t scratch_outbound_ingress_count = 0;
     std::uint64_t scratch_rank_indices_offset = 0;
     std::uint64_t scratch_rank_flags_offset = 0;
     std::uint64_t scratch_rank_count = 0;

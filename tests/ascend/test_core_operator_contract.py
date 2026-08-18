@@ -1084,6 +1084,27 @@ int main() {
         self.assertNotIn(
             "release_protocol::acquire_release(", combine_epilogue)
 
+    def test_hybrid_dispatch_ingress_control_is_receive_owned(self):
+        """Catches local scratch writes racing remote ingress publication."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        producer = source[
+            source.index("__simt_vf__ inline void dispatch_producer_vf"):
+            source.index(
+                "DEEP_EP_ASCEND_SIMT_CALLEE transport::DeviceTransportContext")]
+        self.assertIn(
+            "workspace_scratch_outbound_ingress_counts_offset", producer)
+        self.assertIn(
+            "workspace_scratch_outbound_ingress_count", producer)
+        self.assertIn("outbound_ingress_counts", producer)
+        self.assertNotRegex(
+            producer,
+            r"ingress_control_slots\s*\[[^]]+\]\s*\.count\s*(?:=|\+\+)")
+        self.assertIn("outbound_ingress_counts[ingress_rank]", producer)
+        self.assertIn(
+            "const std::uint64_t count =\n"
+            "                outbound_ingress_counts[ingress_rank]",
+            producer)
+
     def test_pure_cpp_runtime_contract(self):
         runtime = ELASTIC / "runtime.cpp"
         self.assertTrue(runtime.is_file(), str(runtime))

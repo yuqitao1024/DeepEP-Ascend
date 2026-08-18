@@ -42,7 +42,7 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 9;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 10;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -188,7 +188,11 @@ inline bool build_workspace_layout(
         return false;
     layout.scratch_rank_count =
         static_cast<std::uint64_t>(input.topology.world_size);
+    layout.scratch_outbound_ingress_count =
+        has_mode(input.mode_flags, CoreMode::kHybrid) ?
+            layout.scratch_rank_count : 0;
     std::uint64_t rank_u64_bytes = 0;
+    std::uint64_t outbound_ingress_count_bytes = 0;
     std::uint64_t rank_i32_bytes = 0;
     std::uint64_t scratch_cursor = 0;
     if (!checked_multiply(
@@ -197,6 +201,9 @@ inline bool build_workspace_layout(
         !checked_multiply(
             layout.scratch_rank_count, sizeof(std::int32_t),
             &rank_i32_bytes) ||
+        !checked_multiply(
+            layout.scratch_outbound_ingress_count, sizeof(std::uint64_t),
+            &outbound_ingress_count_bytes) ||
         !checked_add(scratch_cursor, sizeof(std::uint64_t),
                      &scratch_cursor))
         return false;
@@ -210,6 +217,13 @@ inline bool build_workspace_layout(
     layout.scratch_rank_values_offset = scratch_cursor;
     if (!checked_add(scratch_cursor, rank_u64_bytes, &scratch_cursor))
         return false;
+    if (layout.scratch_outbound_ingress_count != 0) {
+        layout.scratch_outbound_ingress_counts_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, outbound_ingress_count_bytes,
+                &scratch_cursor))
+            return false;
+    }
     layout.scratch_rank_indices_offset = scratch_cursor;
     if (!checked_add(scratch_cursor, rank_i32_bytes, &scratch_cursor))
         return false;
@@ -241,6 +255,11 @@ inline bool build_workspace_layout(
         !checked_add(
             layout.scratch_offset, layout.scratch_rank_values_offset,
             &layout.scratch_rank_values_offset) ||
+        (layout.scratch_outbound_ingress_count != 0 &&
+         !checked_add(
+             layout.scratch_offset,
+             layout.scratch_outbound_ingress_counts_offset,
+             &layout.scratch_outbound_ingress_counts_offset)) ||
         !checked_add(
             layout.scratch_offset, layout.scratch_rank_indices_offset,
             &layout.scratch_rank_indices_offset) ||
