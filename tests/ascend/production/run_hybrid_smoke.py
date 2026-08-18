@@ -2,7 +2,9 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import sys
+import time
 from dataclasses import dataclass
 
 
@@ -135,6 +137,21 @@ def reference_reverse_schedule(records, contributions):
     )
 
 
+def validate_bounded_failure(message, rank, elapsed):
+    if f"dispatch failed on rank {rank}" not in message:
+        raise AssertionError(f"bounded failure omitted rank {rank}: {message}")
+    for field in ("command_index", "opcode", "peer", "channel"):
+        if re.search(rf"{field}=[0-9]+", message) is None:
+            raise AssertionError(
+                f"bounded failure omitted numeric {field}: {message}")
+    if re.search(r"generation=[1-9][0-9]*", message) is None:
+        raise AssertionError(
+            f"bounded failure omitted positive generation: {message}")
+    if elapsed >= 30:
+        raise AssertionError(
+            f"bounded failure exceeded 30 seconds: {elapsed:.3f}s")
+
+
 def _contract():
     return {
         "allow_multiple_reduction": [False, True],
@@ -144,6 +161,7 @@ def _contract():
             "repeated-generations",
             "cached-dispatch",
             "reverse-combine",
+            "bounded-failure-poisoned-teardown",
         ],
         "environment": {
             "DEEP_EP_ASCEND_LOGICAL_SIMULATION": "1",
@@ -203,6 +221,39 @@ def _run_runtime():
                     "logical domain is not 2x2"),
                 "hybrid topology validation")
 
+        def _run_bounded_failure(self):
+            def expect_failure():
+                x = self.torch.full(
+                    (1, base.HIDDEN), self.rank + 1,
+                    dtype=self.torch.bfloat16, device=self.device)
+                topk_idx = self.torch.full(
+                    (1, 1), WORLD_SIZE,
+                    dtype=self.torch.int64, device=self.device)
+                started = time.monotonic()
+                try:
+                    self.buffer.dispatch(
+                        x,
+                        topk_idx=topk_idx,
+                        num_experts=WORLD_SIZE,
+                        num_max_tokens_per_rank=WORLD_SIZE,
+                        expert_alignment=1,
+                        num_sms=1,
+                        num_qps=0,
+                        do_handle_copy=True,
+                        do_cpu_sync=True)
+                except RuntimeError as error:
+                    validate_bounded_failure(
+                        str(error), self.rank, time.monotonic() - started)
+                else:
+                    raise AssertionError("invalid hybrid expert was accepted")
+
+            self._step(
+                expect_failure, "bounded invalid hybrid dispatch")
+
+        def run(self):
+            super().run()
+            self._run_bounded_failure()
+
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.npu.set_device(local_rank)
     dist.init_process_group("hccl")
@@ -218,7 +269,7 @@ def _run_runtime():
             try:
                 smoke.run()
             finally:
-                smoke.buffer.destroy()
+                base._destroy_twice(smoke.buffer)
     finally:
         dist.destroy_process_group()
     if int(os.environ["RANK"]) == 0:

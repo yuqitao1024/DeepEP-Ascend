@@ -4,6 +4,8 @@ import pathlib
 import re
 import subprocess
 
+import pytest
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "tests/ascend/production/run_hybrid_smoke.py"
@@ -29,6 +31,7 @@ def test_hybrid_runner_contract_is_exact():
             "repeated-generations",
             "cached-dispatch",
             "reverse-combine",
+            "bounded-failure-poisoned-teardown",
         ],
         "environment": {
             "DEEP_EP_ASCEND_LOGICAL_SIMULATION": "1",
@@ -117,6 +120,39 @@ def test_reverse_schedule_uses_recorded_slots_not_contributor_order():
         records, contributions)
     assert reverse_forward == ((2, 0, "second"), (2, 1, "first"))
     assert reverse_return == ((0, 0, "first"), (0, 1, "second"))
+
+
+def test_bounded_failure_contract_requires_deterministic_diagnostics():
+    model = _load_runner()
+    message = (
+        "dispatch failed on rank 2: error=invalid_protocol generation=17 "
+        "command_index=0 opcode=0 peer=2 channel=0")
+    model.validate_bounded_failure(message, rank=2, elapsed=4.5)
+
+    for invalid in (
+            message.replace("rank 2", "rank 1"),
+            message.replace("generation=17", "generation=0"),
+            message.replace("command_index=0", "command_index=unknown"),
+            message.replace("opcode=0", "opcode=unknown"),
+            message.replace("peer=2", "peer=unknown"),
+            message.replace("channel=0", "channel=unknown")):
+        with pytest.raises(AssertionError):
+            model.validate_bounded_failure(invalid, rank=2, elapsed=4.5)
+    with pytest.raises(AssertionError):
+        model.validate_bounded_failure(message, rank=2, elapsed=30.0)
+
+
+def test_production_runner_executes_bounded_failure_last_then_destroys_twice():
+    source = RUNNER.read_text()
+    bounded_start = source.index("def _run_bounded_failure")
+    bounded = source[bounded_start:source.index("def run(self):", bounded_start)]
+    assert bounded.index("self.buffer.dispatch(") < bounded.index(
+        "validate_bounded_failure(")
+    assert "self.buffer.barrier(" not in bounded
+    runtime = source[source.index("class HybridSmoke") :]
+    assert runtime.index("super().run()") < runtime.index(
+        "self._run_bounded_failure()")
+    assert "base._destroy_twice(smoke.buffer)" in runtime
 
 
 def test_production_exposes_device_only_two_stage_hybrid_contract():
