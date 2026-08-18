@@ -52,9 +52,18 @@ DEEP_EP_ASCEND_SIMT_CALLEE __gm__ DeviceTransportDiagnostic* diagnostic(
 
 DEEP_EP_ASCEND_SIMT_CALLEE __gm__ std::uint64_t* signal_address(
     const DeviceTransportContext& context, int source_rank,
-    std::uint32_t signal_index) {
-    if (context.channel_table == 0 || source_rank < 0)
+    std::uint32_t signal_index, std::uint32_t* failure_stage = nullptr,
+    std::uint64_t* failure_value = nullptr) {
+    if (failure_stage != nullptr)
+        *failure_stage = 0;
+    if (failure_value != nullptr)
+        *failure_value = 0;
+    if (context.channel_table == 0) {
+        if (failure_stage != nullptr)
+            *failure_stage = static_cast<std::uint32_t>(
+                sync_layout::SignalAddressFailure::kMissingTeam);
         return nullptr;
+    }
     auto* team = reinterpret_cast<__gm__ cann_abi::Team*>(
         context.channel_table);
     const auto members = simt::load_observed(&team->member_count);
@@ -64,16 +73,51 @@ DEEP_EP_ASCEND_SIMT_CALLEE __gm__ std::uint64_t* signal_address(
     const auto barriers = simt::load_observed(&team->barrier_count);
     const auto memories_address =
         simt::load_observed(&team->remote_sync_memories);
-    if (static_cast<std::uint32_t>(source_rank) >= members || self >= members ||
-        signals != sync_layout::kWorldTeamSignalCount ||
-        counters != sync_layout::kWorldTeamCounterCount ||
-        barriers < sync_layout::kWorldTeamBarrierCount ||
-        signal_index >= sync_layout::kLogicalSignalCount ||
-        memories_address == 0)
+    const auto failure = sync_layout::classify_signal_address_layout(
+        members, self, signals, counters, barriers, memories_address,
+        source_rank, signal_index);
+    if (failure != sync_layout::SignalAddressFailure::kNone) {
+        if (failure_stage != nullptr)
+            *failure_stage = static_cast<std::uint32_t>(failure);
+        if (failure_value != nullptr) {
+            switch (failure) {
+                case sync_layout::SignalAddressFailure::kInvalidSourceMember:
+                    *failure_value = static_cast<std::uint64_t>(source_rank);
+                    break;
+                case sync_layout::SignalAddressFailure::kInvalidSelfMember:
+                    *failure_value = self;
+                    break;
+                case sync_layout::SignalAddressFailure::kInvalidSignalCount:
+                    *failure_value = signals;
+                    break;
+                case sync_layout::SignalAddressFailure::kInvalidCounterCount:
+                    *failure_value = counters;
+                    break;
+                case sync_layout::SignalAddressFailure::kInvalidBarrierCount:
+                    *failure_value = barriers;
+                    break;
+                case sync_layout::SignalAddressFailure::kInvalidSignalIndex:
+                    *failure_value = signal_index;
+                    break;
+                case sync_layout::SignalAddressFailure::kMissingRemoteSyncMemories:
+                    *failure_value = memories_address;
+                    break;
+                default: break;
+            }
+        }
         return nullptr;
+    }
     auto* memories = reinterpret_cast<__gm__ cann_abi::Memory*>(
         memories_address);
     const auto base = simt::load_observed(&memories[self].address);
+    if (base == 0) {
+        if (failure_stage != nullptr)
+            *failure_stage = static_cast<std::uint32_t>(
+                sync_layout::SignalAddressFailure::kMissingLocalSyncMemory);
+        if (failure_value != nullptr)
+            *failure_value = self;
+        return nullptr;
+    }
     const auto offset =
         (static_cast<std::uint64_t>(signal_index) * members +
          static_cast<std::uint32_t>(source_rank)) * sizeof(std::uint64_t);
@@ -84,7 +128,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE __gm__ std::uint64_t* signal_address(
 DEEP_EP_ASCEND_SIMT_CALLEE void record_error(
     __gm__ TransportCommandQueue* queue, DeviceTransportError error,
     TransportCommandOpcode opcode, TransportTeam team, int peer,
-    int world_peer, DeviceChannel channel) {
+    int world_peer, DeviceChannel channel, std::uint32_t backend_status = 0,
+    std::uint64_t reserved = 0) {
     auto* output = diagnostic(queue);
     if (output == nullptr ||
         simt::load_observed(reinterpret_cast<__gm__ std::uint32_t*>(
@@ -104,6 +149,10 @@ DEEP_EP_ASCEND_SIMT_CALLEE void record_error(
         reinterpret_cast<__gm__ std::uint8_t*>(&output->team),
         static_cast<std::uint8_t>(team));
     simt::store_published(&output->channel, channel);
+    if (backend_status != 0 || reserved != 0) {
+        simt::store_published(&output->backend_status, backend_status);
+        simt::store_published(&output->reserved, reserved);
+    }
     simt::system_fence();
     simt::store_published(
         reinterpret_cast<__gm__ std::uint32_t*>(&output->error),
@@ -112,9 +161,11 @@ DEEP_EP_ASCEND_SIMT_CALLEE void record_error(
 
 DEEP_EP_ASCEND_SIMT_CALLEE void record_error(
     __gm__ TransportCommandQueue* queue, DeviceTransportError error,
-    TransportCommandOpcode opcode, int peer, DeviceChannel channel) {
+    TransportCommandOpcode opcode, int peer, DeviceChannel channel,
+    std::uint32_t backend_status = 0, std::uint64_t reserved = 0) {
     record_error(
-        queue, error, opcode, TransportTeam::kWorld, peer, peer, channel);
+        queue, error, opcode, TransportTeam::kWorld, peer, peer, channel,
+        backend_status, reserved);
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE bool validate_queue(
@@ -421,12 +472,15 @@ DEEP_EP_ASCEND_SIMT_CALLEE void wait_signal(
             channel);
         return;
     }
-    auto* address = detail::signal_address(context, world_peer, signal_index);
+    std::uint32_t failure_stage = 0;
+    std::uint64_t failure_value = 0;
+    auto* address = detail::signal_address(
+        context, world_peer, signal_index, &failure_stage, &failure_value);
     if (address == nullptr) {
         detail::record_error(
             queue, DeviceTransportError::kInvalidAddress,
             TransportCommandOpcode::kSignal, team, source_rank, world_peer,
-            channel);
+            channel, failure_stage, failure_value);
         return;
     }
     const auto limit = timeout_cycles == 0 ?

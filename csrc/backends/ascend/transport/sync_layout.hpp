@@ -18,6 +18,42 @@ inline constexpr std::uint32_t kWorldTeamCounterCount = 0;
 inline constexpr std::uint32_t kWorldTeamBarrierCount =
     kLogicalSignalCount + kLogicalBarrierCount;
 
+enum class SignalAddressFailure : std::uint32_t {
+    kNone = 0,
+    kMissingTeam = 10,
+    kInvalidSourceMember = 11,
+    kInvalidSelfMember = 12,
+    kInvalidSignalCount = 13,
+    kInvalidCounterCount = 14,
+    kInvalidBarrierCount = 15,
+    kInvalidSignalIndex = 16,
+    kMissingRemoteSyncMemories = 17,
+    kMissingLocalSyncMemory = 18,
+};
+
+inline constexpr SignalAddressFailure classify_signal_address_layout(
+    std::uint32_t member_count, std::uint32_t self_member,
+    std::uint32_t signal_count, std::uint32_t counter_count,
+    std::uint32_t barrier_count, std::uintptr_t remote_sync_memories,
+    int source_member, std::uint32_t signal_index) {
+    if (source_member < 0 ||
+        static_cast<std::uint32_t>(source_member) >= member_count)
+        return SignalAddressFailure::kInvalidSourceMember;
+    if (self_member >= member_count)
+        return SignalAddressFailure::kInvalidSelfMember;
+    if (signal_count != kWorldTeamSignalCount)
+        return SignalAddressFailure::kInvalidSignalCount;
+    if (counter_count != kWorldTeamCounterCount)
+        return SignalAddressFailure::kInvalidCounterCount;
+    if (barrier_count < kWorldTeamBarrierCount)
+        return SignalAddressFailure::kInvalidBarrierCount;
+    if (signal_index >= kLogicalSignalCount)
+        return SignalAddressFailure::kInvalidSignalIndex;
+    if (remote_sync_memories == 0)
+        return SignalAddressFailure::kMissingRemoteSyncMemories;
+    return SignalAddressFailure::kNone;
+}
+
 inline constexpr bool has_required_world_team_layout(
     std::uint32_t signal_count, std::uint32_t counter_count,
     std::uint32_t barrier_count) {

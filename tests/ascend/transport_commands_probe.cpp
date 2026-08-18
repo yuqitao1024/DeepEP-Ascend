@@ -327,6 +327,30 @@ void check_barrier_poll_timeout() {
     CHECK(barrier_poll_timed_out(UINT64_MAX - 2, 2, 5, 0, 1000));
 }
 
+void check_signal_address_layout_diagnostics() {
+    using Failure = transport::sync_layout::SignalAddressFailure;
+    using transport::sync_layout::classify_signal_address_layout;
+
+    CHECK(classify_signal_address_layout(4, 0, 0, 0, 6, 1, 1, 0) ==
+          Failure::kNone);
+    CHECK(classify_signal_address_layout(4, 0, 0, 0, 6, 1, -1, 0) ==
+          Failure::kInvalidSourceMember);
+    CHECK(classify_signal_address_layout(4, 4, 0, 0, 6, 1, 1, 0) ==
+          Failure::kInvalidSelfMember);
+    CHECK(classify_signal_address_layout(4, 0, 1, 0, 6, 1, 1, 0) ==
+          Failure::kInvalidSignalCount);
+    CHECK(classify_signal_address_layout(4, 0, 0, 1, 6, 1, 1, 0) ==
+          Failure::kInvalidCounterCount);
+    CHECK(classify_signal_address_layout(4, 0, 0, 0, 5, 1, 1, 0) ==
+          Failure::kInvalidBarrierCount);
+    CHECK(classify_signal_address_layout(4, 0, 0, 0, 6, 1, 1, 4) ==
+          Failure::kInvalidSignalIndex);
+    CHECK(classify_signal_address_layout(4, 0, 0, 0, 6, 0, 1, 0) ==
+          Failure::kMissingRemoteSyncMemories);
+    CHECK(classify_signal_address_layout(0, 0, 0, 0, 6, 1, 0, 0) ==
+          Failure::kInvalidSourceMember);
+}
+
 }  // namespace
 
 int main() {
@@ -336,5 +360,6 @@ int main() {
     check_checked_queue_reset();
     check_service_entry_contract();
     check_barrier_poll_timeout();
+    check_signal_address_layout_diagnostics();
     return failures == 0 ? 0 : 1;
 }
