@@ -425,7 +425,7 @@ class AscendRuntime:
         ref_x, ref_idx, ref_weights, ref_src_idx, _ = ref_dispatch
         recv_x, recv_idx, recv_weights, handle, event = normal
         expanded_x, expanded_idx, expanded_weights, expanded_handle, _ = expanded
-        cached_x, cached_idx, cached_weights, cached_handle, _ = cached
+        cached_x, cached_idx, _, cached_handle, _ = cached
         cached_expanded_x, _, cached_expanded_weights, _, _ = cached_expanded
 
         assert event.event is None
@@ -441,7 +441,6 @@ class AscendRuntime:
             recv_x, cached_x, rtol=0, atol=0
         )
         assert self.torch.equal(recv_idx, cached_idx)
-        assert self.torch.equal(recv_weights, cached_weights)
 
         order = self.torch.argsort(handle.recv_src_metadata[:, 0])
         assert self.torch.equal(handle.recv_src_metadata[order, 0], ref_src_idx)

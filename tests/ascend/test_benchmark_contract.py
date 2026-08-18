@@ -3,6 +3,7 @@ import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,10 +14,11 @@ from tests.ascend.benchmark.report import (
 )
 from tests.ascend.benchmark.compare import compare_reports
 from tests.ascend.benchmark.bench_ep import build_parser, _selected_case_ids
+from tests.ascend.benchmark.runtime import AscendRuntime
 from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
 from tests.ascend.benchmark.timing import NpuEventTimer
 from tests.ascend.benchmark.workloads import classify_ascend_case
-from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
+from tests.utils.ep_benchmark_manifest import EPModeCase, enumerate_ep_mode_cases
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -80,6 +82,108 @@ def test_supported_ascend_cases_are_the_sync_bf16_intersection():
         for num_bias in (0, 1, 2)
         for do_handle_copy in (True, False)
     }
+
+
+class _ContractTensor:
+    shape = (1, 3)
+
+    def data_ptr(self):
+        return 1
+
+    def __getitem__(self, _key):
+        return self
+
+    def __lt__(self, _other):
+        return self
+
+    def __ge__(self, _other):
+        return self
+
+    def __eq__(self, _other):
+        return self
+
+    def __invert__(self):
+        return self
+
+    def masked_fill(self, _mask, _value):
+        return self
+
+    def to(self, _dtype):
+        return self
+
+    def argmax(self, dim):
+        assert dim == 1
+        return self
+
+    def flatten(self):
+        return self
+
+    def float(self):
+        return self
+
+    def all(self):
+        return self
+
+    def item(self):
+        return 1
+
+
+class _ContractTorch:
+    int32 = "int32"
+    testing = SimpleNamespace(assert_close=lambda *_args, **_kwargs: None)
+
+    @staticmethod
+    def equal(left, right):
+        if left is None or right is None:
+            raise TypeError("equal() operands must be tensors")
+        return True
+
+    @staticmethod
+    def argsort(_tensor):
+        return _ContractTensor()
+
+    @staticmethod
+    def arange(_length, device):
+        assert device == "npu"
+        return _ContractTensor()
+
+
+def test_correctness_check_accepts_missing_cached_weights_like_upstream():
+    tensor = _ContractTensor()
+    handle = SimpleNamespace(
+        topk_idx=tensor,
+        recv_src_metadata=tensor,
+        psum_num_recv_tokens_per_expert=tensor,
+    )
+    event = SimpleNamespace(event=None)
+    normal = (tensor, tensor, tensor, handle, event)
+    expanded = (tensor, None, tensor, handle, event)
+    cached = (tensor, tensor, None, handle, event)
+    cached_expanded = (tensor, None, tensor, handle, event)
+    combined = (tensor, tensor, event)
+    case = EPModeCase(False, 1, False, 0, False, False, False)
+    runtime = AscendRuntime.__new__(AscendRuntime)
+    runtime.torch = _ContractTorch()
+    runtime.device = "npu"
+    runtime.world_size = 1
+    runtime.args = SimpleNamespace(allow_multiple_reduction=False)
+    runtime.manifest = SimpleNamespace(
+        spec=SimpleNamespace(num_experts=1),
+    )
+
+    runtime._check_case(
+        case,
+        tensor,
+        tensor,
+        normal,
+        expanded,
+        cached,
+        cached_expanded,
+        combined,
+        combined,
+        ((tensor, tensor, tensor, tensor, None), tensor, tensor),
+        num_recv_tokens=1,
+    )
 
 
 def test_summary_uses_linear_percentiles_and_decimal_gbps():
