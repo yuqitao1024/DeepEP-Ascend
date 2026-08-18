@@ -32,6 +32,28 @@ int main() {
     CHECK(core_topology.kind == TransportTopologyKind::kLogicalSimulation);
     CHECK(core_topology.epoch == 17);
 
+    const auto logical_physical_domain =
+        physical_transport_domain_size(topology, kNoCapabilities);
+    CHECK(logical_physical_domain.first == 1 &&
+          logical_physical_domain.second == 4);
+    const auto flat_physical_domain =
+        physical_transport_domain_size(flat, kNoCapabilities);
+    CHECK(flat_physical_domain.first == 1 &&
+          flat_physical_domain.second == 4);
+
+    TransportTopology physical{};
+    CHECK(build_transport_topology(
+              3, 4, 2, TransportTopologyKind::kPhysical2D, 17, &physical)
+              .ok());
+    const auto disabled_physical_domain =
+        physical_transport_domain_size(physical, kNoCapabilities);
+    CHECK(disabled_physical_domain.first == 1 &&
+          disabled_physical_domain.second == 4);
+    const auto enabled_physical_domain = physical_transport_domain_size(
+        physical, capability_bit(TransportCapability::kScaleOutTeam));
+    CHECK(enabled_physical_domain.first == 2 &&
+          enabled_physical_domain.second == 2);
+
     int world_peer = -1;
     CHECK(checked_team_world_rank(
         topology, TransportTeam::kWorld, 0, &world_peer));

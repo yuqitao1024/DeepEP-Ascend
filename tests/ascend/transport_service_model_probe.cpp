@@ -1,12 +1,14 @@
 #include <cstdint>
 #include <iostream>
 
+#include "csrc/backends/ascend/elastic/release_protocol.hpp"
 #include "csrc/backends/ascend/transport/aicore_transport_service.hpp"
 #include "csrc/backends/ascend/transport/sync_layout.hpp"
 
 namespace transport = deep_ep::ascend::transport;
 namespace service = deep_ep::ascend::transport::service;
 namespace sync_layout = deep_ep::ascend::transport::sync_layout;
+namespace release_protocol = deep_ep::ascend::elastic::release_protocol;
 
 namespace {
 
@@ -23,11 +25,11 @@ int failures = 0;
 
 void check_order_flush_and_barrier() {
     CHECK(sync_layout::kLogicalSignalCount == 4);
-    CHECK(sync_layout::kLogicalBarrierCount == 1);
+    CHECK(sync_layout::kLogicalBarrierCount == 2);
     CHECK(sync_layout::kWorldTeamSignalCount == 0);
     CHECK(sync_layout::kWorldTeamCounterCount == 0);
-    CHECK(sync_layout::kWorldTeamBarrierCount == 5);
-    CHECK(sync_layout::has_required_world_team_layout(0, 0, 5));
+    CHECK(sync_layout::kWorldTeamBarrierCount == 6);
+    CHECK(sync_layout::has_required_world_team_layout(0, 0, 6));
     CHECK(!sync_layout::has_required_world_team_layout(4, 0, 1));
     CHECK(sync_layout::signal_offset(4, 0, 0) == 0);
     CHECK(sync_layout::signal_offset(4, 2, 3) == 88);
@@ -197,6 +199,75 @@ void check_protocol_validation_precedes_dispatch() {
     check_rejected(signal, transport::DeviceTransportError::kInvalidProtocol);
 }
 
+struct ReleaseProtocolModel {
+    bool payload_visible = false;
+    bool control_published_after_payload = false;
+    std::uint64_t release_generation = 0;
+    std::uint64_t acquired_generation = 0;
+
+    void flush(transport::CooperationScope scope) {
+        CHECK(scope == transport::CooperationScope::kDevice);
+        payload_visible = true;
+    }
+
+    void put_value(
+        transport::TransportTeam, int, transport::DeviceAddress,
+        std::uint64_t, std::uint32_t, transport::DeviceOptions) {
+        control_published_after_payload = payload_visible;
+    }
+
+    void signal(
+        transport::TransportTeam, int,
+        const transport::RemoteAction& action) {
+        CHECK(action.kind == transport::RemoteActionKind::kSignalSet);
+        release_generation = action.value;
+    }
+
+    void wait_signal(
+        transport::TransportTeam, int, std::uint32_t,
+        transport::SignalValue target, std::uint64_t) {
+        if (release_generation >= target)
+            acquired_generation = target;
+    }
+
+    transport::SignalValue read_signal(
+        transport::TransportTeam, int, std::uint32_t) const {
+        return release_generation;
+    }
+};
+
+void check_release_acquire_and_selected_barrier_sequence() {
+    transport::TransportTopology topology{};
+    CHECK(transport::build_transport_topology(
+        0, 4, 2, transport::TransportTopologyKind::kLogicalSimulation,
+        1, &topology).ok());
+
+    ReleaseProtocolModel protocol;
+    const transport::TeamPeer rail{
+        transport::TransportTeam::kScaleOut, 1, 2};
+    release_protocol::flush_payload(protocol);
+    release_protocol::publish_control_and_release(
+        protocol, rail, 0x1000, 3, 0x1008, 7,
+        sync_layout::kDispatchReleaseSignalIndex);
+    CHECK(protocol.control_published_after_payload);
+    CHECK(release_protocol::acquire_release(
+        protocol, topology, 2, sync_layout::kDispatchReleaseSignalIndex,
+        7, 64));
+    CHECK(protocol.acquired_generation == 7);
+
+    const auto barrier = transport::command::make_barrier(
+        transport::kWorldTeamMask, 64);
+    auto state = service::model::make_state(topology, 8);
+    transport::DeviceTransportDiagnostic diagnostic{};
+    CHECK(service::model::execute(&barrier, 1, state, diagnostic));
+    CHECK(state.barrier_phase_count == 2);
+    CHECK(state.barrier_teams[0] == transport::TransportTeam::kScaleOut);
+    CHECK(state.barrier_world_peers[0] == 2);
+    CHECK(state.barrier_teams[1] == transport::TransportTeam::kScaleUp);
+    CHECK(state.barrier_world_peers[1] == 1);
+    CHECK(state.submitted == 2);
+}
+
 }  // namespace
 
 int main() {
@@ -206,5 +277,6 @@ int main() {
     check_barrier_failure_preserves_failed_world_peer();
     check_service_uses_translated_world_peer();
     check_protocol_validation_precedes_dispatch();
+    check_release_acquire_and_selected_barrier_sequence();
     return failures == 0 ? 0 : 1;
 }

@@ -215,7 +215,7 @@ struct Inputs {
         const auto& metadata = expanded ? expanded_metadata : normal;
         std::memcpy(source.data_ptr(), metadata.data(), sizeof(metadata));
         descriptor_value = elastic::make_attested_dispatch_handle_descriptor(
-            7, {0, 2, 0, 2, 0, 1}, 1, 8, 2, 2, 4, 4,
+            7, {0, 2, 0, 2, 0, 1}, 1, 1, 8, 2, 2, 4, 4,
             expanded ? elastic::mode_bit(elastic::CoreMode::kExpanded) : 0);
         write_descriptor();
     }
@@ -227,7 +227,7 @@ struct Inputs {
 
     void attest_descriptor_mode(elastic::CoreModeFlags mode_flags) {
         descriptor_value = elastic::make_attested_dispatch_handle_descriptor(
-            7, {0, 2, 0, 2, 0, 1}, 1, 8, 2, 2, 4, 4, mode_flags);
+            7, {0, 2, 0, 2, 0, 1}, 1, 1, 8, 2, 2, 4, 4, mode_flags);
         write_descriptor();
     }
 };
@@ -257,7 +257,7 @@ std::unique_ptr<Buffer> buffer(bool allow_multiple_reduction = true) {
         return {};
     return Buffer::make_testing_buffer(
         0, std::move(owned), 2 * 1024 * 1024, 1,
-        allow_multiple_reduction);
+        allow_multiple_reduction, 7, 2, 1);
 }
 
 bool error_contains(
@@ -269,7 +269,7 @@ bool rank_parameterized_capacity() {
     if (!owned)
         return false;
     auto target = Buffer::make_testing_buffer(
-        0, std::move(owned), 2 * 1024 * 1024, 1, true, 7, 3);
+        0, std::move(owned), 2 * 1024 * 1024, 1, true, 7, 3, 1);
     Inputs inputs;
     inputs.x = torch::empty(
         {3, 8}, torch::TensorOptions().dtype(torch::kBFloat16));
@@ -287,7 +287,7 @@ bool rank_parameterized_capacity() {
     const std::array<std::int32_t, 3> prefix{1, 2, 3};
     std::memcpy(inputs.prefix.data_ptr(), prefix.data(), sizeof(prefix));
     inputs.descriptor_value = elastic::make_attested_dispatch_handle_descriptor(
-        7, {0, 3, 0, 3, 0, 1}, 1, 8, 3, 2, 4, 1, 0);
+        7, {0, 3, 0, 3, 0, 1}, 1, 1, 8, 3, 2, 4, 1, 0);
     inputs.write_descriptor();
 
     if (std::get<2>(call(
@@ -316,7 +316,7 @@ std::unique_ptr<Buffer> stateless_buffer(std::uint64_t dispatch_family = 7) {
         return {};
     return Buffer::make_testing_buffer(
         0, std::move(owned), 2 * 1024 * 1024, 1, true,
-        dispatch_family);
+        dispatch_family, 2, 1);
 }
 
 auto run_uncached_dispatch(
@@ -497,7 +497,7 @@ bool padding_expanded_extent_is_accepted() {
     inputs.source.data_ptr<std::int32_t>()[7] = 23;
     inputs.descriptor_value =
         elastic::make_attested_dispatch_handle_descriptor(
-            7, {0, 2, 0, 2, 0, 1}, 1, 8, 2, 2, 8, 4,
+            7, {0, 2, 0, 2, 0, 1}, 1, 1, 8, 2, 2, 8, 4,
             expanded | zero_padding);
     inputs.write_descriptor();
 
@@ -517,19 +517,32 @@ bool long_lived_dispatch_validation_state_is_constant() {
     Inputs inputs;
     const auto validation_state_bytes =
         target->testing_dispatch_validation_state_bytes();
-    if (validation_state_bytes != sizeof(std::uint64_t))
+    if (validation_state_bytes != 2 * sizeof(std::uint64_t))
         return false;
     auto oldest = run_uncached_dispatch(*target, inputs, 4, 1);
+    auto current = oldest;
     for (int iteration = 0; iteration < 64; ++iteration)
-        (void)run_uncached_dispatch(
-            *target, inputs, 4 + iteration % 2,
-            iteration % 2 == 0 ? 1 : 4);
+        current = run_uncached_dispatch(
+            *target, inputs, 4 + (iteration + 1) % 2,
+            (iteration + 1) % 2 == 0 ? 1 : 4);
     if (target->testing_dispatch_validation_state_bytes() !=
             validation_state_bytes)
         return false;
-    auto cached = run_cached_dispatch(*target, inputs, oldest, 4, 1);
+    if (!error_contains(
+            [&] { (void)run_cached_dispatch(*target, inputs, oldest, 4, 1); },
+            "dispatch handle") || trace.launches != 0)
+        return false;
+    inputs.descriptor = *std::get<13>(oldest);
+    if (!error_contains([&] { (void)call(*target, inputs); },
+                        "dispatch handle") || trace.launches != 0)
+        return false;
+    auto cached = run_cached_dispatch(*target, inputs, current, 4, 1);
     if (target->testing_dispatch_validation_state_bytes() !=
             validation_state_bytes)
+        return false;
+    elastic::DispatchHandleDescriptor refreshed{};
+    std::memcpy(&refreshed, std::get<13>(cached)->data_ptr(), sizeof(refreshed));
+    if (refreshed.generation != 66)
         return false;
     inputs.descriptor = *std::get<13>(cached);
     const auto result = call(*target, inputs);

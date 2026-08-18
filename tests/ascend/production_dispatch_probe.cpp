@@ -274,8 +274,11 @@ bool has_exact_result(
     elastic::DispatchHandleDescriptor descriptor{};
     std::memcpy(
         &descriptor, std::get<13>(result)->data_ptr(), sizeof(descriptor));
-    const std::uint64_t expected_family = expanded ?
-        0x34c68e658004e440ULL : 0xe20f7c80618f7da3ULL;
+    const std::uint64_t expected_family = elastic::attest_dispatch_handle_family(
+        7, descriptor.topology, descriptor.generation, descriptor.num_tokens,
+        descriptor.hidden, descriptor.num_experts, descriptor.num_topk,
+        descriptor.expert_alignment, descriptor.num_max_tokens_per_rank,
+        descriptor.mode_flags);
     return descriptor.abi_version ==
                elastic::kDispatchHandleDescriptorAbiVersion &&
         descriptor.struct_size == sizeof(elastic::DispatchHandleDescriptor) &&
@@ -288,7 +291,8 @@ bool has_exact_result(
         descriptor.topology.scale_out_size == 1 &&
         descriptor.topology.kind ==
             transport::TransportTopologyKind::kFlatScaleUp &&
-        descriptor.topology.epoch == 1 && descriptor.num_tokens == 1 &&
+        descriptor.topology.epoch == 1 && descriptor.generation ==
+            trace.generation && descriptor.num_tokens == 1 &&
         descriptor.hidden == 8 && descriptor.num_experts == 2 &&
         descriptor.num_topk == 2 && descriptor.expert_alignment == 4 &&
         descriptor.num_max_tokens_per_rank == 4 &&
@@ -326,6 +330,7 @@ bool exact_and_cached_probe() {
     auto cached = cached_dispatch(*buffer, inputs, result, std::get<8>(result));
     if (!has_exact_result(cached, true, false) || trace.launches != 2 ||
         trace.generations != std::vector<std::uint64_t>({1, 2}) ||
+        std::get<13>(cached)->data_ptr() != std::get<13>(result)->data_ptr() ||
         !trace.cached_private_contract ||
         trace.kernel_expert_prefixes[1] == std::get<9>(result).data_ptr() ||
         trace.kernel_unaligned_counts[1] == std::get<10>(result).data_ptr())
@@ -386,7 +391,7 @@ bool expanded_public_contract_probe() {
         trace.kernel_unaligned_counts[1] != std::get<10>(result).data_ptr();
 }
 
-bool descriptor_copy_retry_probe() {
+bool post_activation_copy_failure_poisons_probe() {
     trace = {};
     auto runtime_resources = resources();
     if (!runtime_resources) return false;
@@ -401,16 +406,18 @@ bool descriptor_copy_retry_probe() {
     } catch (const std::runtime_error& error) {
         if (std::string(error.what()).find("copy_from_host failed") ==
                 std::string::npos ||
-            trace.launches != 0)
+            trace.launches != 1 ||
+            trace.generations != std::vector<std::uint64_t>{1})
             return false;
     }
     trace.fail_h2d = false;
     try {
-        const auto result = uncached_dispatch(*buffer, inputs, no_weights);
-        return has_exact_result(result, false, true) && trace.launches == 1 &&
-            trace.generations == std::vector<std::uint64_t>{1};
-    } catch (const std::runtime_error&) {
+        (void)uncached_dispatch(*buffer, inputs, no_weights);
         return false;
+    } catch (const std::runtime_error& error) {
+        return std::string(error.what()).find("cannot continue") !=
+                std::string::npos && trace.launches == 1 &&
+            trace.generations == std::vector<std::uint64_t>{1};
     }
 }
 
@@ -535,7 +542,8 @@ int main() {
     };
     check(exact_and_cached_probe(), "exact outputs and cached preflight retry");
     check(expanded_public_contract_probe(), "expanded public expert prefix");
-    check(descriptor_copy_retry_probe(), "descriptor copy retry");
+    check(post_activation_copy_failure_poisons_probe(),
+          "post-activation copy failure poisoning");
     check(stream_retry_probe(), "stream acquisition retry");
     check(launch_poison_probe(), "launch failure poisoning");
     check(diagnostic_order_probe(), "diagnostic ordering");

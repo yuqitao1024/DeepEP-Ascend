@@ -137,6 +137,7 @@ enum class RemoteActionKind : std::uint8_t {
     kNone,
     kSignalAdd,
     kSignalIncrement,
+    kSignalSet,
 };
 
 struct RemoteAction {
@@ -156,6 +157,11 @@ struct RemoteAction {
 
     static constexpr RemoteAction signal_increment(std::uint32_t index) {
         return {RemoteActionKind::kSignalIncrement, index, 0, 1};
+    }
+
+    static constexpr RemoteAction signal_set(
+        std::uint32_t index, std::uint64_t value) {
+        return {RemoteActionKind::kSignalSet, index, 0, value};
     }
 };
 
@@ -258,6 +264,15 @@ constexpr bool valid_transport_topology(
         default:
             return false;
     }
+}
+
+constexpr std::pair<int, int> physical_transport_domain_size(
+    const TransportTopology& topology,
+    TransportCapabilities capabilities) noexcept {
+    if (topology.kind == TransportTopologyKind::kPhysical2D &&
+        has_capability(capabilities, TransportCapability::kScaleOutTeam))
+        return {topology.scale_out_size, topology.scale_up_size};
+    return {1, topology.world_size};
 }
 
 constexpr bool checked_team_world_rank(

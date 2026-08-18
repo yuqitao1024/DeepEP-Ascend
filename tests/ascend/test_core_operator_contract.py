@@ -84,14 +84,20 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                     self.assertIn(argument, call.group(1), function_name)
 
     def test_remote_operator_commands_reuse_checked_team_peer(self):
+        release = (ELASTIC / "release_protocol.hpp").read_text()
         for source_name, signal_name in (
                 ("dispatch.asc", "kDispatchReleaseSignalIndex"),
                 ("combine.asc", "kCombineReleaseSignalIndex")):
             source = (ELASTIC / source_name).read_text()
             self.assertIn("checked_team_peer_for_world_rank(", source,
                           source_name)
-            self.assertGreaterEqual(source.count("route.team"), 4, source_name)
-            self.assertGreaterEqual(source.count("route.peer"), 4, source_name)
+            self.assertIn("route.team", source, source_name)
+            self.assertIn("route.peer", source, source_name)
+            self.assertIn(
+                "release_protocol::publish_control_and_release(",
+                source, source_name)
+            self.assertIn(
+                "release_protocol::acquire_release(", source, source_name)
             self.assertNotIn(
                 "TransportTeam::kScaleUp, destination_rank", source,
                 source_name)
@@ -100,6 +106,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                              source_name)
         barrier = (ELASTIC / "barrier.asc").read_text()
         self.assertEqual(barrier.count("transport.device_barrier("), 1)
+        for marker in (
+                "checked_team_peer_for_world_rank(", "route.team",
+                "route.peer", "facade.put_value(", "facade.signal(",
+                "facade.wait_signal(", "facade.read_signal("):
+            self.assertIn(marker, release)
 
     def test_production_combine_producer_weights(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -884,10 +895,14 @@ int main() {
         required = {
             "barrier.asc": ("DeviceTransportFacade", "store_release(",
                             "device_barrier"),
-            "dispatch.asc": ("DeviceTransportFacade", "put(", "put_value(",
-                             "signal(", "device_barrier("),
-            "combine.asc": ("DeviceTransportFacade", "put(", "put_value(",
-                            "signal(", "device_barrier("),
+            "dispatch.asc": (
+                "DeviceTransportFacade", "put(",
+                "release_protocol::publish_control_and_release(",
+                "release_protocol::acquire_release(", "device_barrier("),
+            "combine.asc": (
+                "DeviceTransportFacade", "put(",
+                "release_protocol::publish_control_and_release(",
+                "release_protocol::acquire_release(", "device_barrier("),
         }
         forbidden = ("nccl", "nvshmem", "cuda", "ain", "hcomm", "hccl",
                      "urma")
@@ -903,6 +918,11 @@ int main() {
             for token in forbidden:
                 self.assertFalse(any(token in include for include in includes),
                                  f"{path}: {token}")
+        release = (ELASTIC / "release_protocol.hpp").read_text()
+        for operation in (
+                "facade.flush(", "facade.put_value(", "facade.signal(",
+                "facade.wait_signal(", "facade.read_signal("):
+            self.assertIn(operation, release)
 
     def test_barrier_has_staged_service_boundaries(self):
         source = (ELASTIC / "barrier.asc").read_text()
@@ -994,7 +1014,10 @@ int main() {
                 "header->origin_token", "header->contributor_rank",
                 "is_valid_combine_record_lanes(",
                 "record_count", "remote_count, count",
-                "remote_generation, generation", "transport.signal(",
+                "release_protocol::flush_payload(",
+                "release_protocol::publish_control_and_release(",
+                "release_protocol::acquire_release(",
+                "kCombineReleaseSignalIndex",
                 "transport.device_barrier(",
                 "transport.consumed_generation()",
                 "CombineOriginDeviceRecordSource",
@@ -1154,6 +1177,7 @@ int main() {
 
     def test_dispatch_preflights_protocol_state_before_publication(self):
         source = (ELASTIC / "dispatch.asc").read_text()
+        release = (ELASTIC / "release_protocol.hpp").read_text()
         for marker in (
                 "DispatchProtocolError::kInvalidTopk",
                 "DispatchProtocolError::kInvalidCachedSlot",
@@ -1171,15 +1195,27 @@ int main() {
         diagnostic_check = source.index("observed_transport_error")
         backend_status_write = source.index("&diagnostic->backend_status")
         self.assertLess(diagnostic_check, backend_status_write)
-        self.assertNotIn("RemoteAction::signal_add", source)
-        self.assertIn("RemoteAction::signal_increment", source)
-        count_position = source.index("remote_count, count")
-        generation_position = source.index("remote_generation, generation")
-        signal_position = source.index("transport.signal(")
+        self.assertNotIn("RemoteAction::signal_add", source + release)
+        self.assertNotIn("RemoteAction::signal_increment", source + release)
+        self.assertIn(
+            "RemoteAction::signal_set(signal_index, generation)", release)
+        flush_position = source.index("release_protocol::flush_payload(")
+        publish_position = source.index(
+            "release_protocol::publish_control_and_release(")
         barrier_position = source.index("transport.device_barrier(")
+        self.assertLess(flush_position, publish_position)
+        self.assertLess(publish_position, barrier_position)
+
+        publish_begin = release.index("void publish_control_and_release(")
+        publish_end = release.index("template <typename Transport>",
+                                    publish_begin)
+        publish = release[publish_begin:publish_end]
+        count_position = publish.index("count_address, count")
+        generation_position = publish.index(
+            "generation_address, generation")
+        signal_position = publish.index("facade.signal(")
         self.assertLess(count_position, generation_position)
         self.assertLess(generation_position, signal_position)
-        self.assertLess(signal_position, barrier_position)
 
         runner = (CORE_OPS / "core_operator_runner.asc").read_text()
         for case_name in ("dispatch-invalid-topk",

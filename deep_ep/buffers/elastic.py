@@ -27,7 +27,8 @@ from ..utils.semantic import value_or, weak_lru
 from ..utils.envs import (
     check_fast_rdma_atomic_support,
     check_nvlink_connections, check_torch_deterministic,
-    get_nvlink_gbs, get_rdma_gbs, preflight_ascend_topology
+    get_nvlink_gbs, get_rdma_gbs, preflight_ascend_contract,
+    preflight_ascend_topology
 )
 
 
@@ -201,6 +202,32 @@ class EPHandle:
             self.recv_src_metadata[:, 2:][valid_mask] = to_indices_for_expanded_tensors[self.recv_src_metadata[:, 2:][valid_mask]]
 
 
+def _ascend_tensor_contract(tensor, dimensions: int, dtype,
+                            name: str):
+    if not isinstance(tensor, torch.Tensor):
+        return None, f"invalid_{name}_tensor"
+    shape = tuple(tensor.shape)
+    contiguous = tensor.is_contiguous()
+    if (tensor.device.type != 'npu' or len(shape) != dimensions or
+            tensor.dtype != dtype or not contiguous):
+        return None, f"invalid_{name}_tensor"
+    return shape, None
+
+
+def _ascend_descriptor_fingerprint(tensor):
+    if not isinstance(tensor, torch.Tensor):
+        return None
+    try:
+        values = tensor.detach().cpu().reshape(-1).tolist()
+        return tuple(int(value) for value in values)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _first_error(*errors):
+    return next((error for error in errors if error is not None), None)
+
+
 class ElasticBuffer:
     """
     The elastic communication buffer, which supports:
@@ -323,8 +350,28 @@ class ElasticBuffer:
                 comm_handle,
                 num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
                 allow_hybrid_mode, allow_multiple_reduction)
-        if not is_cuda() and num_bytes <= 0:
-            raise ValueError("num_bytes must be positive")
+        if not is_cuda():
+            construction_error = None
+            if not isinstance(num_bytes, int) or num_bytes <= 0:
+                construction_error = "invalid_num_bytes"
+            elif num_bytes % (2 * 1024 * 1024) != 0:
+                construction_error = "unaligned_num_bytes"
+            elif num_cpu_bytes != 0:
+                construction_error = "cpu_buffer_unsupported"
+            elif allow_hybrid_mode:
+                construction_error = "hybrid_mode_unsupported"
+            elif num_gpu_timeout_secs <= 0:
+                construction_error = "invalid_gpu_timeout"
+            preflight_ascend_contract(
+                group, "construction", {
+                    "num_bytes": num_bytes,
+                    "num_cpu_bytes": num_cpu_bytes,
+                    "allow_hybrid_mode": allow_hybrid_mode,
+                    "allow_multiple_reduction": allow_multiple_reduction,
+                    "prefer_overlap_with_compute": prefer_overlap_with_compute,
+                    "sl_idx": sl_idx,
+                    "num_gpu_timeout_secs": num_gpu_timeout_secs,
+                }, construction_error)
         if os.environ.get('EP_BUFFER_DEBUG', 0):
             print(f'Initializing EP elastic buffer with {num_bytes} bytes '
                   f'(cpu: {num_cpu_bytes}) at rank EP {group.rank()}/{group.size()}')
@@ -374,6 +421,7 @@ class ElasticBuffer:
                                         sl_idx, num_allocated_qps,
                                         num_cpu_timeout_secs, num_gpu_timeout_secs,
                                         self.explicitly_destroy)
+        self._ascend_handle_generation = 0
 
         if is_cuda():
             # Logical rank indices
@@ -396,6 +444,164 @@ class ElasticBuffer:
             self.scaleup_rank_idx = self.rank_idx % self.num_scaleup_ranks
             self.num_rdma_ranks, self.num_nvlink_ranks = \
                 self.get_physical_domain_size()
+
+    def _preflight_ascend_dispatch(
+            self, x, sf, topk_idx, topk_weights, handle,
+            num_experts, num_max_tokens_per_rank, expert_alignment,
+            num_sms, num_qps, previous_event,
+            previous_event_before_epilogue, async_with_compute_stream,
+            allocate_on_comm_stream, do_expand, do_zero_padding):
+        cached = handle is not None
+        handle_error = None
+        if cached:
+            descriptor_fingerprint = _ascend_descriptor_fingerprint(
+                getattr(handle, 'token_metadata_at_forward', None))
+            if (not isinstance(handle, EPHandle) or
+                    getattr(handle, '_ascend_owner', None) is not self or
+                    getattr(handle, '_ascend_generation', None) !=
+                    self._ascend_handle_generation or
+                    descriptor_fingerprint is None or
+                    descriptor_fingerprint !=
+                    getattr(handle, '_ascend_descriptor_fingerprint', None)):
+                handle_error = "invalid_dispatch_handle"
+            elif topk_idx is not None:
+                handle_error = "cached_topk_must_be_none"
+            else:
+                topk_idx = handle.topk_idx
+                num_experts = (handle.num_experts if num_experts is None
+                               else num_experts)
+                num_max_tokens_per_rank = (
+                    handle.num_max_tokens_per_rank
+                    if num_max_tokens_per_rank is None
+                    else num_max_tokens_per_rank)
+                expert_alignment = (handle.expert_alignment
+                                    if expert_alignment is None
+                                    else expert_alignment)
+
+        x_shape, x_error = _ascend_tensor_contract(
+            x, 2, torch.bfloat16, "x")
+        topk_shape, topk_error = _ascend_tensor_contract(
+            topk_idx, 2, torch.int64, "topk")
+        weights_shape, weights_error = (None, None)
+        if topk_weights is not None:
+            weights_shape, weights_error = _ascend_tensor_contract(
+                topk_weights, 2, torch.float32, "topk_weights")
+        shape_error = None
+        if x_shape is not None and topk_shape is not None:
+            if (x_shape[0] != topk_shape[0] or x_shape[1] <= 0 or
+                    topk_shape[1] <= 0):
+                shape_error = "invalid_dispatch_shape"
+        if (weights_shape is not None and topk_shape is not None and
+                weights_shape != topk_shape):
+            shape_error = "invalid_dispatch_shape"
+        capacity = (self.num_max_tokens_per_rank
+                    if num_max_tokens_per_rank is None
+                    else num_max_tokens_per_rank)
+        alignment = 1 if expert_alignment is None else expert_alignment
+        scalar_error = None
+        if num_sms not in (0, 1) or num_qps != 0:
+            scalar_error = "invalid_launch_configuration"
+        elif (not isinstance(num_experts, int) or num_experts <= 0 or
+                num_experts % self.num_ranks != 0):
+            scalar_error = "invalid_num_experts"
+        elif not isinstance(capacity, int) or capacity <= 0:
+            scalar_error = "invalid_capacity"
+        elif not isinstance(alignment, int) or alignment <= 0:
+            scalar_error = "invalid_expert_alignment"
+        elif (sf is not None or previous_event is not None or
+              previous_event_before_epilogue is not None or
+              async_with_compute_stream or allocate_on_comm_stream):
+            scalar_error = "unsupported_dispatch_mode"
+        elif do_zero_padding and not do_expand:
+            scalar_error = "invalid_zero_padding_mode"
+
+        error = _first_error(
+            handle_error, scalar_error, x_error, topk_error, weights_error,
+            shape_error)
+        contract = {
+            "buffer_bytes": self.num_bytes,
+            "cached": cached,
+            "handle_generation": (getattr(handle, '_ascend_generation', 0)
+                                  if cached else 0),
+            "x_dtype": str(x.dtype) if x_shape is not None else None,
+            "x_shape": [None, x_shape[1]] if x_shape is not None else None,
+            "topk_dtype": (str(topk_idx.dtype)
+                           if topk_shape is not None else None),
+            "topk_shape": ([None, topk_shape[1]]
+                           if topk_shape is not None else None),
+            "weights_dtype": (str(topk_weights.dtype)
+                              if weights_shape is not None else None),
+            "num_experts": num_experts,
+            "capacity": capacity,
+            "expert_alignment": alignment,
+            "expanded": do_expand,
+            "zero_padding": do_zero_padding,
+        }
+        preflight_ascend_contract(self.group, "dispatch", contract, error)
+
+    def _preflight_ascend_combine(
+            self, x, handle, topk_weights, bias, num_sms, num_qps,
+            previous_event, previous_event_before_epilogue,
+            async_with_compute_stream, allocate_on_comm_stream):
+        handle_error = None
+        descriptor_fingerprint = _ascend_descriptor_fingerprint(
+            getattr(handle, 'token_metadata_at_forward', None))
+        if (not isinstance(handle, EPHandle) or
+                getattr(handle, '_ascend_owner', None) is not self or
+                getattr(handle, '_ascend_generation', None) !=
+                self._ascend_handle_generation or
+                descriptor_fingerprint is None or
+                descriptor_fingerprint !=
+                getattr(handle, '_ascend_descriptor_fingerprint', None)):
+            handle_error = "invalid_dispatch_handle"
+        x_shape, x_error = _ascend_tensor_contract(
+            x, 2, torch.bfloat16, "x")
+        weights_error = None
+        weights_shape = None
+        if topk_weights is not None:
+            dimensions = 1 if getattr(handle, 'do_expand', False) else 2
+            weights_shape, weights_error = _ascend_tensor_contract(
+                topk_weights, dimensions, torch.float32, "topk_weights")
+        bias_values = ()
+        bias_error = None
+        if bias is not None:
+            if isinstance(bias, torch.Tensor):
+                bias_values = (bias,)
+            elif isinstance(bias, tuple) and len(bias) == 2:
+                bias_values = bias
+            else:
+                bias_error = "invalid_bias"
+        for value in bias_values:
+            shape, tensor_error = _ascend_tensor_contract(
+                value, 2, torch.bfloat16, "bias")
+            if tensor_error is not None or (x_shape is not None and
+                                            shape[1] != x_shape[1]):
+                bias_error = "invalid_bias"
+                break
+        scalar_error = None
+        if num_sms not in (0, 1) or num_qps != 0:
+            scalar_error = "invalid_launch_configuration"
+        elif (previous_event is not None or
+              previous_event_before_epilogue is not None or
+              async_with_compute_stream or allocate_on_comm_stream):
+            scalar_error = "unsupported_combine_mode"
+        error = _first_error(
+            handle_error, x_error, weights_error, bias_error, scalar_error)
+        contract = {
+            "buffer_bytes": self.num_bytes,
+            "handle_generation": getattr(handle, '_ascend_generation', None),
+            "x_dtype": str(x.dtype) if x_shape is not None else None,
+            "x_shape": [None, x_shape[1]] if x_shape is not None else None,
+            "weights_dtype": (str(topk_weights.dtype)
+                              if weights_shape is not None else None),
+            "weights_rank": (len(weights_shape)
+                             if weights_shape is not None else None),
+            "bias_count": len(bias_values),
+            "num_experts": getattr(handle, 'num_experts', None),
+            "capacity": getattr(handle, 'num_max_tokens_per_rank', None),
+            "expanded": getattr(handle, 'do_expand', None),
+        }
+        preflight_ascend_contract(self.group, "combine", contract, error)
 
     def destroy(self) -> None:
         """
@@ -997,13 +1203,19 @@ class ElasticBuffer:
             num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
             assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
         else:
-            if num_sms not in (0, 1) or num_qps != 0:
-                raise RuntimeError(
-                    'DeepEP Ascend backend: dispatch requires num_sms=1 and num_qps=0')
-            num_sms = 1
+            pass
 
         # Unpack SF
         x, sf = x if isinstance(x, tuple) else (x, None)
+
+        if not is_cuda():
+            self._preflight_ascend_dispatch(
+                x, sf, topk_idx, topk_weights, handle, num_experts,
+                num_max_tokens_per_rank, expert_alignment, num_sms, num_qps,
+                previous_event, previous_event_before_epilogue,
+                async_with_compute_stream, allocate_on_comm_stream,
+                do_expand, do_zero_padding)
+            num_sms = 1
 
         # Unpack handles
         # Reuse some values if possible
@@ -1085,6 +1297,13 @@ class ElasticBuffer:
                               dst_buffer_slot_idx,
                               token_metadata_at_forward,
                               channel_linked_list)
+        if not is_cuda():
+            self._ascend_handle_generation += 1
+            handle._ascend_owner = self
+            handle._ascend_generation = self._ascend_handle_generation
+            handle._ascend_descriptor_fingerprint = (
+                _ascend_descriptor_fingerprint(
+                    handle.token_metadata_at_forward))
 
         # Create event
         event_overlap = EventOverlap(event)
@@ -1154,6 +1373,12 @@ class ElasticBuffer:
             event: the event after executing the kernel (valid only if `async_with_compute_stream` is set).
         """
         check_torch_deterministic()
+
+        if not is_cuda():
+            self._preflight_ascend_combine(
+                x, handle, topk_weights, bias, num_sms, num_qps,
+                previous_event, previous_event_before_epilogue,
+                async_with_compute_stream, allocate_on_comm_stream)
 
         # Automatic decide SM and QP count
         if is_cuda():

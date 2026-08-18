@@ -1,3 +1,4 @@
+import os
 import pathlib
 import sys
 import unittest
@@ -5,6 +6,10 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "platform"))
 from extension_loader import load_extension
 
+
+if "DEEP_EP_EXTENSION_PATH" not in os.environ:
+    raise unittest.SkipTest(
+        "DEEP_EP_EXTENSION_PATH is required for compiled extension tests")
 
 _C = load_extension()
 

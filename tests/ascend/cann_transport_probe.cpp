@@ -5,6 +5,7 @@
 #include <memory>
 
 #include "csrc/backends/ascend/transport/cann_transport.hpp"
+#include "csrc/backends/ascend/transport/sync_layout.hpp"
 #include "csrc/backends/ascend/transport/transport_commands.hpp"
 
 namespace transport = deep_ep::ascend::transport;
@@ -51,6 +52,8 @@ struct FakeApi {
     std::uint32_t staged_copy_count = 0;
     transport::TransportCommandQueue queue{};
     std::uint32_t queue_copy_count = 0;
+    transport::DeviceTransportDiagnostic diagnostic{};
+    std::uint32_t diagnostic_copy_count = 0;
     std::uint64_t allocation_bytes[8]{};
     std::uint32_t allocation_count = 0;
 
@@ -109,7 +112,8 @@ struct FakeApi {
         for (std::uint32_t index = 0; index < size; ++index)
             CHECK(rank_ids[index] == index);
         CHECK(signal_count == 0);
-        CHECK(barrier_count == 5);
+        CHECK(barrier_count ==
+              transport::sync_layout::kWorldTeamBarrierCount);
         if (fake.fail_now()) return 73;
         *team = 0x200000;
         return 0;
@@ -174,6 +178,12 @@ struct FakeApi {
             fake.queue =
                 *static_cast<const transport::TransportCommandQueue*>(source);
             ++fake.queue_copy_count;
+        }
+        if (destination == reinterpret_cast<void*>(0x103000) &&
+            bytes == sizeof(transport::DeviceTransportDiagnostic)) {
+            fake.diagnostic = *static_cast<
+                const transport::DeviceTransportDiagnostic*>(source);
+            ++fake.diagnostic_copy_count;
         }
         return 0;
     }
@@ -393,9 +403,17 @@ void check_success_and_reverse_cleanup() {
     CHECK(fake.staged_copy_count == 1);
     CHECK(fake.staged.fetch_results == 0);
     CHECK(fake.staged.fetch_result_bytes == 0);
+    CHECK(fake.staged.reserved == transport::command::registration_cookie(
+        fake.staged.command_queue, fake.queue.commands,
+        fake.queue.service_state, fake.queue.diagnostic,
+        fake.queue.capacity));
+    CHECK(fake.diagnostic_copy_count == 1);
+    CHECK(fake.diagnostic.abi_version ==
+          transport::kTransportCommandAbiVersion);
+    CHECK(fake.diagnostic.error == transport::DeviceTransportError::kNone);
     CHECK(fake.count(Event::kAllocate) == 5);
     CHECK(fake.count(Event::kZero) == 5);
-    CHECK(fake.count(Event::kCopy) == 3);
+    CHECK(fake.count(Event::kCopy) == 4);
 
     CHECK(created.transport->destroy().ok());
     const auto after_first_destroy = fake.event_count;

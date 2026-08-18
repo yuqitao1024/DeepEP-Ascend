@@ -6,7 +6,7 @@ import re
 import subprocess
 import torch
 import torch.distributed as dist
-from typing import Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # noinspection PyUnresolvedReferences
 import deep_ep._C as _C
@@ -96,6 +96,38 @@ def preflight_ascend_topology(group: dist.ProcessGroup) -> Tuple[str, int, int, 
         raise RuntimeError(
             "DeepEP Ascend backend: topology configuration differs across ranks")
     return local_config
+
+
+def preflight_ascend_contract(group: dist.ProcessGroup, stage: str,
+                              contract: Optional[Dict[str, Any]],
+                              error_code: Optional[str] = None) -> Dict[str, Any]:
+    """Aggregate a rank-local Ascend contract before collective runtime work."""
+    world_size = group.size()
+    local = {
+        "stage": stage,
+        "ok": error_code is None,
+        "contract": contract if error_code is None else None,
+        "error_code": error_code,
+    }
+    gathered = [None] * world_size
+    dist.all_gather_object(gathered, local, group)
+    for rank, value in enumerate(gathered):
+        valid_record = (isinstance(value, dict) and
+                        value.get("stage") == stage and
+                        value.get("ok") is True and
+                        isinstance(value.get("contract"), dict))
+        if not valid_record:
+            code = (value.get("error_code", "invalid_preflight_record")
+                    if isinstance(value, dict)
+                    else "invalid_preflight_record")
+            raise RuntimeError(
+                f"DeepEP Ascend backend: {stage} preflight failed on rank "
+                f"{rank} ({code})")
+    first_contract = gathered[0]["contract"]
+    if any(value["contract"] != first_contract for value in gathered[1:]):
+        raise RuntimeError(
+            f"DeepEP Ascend backend: {stage} contract differs across ranks")
+    return contract
 
 # Default NIC name for RDMA operations, configurable via environment variable
 _DEFAULT_NIC_NAME = os.getenv('EP_NIC_NAME', 'mlx5_0')

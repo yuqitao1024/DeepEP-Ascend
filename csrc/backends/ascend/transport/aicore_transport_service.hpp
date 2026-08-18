@@ -51,6 +51,9 @@ struct State {
     std::uint64_t barrier_generation = 0;
     std::uint64_t retry_count = 0;
     int completion_failure_world_peer = 0;
+    std::uint32_t barrier_phase_count = 0;
+    TransportTeam barrier_teams[64]{};
+    int barrier_world_peers[64]{};
 };
 
 inline State make_state(
@@ -118,11 +121,27 @@ inline bool execute(
             if (!drain(state, diagnostic, index, current.opcode))
                 return false;
         } else if (current.opcode == TransportCommandOpcode::kBarrier) {
-            state.submitted += state.member_count > 0 ?
-                state.member_count - 1 : 0;
-            state.outstanding = state.submitted - state.completed;
-            if (!drain(state, diagnostic, index, current.opcode))
-                return false;
+            for (const auto team : {
+                     TransportTeam::kScaleOut, TransportTeam::kScaleUp}) {
+                if (!command::barrier_team_enabled(
+                        state.topology, current.options, team))
+                    continue;
+                for (int peer = 0; peer < state.topology.world_size; ++peer) {
+                    if (!command::barrier_peer_in_team(
+                            state.topology, team, peer))
+                        continue;
+                    if (state.barrier_phase_count < 64) {
+                        state.barrier_teams[state.barrier_phase_count] = team;
+                        state.barrier_world_peers[state.barrier_phase_count] =
+                            peer;
+                        ++state.barrier_phase_count;
+                    }
+                    ++state.submitted;
+                    ++state.outstanding;
+                }
+                if (!drain(state, diagnostic, index, current.opcode))
+                    return false;
+            }
             ++state.barrier_generation;
         } else {
             ++state.submitted;
@@ -264,7 +283,8 @@ __aicore__ inline DeviceTransportError validate_command(
         case TransportCommandOpcode::kSignal:
             if ((current->action_kind != RemoteActionKind::kSignalAdd &&
                  current->action_kind !=
-                     RemoteActionKind::kSignalIncrement) ||
+                     RemoteActionKind::kSignalIncrement &&
+                 current->action_kind != RemoteActionKind::kSignalSet) ||
                 current->options != kDefaultOptions)
                 return DeviceTransportError::kInvalidProtocol;
             return DeviceTransportError::kNone;
@@ -279,9 +299,17 @@ __aicore__ inline DeviceTransportError validate_command(
                 return DeviceTransportError::kInvalidProtocol;
             return DeviceTransportError::kNone;
         case TransportCommandOpcode::kBarrier:
-            if (current->options != kWorldTeamMask ||
+            if (current->options == 0 ||
+                (current->options & ~kWorldTeamMask) != 0 ||
                 current->team != TransportTeam::kWorld ||
                 current->peer != 0 || current->world_peer != 0)
+                return DeviceTransportError::kInvalidProtocol;
+            if (!command::barrier_team_enabled(
+                    context.topology, current->options,
+                    TransportTeam::kScaleOut) &&
+                !command::barrier_team_enabled(
+                    context.topology, current->options,
+                    TransportTeam::kScaleUp))
                 return DeviceTransportError::kInvalidProtocol;
             return DeviceTransportError::kNone;
         default: return DeviceTransportError::kUnsupportedOperation;
@@ -323,6 +351,35 @@ __aicore__ inline __gm__ DeviceTransportDiagnostic* diagnostic(
     __gm__ TransportCommandQueue* queue) {
     return queue == nullptr ? nullptr :
         reinterpret_cast<__gm__ DeviceTransportDiagnostic*>(queue->diagnostic);
+}
+
+__aicore__ inline bool valid_registered_queue(
+    __gm__ StagedTransportContext* staged,
+    __gm__ TransportCommandQueue* queue) {
+    if (staged == nullptr || queue == nullptr)
+        return false;
+    aicore::flush_cacheline(staged);
+    if (!command::valid_staged_context_header(
+            staged->abi_version, staged->struct_size,
+            staged->cann_compatibility, staged->command_queue) ||
+        staged->command_queue != reinterpret_cast<std::uintptr_t>(queue))
+        return false;
+    aicore::flush_cacheline(queue);
+    if (!command::valid_command_queue_header(
+            queue->abi_version, queue->struct_size, queue->commands,
+            queue->capacity, queue->count, queue->service_state,
+            queue->diagnostic) ||
+        !command::valid_registration_cookie(
+            staged->reserved, staged->command_queue, queue->commands,
+            queue->service_state, queue->diagnostic, queue->capacity))
+        return false;
+    auto* state = service_state(queue);
+    auto* output = diagnostic(queue);
+    aicore::flush_cacheline(state);
+    aicore::flush_cacheline(output);
+    return command::valid_service_state_header(
+               state->abi_version, state->struct_size) &&
+           command::valid_diagnostic_header(output->abi_version);
 }
 
 __aicore__ inline void record_error(
@@ -757,7 +814,8 @@ __aicore__ inline bool execute_signal(
             transport_team->member_count)
         return false;
     std::uint64_t remote_address = 0;
-    if (current->action_kind == RemoteActionKind::kSignalIncrement) {
+    if (current->action_kind == RemoteActionKind::kSignalIncrement ||
+        current->action_kind == RemoteActionKind::kSignalSet) {
         if (transport_team->signal_count !=
                 sync_layout::kWorldTeamSignalCount ||
             transport_team->counter_count !=
@@ -783,6 +841,21 @@ __aicore__ inline bool execute_signal(
             return false;
     } else {
         return false;
+    }
+    if (current->action_kind == RemoteActionKind::kSignalSet) {
+        auto peer = resolve_context(
+            context, static_cast<std::uint32_t>(current->world_peer), 0);
+        auto* remote = peer.channel == nullptr ? nullptr : resolve_buffer(
+            peer.channel->remote_buffers, peer.channel->remote_buffer_count,
+            remote_address, sizeof(std::uint64_t));
+        if (remote == nullptr)
+            return false;
+        const auto request = urma::make_inline_write64(
+            snapshot_sq(peer.sq), snapshot_buffer(remote), 0,
+            remote_address, current->value);
+        return post_request(
+            queue, peer, request, command_index, current->opcode,
+            retry_limit, wqe_scratch);
     }
     return post_faa(
         context, queue, static_cast<std::uint32_t>(current->world_peer),
@@ -815,66 +888,82 @@ __aicore__ inline bool execute_barrier(
         return false;
     auto* memories = reinterpret_cast<__gm__ cann_abi::Memory*>(
         transport_team->remote_sync_memories);
-    for (std::uint32_t peer = 0; peer < transport_team->member_count; ++peer) {
-        if (peer == transport_team->self_member)
-            continue;
-        const auto offset =
-            (static_cast<std::uint64_t>(sync_layout::kLogicalSignalCount) *
-                 transport_team->member_count +
-             transport_team->self_member) * sizeof(std::uint64_t);
-        const auto remote_address = memories[peer].address + offset;
-        const auto fetch_address =
-            transport_team->shadow_sync_memory.address + offset;
-        if (!post_faa(
-                context, queue, peer, remote_address, fetch_address, 1,
-                command_index, current->opcode, retry_limit, wqe_scratch))
-            return false;
-    }
-    if (!drain_all(
-            context, queue, command_index, current->opcode, retry_limit,
-            wqe_scratch))
-        return false;
-
     const auto generation = state->barrier_generation + 1;
-    const auto start_cycles = static_cast<std::uint64_t>(
-        AscendC::GetSystemCycle());
-    for (std::uint32_t peer = 0; peer < transport_team->member_count; ++peer) {
-        if (peer == transport_team->self_member)
+    for (const auto phase_team : {
+             TransportTeam::kScaleOut, TransportTeam::kScaleUp}) {
+        if (!command::barrier_team_enabled(
+                context.topology, current->options, phase_team))
             continue;
-        const auto offset =
-            (static_cast<std::uint64_t>(sync_layout::kLogicalSignalCount) *
-                 transport_team->member_count +
-             peer) * sizeof(std::uint64_t);
-        auto* signal = reinterpret_cast<__gm__ std::uint64_t*>(
-            memories[transport_team->self_member].address + offset);
-        AscendC::GlobalTensor<std::uint64_t> signal_global;
-        signal_global.SetGlobalBuffer(signal);
-        const auto signal_scratch =
-            wqe_scratch[48].ReinterpretCast<std::uint64_t>();
-        const AscendC::DataCopyExtParams copy_params{
-            1, sizeof(std::uint64_t), 0, 0, 0};
-        const AscendC::DataCopyPadExtParams<std::uint64_t> pad_params{
-            false, 0, 0, 0};
-        std::uint64_t retry = 0;
-        std::uint64_t observed = 0;
-        while (true) {
-            aicore::sync_event<AscendC::HardEvent::S_MTE2>();
-            AscendC::DataCopyPad(signal_scratch, signal_global, copy_params,
-                                 pad_params);
-            aicore::sync_event<AscendC::HardEvent::MTE2_S>();
-            observed = signal_scratch.GetValue(0);
-            if (observed >= generation)
-                break;
-            ++retry;
-            const auto current_cycles = static_cast<std::uint64_t>(
-                AscendC::GetSystemCycle());
-            if (barrier_poll_timed_out(
-                    start_cycles, current_cycles, current->timeout_cycles,
-                    retry, retry_limit)) {
-                record_error(
-                    queue, DeviceTransportError::kCompletionTimeout,
-                    command_index, current->opcode, peer, 0);
+        const std::uint32_t barrier_index =
+            phase_team == TransportTeam::kScaleOut ?
+                sync_layout::kScaleOutBarrierIndex :
+                sync_layout::kScaleUpBarrierIndex;
+        for (std::uint32_t peer = 0;
+             peer < transport_team->member_count; ++peer) {
+            if (!command::barrier_peer_in_team(
+                    context.topology, phase_team, static_cast<int>(peer)))
+                continue;
+            const auto offset = sync_layout::barrier_offset(
+                transport_team->member_count, barrier_index,
+                transport_team->self_member);
+            if (!post_faa(
+                    context, queue, peer, memories[peer].address + offset,
+                    transport_team->shadow_sync_memory.address + offset, 1,
+                    command_index, current->opcode, retry_limit, wqe_scratch))
                 return false;
+        }
+        if (!drain_all(
+                context, queue, command_index, current->opcode, retry_limit,
+                wqe_scratch))
+            return false;
+
+        const auto start_cycles = static_cast<std::uint64_t>(
+            AscendC::GetSystemCycle());
+        for (std::uint32_t peer = 0;
+             peer < transport_team->member_count; ++peer) {
+            if (!command::barrier_peer_in_team(
+                    context.topology, phase_team, static_cast<int>(peer)))
+                continue;
+            const auto offset = sync_layout::barrier_offset(
+                transport_team->member_count, barrier_index, peer);
+            auto* signal = reinterpret_cast<__gm__ std::uint64_t*>(
+                memories[transport_team->self_member].address + offset);
+            AscendC::GlobalTensor<std::uint64_t> signal_global;
+            signal_global.SetGlobalBuffer(signal);
+            const auto signal_scratch =
+                wqe_scratch[48].ReinterpretCast<std::uint64_t>();
+            const AscendC::DataCopyExtParams copy_params{
+                1, sizeof(std::uint64_t), 0, 0, 0};
+            const AscendC::DataCopyPadExtParams<std::uint64_t> pad_params{
+                false, 0, 0, 0};
+            std::uint64_t retry = 0;
+            std::uint64_t observed = 0;
+            while (true) {
+                aicore::sync_event<AscendC::HardEvent::S_MTE2>();
+                AscendC::DataCopyPad(signal_scratch, signal_global,
+                                     copy_params, pad_params);
+                aicore::sync_event<AscendC::HardEvent::MTE2_S>();
+                observed = signal_scratch.GetValue(0);
+                if (observed >= generation)
+                    break;
+                ++retry;
+                const auto current_cycles = static_cast<std::uint64_t>(
+                    AscendC::GetSystemCycle());
+                if (barrier_poll_timed_out(
+                        start_cycles, current_cycles, current->timeout_cycles,
+                        retry, retry_limit)) {
+                    const int logical_peer =
+                        phase_team == TransportTeam::kScaleOut ?
+                            static_cast<int>(peer) /
+                                context.topology.scale_up_size :
+                            static_cast<int>(peer) %
+                                context.topology.scale_up_size;
+                    record_error(
+                        queue, DeviceTransportError::kCompletionTimeout,
+                        command_index, current->opcode, phase_team,
+                        logical_peer, static_cast<int>(peer), 0);
+                    return false;
+                }
             }
         }
     }
@@ -886,56 +975,47 @@ __aicore__ inline bool execute_barrier(
 
 __aicore__ inline void reset(
     const DeviceTransportContext& context, std::uint64_t generation) {
+    auto* staged = detail::staged_context(context);
     auto* queue = detail::command_queue(context);
-    if (queue == nullptr)
+    if (!detail::valid_registered_queue(staged, queue))
         return;
+    auto* state = detail::service_state(queue);
+    auto* output = detail::diagnostic(queue);
+    state->consumed_count = 0;
+    state->active = 0;
+    state->consumed_generation = 0;
+    if (state->default_retry_limit == 0)
+        state->default_retry_limit = detail::kDefaultRetryLimit;
+    output->error = DeviceTransportError::kNone;
+    output->command_index = 0;
+    output->opcode = TransportCommandOpcode::kNone;
+    output->peer = 0;
+    output->channel = 0;
+    output->sq_head = 0;
+    output->cq_head = 0;
+    output->cq_tail = 0;
+    output->backend_status = 0;
+    output->generation = generation;
+    output->world_peer = 0;
+    output->team = TransportTeam::kWorld;
+    output->reserved0[0] = 0;
+    output->reserved0[1] = 0;
+    output->reserved0[2] = 0;
+    output->reserved = 0;
     queue->count = 0;
     queue->generation = generation;
-    auto* state = detail::service_state(queue);
-    if (state != nullptr) {
-        state->abi_version = kTransportCommandAbiVersion;
-        state->struct_size = sizeof(TransportServiceState);
-        state->consumed_count = 0;
-        state->active = 0;
-        state->consumed_generation = 0;
-        if (state->default_retry_limit == 0)
-            state->default_retry_limit = detail::kDefaultRetryLimit;
-        aicore::flush_cacheline(state);
-    }
-    auto* output = detail::diagnostic(queue);
-    if (output != nullptr) {
-        output->abi_version = kTransportCommandAbiVersion;
-        output->error = DeviceTransportError::kNone;
-        output->command_index = 0;
-        output->opcode = TransportCommandOpcode::kNone;
-        output->generation = generation;
-        aicore::flush_cacheline(output);
-    }
     aicore::system_fence();
+    aicore::flush_cacheline(state);
+    aicore::flush_cacheline(output);
     aicore::flush_cacheline(queue);
 }
 
 __aicore__ inline void execute(const DeviceTransportContext& context) {
+    auto* staged = detail::staged_context(context);
     auto* queue = detail::command_queue(context);
-    if (queue == nullptr)
+    if (!detail::valid_registered_queue(staged, queue))
         return;
-    aicore::flush_cacheline(queue);
-    if (queue->abi_version != kTransportCommandAbiVersion ||
-        queue->struct_size != sizeof(TransportCommandQueue) ||
-        queue->commands == 0 || queue->count > queue->capacity ||
-        queue->service_state == 0 || queue->diagnostic == 0) {
-        detail::record_error(
-            queue,
-            queue->abi_version != kTransportCommandAbiVersion ||
-                    queue->struct_size != sizeof(TransportCommandQueue)
-                ? DeviceTransportError::kInvalidAbi
-                : DeviceTransportError::kInvalidQueue,
-            0, TransportCommandOpcode::kNone, 0, 0);
-        return;
-    }
     auto* state = detail::service_state(queue);
-    if (state == nullptr)
-        return;
     AscendC::TPipe pipe;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> scratch_buffer;
     if (!pipe.InitBuffer(scratch_buffer, detail::kServiceScratchBytes)) {

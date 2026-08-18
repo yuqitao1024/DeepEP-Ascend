@@ -11,7 +11,10 @@ namespace deep_ep::ascend::transport {
 inline constexpr std::uint32_t kTransportCommandAbiVersion = 2;
 inline constexpr std::uint32_t kStagedTransportCannCompatibility =
     0x00090200U;
-inline constexpr std::uint32_t kWorldTeamMask = 1U;
+inline constexpr std::uint32_t kScaleUpTeamMask = 1U;
+inline constexpr std::uint32_t kScaleOutTeamMask = 2U;
+inline constexpr std::uint32_t kWorldTeamMask =
+    kScaleUpTeamMask | kScaleOutTeamMask;
 
 enum class TransportCommandOpcode : std::uint32_t {
     kNone,
@@ -143,6 +146,43 @@ inline constexpr bool valid_command_queue_header(
            count <= capacity && service_state != 0 && diagnostic != 0;
 }
 
+inline constexpr bool valid_service_state_header(
+    std::uint32_t abi_version, std::uint32_t struct_size) {
+    return abi_version == kTransportCommandAbiVersion &&
+           struct_size == sizeof(TransportServiceState);
+}
+
+inline constexpr bool valid_diagnostic_header(std::uint32_t abi_version) {
+    return abi_version == kTransportCommandAbiVersion;
+}
+
+inline constexpr std::uint64_t mix_registration_cookie(
+    std::uint64_t state, std::uint64_t value) {
+    return state ^ (value + 0x9e3779b97f4a7c15ULL + (state << 6U) +
+                    (state >> 2U));
+}
+
+inline constexpr std::uint64_t registration_cookie(
+    std::uintptr_t command_queue, std::uintptr_t commands,
+    std::uintptr_t service_state, std::uintptr_t diagnostic,
+    std::uint32_t capacity) {
+    std::uint64_t state = 0x445045505452414eULL;
+    state = mix_registration_cookie(state, command_queue);
+    state = mix_registration_cookie(state, commands);
+    state = mix_registration_cookie(state, service_state);
+    state = mix_registration_cookie(state, diagnostic);
+    state = mix_registration_cookie(state, capacity);
+    return state | 1ULL;
+}
+
+inline constexpr bool valid_registration_cookie(
+    std::uint64_t cookie, std::uintptr_t command_queue,
+    std::uintptr_t commands, std::uintptr_t service_state,
+    std::uintptr_t diagnostic, std::uint32_t capacity) {
+    return cookie != 0 && cookie == registration_cookie(
+        command_queue, commands, service_state, diagnostic, capacity);
+}
+
 inline constexpr bool checked_world_peer(
     const TransportTopology& topology, TransportTeam team, int peer,
     int* world_peer) {
@@ -154,6 +194,30 @@ inline constexpr bool is_remote_operation(TransportCommandOpcode opcode) {
            opcode == TransportCommandOpcode::kPutValue64 ||
            opcode == TransportCommandOpcode::kRemoteAdd64 ||
            opcode == TransportCommandOpcode::kSignal;
+}
+
+inline constexpr bool barrier_team_enabled(
+    const TransportTopology& topology, std::uint32_t team_mask,
+    TransportTeam team) {
+    if (team == TransportTeam::kScaleOut)
+        return topology.scale_out_size > 1 &&
+            (team_mask & kScaleOutTeamMask) != 0;
+    if (team == TransportTeam::kScaleUp)
+        return topology.scale_up_size > 1 &&
+            (team_mask & kScaleUpTeamMask) != 0;
+    return false;
+}
+
+inline constexpr bool barrier_peer_in_team(
+    const TransportTopology& topology, TransportTeam team, int world_peer) {
+    if (world_peer < 0 || world_peer >= topology.world_size ||
+        world_peer == topology.world_rank)
+        return false;
+    if (team == TransportTeam::kScaleOut)
+        return world_peer % topology.scale_up_size == topology.scale_up_rank;
+    if (team == TransportTeam::kScaleUp)
+        return world_peer / topology.scale_up_size == topology.scale_out_rank;
+    return false;
 }
 
 inline constexpr DeviceTransportError validate_for_dispatch(
@@ -202,7 +266,9 @@ inline constexpr DeviceTransportError validate_for_dispatch(
             if ((transport_command.action_kind !=
                      RemoteActionKind::kSignalAdd &&
                  transport_command.action_kind !=
-                     RemoteActionKind::kSignalIncrement) ||
+                     RemoteActionKind::kSignalIncrement &&
+                 transport_command.action_kind !=
+                     RemoteActionKind::kSignalSet) ||
                 transport_command.options != kDefaultOptions)
                 return DeviceTransportError::kInvalidProtocol;
             return DeviceTransportError::kNone;
@@ -220,10 +286,18 @@ inline constexpr DeviceTransportError validate_for_dispatch(
                 default: return DeviceTransportError::kInvalidProtocol;
             }
         case TransportCommandOpcode::kBarrier:
-            if (transport_command.options != kWorldTeamMask ||
+            if (transport_command.options == 0 ||
+                (transport_command.options & ~kWorldTeamMask) != 0 ||
                 transport_command.team != TransportTeam::kWorld ||
                 transport_command.peer != 0 ||
                 transport_command.world_peer != 0)
+                return DeviceTransportError::kInvalidProtocol;
+            if (!barrier_team_enabled(
+                    topology, transport_command.options,
+                    TransportTeam::kScaleOut) &&
+                !barrier_team_enabled(
+                    topology, transport_command.options,
+                    TransportTeam::kScaleUp))
                 return DeviceTransportError::kInvalidProtocol;
             return DeviceTransportError::kNone;
         default: return DeviceTransportError::kUnsupportedOperation;
@@ -353,15 +427,40 @@ inline void record_first_error(
         peer, peer, channel);
 }
 
-inline void reset(TransportCommandQueue& queue, std::uint64_t generation) {
+inline bool checked_reset(
+    const StagedTransportContext& staged, TransportCommandQueue& queue,
+    TransportServiceState& service, DeviceTransportDiagnostic& diagnostic,
+    std::uint64_t generation) {
+    const auto queue_address = reinterpret_cast<std::uintptr_t>(&queue);
+    const auto service_address = reinterpret_cast<std::uintptr_t>(&service);
+    const auto diagnostic_address = reinterpret_cast<std::uintptr_t>(
+        &diagnostic);
+    if (!valid_staged_context_header(
+            staged.abi_version, staged.struct_size,
+            staged.cann_compatibility, staged.command_queue) ||
+        staged.command_queue != queue_address ||
+        !valid_command_queue_header(
+            queue.abi_version, queue.struct_size, queue.commands,
+            queue.capacity, queue.count, queue.service_state,
+            queue.diagnostic) ||
+        queue.service_state != service_address ||
+        queue.diagnostic != diagnostic_address ||
+        !valid_registration_cookie(
+            staged.reserved, queue_address, queue.commands,
+            service_address, diagnostic_address, queue.capacity) ||
+        !valid_service_state_header(
+            service.abi_version, service.struct_size) ||
+        !valid_diagnostic_header(diagnostic.abi_version))
+        return false;
+
     queue.count = 0;
     queue.generation = generation;
-    auto* diagnostic = reinterpret_cast<DeviceTransportDiagnostic*>(
-        queue.diagnostic);
-    if (diagnostic != nullptr) {
-        *diagnostic = DeviceTransportDiagnostic{};
-        diagnostic->generation = generation;
-    }
+    service.consumed_count = 0;
+    service.active = 0;
+    service.consumed_generation = 0;
+    diagnostic = DeviceTransportDiagnostic{};
+    diagnostic.generation = generation;
+    return true;
 }
 
 inline bool append(

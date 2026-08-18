@@ -45,10 +45,11 @@ int main() {
     topology.world_size = 2;
     topology.scale_up_size = 2;
     DispatchHandleDescriptor expected = make_dispatch_handle_descriptor(
-        17, topology, 3, 128, 8, 2, 4, 256,
+        17, topology, 11, 3, 128, 8, 2, 4, 256,
         mode_bit(CoreMode::kExpanded));
     CHECK(expected.abi_version == kDispatchHandleDescriptorAbiVersion);
     CHECK(expected.struct_size == sizeof(DispatchHandleDescriptor));
+    CHECK(expected.generation == 11);
     CHECK(validate_dispatch_handle(expected, expected).ok());
 
     auto mismatch = expected;
@@ -56,6 +57,9 @@ int main() {
     CHECK(!validate_dispatch_handle(expected, mismatch).ok());
     mismatch = expected;
     mismatch.topology.scale_up_rank = 1;
+    CHECK(!validate_dispatch_handle(expected, mismatch).ok());
+    mismatch = expected;
+    mismatch.generation = 10;
     CHECK(!validate_dispatch_handle(expected, mismatch).ok());
     mismatch = expected;
     mismatch.num_tokens += 1;
@@ -78,5 +82,13 @@ int main() {
     mismatch = expected;
     mismatch.mode_flags = 0;
     CHECK(!validate_dispatch_handle(expected, mismatch).ok());
+
+    const auto attested = make_attested_dispatch_handle_descriptor(
+        99, topology, 11, 3, 128, 8, 2, 4, 256,
+        mode_bit(CoreMode::kExpanded));
+    const auto stale = make_attested_dispatch_handle_descriptor(
+        99, topology, 10, 3, 128, 8, 2, 4, 256,
+        mode_bit(CoreMode::kExpanded));
+    CHECK(attested.family != stale.family);
     return 0;
 }

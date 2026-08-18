@@ -64,6 +64,7 @@ class ElasticBuffer {
     std::unique_ptr<runtime::CannRuntimeResources> resources_;
     mutable elastic::BufferOperationCoordinator coordinator_;
     std::uint64_t dispatch_family_ = 0;
+    mutable std::uint64_t last_dispatch_generation_ = 0;
     std::uint64_t barrier_timeout_cycles_ = 0;
 
     inline static std::atomic_uint64_t next_dispatch_family_{0};
@@ -343,12 +344,14 @@ class ElasticBuffer {
                   std::unique_ptr<runtime::CannRuntimeResources> resources,
                   std::int64_t buffer_bytes, std::uint64_t timeout_cycles,
                   bool allow_multiple_reduction,
-                  std::uint64_t dispatch_family)
+                  std::uint64_t dispatch_family,
+                  std::uint64_t last_dispatch_generation)
         : rank_idx_(rank), num_ranks_(num_ranks),
           num_buffer_bytes_(buffer_bytes),
           allow_hybrid_mode_(false),
           allow_multiple_reduction_(allow_multiple_reduction),
           resources_(std::move(resources)),
+          last_dispatch_generation_(last_dispatch_generation),
           barrier_timeout_cycles_(timeout_cycles) {
         dispatch_family_ = dispatch_family;
     }
@@ -422,7 +425,8 @@ public:
         std::int64_t buffer_bytes, std::uint64_t timeout_cycles,
         bool allow_multiple_reduction = true,
         std::uint64_t dispatch_family = 7,
-        int num_ranks = 2) {
+        int num_ranks = 2,
+        std::uint64_t last_dispatch_generation = 0) {
         TORCH_CHECK(num_ranks >= 2 && rank >= 0 && rank < num_ranks,
                     "DeepEP Ascend backend: invalid testing topology");
         TORCH_CHECK(resources != nullptr && resources->initialized() &&
@@ -435,11 +439,12 @@ public:
                     "DeepEP Ascend backend: testing topology must match runtime resources");
         return std::unique_ptr<ElasticBuffer>(new ElasticBuffer(
             TestingTag{}, rank, num_ranks, std::move(resources), buffer_bytes,
-            timeout_cycles, allow_multiple_reduction, dispatch_family));
+            timeout_cycles, allow_multiple_reduction, dispatch_family,
+            last_dispatch_generation));
     }
 
     std::size_t testing_dispatch_validation_state_bytes() const noexcept {
-        return sizeof(dispatch_family_);
+        return sizeof(dispatch_family_) + sizeof(last_dispatch_generation_);
     }
 #endif
 
@@ -476,8 +481,10 @@ public:
             status.operation = "get_physical_domain_size";
             raise_transport_status(status, rank_idx_);
         }
+        const auto domain = transport::physical_transport_domain_size(
+            topology, host_transport()->capabilities());
         lease.complete();
-        return {topology.scale_out_size, topology.scale_up_size};
+        return {domain.first, domain.second};
     }
 
     std::tuple<int, int> get_logical_domain_size() const {
@@ -801,8 +808,9 @@ public:
             elastic::CoreMode::kCached);
         const auto expected_descriptor =
             elastic::make_attested_dispatch_handle_descriptor(
-            dispatch_family_, tiling.topology, num_tokens, hidden, experts,
-            num_topk, alignment, capacity, descriptor_mode_flags);
+            dispatch_family_, tiling.topology, last_dispatch_generation_,
+            num_tokens, hidden, experts, num_topk, alignment, capacity,
+            descriptor_mode_flags);
         const auto int_options = x.options().dtype(torch::kInt);
         const auto metadata_options = x.options().dtype(torch::kByte);
         const auto max_recv_tokens = capacity * static_cast<std::uint64_t>(num_ranks_);
@@ -992,13 +1000,6 @@ public:
                 {static_cast<int64_t>(sizeof(elastic::DispatchHandleDescriptor))},
                 metadata_options);
         auto status = transport::TransportStatus{};
-        if (!cached_mode) {
-            status = resources_->copy_from_host(
-                descriptor_tensor.data_ptr(), &expected_descriptor,
-                sizeof(expected_descriptor));
-            if (!status.ok())
-                raise_transport_status(status, rank_idx_);
-        }
 
         elastic::DispatchArguments arguments{};
         arguments.x = x.data_ptr();
@@ -1027,6 +1028,11 @@ public:
             static_cast<std::uint64_t>(num_buffer_bytes_), resources_->workspace_bytes()};
         const auto generation = activate_operation(lease, "dispatch");
         arguments.generation = generation;
+        const auto committed_descriptor =
+            elastic::make_attested_dispatch_handle_descriptor(
+                dispatch_family_, tiling.topology, generation, num_tokens,
+                hidden, experts, num_topk, alignment, capacity,
+                descriptor_mode_flags);
         const auto launch_status = elastic::launch_internal_dispatch(
             arguments, tiling, storage, stream);
         if (!launch_status.ok())
@@ -1117,6 +1123,12 @@ public:
                         num_expanded_tokens >= 0 &&
                         num_expanded_tokens <= static_cast<int>(expanded_records),
                     "DeepEP Ascend backend: dispatch returned invalid output counts");
+        status = resources_->copy_from_host(
+            descriptor_tensor.data_ptr(), &committed_descriptor,
+            sizeof(committed_descriptor));
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        last_dispatch_generation_ = generation;
         lease.complete();
         const int output_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
         auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
@@ -1283,6 +1295,7 @@ public:
             elastic::make_attested_dispatch_handle_descriptor(
                 dispatch_family_,
                 elastic::core_topology_from_transport(context.topology),
+                last_dispatch_generation_,
                 static_cast<std::uint64_t>(combined_topk_idx.size(0)),
                 static_cast<std::uint64_t>(x.size(1)),
                 static_cast<std::uint64_t>(num_experts), num_topk,

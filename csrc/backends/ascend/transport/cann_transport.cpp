@@ -85,6 +85,10 @@ public:
         status = copy_to_device(
             service_, service_state, "initialize_service");
         if (!status.ok()) return status;
+        DeviceTransportDiagnostic diagnostic_state;
+        status = copy_to_device(
+            diagnostic_, diagnostic_state, "initialize_diagnostic");
+        if (!status.ok()) return status;
 
         TransportCommandQueue queue_state;
         queue_state.capacity = command_capacity_;
@@ -340,6 +344,10 @@ private:
         context.command_queue = pointer_value(queue_);
         context.team = team_;
         context.window = window_;
+        context.reserved = command::registration_cookie(
+            context.command_queue, pointer_value(commands_),
+            pointer_value(service_), pointer_value(diagnostic_),
+            command_capacity_);
         return copy_to_device(staged_, context, operation);
     }
 

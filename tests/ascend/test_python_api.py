@@ -51,9 +51,34 @@ class _FakeDType:
 
 
 class _FakeTensor:
-    def __init__(self, device_type="cpu", shape=()):
+    def __init__(self, device_type="cpu", shape=(), dtype=None,
+                 contiguous=True, values=None):
         self.device = types.SimpleNamespace(type=device_type)
         self.shape = shape
+        self.dtype = dtype
+        self._contiguous = contiguous
+        numel = 1
+        for extent in shape:
+            numel *= extent
+        self._values = list(values) if values is not None else [0] * numel
+
+    def dim(self):
+        return len(self.shape)
+
+    def is_contiguous(self):
+        return self._contiguous
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def reshape(self, *shape):
+        return self
+
+    def tolist(self):
+        return list(self._values)
 
 
 class _FakeSize(tuple):
@@ -198,8 +223,9 @@ def _install_fake_torch(platform, events):
     distributed.barrier = lambda: events.append("dist.barrier")
     def all_gather_object(output, value, group):
         events.append(("dist.all_gather_object", value))
-        output[:] = (group.gathered_objects if group.gathered_objects is not None
-                     else [value] * len(output))
+        gathered = group.gathered_objects
+        output[:] = (gathered(value) if callable(gathered) else gathered
+                     if gathered is not None else [value] * len(output))
 
     distributed.all_gather_object = all_gather_object
     torch.distributed = distributed
@@ -227,6 +253,7 @@ def _install_fake_extension(platform, events):
         def __init__(self, *args):
             extension.runtime_args.append(args)
             extension.runtime_instances.append(self)
+            self.world_size = args[1]
             self.dispatch_calls = []
             self.combine_calls = []
             events.append(("runtime.construct", args))
@@ -247,7 +274,7 @@ def _install_fake_extension(platform, events):
 
         def get_physical_domain_size(self):
             events.append("runtime.get_physical_domain_size")
-            return (1, 2) if platform == "ascend" else (2, 4)
+            return (1, self.world_size) if platform == "ascend" else (2, 4)
 
         def barrier(self, use_comm_stream, with_cpu_sync, sequential):
             events.append(("runtime.barrier", use_comm_stream, with_cpu_sync, sequential))
@@ -262,9 +289,9 @@ def _install_fake_extension(platform, events):
             self.dispatch_calls.append(args)
             recv_src_metadata = _FakeTensor(shape=(1,))
             cloned_topk_idx = _FakeTensor(
-                args[2].device.type, args[2].shape)
+                args[2].device.type, args[2].shape, args[2].dtype)
             token_metadata_at_forward = (
-                _FakeTensor(shape=(112,)) if platform == "ascend" else None)
+                _FakeTensor(shape=(120,)) if platform == "ascend" else None)
             return (args[0], args[1], args[2], args[3], cloned_topk_idx,
                     1, 1, [], _FakeTensor(), _FakeTensor(), _FakeTensor(),
                     recv_src_metadata, _FakeTensor(), token_metadata_at_forward,
@@ -527,8 +554,9 @@ def _scenario_ascend_construction():
             deep_ep.ElasticBuffer(
                 group, num_bytes=num_bytes, allow_hybrid_mode=False,
                 explicitly_destroy=True)
-        except ValueError as error:
-            assert str(error) == "num_bytes must be positive"
+        except RuntimeError as error:
+            assert "construction preflight failed" in str(error)
+            assert "invalid_num_bytes" in str(error)
         else:
             raise AssertionError(f"non-positive buffer size {num_bytes} was accepted")
 
@@ -548,6 +576,7 @@ def _scenario_ascend_topology_preflight():
              "error_code": None}) in events
     assert (buffer.num_scaleout_ranks, buffer.num_scaleup_ranks) == (2, 2)
     assert (buffer.scaleout_rank_idx, buffer.scaleup_rank_idx) == (1, 1)
+    assert (buffer.num_rdma_ranks, buffer.num_nvlink_ranks) == (1, 4)
     assert len(extension.runtime_args) == 1
     buffer.destroy()
 
@@ -653,6 +682,96 @@ def _scenario_ascend_topology_preflight_remote_parse_failure():
     assert not extension.runtime_args
 
 
+def _scenario_ascend_collective_contract_preflight():
+    deep_ep, extension, events = _load_package("ascend", True)
+
+    def mismatch_construction(value):
+        if "config" in value:
+            return [value, value]
+        remote = dict(value)
+        remote_contract = dict(value["contract"])
+        remote_contract["num_bytes"] = 4 * 1024 * 1024
+        remote["contract"] = remote_contract
+        return [value, remote]
+
+    mismatched_group = _FakeGroup(
+        events, rank=0, size=2, gathered_objects=mismatch_construction)
+    try:
+        deep_ep.ElasticBuffer(
+            mismatched_group, num_bytes=2 * 1024 * 1024,
+            allow_hybrid_mode=False, explicitly_destroy=True)
+    except RuntimeError as error:
+        assert "construction contract differs across ranks" in str(error), error
+    else:
+        raise AssertionError("mismatched construction layout was accepted")
+    assert not extension.runtime_args
+
+    group = _FakeGroup(events, rank=0, size=2)
+    buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+        explicitly_destroy=True)
+    runtime = extension.runtime_instances[-1]
+    torch = sys.modules["torch"]
+    x = _FakeTensor("npu", (1, 16), torch.bfloat16)
+    topk_idx = _FakeTensor("npu", (1, 1), torch.int64)
+
+    def remote_failure(error_code):
+        def gather(value):
+            remote = dict(value)
+            remote["ok"] = False
+            remote["contract"] = None
+            remote["error_code"] = error_code
+            return [value, remote]
+        return gather
+
+    group.gathered_objects = remote_failure("invalid_x_dtype")
+    try:
+        buffer.dispatch(
+            x, topk_idx=topk_idx, num_experts=2,
+            num_max_tokens_per_rank=1)
+    except RuntimeError as error:
+        assert "dispatch preflight failed on rank 1 (invalid_x_dtype)" in str(error), error
+    else:
+        raise AssertionError("peer dispatch validation failure was ignored")
+    assert not runtime.dispatch_calls
+
+    group.gathered_objects = None
+    _, _, _, handle, _ = buffer.dispatch(
+        x, topk_idx=topk_idx, num_experts=2,
+        num_max_tokens_per_rank=1)
+
+    descriptor = handle.token_metadata_at_forward
+    descriptor._values[0] ^= 1
+    dispatch_calls = len(runtime.dispatch_calls)
+    try:
+        buffer.dispatch(x, handle=handle)
+    except RuntimeError as error:
+        assert "dispatch preflight failed on rank 0 (invalid_dispatch_handle)" in str(error), error
+    else:
+        raise AssertionError("in-place dispatch descriptor corruption was accepted")
+    assert len(runtime.dispatch_calls) == dispatch_calls
+    combine_calls = len(runtime.combine_calls)
+    try:
+        buffer.combine(x, handle)
+    except RuntimeError as error:
+        assert "combine preflight failed on rank 0 (invalid_dispatch_handle)" in str(error), error
+    else:
+        raise AssertionError("in-place combine descriptor corruption was accepted")
+    assert len(runtime.combine_calls) == combine_calls
+    descriptor._values[0] ^= 1
+
+    group.gathered_objects = remote_failure("invalid_dispatch_handle")
+    combine_calls = len(runtime.combine_calls)
+    try:
+        buffer.combine(x, handle)
+    except RuntimeError as error:
+        assert "combine preflight failed on rank 1 (invalid_dispatch_handle)" in str(error), error
+    else:
+        raise AssertionError("peer combine handle failure was ignored")
+    assert len(runtime.combine_calls) == combine_calls
+    buffer.destroy()
+
+
 def _scenario_ascend_implicit_size():
     deep_ep, extension, events = _load_package("ascend", True)
     group = _FakeGroup(events, rank=0, size=2)
@@ -753,9 +872,10 @@ def _scenario_ascend_dispatch():
         _FakeGroup(events, rank=0, size=2), num_bytes=2 * 1024 * 1024,
         allow_hybrid_mode=False, explicitly_destroy=True)
     runtime = extension.runtime_instances[-1]
-    x = _FakeTensor("npu", (1, 16))
-    topk_idx = _FakeTensor("npu", (1, 1))
-    topk_weights = _FakeTensor("npu", (1, 1))
+    torch = sys.modules["torch"]
+    x = _FakeTensor("npu", (1, 16), torch.bfloat16)
+    topk_idx = _FakeTensor("npu", (1, 1), torch.int64)
+    topk_weights = _FakeTensor("npu", (1, 1), torch.float32)
 
     _, _, recv_topk_weights, handle, event = buffer.dispatch(
         x, topk_idx=topk_idx, topk_weights=topk_weights,
@@ -774,7 +894,7 @@ def _scenario_ascend_dispatch():
     assert handle.token_metadata_at_forward is not None
     assert event.event is None
 
-    cached_topk_weights = _FakeTensor("npu", (1, 1))
+    cached_topk_weights = _FakeTensor("npu", (1, 1), torch.float32)
     _, _, recv_topk_weights, cached_handle, cached_event = buffer.dispatch(
         x, topk_weights=cached_topk_weights, handle=handle)
     cached_args = runtime.dispatch_calls[-1]
@@ -802,12 +922,11 @@ def _scenario_ascend_dispatch():
             buffer.dispatch(x, topk_idx=topk_idx, num_experts=2,
                             num_max_tokens_per_rank=1, **kwargs)
         except RuntimeError as error:
-            assert str(error) == (
-                "DeepEP Ascend backend: dispatch requires num_sms=1 and num_qps=0")
+            assert "invalid_launch_configuration" in str(error)
         else:
             raise AssertionError(f"Ascend dispatch accepted {name}={kwargs[name]}")
 
-    no_weights_idx = _FakeTensor("npu", (1, 1))
+    no_weights_idx = _FakeTensor("npu", (1, 1), torch.int64)
     recv_x, recv_topk_idx, recv_topk_weights, no_weights_handle, no_weights_event = \
         buffer.dispatch(
             x, topk_idx=no_weights_idx, num_experts=2,
@@ -824,8 +943,8 @@ def _scenario_ascend_dispatch():
     assert no_weights_handle.topk_idx is no_weights_idx
     assert no_weights_event.event is None
 
-    empty_x = _FakeTensor("npu", (0, 16))
-    empty_topk_idx = _FakeTensor("npu", (0, 1))
+    empty_x = _FakeTensor("npu", (0, 16), torch.bfloat16)
+    empty_topk_idx = _FakeTensor("npu", (0, 1), torch.int64)
     recv_x, recv_topk_idx, recv_topk_weights, empty_handle, empty_event = \
         buffer.dispatch(
             empty_x, topk_idx=empty_topk_idx, num_experts=2,
@@ -851,17 +970,17 @@ def _scenario_ascend_dispatch_optimized():
         _FakeGroup(events, rank=0, size=2), num_bytes=2 * 1024 * 1024,
         allow_hybrid_mode=False, explicitly_destroy=True)
     runtime = extension.runtime_instances[-1]
-    x = _FakeTensor("npu", (1, 16))
-    topk_idx = _FakeTensor("npu", (1, 1))
-    expected_error = (
-        "DeepEP Ascend backend: dispatch requires num_sms=1 and num_qps=0")
+    torch = sys.modules["torch"]
+    x = _FakeTensor("npu", (1, 16), torch.bfloat16)
+    topk_idx = _FakeTensor("npu", (1, 1), torch.int64)
+    expected_error = "invalid_launch_configuration"
 
     for kwargs in ({"num_sms": 2}, {"num_qps": 1}):
         call_count = len(runtime.dispatch_calls)
         try:
             buffer.dispatch(_Poison(), **kwargs)
         except RuntimeError as error:
-            if str(error) != expected_error:
+            if expected_error not in str(error):
                 raise AssertionError(f"unexpected validation error: {error}")
         else:
             raise AssertionError(f"Ascend dispatch accepted {kwargs}")
@@ -884,18 +1003,23 @@ def _scenario_ascend_combine():
         _FakeGroup(events, rank=0, size=2), num_bytes=2 * 1024 * 1024,
         allow_hybrid_mode=False, explicitly_destroy=True)
     runtime = extension.runtime_instances[-1]
-    x = _FakeTensor("npu", (2, 16))
-    topk_weights = _FakeTensor("npu", (2, 2))
-    bias_0 = _FakeTensor("npu", (1, 16))
-    bias_1 = _FakeTensor("npu", (1, 16))
+    torch = sys.modules["torch"]
+    x = _FakeTensor("npu", (2, 16), torch.bfloat16)
+    topk_weights = _FakeTensor("npu", (2, 2), torch.float32)
+    bias_0 = _FakeTensor("npu", (1, 16), torch.bfloat16)
+    bias_1 = _FakeTensor("npu", (1, 16), torch.bfloat16)
     recv_src_metadata = _FakeTensor("npu", (2, 4))
     topk_idx = _FakeTensor("npu", (1, 2))
     rank_prefix = _FakeTensor("npu", (2,))
-    descriptor = _FakeTensor("npu", (112,))
+    descriptor = _FakeTensor("npu", (120,))
     handle = deep_ep.EPHandle(
         False, 2, 4, 4, 1, topk_idx, 2, 2, [], rank_prefix,
         _FakeTensor("npu", (1,)), _FakeTensor("npu", (1,)),
         recv_src_metadata, _FakeTensor("npu", (1, 2)), descriptor, None)
+    buffer._ascend_handle_generation = 1
+    handle._ascend_owner = buffer
+    handle._ascend_generation = 1
+    handle._ascend_descriptor_fingerprint = tuple(descriptor._values)
 
     combined_x, combined_weights, event = buffer.combine(
         x, handle, topk_weights=topk_weights, bias=(bias_0, bias_1))
@@ -1124,6 +1248,8 @@ SCENARIOS = {
         _scenario_ascend_topology_preflight_local_parse_failure,
     "ascend_topology_preflight_remote_parse_failure":
         _scenario_ascend_topology_preflight_remote_parse_failure,
+    "ascend_collective_contract_preflight":
+        _scenario_ascend_collective_contract_preflight,
     "ascend_implicit_size": _scenario_ascend_implicit_size,
     "ascend_method_gates": _scenario_ascend_method_gates,
     "ascend_contextmanager_gate": _scenario_ascend_contextmanager_gate,
@@ -1157,6 +1283,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_explicit_size_constructs_without_cuda_or_topology(self):
         self.run_scenario("ascend_construction")
+
+    def test_ascend_collective_contract_preflight_precedes_runtime_work(self):
+        self.run_scenario("ascend_collective_contract_preflight")
 
     def test_explicit_logical_topology_is_aggregated_before_construction(self):
         self.run_scenario("ascend_topology_preflight")

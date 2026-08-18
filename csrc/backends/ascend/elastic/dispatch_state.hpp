@@ -14,7 +14,7 @@
 
 namespace deep_ep::ascend::elastic {
 
-inline constexpr std::uint32_t kDispatchHandleDescriptorAbiVersion = 2;
+inline constexpr std::uint32_t kDispatchHandleDescriptorAbiVersion = 3;
 
 class DispatchAttempt;
 
@@ -91,6 +91,7 @@ struct DispatchHandleDescriptor {
     std::uint32_t struct_size = sizeof(DispatchHandleDescriptor);
     std::uint64_t family = 0;
     CoreTopology topology{};
+    std::uint64_t generation = 0;
     std::uint64_t num_tokens = 0;
     std::uint64_t hidden = 0;
     std::uint64_t num_experts = 0;
@@ -117,13 +118,15 @@ struct DispatchHandleStatus {
 
 inline DispatchHandleDescriptor make_dispatch_handle_descriptor(
     std::uint64_t family, const CoreTopology& topology,
-    std::uint64_t num_tokens, std::uint64_t hidden,
+    std::uint64_t generation, std::uint64_t num_tokens,
+    std::uint64_t hidden,
     std::uint64_t num_experts, std::uint64_t num_topk,
     std::uint64_t expert_alignment,
     std::uint64_t num_max_tokens_per_rank, CoreModeFlags mode_flags) {
     DispatchHandleDescriptor descriptor{};
     descriptor.family = family;
     descriptor.topology = topology;
+    descriptor.generation = generation;
     descriptor.num_tokens = num_tokens;
     descriptor.hidden = hidden;
     descriptor.num_experts = num_experts;
@@ -147,7 +150,8 @@ constexpr std::uint64_t mix_dispatch_handle_attestation(
 // Bind public descriptor geometry to its buffer without retaining handles.
 constexpr std::uint64_t attest_dispatch_handle_family(
     std::uint64_t buffer_family, const CoreTopology& topology,
-    std::uint64_t num_tokens, std::uint64_t hidden,
+    std::uint64_t generation, std::uint64_t num_tokens,
+    std::uint64_t hidden,
     std::uint64_t num_experts, std::uint64_t num_topk,
     std::uint64_t expert_alignment,
     std::uint64_t num_max_tokens_per_rank,
@@ -169,6 +173,7 @@ constexpr std::uint64_t attest_dispatch_handle_family(
     state = mix_dispatch_handle_attestation(
         state, static_cast<std::uint32_t>(topology.kind));
     state = mix_dispatch_handle_attestation(state, topology.epoch);
+    state = mix_dispatch_handle_attestation(state, generation);
     state = mix_dispatch_handle_attestation(state, num_tokens);
     state = mix_dispatch_handle_attestation(state, hidden);
     state = mix_dispatch_handle_attestation(state, num_experts);
@@ -181,15 +186,16 @@ constexpr std::uint64_t attest_dispatch_handle_family(
 
 inline DispatchHandleDescriptor make_attested_dispatch_handle_descriptor(
     std::uint64_t buffer_family, const CoreTopology& topology,
-    std::uint64_t num_tokens, std::uint64_t hidden,
+    std::uint64_t generation, std::uint64_t num_tokens,
+    std::uint64_t hidden,
     std::uint64_t num_experts, std::uint64_t num_topk,
     std::uint64_t expert_alignment,
     std::uint64_t num_max_tokens_per_rank, CoreModeFlags mode_flags) {
     return make_dispatch_handle_descriptor(
         attest_dispatch_handle_family(
-            buffer_family, topology, num_tokens, hidden, num_experts,
+            buffer_family, topology, generation, num_tokens, hidden, num_experts,
             num_topk, expert_alignment, num_max_tokens_per_rank, mode_flags),
-        topology, num_tokens, hidden, num_experts, num_topk,
+        topology, generation, num_tokens, hidden, num_experts, num_topk,
         expert_alignment, num_max_tokens_per_rank, mode_flags);
 }
 
@@ -260,11 +266,13 @@ inline DispatchHandleStatus validate_dispatch_handle(
     if (expected.abi_version != kDispatchHandleDescriptorAbiVersion ||
         expected.struct_size != sizeof(DispatchHandleDescriptor) ||
         actual.abi_version != kDispatchHandleDescriptorAbiVersion ||
-        actual.struct_size != sizeof(DispatchHandleDescriptor))
+        actual.struct_size != sizeof(DispatchHandleDescriptor) ||
+        expected.generation == 0 || actual.generation == 0)
         return {DispatchHandleStatusCode::kInvalidDescriptor,
                 "invalid dispatch handle descriptor"};
     if (expected.family != actual.family ||
         !same_topology(expected.topology, actual.topology) ||
+        expected.generation != actual.generation ||
         expected.num_tokens != actual.num_tokens ||
         expected.hidden != actual.hidden ||
         expected.num_experts != actual.num_experts ||

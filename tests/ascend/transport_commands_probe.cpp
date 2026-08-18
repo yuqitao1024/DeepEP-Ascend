@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 
 #include "csrc/backends/ascend/transport/aicore_transport_service.hpp"
@@ -140,8 +141,14 @@ void check_queue_model() {
     transport::DeviceTransportDiagnostic diagnostic{};
     auto queue = transport::command::make_queue(
         commands, 3, &service, &diagnostic);
+    transport::StagedTransportContext staged{};
+    staged.command_queue = reinterpret_cast<std::uintptr_t>(&queue);
+    staged.reserved = transport::command::registration_cookie(
+        staged.command_queue, queue.commands, queue.service_state,
+        queue.diagnostic, queue.capacity);
 
-    transport::command::reset(queue, 7);
+    CHECK(transport::command::checked_reset(
+        staged, queue, service, diagnostic, 7));
     CHECK(queue.generation == 7);
     CHECK(queue.count == 0);
     CHECK(diagnostic.error == transport::DeviceTransportError::kNone);
@@ -179,10 +186,74 @@ void check_queue_model() {
     CHECK(diagnostic.error ==
           transport::DeviceTransportError::kCommandOverflow);
 
-    transport::command::reset(queue, 8);
+    CHECK(transport::command::checked_reset(
+        staged, queue, service, diagnostic, 8));
     CHECK(queue.count == 0);
     CHECK(queue.generation == 8);
     CHECK(diagnostic.error == transport::DeviceTransportError::kNone);
+}
+
+void check_checked_queue_reset() {
+    transport::TransportCommand commands[2]{};
+    transport::TransportServiceState service{};
+    service.consumed_count = 2;
+    service.active = 1;
+    service.consumed_generation = 6;
+    transport::DeviceTransportDiagnostic diagnostic{};
+    diagnostic.error = transport::DeviceTransportError::kCompletionFailure;
+    auto queue = transport::command::make_queue(
+        commands, 2, &service, &diagnostic);
+    queue.count = 2;
+    queue.generation = 6;
+    transport::StagedTransportContext staged{};
+    staged.command_queue = reinterpret_cast<std::uintptr_t>(&queue);
+    staged.reserved = transport::command::registration_cookie(
+        staged.command_queue, queue.commands, queue.service_state,
+        queue.diagnostic, queue.capacity);
+
+    CHECK(transport::command::checked_reset(
+        staged, queue, service, diagnostic, 7));
+    CHECK(queue.count == 0);
+    CHECK(queue.generation == 7);
+    CHECK(service.consumed_count == 0);
+    CHECK(service.active == 0);
+    CHECK(service.consumed_generation == 0);
+    CHECK(diagnostic.error == transport::DeviceTransportError::kNone);
+    CHECK(diagnostic.generation == 7);
+
+    const auto valid_staged = staged;
+    const auto valid_queue = queue;
+    const auto valid_service = service;
+    const auto valid_diagnostic = diagnostic;
+    const auto reject_without_mutation = [&](auto corrupt) {
+        staged = valid_staged;
+        queue = valid_queue;
+        service = valid_service;
+        diagnostic = valid_diagnostic;
+        corrupt();
+        const auto staged_before = staged;
+        const auto queue_before = queue;
+        const auto service_before = service;
+        const auto diagnostic_before = diagnostic;
+        CHECK(!transport::command::checked_reset(
+            staged, queue, service, diagnostic, 8));
+        CHECK(std::memcmp(&staged, &staged_before, sizeof(staged)) == 0);
+        CHECK(std::memcmp(&queue, &queue_before, sizeof(queue)) == 0);
+        CHECK(std::memcmp(&service, &service_before, sizeof(service)) == 0);
+        CHECK(std::memcmp(
+            &diagnostic, &diagnostic_before, sizeof(diagnostic)) == 0);
+    };
+
+    reject_without_mutation([&] { ++staged.abi_version; });
+    reject_without_mutation([&] { staged.reserved ^= 1; });
+    reject_without_mutation([&] { ++queue.abi_version; });
+    reject_without_mutation([&] { --queue.struct_size; });
+    reject_without_mutation([&] { queue.commands = 1; });
+    reject_without_mutation([&] { queue.service_state = 1; });
+    reject_without_mutation([&] { queue.diagnostic = 1; });
+    reject_without_mutation([&] { queue.count = queue.capacity + 1; });
+    reject_without_mutation([&] { ++service.abi_version; });
+    reject_without_mutation([&] { ++diagnostic.abi_version; });
 }
 
 void check_service_entry_contract() {
@@ -243,6 +314,7 @@ int main() {
     check_team_peer_translation();
     check_factories();
     check_queue_model();
+    check_checked_queue_reset();
     check_service_entry_contract();
     check_barrier_poll_timeout();
     return failures == 0 ? 0 : 1;

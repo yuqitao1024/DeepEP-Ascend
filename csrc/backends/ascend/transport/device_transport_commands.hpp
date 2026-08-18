@@ -465,7 +465,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE void signal(
     if (queue == nullptr)
         return;
     if (remote_action.kind != RemoteActionKind::kSignalAdd &&
-        remote_action.kind != RemoteActionKind::kSignalIncrement) {
+        remote_action.kind != RemoteActionKind::kSignalIncrement &&
+        remote_action.kind != RemoteActionKind::kSignalSet) {
         detail::record_error(
             queue, DeviceTransportError::kUnsupportedOperation,
             TransportCommandOpcode::kSignal, team, destination_rank,
@@ -621,7 +622,11 @@ DEEP_EP_ASCEND_SIMT_CALLEE void device_barrier(
     if (!detail::validate_queue(
             queue, TransportCommandOpcode::kBarrier, 0, 0))
         return;
-    if (team_mask != 1) {
+    if (team_mask == 0 || (team_mask & ~kWorldTeamMask) != 0 ||
+        (!command::barrier_team_enabled(
+             context.topology, team_mask, TransportTeam::kScaleOut) &&
+         !command::barrier_team_enabled(
+             context.topology, team_mask, TransportTeam::kScaleUp))) {
         detail::record_error(
             queue, DeviceTransportError::kUnsupportedOperation,
             TransportCommandOpcode::kBarrier, 0, 0);
