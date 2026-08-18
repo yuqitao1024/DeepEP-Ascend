@@ -39,7 +39,7 @@ CORE_OPS = ROOT / "tests/ascend/core_ops"
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
-    def test_route_aware_kernels_receive_complete_topology(self):
+    def test_route_aware_kernels_receive_complete_topology_and_timeout(self):
         required_parameters = (
             "transport_topology_abi_version",
             "transport_topology_struct_size",
@@ -52,6 +52,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "transport_scale_up_direct",
             "transport_topology_kind",
             "transport_topology_epoch",
+            "std::uint64_t timeout_cycles",
         )
         required_arguments = (
             "topology.abi_version",
@@ -65,6 +66,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "topology.scale_up_direct",
             "topology.kind",
             "topology.epoch",
+            "timeout_cycles",
         )
         for source_name in ("dispatch.asc", "combine.asc"):
             source = (ELASTIC / source_name).read_text()
@@ -82,6 +84,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 self.assertIsNotNone(call, function_name)
                 for argument in required_arguments:
                     self.assertIn(argument, call.group(1), function_name)
+            operation = source_name.removesuffix(".asc")
+            self.assertRegex(
+                source,
+                rf"(?s)extern \"C\" int deep_ep_ascend_launch_{operation}"
+                rf"\s*\(.*?arguments\.generation,\s*"
+                rf"arguments\.timeout_cycles,",
+                operation)
 
     def test_remote_operator_commands_reuse_checked_team_peer(self):
         release = (ELASTIC / "release_protocol.hpp").read_text()
