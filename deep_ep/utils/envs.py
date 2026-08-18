@@ -1,5 +1,6 @@
 import functools
 import inspect
+import json
 import os
 import random
 import re
@@ -12,6 +13,8 @@ from typing import Any, Dict, Optional, Tuple
 import deep_ep._C as _C
 
 from ..platform import comm_handle_value, get_comm_handle, is_cuda, require_cuda
+
+AscendHybridPreflightRecord = Tuple[str, int, str, str]
 
 _local_rank = None
 _local_seed = 0
@@ -66,6 +69,42 @@ def _parse_ascend_topology(world_size: int) -> Tuple[str, int, int, int]:
     return kind, scale_up_size, epoch, world_size
 
 
+def _encode_ascend_preflight_contract(contract: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(contract, dict):
+        return ""
+    try:
+        return json.dumps(contract, separators=(",", ":"), sort_keys=True)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _decode_ascend_preflight_record(
+        value: Any, stage: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """Read the fixed primitive record exchanged by Ascend process groups."""
+    if (not isinstance(value, tuple) or len(value) != 4 or
+            not isinstance(value[0], str) or not isinstance(value[1], int) or
+            not isinstance(value[2], str) or not isinstance(value[3], str) or
+            value[0] != stage or value[1] not in (0, 1)):
+        return False, "invalid_preflight_record", None
+    if value[1] == 0:
+        return False, value[2] or "invalid_preflight_record", None
+    try:
+        contract = json.loads(value[3])
+    except (TypeError, ValueError):
+        return False, "invalid_preflight_record", None
+    if not isinstance(contract, dict):
+        return False, "invalid_preflight_record", None
+    return True, "", contract
+
+
+def _first_ascend_contract_mismatch(reference: Dict[str, Any],
+                                    candidate: Dict[str, Any]) -> str:
+    for field in sorted(set(reference) | set(candidate)):
+        if reference.get(field) != candidate.get(field):
+            return f"{field}_mismatch"
+    return "contract_mismatch"
+
+
 def preflight_ascend_topology(group: dist.ProcessGroup) -> Tuple[str, int, int, int]:
     """Validate and aggregate the explicit Ascend topology configuration."""
     world_size = group.size()
@@ -75,26 +114,40 @@ def preflight_ascend_topology(group: dist.ProcessGroup) -> Tuple[str, int, int, 
 
     try:
         local_config = _parse_ascend_topology(world_size)
-        local = {"ok": True, "config": local_config, "error_code": None}
+        local = (
+            "topology", 1, "", _encode_ascend_preflight_contract({
+                "kind": local_config[0],
+                "scale_up_size": local_config[1],
+                "topology_epoch": local_config[2],
+                "world_size": local_config[3],
+            }))
     except _AscendTopologyConfigError as error:
         local_config = None
-        local = {"ok": False, "config": None, "error_code": error.code}
+        local = ("topology", 0, error.code, "")
 
     gathered = [None] * world_size
     dist.all_gather_object(gathered, local, group)
+    decoded = []
     for rank, value in enumerate(gathered):
-        if not isinstance(value, dict) or value.get("ok") is not True:
-            error_code = (value.get("error_code", "invalid_preflight_record")
-                          if isinstance(value, dict)
-                          else "invalid_preflight_record")
+        valid, error_code, config = _decode_ascend_preflight_record(
+            value, "topology")
+        if not valid:
             raise RuntimeError(
                 "DeepEP Ascend backend: topology preflight failed on rank "
                 f"{rank} ({error_code})")
+        decoded.append(config)
 
-    first_config = gathered[0].get("config")
-    if any(value.get("config") != first_config for value in gathered[1:]):
+    first_config = decoded[0]
+    for rank, config in enumerate(decoded[1:], 1):
+        if config == first_config:
+            continue
+        reason = ("topology_epoch_mismatch" if
+                  config.get("topology_epoch") !=
+                  first_config.get("topology_epoch") else
+                  "topology_shape_mismatch")
         raise RuntimeError(
-            "DeepEP Ascend backend: topology configuration differs across ranks")
+            "DeepEP Ascend backend: topology preflight failed on rank "
+            f"{rank} ({reason})")
     return local_config
 
 
@@ -103,30 +156,26 @@ def preflight_ascend_contract(group: dist.ProcessGroup, stage: str,
                               error_code: Optional[str] = None) -> Dict[str, Any]:
     """Aggregate a rank-local Ascend contract before collective runtime work."""
     world_size = group.size()
-    local = {
-        "stage": stage,
-        "ok": error_code is None,
-        "contract": contract if error_code is None else None,
-        "error_code": error_code,
-    }
+    encoded_contract = _encode_ascend_preflight_contract(contract)
+    local = (stage, int(error_code is None and bool(encoded_contract)),
+             "" if error_code is None else error_code, encoded_contract)
     gathered = [None] * world_size
     dist.all_gather_object(gathered, local, group)
+    decoded = []
     for rank, value in enumerate(gathered):
-        valid_record = (isinstance(value, dict) and
-                        value.get("stage") == stage and
-                        value.get("ok") is True and
-                        isinstance(value.get("contract"), dict))
+        valid_record, code, decoded_contract = _decode_ascend_preflight_record(
+            value, stage)
         if not valid_record:
-            code = (value.get("error_code", "invalid_preflight_record")
-                    if isinstance(value, dict)
-                    else "invalid_preflight_record")
             raise RuntimeError(
                 f"DeepEP Ascend backend: {stage} preflight failed on rank "
                 f"{rank} ({code})")
-    first_contract = gathered[0]["contract"]
-    if any(value["contract"] != first_contract for value in gathered[1:]):
-        raise RuntimeError(
-            f"DeepEP Ascend backend: {stage} contract differs across ranks")
+        decoded.append(decoded_contract)
+    first_contract = decoded[0]
+    for rank, candidate in enumerate(decoded[1:], 1):
+        if candidate != first_contract:
+            raise RuntimeError(
+                f"DeepEP Ascend backend: {stage} preflight failed on rank "
+                f"{rank} ({_first_ascend_contract_mismatch(first_contract, candidate)})")
     return contract
 
 # Default NIC name for RDMA operations, configurable via environment variable

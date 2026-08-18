@@ -1,4 +1,5 @@
 import functools
+import hashlib
 import os
 import math
 import torch
@@ -30,6 +31,9 @@ from ..utils.envs import (
     get_nvlink_gbs, get_rdma_gbs, preflight_ascend_contract,
     preflight_ascend_topology
 )
+
+
+_ASCEND_DEVICE_TRANSPORT_CAPABILITIES = 0x775
 
 
 class EPHandle:
@@ -224,6 +228,13 @@ def _ascend_descriptor_fingerprint(tensor):
         return None
 
 
+def _ascend_descriptor_identity(tensor):
+    fingerprint = _ascend_descriptor_fingerprint(tensor)
+    if fingerprint is None:
+        return ""
+    return hashlib.sha256(repr(fingerprint).encode("ascii")).hexdigest()
+
+
 def _first_error(*errors):
     return next((error for error in errors if error is not None), None)
 
@@ -311,9 +322,10 @@ class ElasticBuffer:
         self.allow_multiple_reduction = allow_multiple_reduction
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
         self.deterministic = deterministic
+        self._ascend_topology = None
 
         if not is_cuda():
-            preflight_ascend_topology(group)
+            self._ascend_topology = preflight_ascend_topology(group)
 
         if is_cuda():
             if os.environ.get('NCCL_GIN_CROSS_NIC') == '0':
@@ -376,10 +388,15 @@ class ElasticBuffer:
                 construction_error = "unaligned_num_bytes"
             elif num_cpu_bytes != 0:
                 construction_error = "cpu_buffer_unsupported"
-            elif allow_hybrid_mode:
-                construction_error = "hybrid_mode_unsupported"
+            elif (allow_hybrid_mode and
+                  (self._ascend_topology[1] != 2 or
+                   self._ascend_topology[3] != 4)):
+                construction_error = "unsupported_hybrid_topology"
             elif num_gpu_timeout_secs <= 0:
                 construction_error = "invalid_gpu_timeout"
+            topology_kind, scale_up_size, topology_epoch, topology_world_size = \
+                self._ascend_topology
+            scale_out_size = topology_world_size // scale_up_size
             preflight_ascend_contract(
                 group, "construction", {
                     "num_bytes": num_bytes,
@@ -389,6 +406,20 @@ class ElasticBuffer:
                     "prefer_overlap_with_compute": prefer_overlap_with_compute,
                     "sl_idx": sl_idx,
                     "num_gpu_timeout_secs": num_gpu_timeout_secs,
+                    "topology_kind": topology_kind,
+                    "topology_epoch": topology_epoch,
+                    "scale_up_size": scale_up_size,
+                    "scale_out_size": scale_out_size,
+                    "hybrid_mode": int(allow_hybrid_mode),
+                    "symmetric_bytes": num_bytes,
+                    "route_capacity": (
+                        num_max_tokens_per_rank * topology_world_size
+                        if isinstance(num_max_tokens_per_rank, int) else 0),
+                    "scale_up_team_available": int(scale_up_size > 0),
+                    "scale_out_team_available": int(
+                        not allow_hybrid_mode or scale_out_size > 1),
+                    "transport_capabilities":
+                        _ASCEND_DEVICE_TRANSPORT_CAPABILITIES,
                 }, construction_error)
         if os.environ.get('EP_BUFFER_DEBUG', 0):
             print(f'Initializing EP elastic buffer with {num_bytes} bytes '
@@ -558,6 +589,23 @@ class ElasticBuffer:
             "expert_alignment": alignment,
             "expanded": do_expand,
             "zero_padding": do_zero_padding,
+            "topology_epoch": self._ascend_topology[2],
+            "topology_kind": self._ascend_topology[0],
+            "scale_up_size": self._ascend_topology[1],
+            "scale_out_size": self._ascend_topology[3] //
+                              self._ascend_topology[1],
+            "hybrid_mode": int(self.allow_hybrid_mode),
+            "symmetric_bytes": self.num_bytes,
+            "route_capacity": (capacity * self.num_ranks
+                               if isinstance(capacity, int) else 0),
+            "scale_up_team_available": 1,
+            "scale_out_team_available": int(
+                not self.allow_hybrid_mode or self.num_scaleout_ranks > 1),
+            "transport_capabilities": _ASCEND_DEVICE_TRANSPORT_CAPABILITIES,
+            "cached_handle_descriptor": (
+                _ascend_descriptor_identity(
+                    getattr(handle, 'token_metadata_at_forward', None))
+                if cached else ""),
         }
         preflight_ascend_contract(self.group, "dispatch", contract, error)
 
@@ -622,6 +670,23 @@ class ElasticBuffer:
             "num_experts": getattr(handle, 'num_experts', None),
             "capacity": getattr(handle, 'num_max_tokens_per_rank', None),
             "expanded": getattr(handle, 'do_expand', None),
+            "topology_epoch": self._ascend_topology[2],
+            "topology_kind": self._ascend_topology[0],
+            "scale_up_size": self._ascend_topology[1],
+            "scale_out_size": self._ascend_topology[3] //
+                              self._ascend_topology[1],
+            "hybrid_mode": int(self.allow_hybrid_mode),
+            "symmetric_bytes": self.num_bytes,
+            "route_capacity": (
+                getattr(handle, 'num_max_tokens_per_rank', 0) * self.num_ranks
+                if isinstance(getattr(handle, 'num_max_tokens_per_rank', 0), int)
+                else 0),
+            "scale_up_team_available": 1,
+            "scale_out_team_available": int(
+                not self.allow_hybrid_mode or self.num_scaleout_ranks > 1),
+            "transport_capabilities": _ASCEND_DEVICE_TRANSPORT_CAPABILITIES,
+            "dispatch_handle_descriptor": _ascend_descriptor_identity(
+                getattr(handle, 'token_metadata_at_forward', None)),
         }
         preflight_ascend_contract(self.group, "combine", contract, error)
 

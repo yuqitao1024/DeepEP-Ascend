@@ -793,10 +793,14 @@ public:
             TORCH_CHECK(topk_weights->sizes() == topk_idx.sizes(),
                         "DeepEP Ascend backend: dispatch topk_weights shape mismatch");
         }
+        if (allow_hybrid_mode_)
+            require_transport("dispatch",
+                              operation_capabilities(kDispatchCapabilities));
         auto lease = reserve_operation(
             elastic::BufferOperationKind::kDispatch, "dispatch");
-        require_transport("dispatch",
-                          operation_capabilities(kDispatchCapabilities));
+        if (!allow_hybrid_mode_)
+            require_transport("dispatch",
+                              operation_capabilities(kDispatchCapabilities));
         int current_device = -1;
         auto device_status = resources_->current_device(&current_device);
         if (!device_status.ok())
@@ -1403,10 +1407,14 @@ public:
                     "rank-partitioned expert capacity");
         TORCH_CHECK(token_metadata_at_forward.has_value(),
                     "DeepEP Ascend backend: combine requires a dispatch handle");
+        if (allow_hybrid_mode_)
+            require_transport("combine",
+                              operation_capabilities(kCombineCapabilities));
         auto lease = reserve_operation(
             elastic::BufferOperationKind::kCombine, "combine");
-        require_transport("combine",
-                          operation_capabilities(kCombineCapabilities));
+        if (!allow_hybrid_mode_)
+            require_transport("combine",
+                              operation_capabilities(kCombineCapabilities));
 
         const auto device = x.device();
         int current_device = -1;

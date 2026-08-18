@@ -1,6 +1,7 @@
 import ast
 import importlib.abc
 import importlib.util
+import json
 import os
 import pathlib
 import subprocess
@@ -140,6 +141,17 @@ class _FakeGroup:
         return types.SimpleNamespace(
             _comm_ptr=lambda: self.comm_pointer,
             get_hccl_comm=lambda local_rank: self.comm_pointer)
+
+
+def _fixed_preflight_record(stage, contract=None, error_code=None):
+    return (
+        stage, int(error_code is None), error_code or "",
+        "" if error_code is not None else json.dumps(
+            contract, separators=(",", ":"), sort_keys=True))
+
+
+def _fixed_preflight_contract(record):
+    return json.loads(record[3])
 
 
 def _transport_error(operation):
@@ -570,10 +582,9 @@ def _scenario_ascend_topology_preflight():
     buffer = deep_ep.ElasticBuffer(
         group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
         explicitly_destroy=True)
-    assert ("dist.all_gather_object",
-            {"ok": True,
-             "config": ("logical_simulation", 2, 17, 4),
-             "error_code": None}) in events
+    assert ("dist.all_gather_object", _fixed_preflight_record(
+        "topology", {"kind": "logical_simulation", "scale_up_size": 2,
+                     "topology_epoch": 17, "world_size": 4})) in events
     assert (buffer.num_scaleout_ranks, buffer.num_scaleup_ranks) == (2, 2)
     assert (buffer.scaleout_rank_idx, buffer.scaleup_rank_idx) == (1, 1)
     assert (buffer.num_rdma_ranks, buffer.num_nvlink_ranks) == (1, 4)
@@ -588,25 +599,26 @@ def _scenario_ascend_topology_preflight_mismatch():
     group = _FakeGroup(
         events, rank=0, size=4,
         gathered_objects=[
-            {"ok": True,
-             "config": ("logical_simulation", 2, 1, 4),
-             "error_code": None},
-            {"ok": True,
-             "config": ("logical_simulation", 2, 1, 4),
-             "error_code": None},
-            {"ok": True,
-             "config": ("logical_simulation", 4, 1, 4),
-             "error_code": None},
-            {"ok": True,
-             "config": ("logical_simulation", 2, 1, 4),
-             "error_code": None},
+            _fixed_preflight_record(
+                "topology", {"kind": "logical_simulation", "scale_up_size": 2,
+                             "topology_epoch": 1, "world_size": 4}),
+            _fixed_preflight_record(
+                "topology", {"kind": "logical_simulation", "scale_up_size": 2,
+                             "topology_epoch": 1, "world_size": 4}),
+            _fixed_preflight_record(
+                "topology", {"kind": "logical_simulation", "scale_up_size": 4,
+                             "topology_epoch": 1, "world_size": 4}),
+            _fixed_preflight_record(
+                "topology", {"kind": "logical_simulation", "scale_up_size": 2,
+                             "topology_epoch": 1, "world_size": 4}),
         ])
     try:
         deep_ep.ElasticBuffer(
             group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
             explicitly_destroy=True)
     except RuntimeError as error:
-        assert "topology configuration differs across ranks" in str(error), error
+        assert "topology preflight failed on rank 2 (topology_shape_mismatch)" \
+               in str(error), error
     else:
         raise AssertionError("asymmetric Ascend topology was accepted")
     assert not extension.runtime_args
@@ -617,17 +629,16 @@ def _scenario_ascend_topology_preflight_local_parse_failure():
     os.environ["DEEP_EP_ASCEND_LOGICAL_SIMULATION"] = "1"
     os.environ.pop("DEEP_EP_ASCEND_SCALE_UP_SIZE", None)
     gathered = [
-        {"ok": True,
-         "config": ("logical_simulation", 2, 1, 4),
-         "error_code": None},
-        {"ok": False, "config": None,
-         "error_code": "missing_scale_up_size"},
-        {"ok": True,
-         "config": ("logical_simulation", 2, 1, 4),
-         "error_code": None},
-        {"ok": True,
-         "config": ("logical_simulation", 2, 1, 4),
-         "error_code": None},
+        _fixed_preflight_record(
+            "topology", {"kind": "logical_simulation", "scale_up_size": 2,
+                         "topology_epoch": 1, "world_size": 4}),
+        _fixed_preflight_record("topology", error_code="missing_scale_up_size"),
+        _fixed_preflight_record(
+            "topology", {"kind": "logical_simulation", "scale_up_size": 2,
+                         "topology_epoch": 1, "world_size": 4}),
+        _fixed_preflight_record(
+            "topology", {"kind": "logical_simulation", "scale_up_size": 2,
+                         "topology_epoch": 1, "world_size": 4}),
     ]
     group = _FakeGroup(
         events, rank=1, size=4, gathered_objects=gathered)
@@ -650,16 +661,14 @@ def _scenario_ascend_topology_preflight_remote_parse_failure():
     os.environ["DEEP_EP_ASCEND_LOGICAL_SIMULATION"] = "1"
     os.environ["DEEP_EP_ASCEND_SCALE_UP_SIZE"] = "2"
     gathered = [
-        {"ok": True,
-         "config": ("logical_simulation", 2, 1, 4),
-         "error_code": None},
-        {"ok": False, "config": None,
-         "error_code": "invalid_topology_epoch"},
-        {"ok": True,
-         "config": ("logical_simulation", 2, 1, 4),
-         "error_code": None},
-        {"ok": False, "config": None,
-         "error_code": "invalid_scale_up_size"},
+        _fixed_preflight_record(
+            "topology", {"kind": "logical_simulation", "scale_up_size": 2,
+                         "topology_epoch": 1, "world_size": 4}),
+        _fixed_preflight_record("topology", error_code="invalid_topology_epoch"),
+        _fixed_preflight_record(
+            "topology", {"kind": "logical_simulation", "scale_up_size": 2,
+                         "topology_epoch": 1, "world_size": 4}),
+        _fixed_preflight_record("topology", error_code="invalid_scale_up_size"),
     ]
     errors = []
     for rank in (0, 3):
@@ -686,19 +695,14 @@ def _scenario_ascend_collective_contract_preflight():
     deep_ep, extension, events = _load_package("ascend", True)
 
     def valid_record(stage, contract):
-        return {
-            "stage": stage,
-            "ok": True,
-            "contract": contract,
-            "error_code": None,
-        }
+        return _fixed_preflight_record(stage, contract)
 
     def gather_local_communicator_failure(value):
-        if "config" in value:
+        if value[0] == "topology":
             return [value, value]
-        assert value["stage"] == "construction_communicator", value
-        assert value["ok"] is False, value
-        assert value["error_code"] == "invalid_communicator_handle", value
+        assert value[0] == "construction_communicator", value
+        assert value[1] == 0, value
+        assert value[2] == "invalid_communicator_handle", value
         return [value, valid_record(
             "construction_communicator", {"communicator_valid": True})]
 
@@ -718,14 +722,12 @@ def _scenario_ascend_collective_contract_preflight():
     assert not extension.size_calls
 
     def gather_remote_communicator_failure(value):
-        if "config" in value:
+        if value[0] == "topology":
             return [value, value]
-        assert value["stage"] == "construction_communicator", value
-        assert value["contract"] == {"communicator_valid": True}, value
-        remote = dict(value)
-        remote["ok"] = False
-        remote["contract"] = None
-        remote["error_code"] = "invalid_communicator_handle"
+        assert value[0] == "construction_communicator", value
+        assert _fixed_preflight_contract(value) == {"communicator_valid": True}, value
+        remote = _fixed_preflight_record(
+            "construction_communicator", error_code="invalid_communicator_handle")
         return [value, remote]
 
     remote_invalid_group = _FakeGroup(
@@ -744,14 +746,13 @@ def _scenario_ascend_collective_contract_preflight():
     assert not extension.size_calls
 
     def mismatch_construction(value):
-        if "config" in value:
+        if value[0] == "topology":
             return [value, value]
-        if value.get("stage") != "construction":
+        if value[0] != "construction":
             return [value, value]
-        remote = dict(value)
-        remote_contract = dict(value["contract"])
+        remote_contract = _fixed_preflight_contract(value)
         remote_contract["num_bytes"] = 4 * 1024 * 1024
-        remote["contract"] = remote_contract
+        remote = valid_record("construction", remote_contract)
         return [value, remote]
 
     mismatched_group = _FakeGroup(
@@ -761,7 +762,8 @@ def _scenario_ascend_collective_contract_preflight():
             mismatched_group, num_bytes=2 * 1024 * 1024,
             allow_hybrid_mode=False, explicitly_destroy=True)
     except RuntimeError as error:
-        assert "construction contract differs across ranks" in str(error), error
+        assert "construction preflight failed on rank 1 (num_bytes_mismatch)" \
+               in str(error), error
     else:
         raise AssertionError("mismatched construction layout was accepted")
     assert not extension.runtime_args
@@ -777,10 +779,7 @@ def _scenario_ascend_collective_contract_preflight():
 
     def remote_failure(error_code):
         def gather(value):
-            remote = dict(value)
-            remote["ok"] = False
-            remote["contract"] = None
-            remote["error_code"] = error_code
+            remote = _fixed_preflight_record(value[0], error_code=error_code)
             return [value, remote]
         return gather
 
@@ -797,9 +796,9 @@ def _scenario_ascend_collective_contract_preflight():
 
     def local_dispatch_failure(expected_error):
         def gather(value):
-            assert value["stage"] == "dispatch", value
-            assert value["ok"] is False, value
-            assert value["error_code"] == expected_error, value
+            assert value[0] == "dispatch", value
+            assert value[1] == 0, value
+            assert value[2] == expected_error, value
             return [value, valid_record("dispatch", {})]
         return gather
 
@@ -831,11 +830,12 @@ def _scenario_ascend_collective_contract_preflight():
     assert not runtime.dispatch_calls
 
     def gather_valid_dispatch(value):
-        assert value["stage"] == "dispatch", value
-        assert value["ok"] is True, value
-        assert value["contract"]["x_shape"] == [None, 16], value
-        assert value["contract"]["topk_shape"] == [None, 1], value
-        assert "token_count" not in value["contract"], value
+        assert value[0] == "dispatch", value
+        assert value[1] == 1, value
+        contract = _fixed_preflight_contract(value)
+        assert contract["x_shape"] == [None, 16], value
+        assert contract["topk_shape"] == [None, 1], value
+        assert "token_count" not in contract, value
         return [value, value]
 
     group.gathered_objects = gather_valid_dispatch
@@ -872,6 +872,182 @@ def _scenario_ascend_collective_contract_preflight():
         assert "combine preflight failed on rank 1 (invalid_dispatch_handle)" in str(error), error
     else:
         raise AssertionError("peer combine handle failure was ignored")
+    assert len(runtime.combine_calls) == combine_calls
+    buffer.destroy()
+
+
+def _scenario_ascend_hybrid_collective_preflight():
+    deep_ep, extension, events = _load_package("ascend", True)
+    os.environ["DEEP_EP_ASCEND_LOGICAL_SIMULATION"] = "1"
+    os.environ["DEEP_EP_ASCEND_SCALE_UP_SIZE"] = "2"
+    os.environ["DEEP_EP_ASCEND_TOPOLOGY_EPOCH"] = "9"
+
+    def mutate_record(value, field, replacement):
+        assert isinstance(value, tuple), value
+        assert len(value) == 4, value
+        assert all(isinstance(item, (str, int)) for item in value), value
+        stage, ok, error_code, encoded_contract = value
+        assert ok == 1 and error_code == "", value
+        contract = json.loads(encoded_contract)
+        assert field in contract, (field, contract)
+        contract[field] = replacement
+        return stage, ok, error_code, json.dumps(
+            contract, separators=(",", ":"), sort_keys=True)
+
+    def construction_gather(field, replacement):
+        def gather(value):
+            if value[0] == "topology":
+                return [value] * 4
+            if value[0] == "construction_communicator":
+                return [value] * 4
+            assert value[0] == "construction", value
+            remote = mutate_record(value, field, replacement)
+            return [value, remote, value, value]
+        return gather
+
+    construction_cases = (
+        ("hybrid_mode", 0, "hybrid_mode_mismatch"),
+        ("symmetric_bytes", 4 * 1024 * 1024, "symmetric_bytes_mismatch"),
+        ("route_capacity", 17, "route_capacity_mismatch"),
+        ("scale_up_team_available", 0, "scale_up_team_available_mismatch"),
+        ("scale_out_team_available", 0, "scale_out_team_available_mismatch"),
+        ("transport_capabilities", 0, "transport_capabilities_mismatch"),
+        ("num_cpu_bytes", 2 * 1024 * 1024, "num_cpu_bytes_mismatch"),
+    )
+    for field, replacement, error_code in construction_cases:
+        errors = []
+        for rank in (0, 3):
+            group = _FakeGroup(
+                events, rank=rank, size=4,
+                gathered_objects=construction_gather(field, replacement))
+            try:
+                deep_ep.ElasticBuffer(
+                    group, num_bytes=2 * 1024 * 1024,
+                    allow_hybrid_mode=True, explicitly_destroy=True)
+            except RuntimeError as error:
+                errors.append(str(error))
+            else:
+                raise AssertionError(f"asymmetric {field} was accepted")
+        assert errors == [
+            f"DeepEP Ascend backend: construction preflight failed on rank 1 "
+            f"({error_code})",
+        ] * 2, errors
+        assert not extension.runtime_args
+
+    def topology_gather(field, replacement):
+        def gather(value):
+            assert isinstance(value, tuple), value
+            assert value[0] == "topology", value
+            contract = json.loads(value[3])
+            contract[field] = replacement
+            remote = _fixed_preflight_record("topology", contract)
+            return [value, remote, value, value]
+        return gather
+
+    topology_cases = (
+        ("topology_epoch", 10, "topology_epoch_mismatch"),
+        ("scale_up_size", 4, "topology_shape_mismatch"),
+    )
+    for field, replacement, error_code in topology_cases:
+        topology_errors = []
+        for rank in (0, 3):
+            group = _FakeGroup(events, rank=rank, size=4,
+                               gathered_objects=topology_gather(
+                                   field, replacement))
+            try:
+                deep_ep.ElasticBuffer(
+                    group, num_bytes=2 * 1024 * 1024,
+                    allow_hybrid_mode=True, explicitly_destroy=True)
+            except RuntimeError as error:
+                topology_errors.append(str(error))
+            else:
+                raise AssertionError(f"asymmetric {field} was accepted")
+        assert topology_errors == [
+            "DeepEP Ascend backend: topology preflight failed on rank 1 "
+            f"({error_code})",
+        ] * 2, topology_errors
+        assert not extension.runtime_args
+
+    def valid_gather(value):
+        assert isinstance(value, tuple), value
+        assert len(value) == 4, value
+        return [value] * 4
+
+    cpu_errors = []
+    for rank in (0, 3):
+        group = _FakeGroup(events, rank=rank, size=4,
+                           gathered_objects=valid_gather)
+        try:
+            deep_ep.ElasticBuffer(
+                group, num_bytes=4 * 1024 * 1024,
+                num_cpu_bytes=2 * 1024 * 1024, allow_hybrid_mode=True,
+                explicitly_destroy=True)
+        except RuntimeError as error:
+            cpu_errors.append(str(error))
+        else:
+            raise AssertionError("mapped CPU request was accepted without capability")
+    assert cpu_errors == [
+        "DeepEP Ascend backend: construction preflight failed on rank 0 "
+        "(cpu_buffer_unsupported)",
+    ] * 2, cpu_errors
+    assert not extension.runtime_args
+
+    group = _FakeGroup(events, rank=0, size=4, gathered_objects=valid_gather)
+    buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=2 * 1024 * 1024,
+        allow_hybrid_mode=True, explicitly_destroy=True)
+    runtime = extension.runtime_instances[-1]
+    torch = sys.modules["torch"]
+    x = _FakeTensor("npu", (1, 16), torch.bfloat16)
+    topk_idx = _FakeTensor("npu", (1, 1), torch.int64)
+    _, _, _, handle, _ = buffer.dispatch(
+        x, topk_idx=topk_idx, num_experts=4, num_max_tokens_per_rank=1)
+    dispatch_calls = len(runtime.dispatch_calls)
+
+    def cached_descriptor_gather(value):
+        if value[0] == "topology":
+            return [value] * 4
+        assert value[0] == "dispatch", value
+        remote = mutate_record(value, "cached_handle_descriptor", "foreign")
+        return [value, remote, value, value]
+
+    group.gathered_objects = cached_descriptor_gather
+    cached_errors = []
+    for rank in (0, 3):
+        group._rank = rank
+        try:
+            buffer.dispatch(x, handle=handle)
+        except RuntimeError as error:
+            cached_errors.append(str(error))
+        else:
+            raise AssertionError("asymmetric cached descriptor was accepted")
+    assert cached_errors == [
+        "DeepEP Ascend backend: dispatch preflight failed on rank 1 "
+        "(cached_handle_descriptor_mismatch)",
+    ] * 2, cached_errors
+    assert len(runtime.dispatch_calls) == dispatch_calls
+    assert buffer._ascend_handle_generation == 1
+
+    def combine_descriptor_gather(value):
+        assert value[0] == "combine", value
+        remote = mutate_record(value, "dispatch_handle_descriptor", "foreign")
+        return [value, remote, value, value]
+
+    group.gathered_objects = combine_descriptor_gather
+    combine_calls = len(runtime.combine_calls)
+    combine_errors = []
+    for rank in (0, 3):
+        group._rank = rank
+        try:
+            buffer.combine(x, handle)
+        except RuntimeError as error:
+            combine_errors.append(str(error))
+        else:
+            raise AssertionError("asymmetric combine descriptor was accepted")
+    assert combine_errors == [
+        "DeepEP Ascend backend: combine preflight failed on rank 1 "
+        "(dispatch_handle_descriptor_mismatch)",
+    ] * 2, combine_errors
     assert len(runtime.combine_calls) == combine_calls
     buffer.destroy()
 
@@ -1354,6 +1530,8 @@ SCENARIOS = {
         _scenario_ascend_topology_preflight_remote_parse_failure,
     "ascend_collective_contract_preflight":
         _scenario_ascend_collective_contract_preflight,
+    "ascend_hybrid_collective_preflight":
+        _scenario_ascend_hybrid_collective_preflight,
     "ascend_implicit_size": _scenario_ascend_implicit_size,
     "ascend_method_gates": _scenario_ascend_method_gates,
     "ascend_contextmanager_gate": _scenario_ascend_contextmanager_gate,
@@ -1390,6 +1568,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_ascend_collective_contract_preflight_precedes_runtime_work(self):
         self.run_scenario("ascend_collective_contract_preflight")
+
+    def test_hybrid_collective_preflight_rejects_asymmetric_records_before_runtime(self):
+        self.run_scenario("ascend_hybrid_collective_preflight")
 
     def test_explicit_logical_topology_is_aggregated_before_construction(self):
         self.run_scenario("ascend_topology_preflight")

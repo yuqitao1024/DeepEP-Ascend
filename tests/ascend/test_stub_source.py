@@ -605,6 +605,14 @@ class AscendStubSourceTest(unittest.TestCase):
         self.assertIn("coordinator_.reserve(kind)", source)
         self.assertIn("coordinator_.reserve_destroy()", source)
 
+        for operation in ("dispatch", "combine"):
+            begin = source.index(f'    {operation}(')
+            end = source.index("\n    }", begin)
+            body = source[begin:end]
+            self.assertLess(
+                body.index(f'require_transport("{operation}"'),
+                body.index("reserve_operation("), operation)
+
     def test_contract_defines_exact_public_allowlists(self):
         spec = importlib.util.spec_from_file_location("api_contract", API_CONTRACT)
         contract = importlib.util.module_from_spec(spec)
