@@ -13,12 +13,14 @@ from tests.ascend.benchmark.report import (
 )
 from tests.ascend.benchmark.bench_ep import build_parser
 from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
+from tests.ascend.benchmark.timing import NpuEventTimer
 from tests.ascend.benchmark.workloads import classify_ascend_case
 from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
 
 
 ROOT = Path(__file__).resolve().parents[2]
 BENCH_EP = ROOT / "tests/ascend/benchmark/bench_ep.py"
+RUNTIME = ROOT / "tests/ascend/benchmark/runtime.py"
 
 
 def test_case_matrix_matches_upstream_order_and_size():
@@ -180,3 +182,58 @@ def test_cli_rejects_unknown_case_before_runtime_import():
     assert result.returncode == 2
     assert "unknown case IDs: not-a-case" in result.stderr
     assert "torch_npu" not in result.stderr
+
+
+class RecordingEvent:
+    def __init__(self, backend, name):
+        self.backend = backend
+        self.name = name
+
+    def record(self):
+        self.backend.operations.append(f"{self.name}.record")
+
+    def elapsed_time(self, other):
+        assert other.name == "end"
+        return self.backend.elapsed_ms
+
+
+class RecordingEventBackend:
+    def __init__(self, elapsed_ms):
+        self.elapsed_ms = elapsed_ms
+        self.operations = []
+
+    def synchronize(self):
+        self.operations.append("synchronize")
+
+    def new_event(self, name):
+        return RecordingEvent(self, name)
+
+
+def test_npu_timer_synchronizes_and_returns_seconds():
+    backend = RecordingEventBackend(elapsed_ms=1.25)
+    timer = NpuEventTimer(backend)
+
+    sample = timer.measure(lambda: backend.operations.append("operation"))
+
+    assert sample.device_seconds == 0.00125
+    assert sample.wall_seconds > 0
+    assert backend.operations == [
+        "synchronize",
+        "start.record",
+        "operation",
+        "end.record",
+        "synchronize",
+    ]
+
+
+def test_runtime_source_pins_supported_ascend_contract():
+    source = RUNTIME.read_text()
+
+    assert 'backend="hccl"' in source
+    assert 'torch.device("npu", local_rank)' in source
+    assert "allow_hybrid_mode=False" in source
+    assert "explicitly_destroy=True" in source
+    assert "num_sms=1" in source
+    assert "num_qps=0" in source
+    assert source.index("buffer.destroy()") < source.index(
+        "dist.destroy_process_group()")

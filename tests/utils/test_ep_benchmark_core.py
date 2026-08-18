@@ -5,6 +5,7 @@ from tests.utils.ep_benchmark_core import (
     CORRECTNESS_OPERATIONS,
     PERFORMANCE_OPERATIONS,
     TensorBytes,
+    build_dispatch_arguments,
     calculate_combine_traffic,
     calculate_dispatch_traffic,
     count_unique_destinations,
@@ -102,3 +103,39 @@ def test_cuda_benchmark_imports_shared_case_and_traffic_logic():
         "calculate_dispatch_traffic",
         "calculate_combine_traffic",
     } <= imports
+
+
+def test_shared_dispatch_arguments_cover_normal_expanded_and_cached_modes():
+    case = next(
+        case
+        for case in __import__(
+            "tests.utils.ep_benchmark_manifest",
+            fromlist=["enumerate_ep_mode_cases"],
+        ).enumerate_ep_mode_cases()
+        if case.case_id
+        == "ep-bf16-align128-bias2-hcopy1-prev0-async0-alloc0"
+    )
+
+    arguments = build_dispatch_arguments(
+        case=case,
+        x="payload",
+        topk_idx="routes",
+        topk_weights="weights",
+        num_max_tokens_per_rank=64,
+        num_experts=16,
+        num_sms=1,
+        num_qps=0,
+    )
+
+    assert arguments.normal["expert_alignment"] == 128
+    assert arguments.normal["do_handle_copy"] is True
+    assert arguments.normal["do_cpu_sync"] is True
+    assert arguments.expanded["do_expand"] is True
+    assert arguments.expanded["use_tma_aligned_col_major_sf"] is False
+    assert arguments.cached("normal-handle") == {
+        "x": "payload",
+        "handle": "normal-handle",
+        "num_sms": 1,
+        "num_qps": 0,
+    }
+    assert arguments.cached_expanded("expanded-handle")["do_zero_padding"] is True

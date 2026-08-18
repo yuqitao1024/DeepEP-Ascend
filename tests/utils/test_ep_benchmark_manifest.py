@@ -1,4 +1,13 @@
-from tests.utils.ep_benchmark_manifest import WorkloadSpec, build_manifest
+import json
+
+import pytest
+
+from tests.utils.ep_benchmark_manifest import (
+    WorkloadSpec,
+    build_manifest,
+    load_manifest,
+    write_manifest,
+)
 
 
 def test_manifest_is_deterministic_and_rank_asymmetric():
@@ -70,3 +79,26 @@ def test_manifest_masking_preserves_weights_and_invalid_routes():
         for row in rank.topk_weights
         for weight in row
     )
+
+
+def test_manifest_json_round_trip_revalidates_fingerprint(tmp_path):
+    manifest = build_manifest(WorkloadSpec(
+        world_size=2,
+        num_tokens=8,
+        hidden=32,
+        num_topk=2,
+        num_experts=4,
+        seed=11,
+    ))
+    path = tmp_path / "manifest.json"
+
+    write_manifest(path, manifest)
+    loaded = load_manifest(path)
+
+    assert loaded == manifest
+
+    payload = json.loads(path.read_text())
+    payload["ranks"][0]["topk_idx"][0][0] = -1
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="fingerprint"):
+        load_manifest(path)

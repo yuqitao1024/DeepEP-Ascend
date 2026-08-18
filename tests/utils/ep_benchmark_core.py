@@ -1,5 +1,7 @@
 from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
+
+from tests.utils.ep_benchmark_manifest import EPModeCase
 
 
 CORRECTNESS_OPERATIONS = (
@@ -18,6 +20,72 @@ PERFORMANCE_OPERATIONS = (
     "combine",
     "reduced_combine",
 )
+
+
+@dataclass(frozen=True)
+class DispatchArguments:
+    normal: dict[str, Any]
+    expanded: dict[str, Any]
+    _x: Any
+    _topk_weights: Any
+    _num_sms: int
+    _num_qps: int
+
+    def cached(self, handle: Any) -> dict[str, Any]:
+        return {
+            "x": self._x,
+            "handle": handle,
+            "num_sms": self._num_sms,
+            "num_qps": self._num_qps,
+        }
+
+    def cached_expanded(self, handle: Any) -> dict[str, Any]:
+        return {
+            **self.cached(handle),
+            "topk_weights": self._topk_weights,
+            "do_expand": True,
+            "use_tma_aligned_col_major_sf": False,
+            "do_zero_padding": True,
+        }
+
+
+def build_dispatch_arguments(
+    case: EPModeCase,
+    x: Any,
+    topk_idx: Any,
+    topk_weights: Any,
+    num_max_tokens_per_rank: int,
+    num_experts: int,
+    num_sms: int,
+    num_qps: int,
+) -> DispatchArguments:
+    normal = {
+        "x": x,
+        "topk_idx": topk_idx,
+        "topk_weights": topk_weights,
+        "num_sms": num_sms,
+        "num_qps": num_qps,
+        "num_max_tokens_per_rank": num_max_tokens_per_rank,
+        "num_experts": num_experts,
+        "expert_alignment": case.expert_alignment,
+        "async_with_compute_stream": case.async_with_compute_stream,
+        "allocate_on_comm_stream": case.allocate_on_comm_stream,
+        "do_handle_copy": case.do_handle_copy,
+        "do_cpu_sync": True,
+    }
+    expanded = {
+        **normal,
+        "do_expand": True,
+        "use_tma_aligned_col_major_sf": False,
+    }
+    return DispatchArguments(
+        normal=normal,
+        expanded=expanded,
+        _x=x,
+        _topk_weights=topk_weights,
+        _num_sms=num_sms,
+        _num_qps=num_qps,
+    )
 
 
 @dataclass(frozen=True)

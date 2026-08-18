@@ -2,6 +2,7 @@ import hashlib
 import json
 import random
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -186,4 +187,42 @@ def build_manifest(spec: WorkloadSpec) -> BenchmarkManifest:
         spec=spec,
         ranks=ranks,
         fingerprint=manifest_fingerprint(spec, ranks),
+    )
+
+
+def write_manifest(path: str | Path, manifest: BenchmarkManifest) -> None:
+    Path(path).write_text(
+        json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_manifest(path: str | Path) -> BenchmarkManifest:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1:
+        raise ValueError("unsupported manifest schema_version")
+    if payload.get("generator_version") != 1:
+        raise ValueError("unsupported manifest generator_version")
+
+    spec = WorkloadSpec(**payload["spec"])
+    ranks = tuple(
+        RankWorkload(
+            rank=rank["rank"],
+            num_tokens=rank["num_tokens"],
+            topk_idx=tuple(tuple(row) for row in rank["topk_idx"]),
+            topk_weights=tuple(
+                tuple(row) for row in rank["topk_weights"]
+            ),
+        )
+        for rank in payload["ranks"]
+    )
+    fingerprint = manifest_fingerprint(spec, ranks)
+    if payload.get("fingerprint") != fingerprint:
+        raise ValueError("manifest fingerprint does not match its contents")
+    return BenchmarkManifest(
+        schema_version=payload["schema_version"],
+        generator_version=payload["generator_version"],
+        spec=spec,
+        ranks=ranks,
+        fingerprint=fingerprint,
     )

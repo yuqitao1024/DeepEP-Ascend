@@ -1,7 +1,8 @@
 import math
 import statistics
+import time
 from dataclasses import asdict, dataclass
-from typing import Iterable
+from typing import Any, Callable, Iterable
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,32 @@ class TimingSummary:
 
     def to_dict(self) -> dict[str, float]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class TimingSample:
+    device_seconds: float
+    wall_seconds: float
+
+
+class NpuEventTimer:
+    def __init__(self, backend: Any):
+        self.backend = backend
+
+    def measure(self, operation: Callable[[], Any]) -> TimingSample:
+        start = self.backend.new_event("start")
+        end = self.backend.new_event("end")
+        self.backend.synchronize()
+        start.record()
+        wall_start = time.perf_counter()
+        operation()
+        end.record()
+        self.backend.synchronize()
+        wall_seconds = time.perf_counter() - wall_start
+        return TimingSample(
+            device_seconds=start.elapsed_time(end) / 1e3,
+            wall_seconds=wall_seconds,
+        )
 
 
 def _percentile(sorted_samples: tuple[float, ...], quantile: float) -> float:
