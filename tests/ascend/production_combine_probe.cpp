@@ -468,17 +468,16 @@ bool dispatch_descriptor_modes_are_exactly_compatible() {
         return false;
 
     trace = {};
-    auto unattested_target = buffer();
-    Inputs unattested(true);
-    unattested.descriptor_value.mode_flags |= zero_padding;
-    unattested.write_descriptor();
-    return error_contains(
-               [&] { (void)call(
-                   *unattested_target, unattested, std::nullopt, std::nullopt,
-                   std::nullopt, std::nullopt, 1, 0, std::nullopt, false,
-                   false, true); },
-               "dispatch handle") &&
-        trace.launches == 0;
+    auto padded_target = buffer();
+    Inputs padded(true);
+    padded.descriptor_value.mode_flags |= zero_padding;
+    padded.write_descriptor();
+    const auto padded_result = call(
+        *padded_target, padded, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, false, false, true);
+    return !std::get<2>(padded_result).has_value() && trace.launches == 1 &&
+        elastic::has_mode(trace.mode_flags, elastic::CoreMode::kExpanded) &&
+        !elastic::has_mode(trace.mode_flags, elastic::CoreMode::kZeroPadding);
 }
 
 bool padding_expanded_extent_is_accepted() {
