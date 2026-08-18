@@ -992,12 +992,26 @@ def _scenario_ascend_hybrid_collective_preflight():
     ] * 2, cpu_errors
     assert not extension.runtime_args
 
-    def rank_invariant_gather(world_size):
+    def rank_invariant_gather(world_size, hybrid, normalized):
         def gather(value):
             if value[0] in ("dispatch", "combine"):
                 contract = _fixed_preflight_contract(value)
                 assert "cached_handle_descriptor" not in contract, contract
                 assert "dispatch_handle_descriptor" not in contract, contract
+                field = ("cached_descriptor_contract" if
+                         value[0] == "dispatch" else
+                         "combine_descriptor_contract")
+                descriptor_contract = contract[field]
+                assert descriptor_contract == {
+                    "layout": "regular",
+                    "operation": value[0],
+                    "routing_mode": "hybrid" if hybrid else "direct",
+                    "schema_version": 1,
+                    "valid": 1,
+                }, descriptor_contract
+                normalized[value[0]].append(json.dumps(
+                    descriptor_contract, separators=(",", ":"),
+                    sort_keys=True))
             return [value] * world_size
         return gather
 
@@ -1033,15 +1047,19 @@ def _scenario_ascend_hybrid_collective_preflight():
 
             assert len({tuple(handle.token_metadata_at_forward._values)
                         for handle in handles}) == world_size
+            normalized = {"dispatch": [], "combine": []}
             for (buffer, group, x), handle in zip(buffers, handles):
                 runtime = buffer.runtime
                 dispatch_calls = len(runtime.dispatch_calls)
                 combine_calls = len(runtime.combine_calls)
-                group.gathered_objects = rank_invariant_gather(world_size)
+                group.gathered_objects = rank_invariant_gather(
+                    world_size, hybrid, normalized)
                 buffer.dispatch(x, handle=handle)
                 buffer.combine(x, handle)
                 assert len(runtime.dispatch_calls) == dispatch_calls + 1
                 assert len(runtime.combine_calls) == combine_calls + 1
+            assert len(set(normalized["dispatch"])) == 1, normalized
+            assert len(set(normalized["combine"])) == 1, normalized
             return buffers, handles
         finally:
             if saved_simulation is None:
@@ -1060,8 +1078,12 @@ def _scenario_ascend_hybrid_collective_preflight():
         def gather(value):
             if rank == 1:
                 assert value[1:3] == (0, "invalid_dispatch_handle"), value
+                assert _fixed_preflight_contract(value)[
+                    "cached_descriptor_contract"]["valid"] == 0, value
             else:
                 assert value[1] == 1, value
+                assert _fixed_preflight_contract(value)[
+                    "cached_descriptor_contract"]["valid"] == 1, value
             return [
                 _fixed_preflight_record("dispatch", {}),
                 _fixed_preflight_record(

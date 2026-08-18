@@ -227,6 +227,17 @@ def _ascend_descriptor_fingerprint(tensor):
         return None
 
 
+def _ascend_descriptor_contract(operation: str, hybrid: bool,
+                                expanded: bool, valid: bool):
+    return {
+        "schema_version": 1,
+        "operation": operation,
+        "routing_mode": "hybrid" if hybrid else "direct",
+        "layout": "expanded" if expanded else "regular",
+        "valid": int(valid),
+    }
+
+
 def _first_error(*errors):
     return next((error for error in errors if error is not None), None)
 
@@ -494,6 +505,7 @@ class ElasticBuffer:
             allocate_on_comm_stream, do_expand, do_zero_padding):
         cached = handle is not None
         handle_error = None
+        descriptor_valid = True
         if cached:
             descriptor_fingerprint = _ascend_descriptor_fingerprint(
                 getattr(handle, 'token_metadata_at_forward', None))
@@ -505,6 +517,7 @@ class ElasticBuffer:
                     descriptor_fingerprint !=
                     getattr(handle, '_ascend_descriptor_fingerprint', None)):
                 handle_error = "invalid_dispatch_handle"
+                descriptor_valid = False
             elif topk_idx is not None:
                 handle_error = "cached_topk_must_be_none"
             else:
@@ -595,6 +608,11 @@ class ElasticBuffer:
                 not self.allow_hybrid_mode or self.num_scaleout_ranks > 1),
             "transport_capabilities": _ASCEND_DEVICE_TRANSPORT_CAPABILITIES,
         }
+        if cached:
+            contract["cached_descriptor_contract"] = \
+                _ascend_descriptor_contract(
+                    "dispatch", self.allow_hybrid_mode,
+                    getattr(handle, 'do_expand', do_expand), descriptor_valid)
         preflight_ascend_contract(self.group, "dispatch", contract, error)
 
     def _preflight_ascend_combine(
@@ -602,6 +620,7 @@ class ElasticBuffer:
             previous_event, previous_event_before_epilogue,
             async_with_compute_stream, allocate_on_comm_stream):
         handle_error = None
+        descriptor_valid = True
         descriptor_fingerprint = _ascend_descriptor_fingerprint(
             getattr(handle, 'token_metadata_at_forward', None))
         if (not isinstance(handle, EPHandle) or
@@ -612,6 +631,7 @@ class ElasticBuffer:
                 descriptor_fingerprint !=
                 getattr(handle, '_ascend_descriptor_fingerprint', None)):
             handle_error = "invalid_dispatch_handle"
+            descriptor_valid = False
         x_shape, x_error = _ascend_tensor_contract(
             x, 2, torch.bfloat16, "x")
         weights_error = None
@@ -673,6 +693,9 @@ class ElasticBuffer:
             "scale_out_team_available": int(
                 not self.allow_hybrid_mode or self.num_scaleout_ranks > 1),
             "transport_capabilities": _ASCEND_DEVICE_TRANSPORT_CAPABILITIES,
+            "combine_descriptor_contract": _ascend_descriptor_contract(
+                "combine", self.allow_hybrid_mode,
+                getattr(handle, 'do_expand', False), descriptor_valid),
         }
         preflight_ascend_contract(self.group, "combine", contract, error)
 
