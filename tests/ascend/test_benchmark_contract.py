@@ -249,6 +249,13 @@ def test_performance_report_contains_only_current_cases(tmp_path):
     payload = json.loads(output.read_text())
 
     assert payload["schema_version"] == 1
+    assert payload["git_commit"] == subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     assert len(payload["cases"]) == 12
     assert payload["case_summary"] == {
         "total": 12,
@@ -451,14 +458,28 @@ def test_runtime_source_pins_supported_ascend_contract():
         "dist.destroy_process_group()")
 
 
-def _report_fixture(platform, *, mean=2e-6, gbps=100.0,
-                    fingerprint="a" * 64):
+def _report_fixture(
+    platform,
+    *,
+    mean=2e-6,
+    gbps=100.0,
+    fingerprint="a" * 64,
+    iterations=30,
+    logical_bytes=200_000,
+):
     return {
         "schema_version": 1,
         "formula_version": 1,
         "platform": platform,
         "world_size": 2,
         "workload_fingerprint": fingerprint,
+        "timing_protocol": {
+            "timer": f"{platform}_event",
+            "warmups": 30,
+            "iterations": iterations,
+            "rank_aggregation": "maximum_latency",
+            "logical_byte_aggregation": "sum",
+        },
         "cases": [{
             "case_id": (
                 "ep-bf16-align1-bias0-hcopy0-prev0-async0-alloc0"
@@ -472,6 +493,7 @@ def _report_fixture(platform, *, mean=2e-6, gbps=100.0,
                     "p50": mean,
                     "p95": mean * 1.1,
                 },
+                "logical_bytes": {"scaleup": logical_bytes},
                 "logical_gbps": gbps,
             }],
         }],
@@ -494,6 +516,22 @@ def test_compare_reports_rejects_workload_mismatch():
         compare_reports(
             _report_fixture("cuda", fingerprint="a" * 64),
             _report_fixture("ascend", fingerprint="b" * 64),
+        )
+
+
+def test_compare_reports_rejects_timing_protocol_mismatch():
+    with pytest.raises(ValueError, match="timing_protocol.iterations"):
+        compare_reports(
+            _report_fixture("cuda", iterations=30),
+            _report_fixture("ascend", iterations=1),
+        )
+
+
+def test_compare_reports_rejects_logical_byte_mismatch():
+    with pytest.raises(ValueError, match="logical_bytes"):
+        compare_reports(
+            _report_fixture("cuda", logical_bytes=200_000),
+            _report_fixture("ascend", logical_bytes=100_000),
         )
 
 

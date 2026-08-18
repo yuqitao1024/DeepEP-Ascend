@@ -10,10 +10,15 @@ if __package__ in (None, ""):
 
 
 def _require_equal(
-    cuda: dict[str, Any], ascend: dict[str, Any], fields: tuple[str, ...]
+    cuda: dict[str, Any],
+    ascend: dict[str, Any],
+    fields: tuple[str, ...],
+    namespace: str = "",
 ) -> None:
     mismatches = [field for field in fields if cuda.get(field) != ascend.get(field)]
     if mismatches:
+        if namespace:
+            mismatches = [f"{namespace}.{field}" for field in mismatches]
         raise ValueError(
             "benchmark reports are not comparable: " + ", ".join(mismatches)
         )
@@ -58,6 +63,17 @@ def compare_reports(
             "workload_fingerprint",
         ),
     )
+    _require_equal(
+        cuda.get("timing_protocol", {}),
+        ascend.get("timing_protocol", {}),
+        (
+            "warmups",
+            "iterations",
+            "rank_aggregation",
+            "logical_byte_aggregation",
+        ),
+        namespace="timing_protocol",
+    )
     if cuda.get("platform") != "cuda" or ascend.get("platform") != "ascend":
         raise ValueError("reports must be ordered as CUDA then Ascend")
 
@@ -77,6 +93,13 @@ def compare_reports(
         ):
             raise ValueError(
                 "benchmark reports are not comparable: formula_version"
+            )
+        if cuda_operation.get("logical_bytes") != ascend_operation.get(
+            "logical_bytes"
+        ):
+            raise ValueError(
+                "benchmark reports are not comparable: logical_bytes "
+                f"for {case_id}/{operation_id}"
             )
         cuda_mean = _positive(cuda_operation, ("device_seconds", "mean"))
         ascend_mean = _positive(

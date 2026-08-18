@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -13,6 +14,20 @@ SCHEMA_VERSION = 1
 FORMULA_VERSION = 1
 
 
+def _current_git_commit() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[3],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
 @dataclass
 class BenchmarkReport:
     platform: str
@@ -24,7 +39,7 @@ class BenchmarkReport:
     )
     schema_version: int = SCHEMA_VERSION
     formula_version: int = FORMULA_VERSION
-    git_commit: str = ""
+    git_commit: str = field(default_factory=_current_git_commit)
     device: dict[str, Any] = field(default_factory=dict)
     workload: dict[str, Any] = field(default_factory=dict)
     timing_protocol: dict[str, Any] = field(default_factory=dict)

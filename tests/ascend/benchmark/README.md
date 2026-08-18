@@ -170,19 +170,22 @@ python3 tests/ascend/benchmark/compare.py \
 The table reports CUDA and Ascend mean/p50/p95 device latency, logical GB/s,
 Ascend-over-CUDA latency ratio, and Ascend-over-CUDA bandwidth ratio.
 Comparison is rejected when schema version, formula version, world size,
-workload fingerprint, passed case IDs, or operation IDs differ.
+workload fingerprint, timing counts/aggregation, passed case IDs, operation
+IDs, or logical bytes differ. The CUDA and NPU event timer names are expected
+to differ and are not a rejection condition.
 
 ## JSON interpretation
 
 The default report contains exactly 12 current BF16 performance cases and 60
 operation records; the 144-row inventory is available separately through
-`--list-cases`. Top-level identity fields include `schema_version`,
-`formula_version`, `platform`, `world_size`, `workload`, and
-`workload_fingerprint`. `case_summary` reports `total`, `pending`, `passed`,
-and `failed` for cases actually present. Each passed operation records raw
-device/wall samples, mean/p50/p95 summaries, logical bytes, formula version,
-per-rank summaries, and aggregated logical GB/s. Rank latency uses the maximum
-for each sample; logical bytes are summed over ranks.
+`--list-cases`. Top-level identity and provenance fields include
+`schema_version`, `formula_version`, `git_commit`, `platform`, `world_size`,
+`workload`, and `workload_fingerprint`. `git_commit` is the repository `HEAD`,
+or `unknown` when Git metadata is unavailable. `case_summary` reports `total`,
+`pending`, `passed`, and `failed` for cases actually present. Each passed
+operation records raw device/wall samples, mean/p50/p95 summaries, logical
+bytes, formula version, per-rank summaries, and aggregated logical GB/s. Rank
+latency uses the maximum for each sample; logical bytes are summed over ranks.
 
 Do not compare internal kernel-stage profiler times across platforms. The
 canonical comparable latency is the end-to-end CUDA/NPU event interval around

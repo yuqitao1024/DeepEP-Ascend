@@ -475,6 +475,7 @@ The top level contains:
 
 ```text
 schema_version
+formula_version
 generated_at
 git_commit
 platform
@@ -487,6 +488,9 @@ case_summary
 cases
 failures
 ```
+
+`git_commit` records the repository `HEAD` that generated the report. Source
+archives without Git metadata use the explicit value `unknown`.
 
 The performance report contains exactly the selected current performance
 cases. The default complete run therefore contains 12 passed cases and 60
@@ -506,8 +510,10 @@ performance case.
 - Correctness failure prevents timing for that case.
 - Buffer destruction precedes process-group destruction.
 - JSON is written atomically after rank aggregation.
-- Comparison rejects mismatched fingerprints, case IDs, formula versions, or
-  world sizes rather than displaying misleading ratios.
+- Comparison rejects mismatched fingerprints, case IDs, formula versions,
+  world sizes, timing counts/aggregation, logical bytes, or operation IDs
+  rather than displaying misleading ratios. CUDA and NPU event timer names are
+  platform-specific and are not required to match.
 
 ## Testing
 
