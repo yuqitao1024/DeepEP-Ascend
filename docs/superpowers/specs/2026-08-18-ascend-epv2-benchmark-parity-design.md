@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-18
 
-**Status:** Approved for implementation
+**Status:** Revised design pending review
 
 ## Purpose
 
@@ -63,19 +63,33 @@ default CLI and behavior when parity options are absent.
 - Declaring CUDA and Ascend kernel-stage timings directly comparable when their
   internal kernel decompositions differ.
 
-## Compatibility Boundary
+## Suite Boundary
 
-The benchmark mirrors all upstream mode cases, but only executes performance
-measurements when the case is supported by the selected backend. Unsupported
-cases remain visible in terminal and JSON reports with a stable reason.
+The upstream loop couples correctness checks and timing across one 144-mode
+matrix. The Ascend adaptation separates intent from capability:
+
+- the performance suite contains only synchronous modes without previous
+  events, asynchronous compute overlap, or communication-stream allocation;
+- the current comparable performance set is the 12 synchronous BF16 modes;
+- the 12 synchronous FP8 modes are performance cases deferred until the FP8
+  runtime is available;
+- the remaining 120 event/stream modes belong to the functional suite and are
+  not emitted as performance records; and
+- every timed case retains a correctness preflight, but that preflight is a
+  measurement gate rather than a separate functional case.
+
+The complete 144-mode inventory remains visible through case listing and in
+this SPEC. Performance reports contain only cases selected from the current
+performance set, so unsupported functional modes cannot be mistaken for
+performance measurements.
 
 | Capability | CUDA parity profile | Ascend 950 | Comparison treatment |
 | --- | --- | --- | --- |
 | BF16 payload | Supported | Supported | Comparable |
-| FP8 dispatch | Supported | Unsupported | Listed, not measured on Ascend |
-| Previous event chaining | Supported | Unsupported | Listed, not measured on Ascend |
-| Async compute-stream overlap | Supported | Unsupported | Listed, not measured on Ascend |
-| Communication-stream allocation | Supported | Unsupported | Listed, not measured on Ascend |
+| Synchronous FP8 dispatch | Supported | Deferred | Future performance set |
+| Previous event chaining | Supported | Deferred | Functional suite, not performance |
+| Async compute-stream overlap | Supported | Deferred | Functional suite, not performance |
+| Communication-stream allocation | Supported | Deferred | Functional suite, not performance |
 | `allow_multiple_reduction=0/1` | Supported | Supported | Comparable |
 | Masked routes (`topk_idx=-1`) | Supported | Supported | Comparable |
 | Balanced/unbalanced routing | Supported | Supported | Comparable |
@@ -117,16 +131,21 @@ Case IDs use:
 ep-{dtype}-align{alignment}-bias{bias}-hcopy{copy}-prev{previous}-async{async}-alloc{allocate}
 ```
 
-### Classification Summary
+### Suite Summary
 
-| Classification | Count | Ascend status | Stable reason |
+| Suite classification | Count | Current Ascend treatment | Stable reason |
 | --- | ---: | --- | --- |
-| FP8 dispatch | 72 | Unsupported | `fp8_runtime_deferred` |
-| BF16 with previous event | 24 | Unsupported | `event_chaining_deferred` |
-| BF16 async compute stream | 24 | Unsupported | `async_overlap_deferred` |
-| BF16 comm-stream allocation | 12 | Unsupported | `comm_stream_allocation_deferred` |
-| BF16 synchronous intersection | 12 | Supported | empty |
-| Total | 144 | 12 supported / 132 unsupported | |
+| Current BF16 performance | 12 | Correctness preflight and timing | empty |
+| Deferred FP8 performance | 12 | Listed, not executed | `fp8_runtime_deferred` |
+| Deferred functional: previous event | 48 | Listed, not executed | `event_chaining_deferred` |
+| Deferred functional: async without previous event | 48 | Listed, not executed | `async_overlap_deferred` |
+| Deferred functional: comm allocation only | 24 | Listed, not executed | `comm_stream_allocation_deferred` |
+| Total | 144 | 12 current performance / 132 deferred | |
+
+The functional reason counts use precedence `previous event`, `async`, then
+`comm allocation` so they are mutually exclusive. FP8 functional rows retain
+their functional classification; FP8 is additionally unavailable, but that
+does not make event/stream modes performance cases.
 
 Classification uses the reason order shown above. A case with multiple deferred
 features receives the first stable reason, while JSON also records every
@@ -134,154 +153,154 @@ requested feature flag so no information is lost.
 
 ### Exhaustive Case Table
 
-| # | Case ID | Ascend status | Reason |
-| ---: | --- | --- | --- |
-| 1 | `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 2 | `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 3 | `ep-fp8-align128-bias0-hcopy1-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 4 | `ep-fp8-align128-bias0-hcopy1-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 5 | `ep-fp8-align128-bias0-hcopy1-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 6 | `ep-fp8-align128-bias0-hcopy1-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 7 | `ep-fp8-align128-bias1-hcopy1-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 8 | `ep-fp8-align128-bias1-hcopy1-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 9 | `ep-fp8-align128-bias1-hcopy1-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 10 | `ep-fp8-align128-bias1-hcopy1-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 11 | `ep-fp8-align128-bias1-hcopy1-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 12 | `ep-fp8-align128-bias1-hcopy1-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 13 | `ep-fp8-align128-bias2-hcopy1-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 14 | `ep-fp8-align128-bias2-hcopy1-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 15 | `ep-fp8-align128-bias2-hcopy1-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 16 | `ep-fp8-align128-bias2-hcopy1-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 17 | `ep-fp8-align128-bias2-hcopy1-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 18 | `ep-fp8-align128-bias2-hcopy1-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 19 | `ep-bf16-align128-bias0-hcopy1-prev0-async0-alloc0` | Supported |  |
-| 20 | `ep-bf16-align128-bias0-hcopy1-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 21 | `ep-bf16-align128-bias0-hcopy1-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 22 | `ep-bf16-align128-bias0-hcopy1-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 23 | `ep-bf16-align128-bias0-hcopy1-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 24 | `ep-bf16-align128-bias0-hcopy1-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
-| 25 | `ep-bf16-align128-bias1-hcopy1-prev0-async0-alloc0` | Supported |  |
-| 26 | `ep-bf16-align128-bias1-hcopy1-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 27 | `ep-bf16-align128-bias1-hcopy1-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 28 | `ep-bf16-align128-bias1-hcopy1-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 29 | `ep-bf16-align128-bias1-hcopy1-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 30 | `ep-bf16-align128-bias1-hcopy1-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
-| 31 | `ep-bf16-align128-bias2-hcopy1-prev0-async0-alloc0` | Supported |  |
-| 32 | `ep-bf16-align128-bias2-hcopy1-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 33 | `ep-bf16-align128-bias2-hcopy1-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 34 | `ep-bf16-align128-bias2-hcopy1-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 35 | `ep-bf16-align128-bias2-hcopy1-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 36 | `ep-bf16-align128-bias2-hcopy1-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
-| 37 | `ep-fp8-align1-bias0-hcopy1-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 38 | `ep-fp8-align1-bias0-hcopy1-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 39 | `ep-fp8-align1-bias0-hcopy1-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 40 | `ep-fp8-align1-bias0-hcopy1-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 41 | `ep-fp8-align1-bias0-hcopy1-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 42 | `ep-fp8-align1-bias0-hcopy1-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 43 | `ep-fp8-align1-bias1-hcopy1-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 44 | `ep-fp8-align1-bias1-hcopy1-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 45 | `ep-fp8-align1-bias1-hcopy1-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 46 | `ep-fp8-align1-bias1-hcopy1-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 47 | `ep-fp8-align1-bias1-hcopy1-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 48 | `ep-fp8-align1-bias1-hcopy1-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 49 | `ep-fp8-align1-bias2-hcopy1-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 50 | `ep-fp8-align1-bias2-hcopy1-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 51 | `ep-fp8-align1-bias2-hcopy1-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 52 | `ep-fp8-align1-bias2-hcopy1-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 53 | `ep-fp8-align1-bias2-hcopy1-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 54 | `ep-fp8-align1-bias2-hcopy1-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 55 | `ep-bf16-align1-bias0-hcopy1-prev0-async0-alloc0` | Supported |  |
-| 56 | `ep-bf16-align1-bias0-hcopy1-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 57 | `ep-bf16-align1-bias0-hcopy1-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 58 | `ep-bf16-align1-bias0-hcopy1-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 59 | `ep-bf16-align1-bias0-hcopy1-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 60 | `ep-bf16-align1-bias0-hcopy1-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
-| 61 | `ep-bf16-align1-bias1-hcopy1-prev0-async0-alloc0` | Supported |  |
-| 62 | `ep-bf16-align1-bias1-hcopy1-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 63 | `ep-bf16-align1-bias1-hcopy1-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 64 | `ep-bf16-align1-bias1-hcopy1-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 65 | `ep-bf16-align1-bias1-hcopy1-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 66 | `ep-bf16-align1-bias1-hcopy1-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
-| 67 | `ep-bf16-align1-bias2-hcopy1-prev0-async0-alloc0` | Supported |  |
-| 68 | `ep-bf16-align1-bias2-hcopy1-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 69 | `ep-bf16-align1-bias2-hcopy1-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 70 | `ep-bf16-align1-bias2-hcopy1-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 71 | `ep-bf16-align1-bias2-hcopy1-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 72 | `ep-bf16-align1-bias2-hcopy1-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
-| 73 | `ep-fp8-align128-bias0-hcopy0-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 74 | `ep-fp8-align128-bias0-hcopy0-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 75 | `ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 76 | `ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 77 | `ep-fp8-align128-bias0-hcopy0-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 78 | `ep-fp8-align128-bias0-hcopy0-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 79 | `ep-fp8-align128-bias1-hcopy0-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 80 | `ep-fp8-align128-bias1-hcopy0-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 81 | `ep-fp8-align128-bias1-hcopy0-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 82 | `ep-fp8-align128-bias1-hcopy0-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 83 | `ep-fp8-align128-bias1-hcopy0-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 84 | `ep-fp8-align128-bias1-hcopy0-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 85 | `ep-fp8-align128-bias2-hcopy0-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 86 | `ep-fp8-align128-bias2-hcopy0-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 87 | `ep-fp8-align128-bias2-hcopy0-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 88 | `ep-fp8-align128-bias2-hcopy0-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 89 | `ep-fp8-align128-bias2-hcopy0-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 90 | `ep-fp8-align128-bias2-hcopy0-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 91 | `ep-bf16-align128-bias0-hcopy0-prev0-async0-alloc0` | Supported |  |
-| 92 | `ep-bf16-align128-bias0-hcopy0-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 93 | `ep-bf16-align128-bias0-hcopy0-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 94 | `ep-bf16-align128-bias0-hcopy0-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 95 | `ep-bf16-align128-bias0-hcopy0-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 96 | `ep-bf16-align128-bias0-hcopy0-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
-| 97 | `ep-bf16-align128-bias1-hcopy0-prev0-async0-alloc0` | Supported |  |
-| 98 | `ep-bf16-align128-bias1-hcopy0-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 99 | `ep-bf16-align128-bias1-hcopy0-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 100 | `ep-bf16-align128-bias1-hcopy0-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 101 | `ep-bf16-align128-bias1-hcopy0-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 102 | `ep-bf16-align128-bias1-hcopy0-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
-| 103 | `ep-bf16-align128-bias2-hcopy0-prev0-async0-alloc0` | Supported |  |
-| 104 | `ep-bf16-align128-bias2-hcopy0-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 105 | `ep-bf16-align128-bias2-hcopy0-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 106 | `ep-bf16-align128-bias2-hcopy0-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 107 | `ep-bf16-align128-bias2-hcopy0-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 108 | `ep-bf16-align128-bias2-hcopy0-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
-| 109 | `ep-fp8-align1-bias0-hcopy0-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 110 | `ep-fp8-align1-bias0-hcopy0-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 111 | `ep-fp8-align1-bias0-hcopy0-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 112 | `ep-fp8-align1-bias0-hcopy0-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 113 | `ep-fp8-align1-bias0-hcopy0-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 114 | `ep-fp8-align1-bias0-hcopy0-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 115 | `ep-fp8-align1-bias1-hcopy0-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 116 | `ep-fp8-align1-bias1-hcopy0-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 117 | `ep-fp8-align1-bias1-hcopy0-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 118 | `ep-fp8-align1-bias1-hcopy0-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 119 | `ep-fp8-align1-bias1-hcopy0-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 120 | `ep-fp8-align1-bias1-hcopy0-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 121 | `ep-fp8-align1-bias2-hcopy0-prev0-async0-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 122 | `ep-fp8-align1-bias2-hcopy0-prev0-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 123 | `ep-fp8-align1-bias2-hcopy0-prev0-async1-alloc0` | Unsupported | `fp8_runtime_deferred` |
-| 124 | `ep-fp8-align1-bias2-hcopy0-prev0-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 125 | `ep-fp8-align1-bias2-hcopy0-prev1-async0-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 126 | `ep-fp8-align1-bias2-hcopy0-prev1-async1-alloc1` | Unsupported | `fp8_runtime_deferred` |
-| 127 | `ep-bf16-align1-bias0-hcopy0-prev0-async0-alloc0` | Supported |  |
-| 128 | `ep-bf16-align1-bias0-hcopy0-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 129 | `ep-bf16-align1-bias0-hcopy0-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 130 | `ep-bf16-align1-bias0-hcopy0-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 131 | `ep-bf16-align1-bias0-hcopy0-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 132 | `ep-bf16-align1-bias0-hcopy0-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
-| 133 | `ep-bf16-align1-bias1-hcopy0-prev0-async0-alloc0` | Supported |  |
-| 134 | `ep-bf16-align1-bias1-hcopy0-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 135 | `ep-bf16-align1-bias1-hcopy0-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 136 | `ep-bf16-align1-bias1-hcopy0-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 137 | `ep-bf16-align1-bias1-hcopy0-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 138 | `ep-bf16-align1-bias1-hcopy0-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
-| 139 | `ep-bf16-align1-bias2-hcopy0-prev0-async0-alloc0` | Supported |  |
-| 140 | `ep-bf16-align1-bias2-hcopy0-prev0-async0-alloc1` | Unsupported | `comm_stream_allocation_deferred` |
-| 141 | `ep-bf16-align1-bias2-hcopy0-prev0-async1-alloc0` | Unsupported | `async_overlap_deferred` |
-| 142 | `ep-bf16-align1-bias2-hcopy0-prev0-async1-alloc1` | Unsupported | `async_overlap_deferred` |
-| 143 | `ep-bf16-align1-bias2-hcopy0-prev1-async0-alloc1` | Unsupported | `event_chaining_deferred` |
-| 144 | `ep-bf16-align1-bias2-hcopy0-prev1-async1-alloc1` | Unsupported | `event_chaining_deferred` |
+| # | Case ID | Suite | Ascend status | Reason |
+| ---: | --- | --- | --- | --- |
+| 1 | `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 2 | `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 3 | `ep-fp8-align128-bias0-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 4 | `ep-fp8-align128-bias0-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 5 | `ep-fp8-align128-bias0-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 6 | `ep-fp8-align128-bias0-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 7 | `ep-fp8-align128-bias1-hcopy1-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 8 | `ep-fp8-align128-bias1-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 9 | `ep-fp8-align128-bias1-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 10 | `ep-fp8-align128-bias1-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 11 | `ep-fp8-align128-bias1-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 12 | `ep-fp8-align128-bias1-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 13 | `ep-fp8-align128-bias2-hcopy1-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 14 | `ep-fp8-align128-bias2-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 15 | `ep-fp8-align128-bias2-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 16 | `ep-fp8-align128-bias2-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 17 | `ep-fp8-align128-bias2-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 18 | `ep-fp8-align128-bias2-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 19 | `ep-bf16-align128-bias0-hcopy1-prev0-async0-alloc0` | Performance | Supported |  |
+| 20 | `ep-bf16-align128-bias0-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 21 | `ep-bf16-align128-bias0-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 22 | `ep-bf16-align128-bias0-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 23 | `ep-bf16-align128-bias0-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 24 | `ep-bf16-align128-bias0-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 25 | `ep-bf16-align128-bias1-hcopy1-prev0-async0-alloc0` | Performance | Supported |  |
+| 26 | `ep-bf16-align128-bias1-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 27 | `ep-bf16-align128-bias1-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 28 | `ep-bf16-align128-bias1-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 29 | `ep-bf16-align128-bias1-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 30 | `ep-bf16-align128-bias1-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 31 | `ep-bf16-align128-bias2-hcopy1-prev0-async0-alloc0` | Performance | Supported |  |
+| 32 | `ep-bf16-align128-bias2-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 33 | `ep-bf16-align128-bias2-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 34 | `ep-bf16-align128-bias2-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 35 | `ep-bf16-align128-bias2-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 36 | `ep-bf16-align128-bias2-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 37 | `ep-fp8-align1-bias0-hcopy1-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 38 | `ep-fp8-align1-bias0-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 39 | `ep-fp8-align1-bias0-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 40 | `ep-fp8-align1-bias0-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 41 | `ep-fp8-align1-bias0-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 42 | `ep-fp8-align1-bias0-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 43 | `ep-fp8-align1-bias1-hcopy1-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 44 | `ep-fp8-align1-bias1-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 45 | `ep-fp8-align1-bias1-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 46 | `ep-fp8-align1-bias1-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 47 | `ep-fp8-align1-bias1-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 48 | `ep-fp8-align1-bias1-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 49 | `ep-fp8-align1-bias2-hcopy1-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 50 | `ep-fp8-align1-bias2-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 51 | `ep-fp8-align1-bias2-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 52 | `ep-fp8-align1-bias2-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 53 | `ep-fp8-align1-bias2-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 54 | `ep-fp8-align1-bias2-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 55 | `ep-bf16-align1-bias0-hcopy1-prev0-async0-alloc0` | Performance | Supported |  |
+| 56 | `ep-bf16-align1-bias0-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 57 | `ep-bf16-align1-bias0-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 58 | `ep-bf16-align1-bias0-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 59 | `ep-bf16-align1-bias0-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 60 | `ep-bf16-align1-bias0-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 61 | `ep-bf16-align1-bias1-hcopy1-prev0-async0-alloc0` | Performance | Supported |  |
+| 62 | `ep-bf16-align1-bias1-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 63 | `ep-bf16-align1-bias1-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 64 | `ep-bf16-align1-bias1-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 65 | `ep-bf16-align1-bias1-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 66 | `ep-bf16-align1-bias1-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 67 | `ep-bf16-align1-bias2-hcopy1-prev0-async0-alloc0` | Performance | Supported |  |
+| 68 | `ep-bf16-align1-bias2-hcopy1-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 69 | `ep-bf16-align1-bias2-hcopy1-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 70 | `ep-bf16-align1-bias2-hcopy1-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 71 | `ep-bf16-align1-bias2-hcopy1-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 72 | `ep-bf16-align1-bias2-hcopy1-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 73 | `ep-fp8-align128-bias0-hcopy0-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 74 | `ep-fp8-align128-bias0-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 75 | `ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 76 | `ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 77 | `ep-fp8-align128-bias0-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 78 | `ep-fp8-align128-bias0-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 79 | `ep-fp8-align128-bias1-hcopy0-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 80 | `ep-fp8-align128-bias1-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 81 | `ep-fp8-align128-bias1-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 82 | `ep-fp8-align128-bias1-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 83 | `ep-fp8-align128-bias1-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 84 | `ep-fp8-align128-bias1-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 85 | `ep-fp8-align128-bias2-hcopy0-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 86 | `ep-fp8-align128-bias2-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 87 | `ep-fp8-align128-bias2-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 88 | `ep-fp8-align128-bias2-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 89 | `ep-fp8-align128-bias2-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 90 | `ep-fp8-align128-bias2-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 91 | `ep-bf16-align128-bias0-hcopy0-prev0-async0-alloc0` | Performance | Supported |  |
+| 92 | `ep-bf16-align128-bias0-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 93 | `ep-bf16-align128-bias0-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 94 | `ep-bf16-align128-bias0-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 95 | `ep-bf16-align128-bias0-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 96 | `ep-bf16-align128-bias0-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 97 | `ep-bf16-align128-bias1-hcopy0-prev0-async0-alloc0` | Performance | Supported |  |
+| 98 | `ep-bf16-align128-bias1-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 99 | `ep-bf16-align128-bias1-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 100 | `ep-bf16-align128-bias1-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 101 | `ep-bf16-align128-bias1-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 102 | `ep-bf16-align128-bias1-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 103 | `ep-bf16-align128-bias2-hcopy0-prev0-async0-alloc0` | Performance | Supported |  |
+| 104 | `ep-bf16-align128-bias2-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 105 | `ep-bf16-align128-bias2-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 106 | `ep-bf16-align128-bias2-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 107 | `ep-bf16-align128-bias2-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 108 | `ep-bf16-align128-bias2-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 109 | `ep-fp8-align1-bias0-hcopy0-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 110 | `ep-fp8-align1-bias0-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 111 | `ep-fp8-align1-bias0-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 112 | `ep-fp8-align1-bias0-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 113 | `ep-fp8-align1-bias0-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 114 | `ep-fp8-align1-bias0-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 115 | `ep-fp8-align1-bias1-hcopy0-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 116 | `ep-fp8-align1-bias1-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 117 | `ep-fp8-align1-bias1-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 118 | `ep-fp8-align1-bias1-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 119 | `ep-fp8-align1-bias1-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 120 | `ep-fp8-align1-bias1-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 121 | `ep-fp8-align1-bias2-hcopy0-prev0-async0-alloc0` | Performance | Deferred | `fp8_runtime_deferred` |
+| 122 | `ep-fp8-align1-bias2-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 123 | `ep-fp8-align1-bias2-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 124 | `ep-fp8-align1-bias2-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 125 | `ep-fp8-align1-bias2-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 126 | `ep-fp8-align1-bias2-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 127 | `ep-bf16-align1-bias0-hcopy0-prev0-async0-alloc0` | Performance | Supported |  |
+| 128 | `ep-bf16-align1-bias0-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 129 | `ep-bf16-align1-bias0-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 130 | `ep-bf16-align1-bias0-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 131 | `ep-bf16-align1-bias0-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 132 | `ep-bf16-align1-bias0-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 133 | `ep-bf16-align1-bias1-hcopy0-prev0-async0-alloc0` | Performance | Supported |  |
+| 134 | `ep-bf16-align1-bias1-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 135 | `ep-bf16-align1-bias1-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 136 | `ep-bf16-align1-bias1-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 137 | `ep-bf16-align1-bias1-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 138 | `ep-bf16-align1-bias1-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 139 | `ep-bf16-align1-bias2-hcopy0-prev0-async0-alloc0` | Performance | Supported |  |
+| 140 | `ep-bf16-align1-bias2-hcopy0-prev0-async0-alloc1` | Functional | Deferred | `comm_stream_allocation_deferred` |
+| 141 | `ep-bf16-align1-bias2-hcopy0-prev0-async1-alloc0` | Functional | Deferred | `async_overlap_deferred` |
+| 142 | `ep-bf16-align1-bias2-hcopy0-prev0-async1-alloc1` | Functional | Deferred | `async_overlap_deferred` |
+| 143 | `ep-bf16-align1-bias2-hcopy0-prev1-async0-alloc1` | Functional | Deferred | `event_chaining_deferred` |
+| 144 | `ep-bf16-align1-bias2-hcopy0-prev1-async1-alloc1` | Functional | Deferred | `event_chaining_deferred` |
 
-### Operations Per Supported Case
+### Operations Per Current Performance Case
 
 | Operation | Correctness | Performance | Notes |
 | --- | --- | --- | --- |
@@ -292,8 +311,8 @@ requested feature flag so no information is lost.
 | Normal combine | Yes | Yes | Same weights and bias count |
 | Reduced/expanded combine | Yes | Yes | Same multiple-reduction setting |
 
-The 12 supported modes each produce five primary performance records, for 60
-comparable performance records per workload configuration.
+The 12 current BF16 performance modes each produce five primary performance
+records, for 60 comparable performance records per workload configuration.
 
 ## Workload Parity
 
@@ -413,7 +432,7 @@ Representative commands:
 
 ```bash
 # Print all 144 cases without importing torch_npu
-python3 tests/ascend/benchmark/bench_ep.py --list-cases
+python3 tests/ascend/benchmark/bench_ep.py --list-cases --suite all
 
 # Two-rank Ascend benchmark inside an allocated NPU task
 torchrun --standalone --nproc-per-node=2 \
@@ -429,8 +448,9 @@ python3 tests/ascend/benchmark/compare.py \
   results/cuda-ep8.json results/ascend-ep8.json
 ```
 
-The final argument names may be refined during TDD only if tests and this SPEC
-are updated together before implementation is declared complete.
+The `--suite` argument is valid with `--list-cases`; benchmark execution always
+uses the current performance set. Explicit `--cases` selection rejects any
+deferred or functional case before runtime dependency loading.
 
 ## Reporting
 
@@ -439,10 +459,15 @@ are updated together before implementation is declared complete.
 The terminal report shows:
 
 1. workload and platform summary;
-2. all 144 cases with supported/unsupported status and reason;
-3. correctness results for supported cases;
-4. latency and logical-bandwidth table;
+2. the 12 selected synchronous BF16 performance cases;
+3. correctness-preflight results for those performance cases;
+4. the 60-record latency and logical-bandwidth table;
 5. failure summary.
+
+Case inventory is a separate listing operation. `--list-cases --suite all`
+shows all 144 rows, `--suite performance` shows 12 current BF16 and 12
+deferred FP8 rows, and `--suite functional` shows the 120 deferred event/stream
+rows. Listing does not initialize `torch_npu` or access an NPU.
 
 ### JSON
 
@@ -463,15 +488,19 @@ cases
 failures
 ```
 
-Every one of the 144 cases appears in `cases`. Unsupported cases contain no
-timing samples and a non-empty stable reason. Supported cases contain an
-operation record for every required correctness or performance operation.
+The performance report contains exactly the selected current performance
+cases. The default complete run therefore contains 12 passed cases and 60
+operation records. Deferred performance and functional cases do not appear in
+`cases`; their exhaustive classification is produced by the separate listing
+operation. A report may never encode a functional case as an unsupported
+performance case.
 
 ## Error Handling
 
-- Unsupported cases are reported and do not fail the process.
-- A supported case may only finish as `passed` or `failed`.
-- A supported case cannot silently become skipped.
+- Deferred and functional cases are rejected from performance case selection
+  with their suite and stable reason.
+- A selected performance case may only finish as `passed` or `failed`.
+- A selected performance case cannot silently become skipped.
 - A failure on any rank is aggregated before the next collective boundary.
 - Peer failure produces a bounded, rank-qualified error.
 - Correctness failure prevents timing for that case.
@@ -485,24 +514,28 @@ operation record for every required correctness or performance operation.
 Host-only TDD coverage must prove:
 
 - exactly 144 stable case IDs are generated;
-- exactly 12 Ascend cases are supported and 132 are unsupported;
-- the classification counts are 72/24/24/12/12;
-- every unsupported case has a stable non-empty reason;
-- all supported cases are BF16, synchronous, event-free, and allocation-free;
-- each supported case expands to the required six correctness operations and
+- exactly 12 cases are current BF16 performance, 12 are deferred FP8
+  performance, and 120 are deferred functional;
+- functional reason counts are 48 previous-event, 48 async, and 24
+  comm-allocation cases;
+- every deferred case has a stable non-empty reason;
+- all current performance cases are BF16, synchronous, event-free, and
+  allocation-free;
+- each current performance case expands to the required six correctness and
   five performance operations;
 - identical manifest inputs produce identical fingerprints;
 - route summaries and logical bytes match across CUDA and Ascend profiles;
 - percentile and GB/s calculations are correct;
-- JSON contains all 144 cases;
+- default JSON contains exactly 12 passed performance cases and 60 operation
+  records, with no functional cases;
 - comparison rejects incompatible inputs;
-- `--list-cases` works without importing `torch_npu`.
+- all/performance/functional case listing works without importing `torch_npu`.
 
 NPU acceptance must cover:
 
-- two-rank full supported matrix;
-- four-rank supported-matrix smoke;
-- eight-rank supported-matrix smoke;
+- two-rank full current-performance matrix;
+- four-rank current-performance smoke;
+- eight-rank current-performance smoke;
 - bounded peer failure and cleanup;
 - JSON production and comparison against a matching CUDA parity result.
 
@@ -511,10 +544,14 @@ coverage. Reports must record the qualification level.
 
 ## Acceptance Criteria
 
-1. The standalone Ascend benchmark lists all 144 upstream modes.
-2. The report contains exactly 12 supported and 132 unsupported Ascend modes.
-3. Unsupported reasons match this SPEC.
-4. The 12 supported modes run the required BF16 operation variants.
+1. The standalone Ascend benchmark lists and classifies all 144 upstream modes.
+2. The default performance report contains exactly 12 passed BF16 cases and
+   no functional cases.
+3. The inventory contains 12 current BF16 performance, 12 deferred FP8
+   performance, and 120 deferred functional cases with reasons matching this
+   SPEC.
+4. The 12 current performance cases run the required BF16 operation variants
+   and emit exactly 60 timing records.
 5. GPU and Ascend parity records share workload fingerprints and logical bytes.
 6. Canonical latency and bandwidth statistics use the same timing protocol.
 7. Existing `tests/elastic/test_ep.py` behavior is unchanged without parity flags.
