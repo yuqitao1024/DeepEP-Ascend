@@ -1,5 +1,8 @@
 import json
+import subprocess
+import sys
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -8,9 +11,14 @@ from tests.ascend.benchmark.report import (
     validate_comparable,
     write_report_atomic,
 )
+from tests.ascend.benchmark.bench_ep import build_parser
 from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
 from tests.ascend.benchmark.workloads import classify_ascend_case
 from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
+
+
+ROOT = Path(__file__).resolve().parents[2]
+BENCH_EP = ROOT / "tests/ascend/benchmark/bench_ep.py"
 
 
 def test_case_matrix_matches_upstream_order_and_size():
@@ -122,3 +130,53 @@ def test_comparison_rejects_incompatible_report_identity():
 
     with pytest.raises(ValueError, match="workload_fingerprint"):
         validate_comparable(left, right)
+
+
+def test_benchmark_parser_preserves_production_size_defaults():
+    args = build_parser().parse_args([])
+
+    assert args.num_tokens == 4096
+    assert args.hidden == 7168
+    assert args.num_topk == 6
+    assert args.num_experts == 256
+    assert args.warmups == 30
+    assert args.iterations == 30
+    assert args.allow_multiple_reduction == 1
+
+
+def test_list_cases_is_host_only_and_exhaustive():
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(BENCH_EP),
+            "--list-cases",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={},
+    )
+    payload = json.loads(result.stdout)
+
+    assert len(payload["cases"]) == 144
+    assert payload["summary"] == {"supported": 12, "unsupported": 132}
+    assert all(
+        case["reason"]
+        for case in payload["cases"]
+        if case["status"] == "unsupported"
+    )
+
+
+def test_cli_rejects_unknown_case_before_runtime_import():
+    result = subprocess.run(
+        [sys.executable, str(BENCH_EP), "--cases", "not-a-case"],
+        capture_output=True,
+        text=True,
+        env={},
+    )
+
+    assert result.returncode == 2
+    assert "unknown case IDs: not-a-case" in result.stderr
+    assert "torch_npu" not in result.stderr
