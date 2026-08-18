@@ -41,7 +41,7 @@ NPU8P host, use the validated symlink rather than selecting a weekly package:
 ```bash
 source /usr/local/Ascend/cann-9.2.0/set_env.sh
 export HCOMM_ROOT=/home/pyptouser/yuqitao/Ascend/hcomm-deepep-current/cann
-export PATH="$HCOMM_ROOT/bin${PATH:+:$PATH}"
+export PATH="/home/pyptouser/yuqitao/tools/cmake-3.28.4/bin:$HCOMM_ROOT/bin${PATH:+:$PATH}"
 export LD_LIBRARY_PATH="$HCOMM_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export LIBRARY_PATH="$HCOMM_ROOT/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export CPLUS_INCLUDE_PATH="$HCOMM_ROOT/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
@@ -73,7 +73,7 @@ task-submit --device 0,1 --max-time 1800 --run '
 cd /home/pyptouser/yuqitao/DeepEP-Ascend &&
 source /usr/local/Ascend/cann-9.2.0/set_env.sh &&
 export HCOMM_ROOT=/home/pyptouser/yuqitao/Ascend/hcomm-deepep-current/cann &&
-export PATH="$HCOMM_ROOT/bin${PATH:+:$PATH}" &&
+export PATH="/home/pyptouser/yuqitao/tools/cmake-3.28.4/bin:$HCOMM_ROOT/bin${PATH:+:$PATH}" &&
 export LD_LIBRARY_PATH="$HCOMM_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" &&
 export LIBRARY_PATH="$HCOMM_ROOT/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}" &&
 export CPLUS_INCLUDE_PATH="$HCOMM_ROOT/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}" &&

@@ -263,6 +263,9 @@ localize_dispatch_expert(
 inline DispatchHandleStatus validate_dispatch_handle(
     const DispatchHandleDescriptor& expected,
     const DispatchHandleDescriptor& actual) {
+    const auto identity_mode_flags = [](CoreModeFlags flags) {
+        return flags & ~mode_bit(CoreMode::kZeroPadding);
+    };
     if (expected.abi_version != kDispatchHandleDescriptorAbiVersion ||
         expected.struct_size != sizeof(DispatchHandleDescriptor) ||
         actual.abi_version != kDispatchHandleDescriptorAbiVersion ||
@@ -279,7 +282,8 @@ inline DispatchHandleStatus validate_dispatch_handle(
         expected.num_topk != actual.num_topk ||
         expected.expert_alignment != actual.expert_alignment ||
         expected.num_max_tokens_per_rank != actual.num_max_tokens_per_rank ||
-        expected.mode_flags != actual.mode_flags)
+        identity_mode_flags(expected.mode_flags) !=
+            identity_mode_flags(actual.mode_flags))
         return {DispatchHandleStatusCode::kMismatch,
                 "dispatch handle does not match the current call"};
     return {};

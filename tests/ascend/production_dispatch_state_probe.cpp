@@ -52,6 +52,11 @@ int main() {
     CHECK(expected.generation == 11);
     CHECK(validate_dispatch_handle(expected, expected).ok());
 
+    auto zero_padded = expected;
+    zero_padded.mode_flags |= mode_bit(CoreMode::kZeroPadding);
+    CHECK(validate_dispatch_handle(expected, zero_padded).ok());
+    CHECK(validate_dispatch_handle(zero_padded, expected).ok());
+
     auto mismatch = expected;
     mismatch.family += 1;
     CHECK(!validate_dispatch_handle(expected, mismatch).ok());
