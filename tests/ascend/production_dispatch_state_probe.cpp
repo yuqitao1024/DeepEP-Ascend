@@ -58,11 +58,11 @@ int main() {
     CHECK(validate_dispatch_handle(zero_padded, expected).ok());
 
     const auto attested_expanded = make_attested_dispatch_handle_descriptor(
-        17, topology, 3, 128, 8, 2, 4, 256,
+        17, topology, 11, 3, 128, 8, 2, 4, 256,
         mode_bit(CoreMode::kExpanded));
     const auto attested_zero_padded =
         make_attested_dispatch_handle_descriptor(
-            17, topology, 3, 128, 8, 2, 4, 256,
+            17, topology, 11, 3, 128, 8, 2, 4, 256,
             mode_bit(CoreMode::kExpanded) |
                 mode_bit(CoreMode::kZeroPadding));
     CHECK(attested_expanded.family == attested_zero_padded.family);
