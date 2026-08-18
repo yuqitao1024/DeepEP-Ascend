@@ -42,7 +42,7 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 7;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 8;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -348,6 +348,8 @@ inline TilingStatus build_core_tiling(
             has_mode(input.mode_flags, CoreMode::kExpanded);
         window_input.allow_multiple_reduction = has_mode(
             input.mode_flags, CoreMode::kAllowMultipleReduction);
+        window_input.hybrid = has_mode(input.mode_flags, CoreMode::kHybrid);
+        window_input.hybrid_route_capacity = tiling.dispatch_output_capacity;
         const auto layout_status = build_symmetric_window_layout(
             window_input, &tiling.symmetric_window_layout);
         if (!layout_status.ok())

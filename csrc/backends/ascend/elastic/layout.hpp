@@ -9,7 +9,8 @@ namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kAscendElasticAlignment = 32;
 inline constexpr std::uint64_t kPublicElasticBufferAlignment = 2ULL << 20U;
-inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 4;
+inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 5;
+inline constexpr std::uint64_t kHybridRouteRecordBytes = 64;
 inline constexpr std::uint64_t kCombineControlSlotBytes =
     2 * sizeof(std::uint64_t);
 inline constexpr std::uint64_t kCombineRecordHeaderBytes =
@@ -193,6 +194,8 @@ struct SymmetricWindowInput {
     std::uint64_t element_bytes = 2;
     bool expanded = false;
     bool allow_multiple_reduction = false;
+    bool hybrid = false;
+    std::uint64_t hybrid_route_capacity = 0;
 };
 
 struct SymmetricWindowLayout {
@@ -241,6 +244,37 @@ struct SymmetricWindowLayout {
     std::uint64_t barrier_completion_offset = 0;
     std::uint64_t barrier_completion_bytes = 0;
     std::uint64_t barrier_completion_count = 0;
+    std::uint64_t hybrid_route_record_offset = 0;
+    std::uint64_t hybrid_route_record_bytes = 0;
+    std::uint64_t hybrid_route_record_count = 0;
+    std::uint64_t hybrid_dispatch_ingress_control_offset = 0;
+    std::uint64_t hybrid_dispatch_ingress_control_bytes = 0;
+    std::uint64_t hybrid_dispatch_ingress_control_count = 0;
+    std::uint64_t hybrid_dispatch_ingress_shard_offset = 0;
+    std::uint64_t hybrid_dispatch_ingress_shard_bytes = 0;
+    std::uint64_t hybrid_dispatch_ingress_shard_count = 0;
+    std::uint64_t hybrid_dispatch_ingress_bytes = 0;
+    std::uint64_t hybrid_dispatch_forward_control_offset = 0;
+    std::uint64_t hybrid_dispatch_forward_control_bytes = 0;
+    std::uint64_t hybrid_dispatch_forward_control_count = 0;
+    std::uint64_t hybrid_dispatch_forward_shard_offset = 0;
+    std::uint64_t hybrid_dispatch_forward_shard_bytes = 0;
+    std::uint64_t hybrid_dispatch_forward_shard_count = 0;
+    std::uint64_t hybrid_dispatch_forward_bytes = 0;
+    std::uint64_t hybrid_combine_reverse_forward_control_offset = 0;
+    std::uint64_t hybrid_combine_reverse_forward_control_bytes = 0;
+    std::uint64_t hybrid_combine_reverse_forward_control_count = 0;
+    std::uint64_t hybrid_combine_reverse_forward_shard_offset = 0;
+    std::uint64_t hybrid_combine_reverse_forward_shard_bytes = 0;
+    std::uint64_t hybrid_combine_reverse_forward_shard_count = 0;
+    std::uint64_t hybrid_combine_reverse_forward_bytes = 0;
+    std::uint64_t hybrid_combine_return_control_offset = 0;
+    std::uint64_t hybrid_combine_return_control_bytes = 0;
+    std::uint64_t hybrid_combine_return_control_count = 0;
+    std::uint64_t hybrid_combine_return_shard_offset = 0;
+    std::uint64_t hybrid_combine_return_shard_bytes = 0;
+    std::uint64_t hybrid_combine_return_shard_count = 0;
+    std::uint64_t hybrid_combine_return_bytes = 0;
 };
 
 class LayoutBuilder {
@@ -413,11 +447,90 @@ inline LayoutStatus build_symmetric_window_layout(
     }
 
     layout.reserve_bytes = kAscendElasticAlignment;
+    if (input.hybrid) {
+        std::uint64_t hybrid_stage_capacity = 0;
+        if (!checked_multiply(input.num_max_tokens_per_rank, input.world_size,
+                              &hybrid_stage_capacity) ||
+            !checked_multiply(input.hybrid_route_capacity,
+                              kHybridRouteRecordBytes,
+                              &layout.hybrid_route_record_bytes))
+            return LayoutStatus::overflow("hybrid route region size overflow");
+
+        const std::uint64_t hybrid_stage_shard_capacity =
+            hybrid_stage_capacity / input.world_size;
+        const auto build_hybrid_stage = [&input, hybrid_stage_shard_capacity](
+                                            std::uint64_t record_bytes,
+                                            std::uint64_t control_slot_bytes,
+                                            std::uint64_t* control_count,
+                                            std::uint64_t* control_bytes,
+                                            std::uint64_t* shard_count,
+                                            std::uint64_t* shard_bytes,
+                                            std::uint64_t* total_bytes) {
+            *control_count = input.world_size;
+            *shard_count = input.world_size;
+            return checked_multiply(*control_count, control_slot_bytes,
+                                    control_bytes) &&
+                   checked_multiply(hybrid_stage_shard_capacity, record_bytes,
+                                    shard_bytes) &&
+                   checked_align(*shard_bytes, kAscendElasticAlignment,
+                                 shard_bytes) &&
+                   checked_multiply(*shard_bytes, *shard_count, total_bytes);
+        };
+        layout.hybrid_route_record_count = input.hybrid_route_capacity;
+        if (!build_hybrid_stage(
+                layout.dispatch_record_bytes, sizeof(DispatchControlSlot),
+                &layout.hybrid_dispatch_ingress_control_count,
+                &layout.hybrid_dispatch_ingress_control_bytes,
+                &layout.hybrid_dispatch_ingress_shard_count,
+                &layout.hybrid_dispatch_ingress_shard_bytes,
+                &layout.hybrid_dispatch_ingress_bytes) ||
+            !build_hybrid_stage(
+                layout.dispatch_record_bytes, sizeof(DispatchControlSlot),
+                &layout.hybrid_dispatch_forward_control_count,
+                &layout.hybrid_dispatch_forward_control_bytes,
+                &layout.hybrid_dispatch_forward_shard_count,
+                &layout.hybrid_dispatch_forward_shard_bytes,
+                &layout.hybrid_dispatch_forward_bytes) ||
+            !build_hybrid_stage(
+                layout.combine_record_bytes, kCombineControlSlotBytes,
+                &layout.hybrid_combine_reverse_forward_control_count,
+                &layout.hybrid_combine_reverse_forward_control_bytes,
+                &layout.hybrid_combine_reverse_forward_shard_count,
+                &layout.hybrid_combine_reverse_forward_shard_bytes,
+                &layout.hybrid_combine_reverse_forward_bytes) ||
+            !build_hybrid_stage(
+                layout.combine_record_bytes, kCombineControlSlotBytes,
+                &layout.hybrid_combine_return_control_count,
+                &layout.hybrid_combine_return_control_bytes,
+                &layout.hybrid_combine_return_shard_count,
+                &layout.hybrid_combine_return_shard_bytes,
+                &layout.hybrid_combine_return_bytes))
+            return LayoutStatus::overflow("hybrid stage region size overflow");
+    }
     LayoutBuilder window;
     if (!window.append(layout.control_bytes, &layout.control_offset) ||
         !window.append(layout.dispatch_bytes, &layout.dispatch_offset) ||
         !window.append(layout.combine_bytes, &layout.combine_offset) ||
         !window.append(layout.reserve_bytes, &layout.reserve_offset) ||
+        (input.hybrid &&
+         (!window.append(layout.hybrid_route_record_bytes,
+                         &layout.hybrid_route_record_offset) ||
+          !window.append(layout.hybrid_dispatch_ingress_control_bytes,
+                         &layout.hybrid_dispatch_ingress_control_offset) ||
+          !window.append(layout.hybrid_dispatch_ingress_bytes,
+                         &layout.hybrid_dispatch_ingress_shard_offset) ||
+          !window.append(layout.hybrid_dispatch_forward_control_bytes,
+                         &layout.hybrid_dispatch_forward_control_offset) ||
+          !window.append(layout.hybrid_dispatch_forward_bytes,
+                         &layout.hybrid_dispatch_forward_shard_offset) ||
+          !window.append(layout.hybrid_combine_reverse_forward_control_bytes,
+                         &layout.hybrid_combine_reverse_forward_control_offset) ||
+          !window.append(layout.hybrid_combine_reverse_forward_bytes,
+                         &layout.hybrid_combine_reverse_forward_shard_offset) ||
+          !window.append(layout.hybrid_combine_return_control_bytes,
+                         &layout.hybrid_combine_return_control_offset) ||
+          !window.append(layout.hybrid_combine_return_bytes,
+                         &layout.hybrid_combine_return_shard_offset))) ||
         !window.finish(&layout.total_bytes, kPublicElasticBufferAlignment))
         return LayoutStatus::overflow("symmetric window size overflow");
     if (!checked_add(layout.control_offset, layout.barrier_generation_offset,

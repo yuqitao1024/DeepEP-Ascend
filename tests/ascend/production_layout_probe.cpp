@@ -15,7 +15,7 @@ int main() {
     static_assert(std::is_standard_layout_v<SymmetricControlHeader>);
     static_assert(std::is_trivially_copyable_v<SymmetricControlHeader>);
     static_assert(sizeof(SymmetricControlHeader) == 32);
-    static_assert(kSymmetricWindowAbiVersion == 4);
+    static_assert(kSymmetricWindowAbiVersion == 5);
     static_assert(offsetof(SymmetricWindowLayout, abi_version) == 0);
     static_assert(offsetof(SymmetricWindowLayout, struct_size) == 4);
     static_assert(offsetof(SymmetricWindowLayout, control_offset) == 8);
@@ -139,6 +139,164 @@ int main() {
           layout.reserve_offset);
     CHECK(layout.total_bytes % kPublicElasticBufferAlignment == 0);
 
+    // These literals preserve the direct ABI-v4 geometry before hybrid tails.
+    SymmetricWindowInput direct_input{};
+    direct_input.world_size = 4;
+    direct_input.num_max_tokens_per_rank = 8;
+    direct_input.hidden = 128;
+    direct_input.num_topk = 2;
+    direct_input.element_bytes = 2;
+    SymmetricWindowLayout direct_layout{};
+    CHECK(build_symmetric_window_layout(direct_input, &direct_layout).ok());
+    CHECK(direct_layout.control_offset == 0);
+    CHECK(direct_layout.control_bytes == 160);
+    CHECK(direct_layout.dispatch_offset == 160);
+    CHECK(direct_layout.dispatch_record_bytes == 352);
+    CHECK(direct_layout.dispatch_source_shard_bytes == 2816);
+    CHECK(direct_layout.dispatch_source_shard_count == 4);
+    CHECK(direct_layout.dispatch_bytes == 22528);
+    CHECK(direct_layout.combine_offset == 22688);
+    CHECK(direct_layout.combine_record_bytes == 320);
+    CHECK(direct_layout.combine_contributor_shard_bytes == 2560);
+    CHECK(direct_layout.combine_contributor_shard_count == 4);
+    CHECK(direct_layout.combine_bytes == 20544);
+    CHECK(direct_layout.reserve_offset == 43232);
+    CHECK(direct_layout.reserve_bytes == 32);
+    CHECK(direct_layout.total_bytes == 2097152);
+    CHECK(direct_layout.dispatch_control_offset == 96);
+    CHECK(direct_layout.dispatch_control_bytes == 64);
+    CHECK(direct_layout.dispatch_receive_offset == 160);
+    CHECK(direct_layout.dispatch_receive_shard_bytes == 2816);
+    CHECK(direct_layout.dispatch_receive_shard_count == 4);
+    CHECK(direct_layout.dispatch_receive_bytes == 11264);
+    CHECK(direct_layout.dispatch_staging_offset == 11424);
+    CHECK(direct_layout.dispatch_staging_shard_bytes == 2816);
+    CHECK(direct_layout.dispatch_staging_shard_count == 4);
+    CHECK(direct_layout.dispatch_staging_bytes == 11264);
+    CHECK(direct_layout.combine_control_offset == 22688);
+    CHECK(direct_layout.combine_control_bytes == 64);
+    CHECK(direct_layout.combine_receive_offset == 22752);
+    CHECK(direct_layout.combine_receive_shard_bytes == 2560);
+    CHECK(direct_layout.combine_receive_shard_count == 4);
+    CHECK(direct_layout.combine_receive_bytes == 10240);
+    CHECK(direct_layout.combine_staging_offset == 32992);
+    CHECK(direct_layout.combine_staging_shard_bytes == 2560);
+    CHECK(direct_layout.combine_staging_shard_count == 4);
+    CHECK(direct_layout.combine_staging_bytes == 10240);
+    CHECK(direct_layout.combine_weight_offset == 256);
+    CHECK(direct_layout.barrier_generation_offset == 32);
+    CHECK(direct_layout.barrier_generation_bytes == 32);
+    CHECK(direct_layout.barrier_generation_count == 4);
+    CHECK(direct_layout.barrier_completion_offset == 64);
+    CHECK(direct_layout.barrier_completion_bytes == 32);
+    CHECK(direct_layout.barrier_completion_count == 4);
+    CHECK(direct_layout.hybrid_route_record_offset == 0);
+    CHECK(direct_layout.hybrid_route_record_bytes == 0);
+    CHECK(direct_layout.hybrid_route_record_count == 0);
+    CHECK(direct_layout.hybrid_dispatch_ingress_control_offset == 0);
+    CHECK(direct_layout.hybrid_dispatch_ingress_control_bytes == 0);
+    CHECK(direct_layout.hybrid_dispatch_ingress_control_count == 0);
+    CHECK(direct_layout.hybrid_dispatch_ingress_shard_offset == 0);
+    CHECK(direct_layout.hybrid_dispatch_ingress_shard_bytes == 0);
+    CHECK(direct_layout.hybrid_dispatch_ingress_shard_count == 0);
+    CHECK(direct_layout.hybrid_dispatch_ingress_bytes == 0);
+    CHECK(direct_layout.hybrid_dispatch_forward_control_offset == 0);
+    CHECK(direct_layout.hybrid_dispatch_forward_control_bytes == 0);
+    CHECK(direct_layout.hybrid_dispatch_forward_control_count == 0);
+    CHECK(direct_layout.hybrid_dispatch_forward_shard_offset == 0);
+    CHECK(direct_layout.hybrid_dispatch_forward_shard_bytes == 0);
+    CHECK(direct_layout.hybrid_dispatch_forward_shard_count == 0);
+    CHECK(direct_layout.hybrid_dispatch_forward_bytes == 0);
+    CHECK(direct_layout.hybrid_combine_reverse_forward_control_offset == 0);
+    CHECK(direct_layout.hybrid_combine_reverse_forward_control_bytes == 0);
+    CHECK(direct_layout.hybrid_combine_reverse_forward_control_count == 0);
+    CHECK(direct_layout.hybrid_combine_reverse_forward_shard_offset == 0);
+    CHECK(direct_layout.hybrid_combine_reverse_forward_shard_bytes == 0);
+    CHECK(direct_layout.hybrid_combine_reverse_forward_shard_count == 0);
+    CHECK(direct_layout.hybrid_combine_reverse_forward_bytes == 0);
+    CHECK(direct_layout.hybrid_combine_return_control_offset == 0);
+    CHECK(direct_layout.hybrid_combine_return_control_bytes == 0);
+    CHECK(direct_layout.hybrid_combine_return_control_count == 0);
+    CHECK(direct_layout.hybrid_combine_return_shard_offset == 0);
+    CHECK(direct_layout.hybrid_combine_return_shard_bytes == 0);
+    CHECK(direct_layout.hybrid_combine_return_shard_count == 0);
+    CHECK(direct_layout.hybrid_combine_return_bytes == 0);
+
+    auto hybrid_input = direct_input;
+    hybrid_input.hybrid = true;
+    hybrid_input.hybrid_route_capacity = 40;
+    SymmetricWindowLayout hybrid_layout{};
+    CHECK(build_symmetric_window_layout(hybrid_input, &hybrid_layout).ok());
+    CHECK(hybrid_layout.control_offset == direct_layout.control_offset);
+    CHECK(hybrid_layout.control_bytes == direct_layout.control_bytes);
+    CHECK(hybrid_layout.dispatch_offset == direct_layout.dispatch_offset);
+    CHECK(hybrid_layout.dispatch_bytes == direct_layout.dispatch_bytes);
+    CHECK(hybrid_layout.combine_offset == direct_layout.combine_offset);
+    CHECK(hybrid_layout.combine_bytes == direct_layout.combine_bytes);
+    CHECK(hybrid_layout.reserve_offset == direct_layout.reserve_offset);
+    CHECK(hybrid_layout.reserve_bytes == direct_layout.reserve_bytes);
+    CHECK(hybrid_layout.total_bytes >= direct_layout.total_bytes);
+    CHECK(hybrid_layout.hybrid_route_record_offset == 43264);
+    CHECK(hybrid_layout.hybrid_route_record_count == 40);
+    CHECK(hybrid_layout.hybrid_route_record_bytes == 2560);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_control_offset == 45824);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_control_count == 4);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_control_bytes == 64);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_shard_offset == 45888);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_shard_count == 4);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_shard_bytes == 2816);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_bytes == 11264);
+    CHECK(hybrid_layout.hybrid_dispatch_forward_control_offset == 57152);
+    CHECK(hybrid_layout.hybrid_dispatch_forward_control_count == 4);
+    CHECK(hybrid_layout.hybrid_dispatch_forward_control_bytes == 64);
+    CHECK(hybrid_layout.hybrid_dispatch_forward_shard_offset == 57216);
+    CHECK(hybrid_layout.hybrid_dispatch_forward_shard_count == 4);
+    CHECK(hybrid_layout.hybrid_dispatch_forward_shard_bytes == 2816);
+    CHECK(hybrid_layout.hybrid_dispatch_forward_bytes == 11264);
+    CHECK(hybrid_layout.hybrid_combine_reverse_forward_control_offset == 68480);
+    CHECK(hybrid_layout.hybrid_combine_reverse_forward_control_count == 4);
+    CHECK(hybrid_layout.hybrid_combine_reverse_forward_control_bytes == 64);
+    CHECK(hybrid_layout.hybrid_combine_reverse_forward_shard_offset == 68544);
+    CHECK(hybrid_layout.hybrid_combine_reverse_forward_shard_count == 4);
+    CHECK(hybrid_layout.hybrid_combine_reverse_forward_shard_bytes == 2560);
+    CHECK(hybrid_layout.hybrid_combine_reverse_forward_bytes == 10240);
+    CHECK(hybrid_layout.hybrid_combine_return_control_offset == 78784);
+    CHECK(hybrid_layout.hybrid_combine_return_control_count == 4);
+    CHECK(hybrid_layout.hybrid_combine_return_control_bytes == 64);
+    CHECK(hybrid_layout.hybrid_combine_return_shard_offset == 78848);
+    CHECK(hybrid_layout.hybrid_combine_return_shard_count == 4);
+    CHECK(hybrid_layout.hybrid_combine_return_shard_bytes == 2560);
+    CHECK(hybrid_layout.hybrid_combine_return_bytes == 10240);
+    CHECK(hybrid_layout.hybrid_route_record_offset >=
+          hybrid_layout.reserve_offset + hybrid_layout.reserve_bytes);
+    CHECK(hybrid_layout.hybrid_route_record_offset +
+              hybrid_layout.hybrid_route_record_bytes <=
+          hybrid_layout.hybrid_dispatch_ingress_control_offset);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_control_offset +
+              hybrid_layout.hybrid_dispatch_ingress_control_bytes <=
+          hybrid_layout.hybrid_dispatch_ingress_shard_offset);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_shard_offset +
+              hybrid_layout.hybrid_dispatch_ingress_bytes <=
+          hybrid_layout.hybrid_dispatch_forward_control_offset);
+    CHECK(hybrid_layout.hybrid_dispatch_forward_control_offset +
+              hybrid_layout.hybrid_dispatch_forward_control_bytes <=
+          hybrid_layout.hybrid_dispatch_forward_shard_offset);
+    CHECK(hybrid_layout.hybrid_dispatch_forward_shard_offset +
+              hybrid_layout.hybrid_dispatch_forward_bytes <=
+          hybrid_layout.hybrid_combine_reverse_forward_control_offset);
+    CHECK(hybrid_layout.hybrid_combine_reverse_forward_control_offset +
+              hybrid_layout.hybrid_combine_reverse_forward_control_bytes <=
+          hybrid_layout.hybrid_combine_reverse_forward_shard_offset);
+    CHECK(hybrid_layout.hybrid_combine_reverse_forward_shard_offset +
+              hybrid_layout.hybrid_combine_reverse_forward_bytes <=
+          hybrid_layout.hybrid_combine_return_control_offset);
+    CHECK(hybrid_layout.hybrid_combine_return_control_offset +
+              hybrid_layout.hybrid_combine_return_control_bytes <=
+          hybrid_layout.hybrid_combine_return_shard_offset);
+    CHECK(hybrid_layout.hybrid_combine_return_shard_offset +
+              hybrid_layout.hybrid_combine_return_bytes <=
+          hybrid_layout.total_bytes);
+
     auto larger = input;
     larger.num_max_tokens_per_rank *= 2;
     SymmetricWindowLayout larger_layout{};
@@ -233,6 +391,11 @@ int main() {
     overflow = expanded_single_reduction;
     overflow.num_max_tokens_per_rank =
         std::numeric_limits<std::uint64_t>::max() / input.num_topk + 1;
+    CHECK(build_symmetric_window_layout(overflow, &layout).code ==
+          LayoutStatusCode::kOverflow);
+    overflow = direct_input;
+    overflow.hybrid = true;
+    overflow.hybrid_route_capacity = std::numeric_limits<std::uint64_t>::max();
     CHECK(build_symmetric_window_layout(overflow, &layout).code ==
           LayoutStatusCode::kOverflow);
 

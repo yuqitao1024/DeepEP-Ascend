@@ -408,7 +408,20 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 }
 
 int main() {
-    static_assert(kCoreTilingAbiVersion == 7);
+    static_assert(kCoreTilingAbiVersion == 8);
+    const auto hybrid_tiling = valid_tiling(
+        OperationKind::kDispatch, ElementKind::kBFloat16, 0, 4,
+        mode_bit(CoreMode::kHybrid));
+    if (hybrid_tiling.symmetric_window_layout.hybrid_route_record_count !=
+            hybrid_tiling.dispatch_output_capacity ||
+        hybrid_tiling.symmetric_window_layout.hybrid_route_record_bytes !=
+            hybrid_tiling.dispatch_output_capacity *
+                kHybridRouteRecordBytes ||
+        hybrid_tiling.symmetric_window_layout
+                .hybrid_dispatch_ingress_shard_count != 4 ||
+        hybrid_tiling.symmetric_window_layout
+                .hybrid_combine_return_shard_count != 4)
+        return 74;
     auto barrier_rank_zero = valid_barrier_tiling(0);
     auto barrier_rank_one = valid_barrier_tiling(1);
     const auto barrier_storage =

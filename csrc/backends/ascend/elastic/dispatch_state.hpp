@@ -50,7 +50,7 @@ struct HybridRouteRecord {
     std::uint32_t reserved;
 };
 
-static_assert(sizeof(HybridRouteRecord) == 64);
+static_assert(sizeof(HybridRouteRecord) == kHybridRouteRecordBytes);
 
 struct HybridRouteTableView {
     const HybridRouteRecord* records;
