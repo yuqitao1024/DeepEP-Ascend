@@ -58,6 +58,8 @@ TransportStatus MappedSegmentOwner::initialize(
         return failure;
     }
     status = provider_.publish(descriptor_, &release_generation_);
+    if (status.ok())
+        published_ = true;
     if (!status.ok() || release_generation_ == 0) {
         const auto failure = status.ok() ? TransportStatus::runtime_failure(
             "publish_mapped_segment", 0,
@@ -66,7 +68,6 @@ TransportStatus MappedSegmentOwner::initialize(
         (void)teardown();
         return failure;
     }
-    published_ = true;
     return TransportStatus::success();
 }
 

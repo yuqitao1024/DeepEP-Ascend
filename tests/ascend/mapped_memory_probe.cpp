@@ -25,6 +25,7 @@ int failures = 0;
 class TraceProvider final : public runtime::MappedMemoryProvider {
 public:
     std::string fail_operation;
+    bool publish_zero_generation = false;
     std::vector<std::string> calls;
 
     transport::TransportStatus allocate(
@@ -61,7 +62,7 @@ public:
         calls.emplace_back("publish");
         if (fails("publish"))
             return failure("publish");
-        *generation = 17;
+        *generation = publish_zero_generation ? 0 : 17;
         return success();
     }
 
@@ -154,6 +155,16 @@ void check_construction_failures_unwind() {
     }
 }
 
+void check_zero_generation_publish_invalidates_before_cleanup() {
+    TraceProvider provider;
+    provider.publish_zero_generation = true;
+    runtime::MappedSegmentOwner owner(provider);
+    CHECK(!owner.initialize(256, 64, 9).ok());
+    CHECK(has_calls(provider, {"allocate", "map", "register", "publish",
+                               "invalidate", "deregister", "unmap", "free"}));
+    CHECK(owner.teardown().ok());
+}
+
 void check_retryable_teardown() {
     TraceProvider provider;
     runtime::MappedSegmentOwner owner(provider);
@@ -200,6 +211,7 @@ int main() {
     CHECK(!runtime::mapped_cpu_memory_supported());
     check_success_and_reverse_teardown();
     check_construction_failures_unwind();
+    check_zero_generation_publish_invalidates_before_cleanup();
     check_retryable_teardown();
     check_epoch_bounds_and_zero_byte_behavior();
     return failures == 0 ? 0 : 1;
