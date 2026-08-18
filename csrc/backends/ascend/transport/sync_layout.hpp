@@ -2,6 +2,13 @@
 
 #include <cstdint>
 
+#if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
+#define DEEP_EP_ASCEND_SYNC_LAYOUT_CALLEE \
+    __SIMT_DEVICE_FUNCTIONS_DECL__ inline
+#else
+#define DEEP_EP_ASCEND_SYNC_LAYOUT_CALLEE inline constexpr
+#endif
+
 namespace deep_ep::ascend::transport::sync_layout {
 
 inline constexpr std::uint32_t kLogicalSignalCount = 4;
@@ -31,7 +38,8 @@ enum class SignalAddressFailure : std::uint32_t {
     kMissingLocalSyncMemory = 18,
 };
 
-inline constexpr SignalAddressFailure classify_signal_address_layout(
+DEEP_EP_ASCEND_SYNC_LAYOUT_CALLEE SignalAddressFailure
+classify_signal_address_layout(
     std::uint32_t member_count, std::uint32_t self_member,
     std::uint32_t signal_count, std::uint32_t counter_count,
     std::uint32_t barrier_count, std::uintptr_t remote_sync_memories,
@@ -77,3 +85,5 @@ inline constexpr std::uint64_t barrier_offset(
 }
 
 }  // namespace deep_ep::ascend::transport::sync_layout
+
+#undef DEEP_EP_ASCEND_SYNC_LAYOUT_CALLEE
