@@ -14,7 +14,48 @@
 
 namespace deep_ep::ascend::elastic {
 
-inline constexpr std::uint32_t kDispatchHandleDescriptorAbiVersion = 3;
+inline constexpr std::uint32_t kDispatchHandleDescriptorAbiVersion = 4;
+inline constexpr std::uint32_t kHybridRouteLayoutVersion = 1;
+inline constexpr std::uint64_t kInvalidHybridRouteSlot =
+    std::numeric_limits<std::uint64_t>::max();
+
+enum class DispatchRoutingMode : std::uint32_t { kDirect = 0, kHybrid = 1 };
+
+enum class HybridRouteStage : std::uint32_t {
+    kIngressComplete = 0,
+    kForwardComplete = 1,
+};
+
+using HybridRouteStageFlags = std::uint32_t;
+
+constexpr HybridRouteStageFlags hybrid_stage_bit(HybridRouteStage stage) {
+    return HybridRouteStageFlags{1} << static_cast<std::uint32_t>(stage);
+}
+
+inline constexpr HybridRouteStageFlags kHybridRouteCompleteStageFlags =
+    hybrid_stage_bit(HybridRouteStage::kIngressComplete) |
+    hybrid_stage_bit(HybridRouteStage::kForwardComplete);
+
+struct HybridRouteRecord {
+    std::int32_t origin_world_rank;
+    std::int32_t destination_world_rank;
+    std::int32_t ingress_world_rank;
+    std::int32_t destination_local_expert;
+    std::uint64_t origin_source_row;
+    std::uint64_t ingress_slot;
+    std::uint64_t forwarded_slot;
+    std::uint64_t generation;
+    std::uint64_t topology_epoch;
+    HybridRouteStageFlags stage_flags;
+    std::uint32_t reserved;
+};
+
+static_assert(sizeof(HybridRouteRecord) == 64);
+
+struct HybridRouteTableView {
+    const HybridRouteRecord* records;
+    std::uint64_t count;
+};
 
 class DispatchAttempt;
 
@@ -99,6 +140,12 @@ struct DispatchHandleDescriptor {
     std::uint64_t expert_alignment = 0;
     std::uint64_t num_max_tokens_per_rank = 0;
     CoreModeFlags mode_flags = 0;
+    DispatchRoutingMode routing_mode = DispatchRoutingMode::kDirect;
+    std::uint32_t route_layout_version = 0;
+    std::uint64_t route_record_count = 0;
+    std::uint64_t route_record_stride = 0;
+    std::uint64_t dispatch_generation = 0;
+    HybridRouteStageFlags route_stage_flags = 0;
 };
 
 enum class DispatchHandleStatusCode : std::uint8_t {
@@ -134,6 +181,30 @@ inline DispatchHandleDescriptor make_dispatch_handle_descriptor(
     descriptor.expert_alignment = expert_alignment;
     descriptor.num_max_tokens_per_rank = num_max_tokens_per_rank;
     descriptor.mode_flags = mode_flags;
+    descriptor.dispatch_generation = generation;
+    return descriptor;
+}
+
+inline DispatchHandleDescriptor make_dispatch_handle_descriptor(
+    std::uint64_t family, const CoreTopology& topology,
+    std::uint64_t generation, std::uint64_t num_tokens,
+    std::uint64_t hidden,
+    std::uint64_t num_experts, std::uint64_t num_topk,
+    std::uint64_t expert_alignment,
+    std::uint64_t num_max_tokens_per_rank, CoreModeFlags mode_flags,
+    DispatchRoutingMode routing_mode, std::uint32_t route_layout_version,
+    std::uint64_t route_record_count, std::uint64_t route_record_stride,
+    std::uint64_t dispatch_generation,
+    HybridRouteStageFlags route_stage_flags) {
+    DispatchHandleDescriptor descriptor = make_dispatch_handle_descriptor(
+        family, topology, generation, num_tokens, hidden, num_experts, num_topk,
+        expert_alignment, num_max_tokens_per_rank, mode_flags);
+    descriptor.routing_mode = routing_mode;
+    descriptor.route_layout_version = route_layout_version;
+    descriptor.route_record_count = route_record_count;
+    descriptor.route_record_stride = route_record_stride;
+    descriptor.dispatch_generation = dispatch_generation;
+    descriptor.route_stage_flags = route_stage_flags;
     return descriptor;
 }
 
@@ -160,7 +231,11 @@ constexpr std::uint64_t attest_dispatch_handle_family(
     std::uint64_t num_experts, std::uint64_t num_topk,
     std::uint64_t expert_alignment,
     std::uint64_t num_max_tokens_per_rank,
-    CoreModeFlags mode_flags) noexcept {
+    CoreModeFlags mode_flags, DispatchRoutingMode routing_mode,
+    std::uint32_t route_layout_version,
+    std::uint64_t route_record_count, std::uint64_t route_record_stride,
+    std::uint64_t dispatch_generation,
+    HybridRouteStageFlags route_stage_flags) noexcept {
     std::uint64_t state = mix_dispatch_handle_attestation(
         buffer_family, kDispatchHandleDescriptorAbiVersion);
     state = mix_dispatch_handle_attestation(
@@ -186,8 +261,29 @@ constexpr std::uint64_t attest_dispatch_handle_family(
     state = mix_dispatch_handle_attestation(state, expert_alignment);
     state = mix_dispatch_handle_attestation(
         state, num_max_tokens_per_rank);
-    return mix_dispatch_handle_attestation(
+    state = mix_dispatch_handle_attestation(
         state, dispatch_handle_identity_mode_flags(mode_flags));
+    state = mix_dispatch_handle_attestation(
+        state, static_cast<std::uint32_t>(routing_mode));
+    state = mix_dispatch_handle_attestation(state, route_layout_version);
+    state = mix_dispatch_handle_attestation(state, route_record_count);
+    state = mix_dispatch_handle_attestation(state, route_record_stride);
+    state = mix_dispatch_handle_attestation(state, dispatch_generation);
+    return mix_dispatch_handle_attestation(state, route_stage_flags);
+}
+
+constexpr std::uint64_t attest_dispatch_handle_family(
+    std::uint64_t buffer_family, const CoreTopology& topology,
+    std::uint64_t generation, std::uint64_t num_tokens,
+    std::uint64_t hidden,
+    std::uint64_t num_experts, std::uint64_t num_topk,
+    std::uint64_t expert_alignment,
+    std::uint64_t num_max_tokens_per_rank,
+    CoreModeFlags mode_flags) noexcept {
+    return attest_dispatch_handle_family(
+        buffer_family, topology, generation, num_tokens, hidden, num_experts,
+        num_topk, expert_alignment, num_max_tokens_per_rank, mode_flags,
+        DispatchRoutingMode::kDirect, 0, 0, 0, generation, 0);
 }
 
 inline DispatchHandleDescriptor make_attested_dispatch_handle_descriptor(
@@ -203,6 +299,29 @@ inline DispatchHandleDescriptor make_attested_dispatch_handle_descriptor(
             num_topk, expert_alignment, num_max_tokens_per_rank, mode_flags),
         topology, generation, num_tokens, hidden, num_experts, num_topk,
         expert_alignment, num_max_tokens_per_rank, mode_flags);
+}
+
+inline DispatchHandleDescriptor make_attested_dispatch_handle_descriptor(
+    std::uint64_t buffer_family, const CoreTopology& topology,
+    std::uint64_t generation, std::uint64_t num_tokens,
+    std::uint64_t hidden,
+    std::uint64_t num_experts, std::uint64_t num_topk,
+    std::uint64_t expert_alignment,
+    std::uint64_t num_max_tokens_per_rank, CoreModeFlags mode_flags,
+    DispatchRoutingMode routing_mode, std::uint32_t route_layout_version,
+    std::uint64_t route_record_count, std::uint64_t route_record_stride,
+    std::uint64_t dispatch_generation,
+    HybridRouteStageFlags route_stage_flags) {
+    return make_dispatch_handle_descriptor(
+        attest_dispatch_handle_family(
+            buffer_family, topology, generation, num_tokens, hidden, num_experts,
+            num_topk, expert_alignment, num_max_tokens_per_rank, mode_flags,
+            routing_mode, route_layout_version, route_record_count,
+            route_record_stride, dispatch_generation, route_stage_flags),
+        topology, generation, num_tokens, hidden, num_experts, num_topk,
+        expert_alignment, num_max_tokens_per_rank, mode_flags, routing_mode,
+        route_layout_version, route_record_count, route_record_stride,
+        dispatch_generation, route_stage_flags);
 }
 
 constexpr bool same_topology(
@@ -266,14 +385,38 @@ localize_dispatch_expert(
         expert - static_cast<std::int64_t>(first_local_expert) : -1;
 }
 
+constexpr bool is_complete_hybrid_route_stage_flags(
+    HybridRouteStageFlags flags) noexcept {
+    return flags == kHybridRouteCompleteStageFlags;
+}
+
+inline bool is_valid_dispatch_handle_descriptor(
+    const DispatchHandleDescriptor& descriptor) noexcept {
+    if (descriptor.abi_version != kDispatchHandleDescriptorAbiVersion ||
+        descriptor.struct_size != sizeof(DispatchHandleDescriptor) ||
+        descriptor.generation == 0 || descriptor.dispatch_generation == 0 ||
+        descriptor.dispatch_generation != descriptor.generation)
+        return false;
+
+    if (descriptor.routing_mode == DispatchRoutingMode::kDirect)
+        return !has_mode(descriptor.mode_flags, CoreMode::kHybrid) &&
+               descriptor.route_layout_version == 0 &&
+               descriptor.route_record_count == 0 &&
+               descriptor.route_record_stride == 0 &&
+               descriptor.route_stage_flags == 0;
+
+    return descriptor.routing_mode == DispatchRoutingMode::kHybrid &&
+           has_mode(descriptor.mode_flags, CoreMode::kHybrid) &&
+           descriptor.route_layout_version == kHybridRouteLayoutVersion &&
+           descriptor.route_record_stride == sizeof(HybridRouteRecord) &&
+           is_complete_hybrid_route_stage_flags(descriptor.route_stage_flags);
+}
+
 inline DispatchHandleStatus validate_dispatch_handle(
     const DispatchHandleDescriptor& expected,
     const DispatchHandleDescriptor& actual) {
-    if (expected.abi_version != kDispatchHandleDescriptorAbiVersion ||
-        expected.struct_size != sizeof(DispatchHandleDescriptor) ||
-        actual.abi_version != kDispatchHandleDescriptorAbiVersion ||
-        actual.struct_size != sizeof(DispatchHandleDescriptor) ||
-        expected.generation == 0 || actual.generation == 0)
+    if (!is_valid_dispatch_handle_descriptor(expected) ||
+        !is_valid_dispatch_handle_descriptor(actual))
         return {DispatchHandleStatusCode::kInvalidDescriptor,
                 "invalid dispatch handle descriptor"};
     if (expected.family != actual.family ||
@@ -286,9 +429,67 @@ inline DispatchHandleStatus validate_dispatch_handle(
         expected.expert_alignment != actual.expert_alignment ||
         expected.num_max_tokens_per_rank != actual.num_max_tokens_per_rank ||
         dispatch_handle_identity_mode_flags(expected.mode_flags) !=
-            dispatch_handle_identity_mode_flags(actual.mode_flags))
+            dispatch_handle_identity_mode_flags(actual.mode_flags) ||
+        expected.routing_mode != actual.routing_mode ||
+        expected.route_layout_version != actual.route_layout_version ||
+        expected.route_record_count != actual.route_record_count ||
+        expected.route_record_stride != actual.route_record_stride ||
+        expected.dispatch_generation != actual.dispatch_generation ||
+        expected.route_stage_flags != actual.route_stage_flags)
         return {DispatchHandleStatusCode::kMismatch,
                 "dispatch handle does not match the current call"};
+    return {};
+}
+
+inline DispatchHandleStatus validate_hybrid_route_table(
+    const DispatchHandleDescriptor& descriptor, HybridRouteTableView route_table,
+    std::uint64_t max_source_rows, std::uint64_t max_slots,
+    std::uint64_t num_local_experts) {
+    if (!is_valid_dispatch_handle_descriptor(descriptor) ||
+        descriptor.routing_mode != DispatchRoutingMode::kHybrid ||
+        route_table.count != descriptor.route_record_count ||
+        (route_table.count != 0 && route_table.records == nullptr))
+        return {DispatchHandleStatusCode::kInvalidDescriptor,
+                "invalid hybrid route table descriptor"};
+
+    for (std::uint64_t index = 0; index < route_table.count; ++index) {
+        const auto& record = route_table.records[index];
+        if (record.origin_world_rank < 0 ||
+            record.destination_world_rank < 0 ||
+            record.ingress_world_rank < 0 ||
+            record.origin_world_rank >= descriptor.topology.world_size ||
+            record.destination_world_rank >= descriptor.topology.world_size ||
+            record.ingress_world_rank >= descriptor.topology.world_size ||
+            record.destination_local_expert < 0 ||
+            record.origin_source_row >= max_source_rows ||
+            static_cast<std::uint64_t>(record.destination_local_expert) >=
+                num_local_experts ||
+            (record.ingress_slot != kInvalidHybridRouteSlot &&
+             record.ingress_slot >= max_slots) ||
+            (record.forwarded_slot != kInvalidHybridRouteSlot &&
+             record.forwarded_slot >= max_slots) ||
+            record.generation != descriptor.dispatch_generation ||
+            record.topology_epoch != descriptor.topology.epoch ||
+            !is_complete_hybrid_route_stage_flags(record.stage_flags))
+            return {DispatchHandleStatusCode::kMismatch,
+                    "hybrid route record does not match the dispatch handle"};
+
+        for (std::uint64_t other_index = 0;
+             other_index < route_table.count; ++other_index) {
+            if (other_index == index)
+                continue;
+            const auto& other = route_table.records[other_index];
+            if ((record.ingress_slot != kInvalidHybridRouteSlot &&
+                 record.ingress_slot == other.ingress_slot &&
+                 record.ingress_world_rank == other.ingress_world_rank) ||
+                (record.forwarded_slot != kInvalidHybridRouteSlot &&
+                 record.forwarded_slot == other.forwarded_slot &&
+                 record.destination_world_rank ==
+                     other.destination_world_rank))
+                return {DispatchHandleStatusCode::kMismatch,
+                        "hybrid route table contains duplicate slots"};
+        }
+    }
     return {};
 }
 
