@@ -330,6 +330,56 @@ constexpr std::uint64_t attest_dispatch_handle_family(
     return mix_dispatch_handle_attestation(state, route_stage_flags);
 }
 
+inline std::uint64_t attest_hybrid_route_table(
+    std::uint64_t state, HybridRouteTableView route_table) noexcept {
+    state = mix_dispatch_handle_attestation(state, route_table.count);
+    if (route_table.count != 0 && route_table.records == nullptr)
+        return mix_dispatch_handle_attestation(
+            state, kInvalidHybridRouteSlot);
+
+    for (std::uint64_t index = 0; index < route_table.count; ++index) {
+        const auto& record = route_table.records[index];
+        state = mix_dispatch_handle_attestation(state, index);
+        state = mix_dispatch_handle_attestation(
+            state, static_cast<std::uint32_t>(record.origin_world_rank));
+        state = mix_dispatch_handle_attestation(
+            state, static_cast<std::uint32_t>(record.destination_world_rank));
+        state = mix_dispatch_handle_attestation(
+            state, static_cast<std::uint32_t>(record.ingress_world_rank));
+        state = mix_dispatch_handle_attestation(
+            state, static_cast<std::uint32_t>(
+                       record.destination_local_expert));
+        state = mix_dispatch_handle_attestation(
+            state, record.origin_source_row);
+        state = mix_dispatch_handle_attestation(state, record.ingress_slot);
+        state = mix_dispatch_handle_attestation(state, record.forwarded_slot);
+        state = mix_dispatch_handle_attestation(state, record.generation);
+        state = mix_dispatch_handle_attestation(state, record.topology_epoch);
+        state = mix_dispatch_handle_attestation(state, record.stage_flags);
+        state = mix_dispatch_handle_attestation(state, record.reserved);
+    }
+    return state;
+}
+
+inline std::uint64_t attest_hybrid_dispatch_handle_family(
+    std::uint64_t buffer_family, const CoreTopology& topology,
+    std::uint64_t generation, std::uint64_t num_tokens,
+    std::uint64_t hidden, std::uint64_t num_experts,
+    std::uint64_t num_topk, std::uint64_t expert_alignment,
+    std::uint64_t num_max_tokens_per_rank, CoreModeFlags mode_flags,
+    std::uint32_t route_layout_version,
+    std::uint64_t route_record_count, std::uint64_t route_record_stride,
+    HybridRouteStageFlags route_stage_flags,
+    HybridRouteTableView route_table) noexcept {
+    const auto geometry = attest_dispatch_handle_family(
+        buffer_family, topology, generation, num_tokens, hidden, num_experts,
+        num_topk, expert_alignment, num_max_tokens_per_rank, mode_flags,
+        DispatchRoutingMode::kHybrid, route_layout_version,
+        route_record_count, route_record_stride, generation,
+        route_stage_flags);
+    return attest_hybrid_route_table(geometry, route_table);
+}
+
 constexpr std::uint64_t attest_dispatch_handle_family(
     std::uint64_t buffer_family, const CoreTopology& topology,
     std::uint64_t generation, std::uint64_t num_tokens,
@@ -380,6 +430,30 @@ inline DispatchHandleDescriptor make_attested_dispatch_handle_descriptor(
         expert_alignment, num_max_tokens_per_rank, mode_flags, routing_mode,
         route_layout_version, route_record_count, route_record_stride,
         dispatch_generation, route_stage_flags);
+}
+
+inline DispatchHandleDescriptor make_attested_hybrid_dispatch_handle_descriptor(
+    std::uint64_t buffer_family, const CoreTopology& topology,
+    std::uint64_t generation, std::uint64_t num_tokens,
+    std::uint64_t hidden, std::uint64_t num_experts,
+    std::uint64_t num_topk, std::uint64_t expert_alignment,
+    std::uint64_t num_max_tokens_per_rank, CoreModeFlags mode_flags,
+    std::uint32_t route_layout_version,
+    std::uint64_t route_record_count, std::uint64_t route_record_stride,
+    HybridRouteStageFlags route_stage_flags,
+    HybridRouteTableView route_table) {
+    return make_dispatch_handle_descriptor(
+        attest_hybrid_dispatch_handle_family(
+            buffer_family, topology, generation, num_tokens, hidden,
+            num_experts, num_topk, expert_alignment,
+            num_max_tokens_per_rank, mode_flags, route_layout_version,
+            route_record_count, route_record_stride, route_stage_flags,
+            route_table),
+        topology, generation, num_tokens, hidden, num_experts, num_topk,
+        expert_alignment, num_max_tokens_per_rank, mode_flags,
+        DispatchRoutingMode::kHybrid, route_layout_version,
+        route_record_count, route_record_stride, generation,
+        route_stage_flags);
 }
 
 constexpr bool same_topology(

@@ -126,8 +126,10 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
         }
         for (int rank = 0; rank < t.topology.world_size; ++rank)
             a.prefix_per_rank[rank] = 1;
-        const std::array<std::int32_t, 5> private_expert_prefix{0, 4, 4, 4, 4};
-        const std::array<std::int32_t, 4> private_unaligned{1, 0, 0, 0};
+        const std::array<std::int32_t, 9> private_expert_prefix{
+            0, 4, 4, 4, 4, 4, 4, 4, 4};
+        const std::array<std::int32_t, 8> private_unaligned{
+            1, 0, 0, 0, 0, 0, 0, 0};
         std::memcpy(a.prefix_per_expert, private_expert_prefix.data(),
                     sizeof(private_expert_prefix));
         std::memcpy(a.unaligned_per_expert, private_unaligned.data(),
@@ -243,7 +245,7 @@ auto uncached_hybrid_dispatch(
     const std::optional<deep_ep::ascend::EventHandle> no_event;
     return buffer.dispatch(
         inputs.x, none, inputs.idx, weights, none, no_int, no_int, no_list,
-        none, none, none, none, none, none, none, 4, 4, 4, 1, 0,
+        none, none, none, none, none, none, none, 4, 8, 4, 1, 0,
         no_event, no_event, false, false, true, true, false, false, false);
 }
 
@@ -257,7 +259,7 @@ auto cached_hybrid_dispatch(
         std::get<5>(handle), std::get<6>(handle), std::get<7>(handle),
         std::get<8>(handle), std::get<9>(handle), std::get<10>(handle),
         std::get<12>(handle), std::get<13>(handle), std::get<11>(handle), none,
-        4, 4, 4, 1, 0, no_event, no_event, false, false, false, false,
+        4, 8, 4, 1, 0, no_event, no_event, false, false, false, false,
         false, false, false);
 }
 
@@ -514,6 +516,26 @@ bool cached_hybrid_route_validation_probe() {
                 std::string::npos ||
             trace.launches != 1) {
             std::cerr << "corrupted cached hybrid dispatch: "
+                      << error.what() << '\n';
+            return false;
+        }
+    }
+
+    corrupted = first;
+    std::get<13>(corrupted) = std::get<13>(first)->clone();
+    record = reinterpret_cast<elastic::HybridRouteRecord*>(
+        static_cast<std::uint8_t*>(std::get<13>(corrupted)->data_ptr()) +
+        sizeof(elastic::DispatchHandleDescriptor));
+    record->destination_local_expert = 1;
+    try {
+        (void)cached_hybrid_dispatch(*buffer, inputs, corrupted);
+        std::cerr << "corrupted cached hybrid expert was accepted\n";
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("hybrid route record") ==
+                std::string::npos ||
+            trace.launches != 1) {
+            std::cerr << "corrupted cached hybrid expert: "
                       << error.what() << '\n';
             return false;
         }

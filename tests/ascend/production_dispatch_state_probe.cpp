@@ -1,7 +1,9 @@
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <type_traits>
+#include <utility>
 
 #include "csrc/backends/ascend/elastic/dispatch_state.hpp"
 
@@ -216,6 +218,61 @@ int main() {
     HybridRouteTableView route_table{&diagonal, 1};
     CHECK(validate_hybrid_route_table(hybrid, route_table, 8, 8, 2).ok());
     CHECK(!validate_hybrid_route_table(expected, route_table, 8, 8, 2).ok());
+
+    const auto route_family = [&](HybridRouteTableView table) {
+        return attest_hybrid_dispatch_handle_family(
+            99, topology, 11, 3, 128, 8, 2, 4, 256, hybrid_mode,
+            kHybridRouteLayoutVersion, table.count,
+            sizeof(HybridRouteRecord), complete_stages, table);
+    };
+    const auto attested_route_family = route_family(route_table);
+    CHECK(attested_route_family == route_family(route_table));
+    CHECK(attested_route_family != hybrid.family);
+    const auto route_mutation_changes_family =
+        [&](const HybridRouteRecord& record) {
+        return attested_route_family != route_family({&record, 1});
+    };
+    auto attestation_mutation = diagonal;
+    ++attestation_mutation.origin_world_rank;
+    CHECK(route_mutation_changes_family(attestation_mutation));
+    attestation_mutation = diagonal;
+    --attestation_mutation.destination_world_rank;
+    CHECK(route_mutation_changes_family(attestation_mutation));
+    attestation_mutation = diagonal;
+    --attestation_mutation.ingress_world_rank;
+    CHECK(route_mutation_changes_family(attestation_mutation));
+    attestation_mutation = diagonal;
+    --attestation_mutation.destination_local_expert;
+    CHECK(route_mutation_changes_family(attestation_mutation));
+    attestation_mutation = diagonal;
+    --attestation_mutation.origin_source_row;
+    CHECK(route_mutation_changes_family(attestation_mutation));
+    attestation_mutation = diagonal;
+    ++attestation_mutation.ingress_slot;
+    CHECK(route_mutation_changes_family(attestation_mutation));
+    attestation_mutation = diagonal;
+    ++attestation_mutation.forwarded_slot;
+    CHECK(route_mutation_changes_family(attestation_mutation));
+    attestation_mutation = diagonal;
+    --attestation_mutation.generation;
+    CHECK(route_mutation_changes_family(attestation_mutation));
+    attestation_mutation = diagonal;
+    --attestation_mutation.topology_epoch;
+    CHECK(route_mutation_changes_family(attestation_mutation));
+    attestation_mutation = diagonal;
+    attestation_mutation.stage_flags =
+        hybrid_stage_bit(HybridRouteStage::kIngressComplete);
+    CHECK(route_mutation_changes_family(attestation_mutation));
+    attestation_mutation = diagonal;
+    ++attestation_mutation.reserved;
+    CHECK(route_mutation_changes_family(attestation_mutation));
+    std::array<HybridRouteRecord, 2> ordered_routes{diagonal, diagonal};
+    ordered_routes[1].origin_source_row = 6;
+    const auto ordered_family = route_family(
+        {ordered_routes.data(), ordered_routes.size()});
+    std::swap(ordered_routes[0], ordered_routes[1]);
+    CHECK(ordered_family != route_family(
+        {ordered_routes.data(), ordered_routes.size()}));
 
     std::int32_t source_metadata[] = {
         encode_dispatch_source_index(0, 8, 7),

@@ -848,20 +848,6 @@ public:
             elastic::DispatchRoutingMode::kDirect;
         const auto cached_route_count = allow_hybrid_mode_ && cached_mode ?
             static_cast<std::uint64_t>(*cached_num_recv_tokens) : 0;
-        const auto expected_descriptor =
-            allow_hybrid_mode_ ?
-            elastic::make_attested_dispatch_handle_descriptor(
-                dispatch_family_, tiling.topology, last_dispatch_generation_,
-                num_tokens, hidden, experts, num_topk, alignment, capacity,
-                descriptor_mode_flags, routing_mode,
-                elastic::kHybridRouteLayoutVersion, cached_route_count,
-                sizeof(elastic::HybridRouteRecord),
-                last_dispatch_generation_,
-                elastic::kHybridRouteCompleteStageFlags) :
-            elastic::make_attested_dispatch_handle_descriptor(
-                dispatch_family_, tiling.topology, last_dispatch_generation_,
-                num_tokens, hidden, experts, num_topk, alignment, capacity,
-                descriptor_mode_flags);
         const auto int_options = x.options().dtype(torch::kInt);
         const auto metadata_options = x.options().dtype(torch::kByte);
         const auto max_recv_tokens = allow_hybrid_mode_ ?
@@ -944,13 +930,9 @@ public:
                 sizeof(descriptor));
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
-            const auto descriptor_status = elastic::validate_dispatch_handle(
-                expected_descriptor, descriptor);
-            TORCH_CHECK(descriptor_status.ok(), "DeepEP Ascend backend: dispatch ",
-                        descriptor_status.message);
             if (allow_hybrid_mode_) {
                 host_route_records.resize(
-                    static_cast<std::size_t>(descriptor.route_record_count));
+                    static_cast<std::size_t>(cached_route_count));
                 if (!host_route_records.empty()) {
                     const auto* device_records =
                         static_cast<const std::uint8_t*>(
@@ -963,6 +945,23 @@ public:
                     if (!status.ok())
                         raise_transport_status(status, rank_idx_);
                 }
+                const auto expected_descriptor =
+                    elastic::make_attested_hybrid_dispatch_handle_descriptor(
+                        dispatch_family_, tiling.topology,
+                        last_dispatch_generation_, num_tokens, hidden, experts,
+                        num_topk, alignment, capacity, descriptor_mode_flags,
+                        elastic::kHybridRouteLayoutVersion, cached_route_count,
+                        sizeof(elastic::HybridRouteRecord),
+                        elastic::kHybridRouteCompleteStageFlags,
+                        {host_route_records.data(),
+                         host_route_records.size()});
+                const auto descriptor_status =
+                    elastic::validate_dispatch_handle(
+                        expected_descriptor, descriptor);
+                TORCH_CHECK(
+                    descriptor_status.ok(),
+                    "DeepEP Ascend backend: dispatch handle or hybrid route "
+                    "record does not match the current call");
                 const auto route_status = elastic::validate_hybrid_route_table(
                     descriptor,
                     {host_route_records.data(), host_route_records.size()},
@@ -1011,6 +1010,18 @@ public:
                 TORCH_CHECK(binding_status.ok(),
                             "DeepEP Ascend backend: dispatch ",
                             binding_status.message);
+            } else {
+                const auto expected_descriptor =
+                    elastic::make_attested_dispatch_handle_descriptor(
+                        dispatch_family_, tiling.topology,
+                        last_dispatch_generation_, num_tokens, hidden, experts,
+                        num_topk, alignment, capacity, descriptor_mode_flags);
+                const auto descriptor_status =
+                    elastic::validate_dispatch_handle(
+                        expected_descriptor, descriptor);
+                TORCH_CHECK(descriptor_status.ok(),
+                            "DeepEP Ascend backend: dispatch ",
+                            descriptor_status.message);
             }
             rank_prefix = *cached_psum_num_recv_tokens_per_scaleup_rank;
             expert_prefix = *cached_psum_num_recv_tokens_per_expert;
@@ -1251,22 +1262,10 @@ public:
                         num_expanded_tokens >= 0 &&
                         num_expanded_tokens <= static_cast<int>(expanded_records),
                     "DeepEP Ascend backend: dispatch returned invalid output counts");
-        const auto committed_descriptor = allow_hybrid_mode_ ?
-            elastic::make_attested_dispatch_handle_descriptor(
-                dispatch_family_, tiling.topology, generation, num_tokens,
-                hidden, experts, num_topk, alignment, capacity,
-                descriptor_mode_flags, routing_mode,
-                elastic::kHybridRouteLayoutVersion,
-                static_cast<std::uint64_t>(num_recv_tokens),
-                sizeof(elastic::HybridRouteRecord), generation,
-                elastic::kHybridRouteCompleteStageFlags) :
-            elastic::make_attested_dispatch_handle_descriptor(
-                dispatch_family_, tiling.topology, generation, num_tokens,
-                hidden, experts, num_topk, alignment, capacity,
-                descriptor_mode_flags);
+        elastic::DispatchHandleDescriptor committed_descriptor{};
         if (allow_hybrid_mode_) {
             host_route_records.resize(
-                static_cast<std::size_t>(committed_descriptor.route_record_count));
+                static_cast<std::size_t>(num_recv_tokens));
             if (!host_route_records.empty()) {
                 const auto* device_records =
                     static_cast<const std::uint8_t*>(descriptor_tensor.data_ptr()) +
@@ -1278,6 +1277,13 @@ public:
                 if (!status.ok())
                     raise_transport_status(status, rank_idx_);
             }
+            committed_descriptor = elastic::make_dispatch_handle_descriptor(
+                0, tiling.topology, generation, num_tokens, hidden, experts,
+                num_topk, alignment, capacity, descriptor_mode_flags,
+                routing_mode, elastic::kHybridRouteLayoutVersion,
+                static_cast<std::uint64_t>(num_recv_tokens),
+                sizeof(elastic::HybridRouteRecord), generation,
+                elastic::kHybridRouteCompleteStageFlags);
             const auto route_status = elastic::validate_hybrid_route_table(
                 committed_descriptor,
                 {host_route_records.data(), host_route_records.size()},
@@ -1313,6 +1319,21 @@ public:
             TORCH_CHECK(binding_status.ok(),
                         "DeepEP Ascend backend: dispatch ",
                         binding_status.message);
+            committed_descriptor =
+                elastic::make_attested_hybrid_dispatch_handle_descriptor(
+                    dispatch_family_, tiling.topology, generation, num_tokens,
+                    hidden, experts, num_topk, alignment, capacity,
+                    descriptor_mode_flags, elastic::kHybridRouteLayoutVersion,
+                    static_cast<std::uint64_t>(num_recv_tokens),
+                    sizeof(elastic::HybridRouteRecord),
+                    elastic::kHybridRouteCompleteStageFlags,
+                    {host_route_records.data(), host_route_records.size()});
+        } else {
+            committed_descriptor =
+                elastic::make_attested_dispatch_handle_descriptor(
+                    dispatch_family_, tiling.topology, generation, num_tokens,
+                    hidden, experts, num_topk, alignment, capacity,
+                    descriptor_mode_flags);
         }
         status = resources_->copy_from_host(
             descriptor_tensor.data_ptr(), &committed_descriptor,
@@ -1496,8 +1517,32 @@ public:
             compatible_descriptor_mode,
             "DeepEP Ascend backend: combine dispatch handle does not match "
             "the current call");
+        TORCH_CHECK(
+            token_metadata_at_forward->numel() == static_cast<int64_t>(
+                sizeof(elastic::DispatchHandleDescriptor) +
+                (allow_hybrid_mode_ ?
+                     num_source_rows * sizeof(elastic::HybridRouteRecord) :
+                     0)),
+            "DeepEP Ascend backend: combine handle tensor shape mismatch");
+        std::vector<elastic::HybridRouteRecord> host_route_records;
+        if (allow_hybrid_mode_) {
+            host_route_records.resize(
+                static_cast<std::size_t>(num_source_rows));
+            if (!host_route_records.empty()) {
+                const auto* device_records =
+                    static_cast<const std::uint8_t*>(
+                        token_metadata_at_forward->data_ptr()) +
+                    sizeof(elastic::DispatchHandleDescriptor);
+                status = resources_->copy_to_host(
+                    host_route_records.data(), device_records,
+                    host_route_records.size() *
+                        sizeof(elastic::HybridRouteRecord));
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
+            }
+        }
         const auto expected_descriptor = allow_hybrid_mode_ ?
-            elastic::make_attested_dispatch_handle_descriptor(
+            elastic::make_attested_hybrid_dispatch_handle_descriptor(
                 dispatch_family_,
                 elastic::core_topology_from_transport(context.topology),
                 last_dispatch_generation_,
@@ -1505,11 +1550,10 @@ public:
                 static_cast<std::uint64_t>(x.size(1)),
                 static_cast<std::uint64_t>(num_experts), num_topk,
                 descriptor.expert_alignment, capacity,
-                descriptor.mode_flags, elastic::DispatchRoutingMode::kHybrid,
-                elastic::kHybridRouteLayoutVersion, num_source_rows,
-                sizeof(elastic::HybridRouteRecord),
-                last_dispatch_generation_,
-                elastic::kHybridRouteCompleteStageFlags) :
+                descriptor.mode_flags, elastic::kHybridRouteLayoutVersion,
+                num_source_rows, sizeof(elastic::HybridRouteRecord),
+                elastic::kHybridRouteCompleteStageFlags,
+                {host_route_records.data(), host_route_records.size()}) :
             elastic::make_attested_dispatch_handle_descriptor(
                 dispatch_family_,
                 elastic::core_topology_from_transport(context.topology),
@@ -1523,27 +1567,7 @@ public:
             expected_descriptor, descriptor);
         TORCH_CHECK(descriptor_status.ok(), "DeepEP Ascend backend: combine ",
                     descriptor_status.message);
-        TORCH_CHECK(
-            token_metadata_at_forward->numel() == static_cast<int64_t>(
-                sizeof(elastic::DispatchHandleDescriptor) +
-                descriptor.route_record_count * descriptor.route_record_stride),
-            "DeepEP Ascend backend: combine handle tensor shape mismatch");
-        std::vector<elastic::HybridRouteRecord> host_route_records;
         if (allow_hybrid_mode_) {
-            host_route_records.resize(
-                static_cast<std::size_t>(descriptor.route_record_count));
-            if (!host_route_records.empty()) {
-                const auto* device_records =
-                    static_cast<const std::uint8_t*>(
-                        token_metadata_at_forward->data_ptr()) +
-                    sizeof(elastic::DispatchHandleDescriptor);
-                status = resources_->copy_to_host(
-                    host_route_records.data(), device_records,
-                    host_route_records.size() *
-                        sizeof(elastic::HybridRouteRecord));
-                if (!status.ok())
-                    raise_transport_status(status, rank_idx_);
-            }
             const auto route_status = elastic::validate_hybrid_route_table(
                 descriptor,
                 {host_route_records.data(), host_route_records.size()},
