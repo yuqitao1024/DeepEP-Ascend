@@ -363,6 +363,38 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
                 [str(executable)], capture_output=True, text=True, check=False)
             self.assertEqual(run_probe.returncode, 0, run_probe.stderr)
 
+    def test_barrier_helpers_are_aicore_callees(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = pathlib.Path(directory) / "aicore_callee_probe"
+            compile_probe = subprocess.run(
+                [
+                    "c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                    "-I", str(ROOT),
+                    str(ROOT / "tests/ascend/transport_command_aicore_callee_probe.cpp"),
+                    "-o", str(executable),
+                ],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(
+                compile_probe.returncode, 0, compile_probe.stderr)
+
+    def test_release_protocol_uses_simt_callee_route_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = pathlib.Path(directory) / "simt_route_probe"
+            compile_probe = subprocess.run(
+                [
+                    "c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                    "-I", str(ROOT),
+                    str(ROOT / "tests/ascend/release_protocol_simt_callee_probe.cpp"),
+                    "-o", str(executable),
+                ],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(
+                compile_probe.returncode, 0, compile_probe.stderr)
+
+            run_probe = subprocess.run(
+                [str(executable)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_probe.returncode, 0, run_probe.stderr)
+
     def test_mixed_phase_primitive_probe_builds_with_cann(self):
         ascend_home = os.environ.get("ASCEND_HOME_PATH")
         if not ascend_home:

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../transport/types.hpp"
+#include "../transport/device_topology.hpp"
 
 #if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
 #define DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE __SIMT_DEVICE_FUNCTIONS_DECL__
@@ -39,7 +39,7 @@ DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE bool acquire_release(
     int source_world_rank, std::uint32_t signal_index,
     std::uint64_t generation, std::uint64_t timeout_cycles) {
     transport::TeamPeer route{};
-    if (!transport::checked_team_peer_for_world_rank(
+    if (!transport::device::detail::checked_device_team_peer_for_world_rank(
             topology, source_world_rank, &route))
         return false;
     facade.wait_signal(

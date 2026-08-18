@@ -253,7 +253,7 @@ void check_rank_sized_command_queue() {
         std::uint32_t command_capacity;
     };
     for (const auto fixture : {
-             Fixture{2, 5}, Fixture{4, 13}, Fixture{8, 29}}) {
+             Fixture{2, 6}, Fixture{4, 16}, Fixture{8, 36}}) {
         FakeApi fake;
         fake.rank = fixture.world_size - 1;
         fake.size = fixture.world_size;
@@ -282,9 +282,52 @@ void check_rank_sized_command_queue() {
 
     std::uint32_t capacity = 0;
     CHECK(transport::checked_scale_up_command_capacity(2, &capacity));
-    CHECK(capacity == 5);
+    CHECK(capacity == 6);
+    CHECK(transport::checked_scale_up_command_capacity(4, &capacity));
+    CHECK(capacity == 16);
+
+    constexpr int kLargestRepresentableWorldSize = 858993459;
+    CHECK(transport::checked_scale_up_command_capacity(
+        kLargestRepresentableWorldSize, &capacity));
+    CHECK(capacity == 4294967291U);
+    capacity = 0x12345678U;
+    CHECK(!transport::checked_scale_up_command_capacity(
+        kLargestRepresentableWorldSize + 1, &capacity));
+    CHECK(capacity == 0x12345678U);
     CHECK(!transport::checked_scale_up_command_capacity(
         std::numeric_limits<int>::max(), &capacity));
+
+    transport::TransportCommand commands[6]{};
+    transport::TransportServiceState service{};
+    transport::DeviceTransportDiagnostic diagnostic{};
+    CHECK(transport::checked_scale_up_command_capacity(2, &capacity));
+    auto queue = transport::command::make_queue(
+        commands, capacity, &service, &diagnostic);
+    CHECK(transport::command::append(
+        queue, transport::command::make_put(
+            transport::TransportTeam::kScaleUp, 1, 1, 0, 0x1000, 0x2000,
+            64, transport::CooperationScope::kParticipant,
+            transport::MemorySegment::kDevice, transport::kDefaultOptions)));
+    CHECK(transport::command::append(
+        queue, transport::command::make_flush(
+            0, transport::CooperationScope::kDevice)));
+    CHECK(transport::command::append(
+        queue, transport::command::make_put_value64(
+            transport::TransportTeam::kScaleUp, 1, 1, 0, 0x3000, 3,
+            transport::kDefaultOptions)));
+    CHECK(transport::command::append(
+        queue, transport::command::make_put_value64(
+            transport::TransportTeam::kScaleUp, 1, 1, 0, 0x3008, 7,
+            transport::kDefaultOptions)));
+    CHECK(transport::command::append(
+        queue, transport::command::make_signal(
+            transport::TransportTeam::kScaleUp, 1, 1, 0,
+            transport::RemoteAction::signal_set(
+                transport::sync_layout::kDispatchReleaseSignalIndex, 7))));
+    CHECK(transport::command::append(
+        queue, transport::command::make_barrier(
+            transport::kWorldTeamMask, 1000)));
+    CHECK(queue.count == capacity);
 }
 
 void check_explicit_two_dimensional_topology() {

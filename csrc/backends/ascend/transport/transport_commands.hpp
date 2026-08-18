@@ -196,7 +196,14 @@ inline constexpr bool is_remote_operation(TransportCommandOpcode opcode) {
            opcode == TransportCommandOpcode::kSignal;
 }
 
-inline constexpr bool barrier_team_enabled(
+#if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && \
+    DEEP_EP_ASCEND_AICORE_URMA_SERVICE
+#define DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE __aicore__
+#else
+#define DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE
+#endif
+
+DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE inline constexpr bool barrier_team_enabled(
     const TransportTopology& topology, std::uint32_t team_mask,
     TransportTeam team) {
     if (team == TransportTeam::kScaleOut)
@@ -208,7 +215,7 @@ inline constexpr bool barrier_team_enabled(
     return false;
 }
 
-inline constexpr bool barrier_peer_in_team(
+DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE inline constexpr bool barrier_peer_in_team(
     const TransportTopology& topology, TransportTeam team, int world_peer) {
     if (world_peer < 0 || world_peer >= topology.world_size ||
         world_peer == topology.world_rank)
@@ -219,6 +226,8 @@ inline constexpr bool barrier_peer_in_team(
         return world_peer / topology.scale_up_size == topology.scale_out_rank;
     return false;
 }
+
+#undef DEEP_EP_ASCEND_AICORE_COMMAND_CALLEE
 
 inline constexpr DeviceTransportError validate_for_dispatch(
     const TransportCommand& transport_command,

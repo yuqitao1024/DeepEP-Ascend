@@ -337,11 +337,29 @@ class ElasticBuffer:
                     # NCCL exposes a better way to configure the symmetric window stride.
                     os.environ['NCCL_WIN_STRIDE'] = str(win_stride)
 
-        self.comm_handle = get_comm_handle(
-            group, force_new_comm=num_cpu_bytes > 0)
         if is_cuda():
+            self.comm_handle = get_comm_handle(
+                group, force_new_comm=num_cpu_bytes > 0)
             self.nccl_comm_handle = self.comm_handle
-        comm_handle = comm_handle_value(self.comm_handle)
+            comm_handle = comm_handle_value(self.comm_handle)
+        else:
+            self.comm_handle = None
+            comm_handle = 0
+            communicator_error = None
+            try:
+                candidate_handle = get_comm_handle(
+                    group, force_new_comm=num_cpu_bytes > 0)
+                candidate_value = comm_handle_value(candidate_handle)
+                if candidate_value == 0:
+                    communicator_error = "invalid_communicator_handle"
+                else:
+                    self.comm_handle = candidate_handle
+                    comm_handle = candidate_value
+            except Exception:
+                communicator_error = "invalid_communicator_handle"
+            preflight_ascend_contract(
+                group, "construction_communicator",
+                {"communicator_valid": True}, communicator_error)
 
         # Calculate buffer size (already 2 MB-aligned from hint functions / calculate_elastic_buffer_size)
         if num_bytes is None:
@@ -486,18 +504,22 @@ class ElasticBuffer:
         if topk_weights is not None:
             weights_shape, weights_error = _ascend_tensor_contract(
                 topk_weights, 2, torch.float32, "topk_weights")
-        shape_error = None
-        if x_shape is not None and topk_shape is not None:
-            if (x_shape[0] != topk_shape[0] or x_shape[1] <= 0 or
-                    topk_shape[1] <= 0):
-                shape_error = "invalid_dispatch_shape"
-        if (weights_shape is not None and topk_shape is not None and
-                weights_shape != topk_shape):
-            shape_error = "invalid_dispatch_shape"
         capacity = (self.num_max_tokens_per_rank
                     if num_max_tokens_per_rank is None
                     else num_max_tokens_per_rank)
         alignment = 1 if expert_alignment is None else expert_alignment
+        shape_error = None
+        if x_shape is not None and topk_shape is not None:
+            if (x_shape[0] != topk_shape[0] or x_shape[1] <= 0 or
+                    topk_shape[1] <= 0 or
+                    (isinstance(capacity, int) and capacity > 0 and
+                     x_shape[0] > capacity) or
+                    (isinstance(num_experts, int) and num_experts > 0 and
+                     topk_shape[1] > num_experts)):
+                shape_error = "invalid_dispatch_shape"
+        if (weights_shape is not None and topk_shape is not None and
+                weights_shape != topk_shape):
+            shape_error = "invalid_dispatch_shape"
         scalar_error = None
         if num_sms not in (0, 1) or num_qps != 0:
             scalar_error = "invalid_launch_configuration"

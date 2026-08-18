@@ -45,6 +45,25 @@ static_assert(offsetof(transport::DeviceTransportDiagnostic, world_peer) == 48);
 static_assert(offsetof(transport::DeviceTransportDiagnostic, team) == 52);
 static_assert(sizeof(transport::StagedTransportContext) == 64);
 
+constexpr transport::TransportTopology kBarrierTopology{
+    transport::kTransportTopologyAbiVersion,
+    sizeof(transport::TransportTopology),
+    1,
+    4,
+    1,
+    2,
+    0,
+    2,
+    false,
+    transport::TransportTopologyKind::kLogicalSimulation,
+    1,
+};
+static_assert(transport::command::barrier_team_enabled(
+    kBarrierTopology, transport::kWorldTeamMask,
+    transport::TransportTeam::kScaleOut));
+static_assert(transport::command::barrier_peer_in_team(
+    kBarrierTopology, transport::TransportTeam::kScaleOut, 3));
+
 void check_team_peer_translation() {
     transport::TransportTopology topology{};
     CHECK(transport::build_transport_topology(

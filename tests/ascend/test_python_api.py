@@ -685,8 +685,68 @@ def _scenario_ascend_topology_preflight_remote_parse_failure():
 def _scenario_ascend_collective_contract_preflight():
     deep_ep, extension, events = _load_package("ascend", True)
 
+    def valid_record(stage, contract):
+        return {
+            "stage": stage,
+            "ok": True,
+            "contract": contract,
+            "error_code": None,
+        }
+
+    def gather_local_communicator_failure(value):
+        if "config" in value:
+            return [value, value]
+        assert value["stage"] == "construction_communicator", value
+        assert value["ok"] is False, value
+        assert value["error_code"] == "invalid_communicator_handle", value
+        return [value, valid_record(
+            "construction_communicator", {"communicator_valid": True})]
+
+    local_invalid_group = _FakeGroup(
+        events, rank=0, size=2, comm_pointer=0,
+        gathered_objects=gather_local_communicator_failure)
+    try:
+        deep_ep.ElasticBuffer(
+            local_invalid_group, num_bytes=2 * 1024 * 1024,
+            allow_hybrid_mode=False, explicitly_destroy=True)
+    except RuntimeError as error:
+        assert "construction_communicator preflight failed on rank 0 " \
+               "(invalid_communicator_handle)" in str(error), error
+    else:
+        raise AssertionError("local null communicator bypassed collective preflight")
+    assert not extension.runtime_args
+    assert not extension.size_calls
+
+    def gather_remote_communicator_failure(value):
+        if "config" in value:
+            return [value, value]
+        assert value["stage"] == "construction_communicator", value
+        assert value["contract"] == {"communicator_valid": True}, value
+        remote = dict(value)
+        remote["ok"] = False
+        remote["contract"] = None
+        remote["error_code"] = "invalid_communicator_handle"
+        return [value, remote]
+
+    remote_invalid_group = _FakeGroup(
+        events, rank=0, size=2,
+        gathered_objects=gather_remote_communicator_failure)
+    try:
+        deep_ep.ElasticBuffer(
+            remote_invalid_group, num_bytes=2 * 1024 * 1024,
+            allow_hybrid_mode=False, explicitly_destroy=True)
+    except RuntimeError as error:
+        assert "construction_communicator preflight failed on rank 1 " \
+               "(invalid_communicator_handle)" in str(error), error
+    else:
+        raise AssertionError("remote null communicator bypassed collective preflight")
+    assert not extension.runtime_args
+    assert not extension.size_calls
+
     def mismatch_construction(value):
         if "config" in value:
+            return [value, value]
+        if value.get("stage") != "construction":
             return [value, value]
         remote = dict(value)
         remote_contract = dict(value["contract"])
@@ -735,10 +795,54 @@ def _scenario_ascend_collective_contract_preflight():
         raise AssertionError("peer dispatch validation failure was ignored")
     assert not runtime.dispatch_calls
 
-    group.gathered_objects = None
+    def local_dispatch_failure(expected_error):
+        def gather(value):
+            assert value["stage"] == "dispatch", value
+            assert value["ok"] is False, value
+            assert value["error_code"] == expected_error, value
+            return [value, valid_record("dispatch", {})]
+        return gather
+
+    group.gathered_objects = local_dispatch_failure(
+        "invalid_dispatch_shape")
+    try:
+        buffer.dispatch(
+            _FakeTensor("npu", (2, 16), torch.bfloat16),
+            topk_idx=_FakeTensor("npu", (2, 1), torch.int64),
+            num_experts=2, num_max_tokens_per_rank=1)
+    except RuntimeError as error:
+        assert "dispatch preflight failed on rank 0 " \
+               "(invalid_dispatch_shape)" in str(error), error
+    else:
+        raise AssertionError("token count above capacity reached dispatch")
+    assert not runtime.dispatch_calls
+
+    group.gathered_objects = local_dispatch_failure(
+        "invalid_dispatch_shape")
+    try:
+        buffer.dispatch(
+            x, topk_idx=_FakeTensor("npu", (1, 3), torch.int64),
+            num_experts=2, num_max_tokens_per_rank=1)
+    except RuntimeError as error:
+        assert "dispatch preflight failed on rank 0 " \
+               "(invalid_dispatch_shape)" in str(error), error
+    else:
+        raise AssertionError("top-k width above expert count reached dispatch")
+    assert not runtime.dispatch_calls
+
+    def gather_valid_dispatch(value):
+        assert value["stage"] == "dispatch", value
+        assert value["ok"] is True, value
+        assert value["contract"]["x_shape"] == [None, 16], value
+        assert value["contract"]["topk_shape"] == [None, 1], value
+        assert "token_count" not in value["contract"], value
+        return [value, value]
+
+    group.gathered_objects = gather_valid_dispatch
     _, _, _, handle, _ = buffer.dispatch(
         x, topk_idx=topk_idx, num_experts=2,
         num_max_tokens_per_rank=1)
+    group.gathered_objects = None
 
     descriptor = handle.token_metadata_at_forward
     descriptor._values[0] ^= 1

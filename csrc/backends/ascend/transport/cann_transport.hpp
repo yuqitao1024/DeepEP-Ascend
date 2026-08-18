@@ -12,7 +12,7 @@ constexpr bool checked_scale_up_command_capacity(
     if (capacity == nullptr || world_size <= 0)
         return false;
     const auto peers = static_cast<std::uint64_t>(world_size - 1);
-    constexpr std::uint64_t kCommandsPerPeer = 4;
+    constexpr std::uint64_t kCommandsPerPeer = 5;
     if (peers >
         (std::numeric_limits<std::uint32_t>::max() - 1ULL) /
             kCommandsPerPeer)

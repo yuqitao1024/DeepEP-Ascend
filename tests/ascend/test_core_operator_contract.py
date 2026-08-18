@@ -89,7 +89,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 ("dispatch.asc", "kDispatchReleaseSignalIndex"),
                 ("combine.asc", "kCombineReleaseSignalIndex")):
             source = (ELASTIC / source_name).read_text()
-            self.assertIn("checked_team_peer_for_world_rank(", source,
+            self.assertIn("checked_device_team_peer_for_world_rank(", source,
                           source_name)
             self.assertIn("route.team", source, source_name)
             self.assertIn("route.peer", source, source_name)
@@ -107,7 +107,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         barrier = (ELASTIC / "barrier.asc").read_text()
         self.assertEqual(barrier.count("transport.device_barrier("), 1)
         for marker in (
-                "checked_team_peer_for_world_rank(", "route.team",
+                "checked_device_team_peer_for_world_rank(", "route.team",
                 "route.peer", "facade.put_value(", "facade.signal(",
                 "facade.wait_signal(", "facade.read_signal("):
             self.assertIn(marker, release)
