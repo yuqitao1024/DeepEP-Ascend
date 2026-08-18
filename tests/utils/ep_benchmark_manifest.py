@@ -1,4 +1,8 @@
-from dataclasses import dataclass
+import hashlib
+import json
+import random
+from dataclasses import asdict, dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -56,3 +60,130 @@ def enumerate_ep_mode_cases() -> tuple[EPModeCase, ...]:
                                     )
                                 )
     return tuple(cases)
+
+
+@dataclass(frozen=True)
+class WorkloadSpec:
+    world_size: int
+    num_tokens: int
+    hidden: int
+    num_topk: int
+    num_experts: int
+    seed: int = 0
+    unbalanced_ratio: float = 1.0
+    precise_unbalanced_ratio: bool = False
+    masked_ratio: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.world_size < 2:
+            raise ValueError("world_size must be at least two")
+        if self.num_tokens <= 0 or self.hidden <= 0:
+            raise ValueError("num_tokens and hidden must be positive")
+        if self.num_experts <= 0 or self.num_experts % self.world_size != 0:
+            raise ValueError("num_experts must be positive and rank-partitioned")
+        if not 0 < self.num_topk <= self.num_experts:
+            raise ValueError("num_topk must be in [1, num_experts]")
+        if self.unbalanced_ratio < 1.0:
+            raise ValueError("unbalanced_ratio must be at least one")
+        if not 0.0 <= self.masked_ratio <= 1.0:
+            raise ValueError("masked_ratio must be in [0, 1]")
+
+
+@dataclass(frozen=True)
+class RankWorkload:
+    rank: int
+    num_tokens: int
+    topk_idx: tuple[tuple[int, ...], ...]
+    topk_weights: tuple[tuple[float, ...], ...]
+
+
+@dataclass(frozen=True)
+class BenchmarkManifest:
+    schema_version: int
+    generator_version: int
+    spec: WorkloadSpec
+    ranks: tuple[RankWorkload, ...]
+    fingerprint: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "generator_version": self.generator_version,
+            "spec": asdict(self.spec),
+            "ranks": [asdict(rank) for rank in self.ranks],
+            "fingerprint": self.fingerprint,
+        }
+
+
+def _rank_workload(spec: WorkloadSpec, rank: int) -> RankWorkload:
+    rng = random.Random(spec.seed + rank)
+    num_tokens = max(1, spec.num_tokens - rank)
+    experts_per_rank = spec.num_experts // spec.world_size
+    topk_indices = []
+    topk_weights = []
+
+    for _ in range(num_tokens):
+        scores = []
+        for expert in range(spec.num_experts):
+            score = rng.random()
+            if expert < experts_per_rank:
+                score *= spec.unbalanced_ratio
+            scores.append(score)
+
+        selected = sorted(
+            range(spec.num_experts),
+            key=lambda expert: (scores[expert], expert),
+            reverse=True,
+        )[:spec.num_topk]
+        rng.shuffle(selected)
+        weights = [scores[expert] for expert in selected]
+
+        for lane in range(spec.num_topk):
+            if rng.random() < spec.masked_ratio:
+                selected[lane] = -1
+                weights[lane] = 0.0
+
+        topk_indices.append(tuple(selected))
+        topk_weights.append(tuple(weights))
+
+    return RankWorkload(
+        rank=rank,
+        num_tokens=num_tokens,
+        topk_idx=tuple(topk_indices),
+        topk_weights=tuple(topk_weights),
+    )
+
+
+def _manifest_payload(
+    spec: WorkloadSpec,
+    ranks: tuple[RankWorkload, ...],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "generator_version": 1,
+        "spec": asdict(spec),
+        "ranks": [asdict(rank) for rank in ranks],
+    }
+
+
+def manifest_fingerprint(
+    spec: WorkloadSpec,
+    ranks: tuple[RankWorkload, ...],
+) -> str:
+    encoded = json.dumps(
+        _manifest_payload(spec, ranks),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_manifest(spec: WorkloadSpec) -> BenchmarkManifest:
+    ranks = tuple(_rank_workload(spec, rank) for rank in range(spec.world_size))
+    return BenchmarkManifest(
+        schema_version=1,
+        generator_version=1,
+        spec=spec,
+        ranks=ranks,
+        fingerprint=manifest_fingerprint(spec, ranks),
+    )
