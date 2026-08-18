@@ -14,6 +14,7 @@ enum class RuntimeCase : std::uint32_t {
     kPutValue64,
     kFaa64,
     kSignal,
+    kSignalSet,
     kFlush,
     kPayloadSignalOrder,
     kBarrierRepeat,

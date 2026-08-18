@@ -53,6 +53,7 @@ bool parse_case(const char* name, probe::RuntimeCase* runtime_case) {
         {"put-value64", probe::RuntimeCase::kPutValue64},
         {"faa64", probe::RuntimeCase::kFaa64},
         {"signal", probe::RuntimeCase::kSignal},
+        {"signal-set", probe::RuntimeCase::kSignalSet},
         {"flush", probe::RuntimeCase::kFlush},
         {"payload-signal-order", probe::RuntimeCase::kPayloadSignalOrder},
         {"barrier-repeat", probe::RuntimeCase::kBarrierRepeat},

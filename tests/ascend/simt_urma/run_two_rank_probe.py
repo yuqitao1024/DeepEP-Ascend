@@ -20,6 +20,7 @@ def runtime_contract():
         "put-value64": dict(phased),
         "faa64": dict(phased),
         "signal": dict(phased),
+        "signal-set": dict(phased),
         "flush": dict(phased),
         "payload-signal-order": {
             **phased, "iterations": ORDERING_ITERATIONS,

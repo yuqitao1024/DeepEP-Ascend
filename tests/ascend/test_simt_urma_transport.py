@@ -176,7 +176,7 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
         contract = json.loads(describe.stdout)
 
         expected_cases = {
-            "put", "put-value64", "faa64", "signal", "flush",
+            "put", "put-value64", "faa64", "signal", "signal-set", "flush",
             "payload-signal-order", "barrier-repeat", "queue-wrap",
             "phase-boundary", "teardown",
         }
