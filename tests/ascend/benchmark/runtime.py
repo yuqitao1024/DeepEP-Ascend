@@ -131,6 +131,8 @@ class AscendRuntime:
         device: Any,
         args: Any,
         manifest: BenchmarkManifest,
+        num_sms: int = NUM_SMS,
+        num_qps: int = NUM_QPS,
     ):
         self.torch = torch_module
         self.dist = dist_module
@@ -141,6 +143,8 @@ class AscendRuntime:
         self.manifest = manifest
         self.rank = dist_module.get_rank(group)
         self.world_size = dist_module.get_world_size(group)
+        self.num_sms = num_sms
+        self.num_qps = num_qps
         self.buffer = None
         self.timer = NpuEventTimer(TorchNpuEventBackend(torch_module))
 
@@ -285,8 +289,8 @@ class AscendRuntime:
             topk_weights=topk_weights,
             num_max_tokens_per_rank=spec.num_tokens,
             num_experts=spec.num_experts,
-            num_sms=1,
-            num_qps=0,
+            num_sms=self.num_sms,
+            num_qps=self.num_qps,
         )
         normal = self.buffer.dispatch(**dispatch_arguments.normal)
         expanded = self.buffer.dispatch(**dispatch_arguments.expanded)
@@ -338,15 +342,15 @@ class AscendRuntime:
             "topk_weights": recv_weights,
             "bias": bias,
             "handle": handle,
-            "num_sms": 1,
-            "num_qps": 0,
+            "num_sms": self.num_sms,
+            "num_qps": self.num_qps,
         }
         reduced_args = {
             "x": input_for_reduced,
             "bias": bias,
             "handle": expanded_handle,
-            "num_sms": 1,
-            "num_qps": 0,
+            "num_sms": self.num_sms,
+            "num_qps": self.num_qps,
         }
         if self.args.allow_multiple_reduction:
             reduced_args["topk_weights"] = expanded_weights
@@ -736,7 +740,8 @@ def run_benchmark(args: Any, selected_case_ids: tuple[str, ...]) -> int:
             "local_rank": local_rank,
         }
         runtime = AscendRuntime(
-            torch, dist, deep_ep, group, device, args, manifest
+            torch, dist, deep_ep, group, device, args, manifest,
+            num_sms=1, num_qps=0,
         )
         runtime.synchronized_step(
             runtime.construct_buffer, "buffer construction"

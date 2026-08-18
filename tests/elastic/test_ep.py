@@ -1,21 +1,15 @@
+from __future__ import annotations
+
 import argparse
+import functools
 import os
-import torch
-import torch.distributed as dist
+import sys
+from pathlib import Path
 from typing import Union, Tuple, Optional
 
-import deep_ep
-from deep_ep.utils.math import (
-    align, count_bytes, calc_diff,
-    per_token_cast_back, per_token_cast_to_fp8,
-    safe_div
-)
-from deep_ep.utils.gate import get_unbalanced_scores
-from deep_ep.utils.envs import init_dist, init_seed, dist_print
-from deep_ep.utils.refs import dispatch as ref_dispatch
-from deep_ep.utils.refs import combine as ref_combine
-from deep_ep.utils.refs import generate_pre_combine_data, ordered_accumulate
-from deep_ep.utils.testing import bench_kineto
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from tests.utils.ep_benchmark_core import (
     TensorBytes,
     calculate_combine_traffic,
@@ -23,6 +17,55 @@ from tests.utils.ep_benchmark_core import (
     expanded_dispatch_copy_bytes,
 )
 from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
+from tests.ascend.benchmark.workloads import classify_ascend_case
+
+
+torch = None
+dist = None
+deep_ep = None
+
+
+def _load_runtime_dependencies():
+    global torch, dist, deep_ep
+    global align, count_bytes, calc_diff
+    global per_token_cast_back, per_token_cast_to_fp8, safe_div
+    global get_unbalanced_scores, init_dist, init_seed, dist_print
+    global ref_dispatch, ref_combine
+    global generate_pre_combine_data, ordered_accumulate, bench_kineto
+
+    if torch is not None:
+        return
+    import torch as torch_module
+    import torch.distributed as dist_module
+
+    import deep_ep as deep_ep_module
+    from deep_ep.utils.envs import init_dist, init_seed, dist_print
+    from deep_ep.utils.gate import get_unbalanced_scores
+    from deep_ep.utils.math import (
+        align,
+        calc_diff,
+        count_bytes,
+        per_token_cast_back,
+        per_token_cast_to_fp8,
+        safe_div,
+    )
+    from deep_ep.utils.refs import combine as ref_combine
+    from deep_ep.utils.refs import dispatch as ref_dispatch
+    from deep_ep.utils.refs import generate_pre_combine_data, ordered_accumulate
+    from deep_ep.utils.testing import bench_kineto
+
+    torch = torch_module
+    dist = dist_module
+    deep_ep = deep_ep_module
+
+
+def _inference_mode(function):
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        _load_runtime_dependencies()
+        with torch.inference_mode():
+            return function(*args, **kwargs)
+    return wrapped
 
 
 # noinspection PyUnusedLocal,PyShadowingNames
@@ -37,6 +80,138 @@ def enumerate_ep_modes():
             int(case.async_with_compute_stream),
             int(case.allocate_on_comm_stream),
         )
+
+
+def selected_parity_case_ids(value: str) -> tuple[str, ...]:
+    supported = tuple(
+        case.case_id
+        for case in enumerate_ep_mode_cases()
+        if classify_ascend_case(case).supported
+    )
+    if not value:
+        return supported
+    selected = tuple(
+        case_id.strip() for case_id in value.split(',') if case_id.strip()
+    )
+    invalid = tuple(case_id for case_id in selected if case_id not in supported)
+    if invalid:
+        raise ValueError(
+            "not a common supported case: " + ", ".join(invalid)
+        )
+    if not selected:
+        raise ValueError("at least one parity case is required")
+    return selected
+
+
+class TorchCudaEventBackend:
+    def synchronize(self):
+        torch.cuda.synchronize()
+
+    def new_event(self, _name):
+        return torch.cuda.Event(enable_timing=True)
+
+
+def parity_buffer_settings(args, manifest):
+    spec = manifest.spec
+    return {
+        'num_max_tokens_per_rank': spec.num_tokens,
+        'hidden': spec.hidden,
+        'num_topk': spec.num_topk,
+        'use_fp8_dispatch': False,
+        'deterministic': args.deterministic,
+        'allow_hybrid_mode': False,
+        'allow_multiple_reduction': args.allow_multiple_reduction,
+        'prefer_overlap_with_compute': False,
+        'sl_idx': args.sl_idx,
+        'num_allocated_qps': max(args.num_allocated_qps, args.num_qps),
+        'explicitly_destroy': True,
+        'num_gpu_timeout_secs': args.num_gpu_timeout_secs,
+        'num_cpu_timeout_secs': args.num_cpu_timeout_secs,
+    }
+
+
+def run_cuda_parity(buffer, args):
+    from dataclasses import asdict
+
+    from tests.ascend.benchmark.report import (
+        BenchmarkReport,
+        write_report_atomic,
+    )
+    from tests.ascend.benchmark.runtime import (
+        AscendRuntime,
+        _resolve_manifest,
+        run_supported_matrix,
+    )
+    from tests.ascend.benchmark.timing import NpuEventTimer
+    from tests.utils.ep_benchmark_manifest import write_manifest
+
+    rank = dist.get_rank(buffer.group)
+    world_size = dist.get_world_size(buffer.group)
+    manifest = getattr(args, 'parity_manifest', None)
+    if manifest is None:
+        manifest = _resolve_manifest(args, world_size)
+    init_seed(manifest.spec.seed)
+    if args.dump_manifest and rank == 0:
+        write_manifest(args.dump_manifest, manifest)
+
+    num_sms = (
+        buffer.get_theoretical_num_sms(
+            manifest.spec.num_experts, manifest.spec.num_topk
+        )
+        if args.num_sms == 0
+        else args.num_sms
+    )
+    num_qps = (
+        buffer.get_theoretical_num_qps(num_sms)
+        if args.num_qps == 0
+        else args.num_qps
+    )
+    runtime = AscendRuntime(
+        torch_module=torch,
+        dist_module=dist,
+        deep_ep_module=deep_ep,
+        group=buffer.group,
+        device=torch.device('cuda', torch.cuda.current_device()),
+        args=args,
+        manifest=manifest,
+        num_sms=num_sms,
+        num_qps=num_qps,
+    )
+    runtime.buffer = buffer
+    runtime.timer = NpuEventTimer(TorchCudaEventBackend())
+
+    report = BenchmarkReport.empty_for_cases(
+        platform='cuda',
+        cases=enumerate_ep_mode_cases(),
+        classify=classify_ascend_case,
+        workload_fingerprint=manifest.fingerprint,
+        world_size=world_size,
+    )
+    report.workload = asdict(manifest.spec)
+    report.device = {
+        'name': torch.cuda.get_device_name(torch.cuda.current_device()),
+        'local_rank': torch.cuda.current_device(),
+        'num_sms': num_sms,
+        'num_qps': num_qps,
+    }
+    report.timing_protocol = {
+        'timer': 'cuda_event',
+        'warmups': args.warmups,
+        'iterations': args.iterations,
+        'rank_aggregation': 'maximum_latency',
+        'logical_byte_aggregation': 'sum',
+    }
+    run_supported_matrix(
+        runtime, args.selected_parity_case_ids, report
+    )
+    if rank == 0:
+        write_report_atomic(args.benchmark_json, report)
+        print(
+            f'CUDA EP parity benchmark wrote {args.benchmark_json} '
+            f'with {num_sms} SMs and {num_qps} QPs',
+            flush=True,
+        )
+    dist.barrier(group=buffer.group)
 
 
 def launch(buffer: deep_ep.ElasticBuffer, name: str,
@@ -545,10 +720,20 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
 
 
 # noinspection PyUnboundLocalVariable,PyShadowingNames
-@torch.inference_mode()
+@_inference_mode
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank_idx, num_ranks, group = init_dist(local_rank, num_local_ranks, seed=args.seed)
+    if args.benchmark_profile == 'parity':
+        from tests.ascend.benchmark.runtime import _resolve_manifest
+
+        args.parity_manifest = _resolve_manifest(args, num_ranks)
+
     def construct_elastic_buffer():
+        if args.benchmark_profile == 'parity':
+            return deep_ep.ElasticBuffer(
+                group,
+                **parity_buffer_settings(args, args.parity_manifest),
+            )
         return deep_ep.ElasticBuffer(group,
                                      num_max_tokens_per_rank=args.num_tokens, hidden=args.hidden,
                                      deterministic=args.deterministic,
@@ -570,7 +755,10 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                    once_in_node=True)
 
     # Test MoE kernels
-    test_dispatch_combine(buffer, args)
+    if args.benchmark_profile == 'parity':
+        run_cuda_parity(buffer, args)
+    else:
+        test_dispatch_combine(buffer, args)
 
     # Pressure tests
     for seed in range(int(1e9) if args.do_pressure_test else 0):
@@ -589,7 +777,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     dist.destroy_process_group()
 
 
-if __name__ == '__main__':
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Test elastic EP kernels')
 
     # Resource settings
@@ -626,12 +814,47 @@ if __name__ == '__main__':
     parser.add_argument('--masked-ratio', type=float, default=0.0, help='Mask some expert selections')
     parser.add_argument('--dump-profile-traces', type=str, default='', help='Dump profiling trace JSONs')
     parser.add_argument('--ignore-local-traffic', action='store_true', help='Whether to ignore local traffic during bandwidth calculation')
+
+    # Opt-in cross-platform benchmark profile. The upstream path above keeps
+    # all of its original defaults and behavior.
+    parser.add_argument(
+        '--benchmark-profile', choices=('upstream', 'parity'),
+        default='upstream', help='Benchmark workload profile')
+    parser.add_argument('--workload-manifest', type=str, default='')
+    parser.add_argument('--dump-manifest', type=str, default='')
+    parser.add_argument(
+        '--benchmark-json', type=str, default='cuda-ep-benchmark.json')
+    parser.add_argument('--warmups', type=int, default=30)
+    parser.add_argument('--iterations', type=int, default=30)
+    parser.add_argument('--cases', type=str, default='')
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
+    if args.benchmark_profile == 'parity':
+        try:
+            args.selected_parity_case_ids = selected_parity_case_ids(
+                args.cases
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        if args.warmups < 0 or args.iterations <= 0:
+            parser.error(
+                '--warmups must be nonnegative and --iterations positive'
+            )
 
     # Create dump trace directories
     if args.dump_profile_traces:
         os.makedirs(args.dump_profile_traces, exist_ok=True)
 
     # Launch test processes
+    _load_runtime_dependencies()
     num_processes = args.num_processes
     torch.multiprocessing.spawn(test_loop, args=(num_processes, args), nprocs=num_processes)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
