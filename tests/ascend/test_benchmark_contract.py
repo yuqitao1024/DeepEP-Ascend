@@ -128,6 +128,22 @@ class _ContractTensor:
         return 1
 
 
+class _CollapsedExpandedWeights(_ContractTensor):
+    pass
+
+
+class _GatheredExpandedWeights(_ContractTensor):
+    def __getitem__(self, key):
+        if isinstance(key, tuple):
+            return _CollapsedExpandedWeights()
+        return self
+
+
+class _ExpandedWeights(_ContractTensor):
+    def __getitem__(self, _key):
+        return _GatheredExpandedWeights()
+
+
 class _ContractTorch:
     int32 = "int32"
     testing = SimpleNamespace(assert_close=lambda *_args, **_kwargs: None)
@@ -136,6 +152,8 @@ class _ContractTorch:
     def equal(left, right):
         if left is None or right is None:
             raise TypeError("equal() operands must be tensors")
+        if isinstance(left, _CollapsedExpandedWeights):
+            raise AssertionError("expanded weight lanes were collapsed")
         return True
 
     @staticmethod
@@ -148,8 +166,9 @@ class _ContractTorch:
         return _ContractTensor()
 
 
-def test_correctness_check_accepts_missing_cached_weights_like_upstream():
+def _run_correctness_contract_check(expanded_weights=None):
     tensor = _ContractTensor()
+    expanded_weights = expanded_weights or tensor
     handle = SimpleNamespace(
         topk_idx=tensor,
         recv_src_metadata=tensor,
@@ -157,9 +176,9 @@ def test_correctness_check_accepts_missing_cached_weights_like_upstream():
     )
     event = SimpleNamespace(event=None)
     normal = (tensor, tensor, tensor, handle, event)
-    expanded = (tensor, None, tensor, handle, event)
+    expanded = (tensor, None, expanded_weights, handle, event)
     cached = (tensor, tensor, None, handle, event)
-    cached_expanded = (tensor, None, tensor, handle, event)
+    cached_expanded = (tensor, None, expanded_weights, handle, event)
     combined = (tensor, tensor, event)
     case = EPModeCase(False, 1, False, 0, False, False, False)
     runtime = AscendRuntime.__new__(AscendRuntime)
@@ -184,6 +203,14 @@ def test_correctness_check_accepts_missing_cached_weights_like_upstream():
         ((tensor, tensor, tensor, tensor, None), tensor, tensor),
         num_recv_tokens=1,
     )
+
+
+def test_correctness_check_accepts_missing_cached_weights_like_upstream():
+    _run_correctness_contract_check()
+
+
+def test_correctness_check_preserves_all_expanded_weight_lanes():
+    _run_correctness_contract_check(_ExpandedWeights())
 
 
 def test_summary_uses_linear_percentiles_and_decimal_gbps():

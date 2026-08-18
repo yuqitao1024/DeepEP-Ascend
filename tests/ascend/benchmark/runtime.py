@@ -460,7 +460,7 @@ class AscendRuntime:
             expanded_indices.shape[0], device=self.device
         )
         folded_x = expanded_x[safe_indices][row_indices, first_valid]
-        folded_weights = expanded_weights[safe_indices][row_indices, first_valid]
+        folded_weights = expanded_weights[safe_indices]
         expanded_order = self.torch.argsort(
             expanded_handle.recv_src_metadata[:, 0]
         )
