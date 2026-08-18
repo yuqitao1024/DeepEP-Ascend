@@ -182,7 +182,11 @@ def run_cuda_parity(buffer, args):
 
     report = BenchmarkReport.empty_for_cases(
         platform='cuda',
-        cases=enumerate_ep_mode_cases(),
+        cases=(
+            case
+            for case in enumerate_ep_mode_cases()
+            if case.case_id in args.selected_parity_case_ids
+        ),
         classify=classify_ascend_case,
         workload_fingerprint=manifest.fingerprint,
         world_size=world_size,

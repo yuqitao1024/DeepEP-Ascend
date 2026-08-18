@@ -90,15 +90,29 @@ def list_cases(output_format: str, suite: str) -> None:
 
 
 def _selected_case_ids(parser: argparse.ArgumentParser, value: str | None):
-    all_ids = tuple(case.case_id for case in enumerate_ep_mode_cases())
+    cases_by_id = {
+        case.case_id: case for case in enumerate_ep_mode_cases()
+    }
+    current_ids = tuple(
+        case_id
+        for case_id, case in cases_by_id.items()
+        if classify_ascend_case(case).supported
+    )
     if value is None:
-        return all_ids
+        return current_ids
     selected = tuple(case_id.strip() for case_id in value.split(",") if case_id.strip())
-    unknown = tuple(case_id for case_id in selected if case_id not in all_ids)
+    unknown = tuple(case_id for case_id in selected if case_id not in cases_by_id)
     if unknown:
         parser.error("unknown case IDs: " + ", ".join(unknown))
     if not selected:
         parser.error("at least one case ID is required")
+    for case_id in selected:
+        capability = classify_ascend_case(cases_by_id[case_id])
+        if not capability.supported:
+            parser.error(
+                f"cannot benchmark {capability.suite} case {case_id}: "
+                f"{capability.reason}"
+            )
     return selected
 
 

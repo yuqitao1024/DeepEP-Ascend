@@ -12,7 +12,7 @@ from tests.ascend.benchmark.report import (
     write_report_atomic,
 )
 from tests.ascend.benchmark.compare import compare_reports
-from tests.ascend.benchmark.bench_ep import build_parser
+from tests.ascend.benchmark.bench_ep import build_parser, _selected_case_ids
 from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
 from tests.ascend.benchmark.timing import NpuEventTimer
 from tests.ascend.benchmark.workloads import classify_ascend_case
@@ -99,10 +99,15 @@ def test_summary_rejects_invalid_samples(samples):
         summarize_samples(samples)
 
 
-def test_report_contains_every_case_and_atomic_writer_round_trips(tmp_path):
+def test_performance_report_contains_only_current_cases(tmp_path):
+    current_performance = tuple(
+        case
+        for case in enumerate_ep_mode_cases()
+        if classify_ascend_case(case).supported
+    )
     report = BenchmarkReport.empty_for_cases(
         platform="ascend",
-        cases=enumerate_ep_mode_cases(),
+        cases=current_performance,
         classify=classify_ascend_case,
         workload_fingerprint="a" * 64,
         world_size=2,
@@ -113,18 +118,42 @@ def test_report_contains_every_case_and_atomic_writer_round_trips(tmp_path):
     payload = json.loads(output.read_text())
 
     assert payload["schema_version"] == 1
-    assert len(payload["cases"]) == 144
-    assert sum(case["status"] == "unsupported" for case in payload["cases"]) == 132
-    assert sum(case["status"] == "pending" for case in payload["cases"]) == 12
+    assert len(payload["cases"]) == 12
+    assert payload["case_summary"] == {
+        "total": 12,
+        "pending": 12,
+        "passed": 0,
+        "failed": 0,
+    }
+
+
+def test_performance_report_rejects_deferred_case():
+    deferred = next(
+        case
+        for case in enumerate_ep_mode_cases()
+        if not classify_ascend_case(case).supported
+    )
+
+    with pytest.raises(ValueError, match="cannot add deferred case"):
+        BenchmarkReport.empty_for_cases(
+            platform="ascend",
+            cases=(deferred,),
+            classify=classify_ascend_case,
+            workload_fingerprint="a" * 64,
+            world_size=2,
+        )
 
 
 def test_comparison_rejects_incompatible_report_identity():
-    cases = enumerate_ep_mode_cases()
+    cases = tuple(
+        case
+        for case in enumerate_ep_mode_cases()
+        if classify_ascend_case(case).supported
+    )
     left = BenchmarkReport.empty_for_cases(
         platform="cuda",
         cases=cases,
-        classify=lambda _case: type(
-            "Supported", (), {"supported": True, "reason": ""})(),
+        classify=classify_ascend_case,
         workload_fingerprint="a" * 64,
         world_size=2,
     )
@@ -150,6 +179,14 @@ def test_benchmark_parser_preserves_production_size_defaults():
     assert args.warmups == 30
     assert args.iterations == 30
     assert args.allow_multiple_reduction == 1
+
+
+def test_default_selection_contains_only_current_performance_cases():
+    selected = _selected_case_ids(build_parser(), None)
+
+    assert len(selected) == 12
+    assert all("-bf16-" in case_id for case_id in selected)
+    assert all("-prev0-async0-alloc0" in case_id for case_id in selected)
 
 
 @pytest.mark.parametrize(
@@ -194,6 +231,37 @@ def test_cli_rejects_unknown_case_before_runtime_import():
 
     assert result.returncode == 2
     assert "unknown case IDs: not-a-case" in result.stderr
+    assert "torch_npu" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("case_id", "suite", "reason"),
+    (
+        (
+            "ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0",
+            "performance",
+            "fp8_runtime_deferred",
+        ),
+        (
+            "ep-bf16-align128-bias0-hcopy1-prev1-async0-alloc1",
+            "functional",
+            "event_chaining_deferred",
+        ),
+    ),
+)
+def test_cli_rejects_noncurrent_performance_case_before_runtime_import(
+    case_id, suite, reason,
+):
+    result = subprocess.run(
+        [sys.executable, str(BENCH_EP), "--cases", case_id],
+        capture_output=True,
+        text=True,
+        env={},
+    )
+
+    assert result.returncode == 2
+    assert suite in result.stderr
+    assert reason in result.stderr
     assert "torch_npu" not in result.stderr
 
 

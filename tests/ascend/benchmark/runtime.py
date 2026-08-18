@@ -653,18 +653,17 @@ def run_supported_matrix(
     selected_case_ids: tuple[str, ...],
     report: BenchmarkReport,
 ) -> None:
-    selected = set(selected_case_ids)
     cases_by_id = {case.case_id: case for case in enumerate_ep_mode_cases()}
     records_by_id = {record["case_id"]: record for record in report.cases}
-    for case_id, case in cases_by_id.items():
+    for case_id in selected_case_ids:
+        case = cases_by_id[case_id]
         record = records_by_id[case_id]
         capability = classify_ascend_case(case)
         if not capability.supported:
-            continue
-        if case_id not in selected:
-            record["status"] = "skipped"
-            record["reason"] = "not_selected"
-            continue
+            raise ValueError(
+                f"cannot benchmark {capability.suite} case {case_id}: "
+                f"{capability.reason}"
+            )
         local_operations = runtime.run_case(case)
         gathered: list[Any] = [None] * runtime.world_size
         runtime.dist.all_gather_object(
@@ -722,7 +721,11 @@ def run_benchmark(args: Any, selected_case_ids: tuple[str, ...]) -> int:
             write_manifest(Path(args.dump_manifest), manifest)
         report = BenchmarkReport.empty_for_cases(
             platform="ascend",
-            cases=enumerate_ep_mode_cases(),
+            cases=(
+                case
+                for case in enumerate_ep_mode_cases()
+                if case.case_id in selected_case_ids
+            ),
             classify=classify_ascend_case,
             workload_fingerprint=manifest.fingerprint,
             world_size=world_size,

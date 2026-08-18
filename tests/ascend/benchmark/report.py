@@ -42,11 +42,16 @@ class BenchmarkReport:
         records = []
         for case in cases:
             capability = classify(case)
+            if not capability.supported:
+                raise ValueError(
+                    f"cannot add deferred case {case.case_id} to a "
+                    f"performance report: {capability.reason}"
+                )
             records.append({
                 "case_id": case.case_id,
                 "mode": asdict(case),
-                "status": "pending" if capability.supported else "unsupported",
-                "reason": capability.reason,
+                "status": "pending",
+                "reason": "",
                 "operations": [],
             })
         return cls(
@@ -69,11 +74,15 @@ class BenchmarkReport:
             "workload_fingerprint": self.workload_fingerprint,
             "timing_protocol": self.timing_protocol,
             "case_summary": {
-                "supported": sum(
-                    case["status"] != "unsupported" for case in self.cases
+                "total": len(self.cases),
+                "pending": sum(
+                    case["status"] == "pending" for case in self.cases
                 ),
-                "unsupported": sum(
-                    case["status"] == "unsupported" for case in self.cases
+                "passed": sum(
+                    case["status"] == "passed" for case in self.cases
+                ),
+                "failed": sum(
+                    case["status"] == "failed" for case in self.cases
                 ),
             },
             "cases": self.cases,
