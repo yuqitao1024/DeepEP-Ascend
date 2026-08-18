@@ -12,6 +12,12 @@
 
 namespace deep_ep::ascend::elastic::release_protocol {
 
+struct ReleaseControlObservation {
+    bool acquired = false;
+    std::uint64_t generation = 0;
+    std::uint64_t count = 0;
+};
+
 template <typename Transport>
 DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void put_staged_payload(
     Transport& facade, const transport::TeamPeer& route,
@@ -63,6 +69,36 @@ DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE bool acquire_release(
         route.team, route.peer, signal_index, generation, timeout_cycles);
     return facade.read_signal(route.team, route.peer, signal_index) >=
         generation;
+}
+
+template <typename Transport, typename Boundary, typename ControlSlots>
+DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE ReleaseControlObservation
+observe_release_control(
+    Transport& facade, const transport::TransportTopology& topology,
+    const Boundary& boundary, int local_world_rank,
+    ControlSlots control_slots, std::uint32_t signal_index,
+    std::uint64_t generation,
+    std::uint64_t timeout_cycles) {
+    ReleaseControlObservation observation{};
+    if (boundary.control_slot_world_rank < 0 ||
+        boundary.control_slot_world_rank >= topology.world_size ||
+        control_slots == nullptr ||
+        sizeof(*control_slots) < 2 * sizeof(std::uint64_t))
+        return observation;
+    if (boundary.control_slot_world_rank != local_world_rank &&
+        !acquire_release(
+            facade, topology, boundary.signal_sender_world_rank,
+            signal_index, generation, timeout_cycles))
+        return observation;
+    const auto slot =
+        reinterpret_cast<transport::DeviceAddress>(control_slots) +
+        static_cast<std::uint64_t>(boundary.control_slot_world_rank) *
+            sizeof(*control_slots);
+    observation.generation = facade.load_acquire(slot);
+    observation.count = facade.load_acquire(
+        slot + sizeof(std::uint64_t));
+    observation.acquired = true;
+    return observation;
 }
 
 }  // namespace deep_ep::ascend::elastic::release_protocol

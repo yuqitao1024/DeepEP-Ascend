@@ -114,7 +114,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "release_protocol::publish_control_and_release(",
                 source, source_name)
             self.assertIn(
-                "release_protocol::acquire_release(", source, source_name)
+                "release_protocol::observe_release_control(",
+                source, source_name)
             self.assertNotIn(
                 "TransportTeam::kScaleUp, destination_rank", source,
                 source_name)
@@ -1027,32 +1028,24 @@ int main() {
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
-    def test_hybrid_epilogues_acquire_from_final_route_sender(self):
-        """Catches unwired dispatch or combine final-sender selection."""
+    def test_hybrid_epilogues_use_observed_release_boundary(self):
+        """Catches bypassing the behaviorally tested release boundary."""
         dispatch = (ELASTIC / "dispatch.asc").read_text()
         dispatch = dispatch[
             dispatch.index("__simt_vf__ inline void dispatch_epilogue_vf"):
             dispatch.index(
                 'extern "C" int deep_ep_ascend_launch_dispatch')]
-        for marker in (
-                "classify_world_route(\n"
-                "                    source_rank, transport_world_rank,\n"
-                "                    transport_scale_up_size)",
-                "final_release_sender_world_rank(\n"
-                "                    route, source_rank)"):
-            self.assertIn(marker, dispatch)
+        self.assertIn("dispatch_release_boundary(", dispatch)
+        self.assertIn("release_protocol::observe_release_control(", dispatch)
+        self.assertNotIn("release_protocol::acquire_release(", dispatch)
 
         combine = (ELASTIC / "combine.asc").read_text()
         combine = combine[
             combine.index("__simt_vf__ inline void combine_epilogue_vf"):
             combine.index('extern "C" int deep_ep_ascend_launch_combine')]
-        for marker in (
-                "classify_world_route(\n"
-                "                transport_world_rank, contributor_rank,\n"
-                "                transport_scale_up_size)",
-                "final_release_sender_world_rank(\n"
-                "                route, contributor_rank)"):
-            self.assertIn(marker, combine)
+        self.assertIn("combine_release_boundary(", combine)
+        self.assertIn("release_protocol::observe_release_control(", combine)
+        self.assertNotIn("release_protocol::acquire_release(", combine)
 
     def test_pure_cpp_runtime_contract(self):
         runtime = ELASTIC / "runtime.cpp"
@@ -1116,11 +1109,13 @@ int main() {
             "dispatch.asc": (
                 "DeviceTransportFacade", "put(",
                 "release_protocol::publish_control_and_release(",
-                "release_protocol::acquire_release(", "device_barrier("),
+                "release_protocol::observe_release_control(",
+                "device_barrier("),
             "combine.asc": (
                 "DeviceTransportFacade", "put(",
                 "release_protocol::publish_control_and_release(",
-                "release_protocol::acquire_release(", "device_barrier("),
+                "release_protocol::observe_release_control(",
+                "device_barrier("),
         }
         forbidden = ("nccl", "nvshmem", "cuda", "ain", "hcomm", "hccl",
                      "urma")
@@ -1234,7 +1229,7 @@ int main() {
                 "record_count", "remote_count, count",
                 "release_protocol::flush_payload(",
                 "release_protocol::publish_control_and_release(",
-                "release_protocol::acquire_release(",
+                "release_protocol::observe_release_control(",
                 "kCombineReleaseSignalIndex",
                 "transport.device_barrier(",
                 "transport.consumed_generation()",

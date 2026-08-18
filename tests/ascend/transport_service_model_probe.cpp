@@ -1,10 +1,12 @@
 #include <cstdint>
 #include <iostream>
 
+#include "csrc/backends/ascend/elastic/kernels.hpp"
 #include "csrc/backends/ascend/elastic/release_protocol.hpp"
 #include "csrc/backends/ascend/transport/aicore_transport_service.hpp"
 #include "csrc/backends/ascend/transport/sync_layout.hpp"
 
+namespace elastic = deep_ep::ascend::elastic;
 namespace transport = deep_ep::ascend::transport;
 namespace service = deep_ep::ascend::transport::service;
 namespace sync_layout = deep_ep::ascend::transport::sync_layout;
@@ -206,6 +208,10 @@ struct ReleaseProtocolModel {
     bool control_published_after_payload = false;
     std::uint64_t release_generation = 0;
     std::uint64_t acquired_generation = 0;
+    transport::TransportTeam waited_team = transport::TransportTeam::kWorld;
+    int waited_peer = -1;
+    std::uint32_t waited_signal_index = 0;
+    int wait_count = 0;
 
     void system_fence() {
         staging_fenced = true;
@@ -238,8 +244,12 @@ struct ReleaseProtocolModel {
     }
 
     void wait_signal(
-        transport::TransportTeam, int, std::uint32_t,
+        transport::TransportTeam team, int peer, std::uint32_t signal_index,
         transport::SignalValue target, std::uint64_t) {
+        waited_team = team;
+        waited_peer = peer;
+        waited_signal_index = signal_index;
+        ++wait_count;
         if (release_generation >= target)
             acquired_generation = target;
     }
@@ -248,7 +258,106 @@ struct ReleaseProtocolModel {
         transport::TransportTeam, int, std::uint32_t) const {
         return release_generation;
     }
+
+    std::uint64_t load_acquire(transport::DeviceAddress address) const {
+        return *reinterpret_cast<const std::uint64_t*>(address);
+    }
 };
+
+struct ReleaseControlFixture {
+    std::uint64_t generation = 0;
+    std::uint64_t count = 0;
+};
+
+void reset_release_fixture(
+    ReleaseProtocolModel* protocol, ReleaseControlFixture* slots,
+    int canonical_slot) {
+    *protocol = {};
+    protocol->release_generation = 7;
+    for (int slot = 0; slot < 4; ++slot) {
+        slots[slot].generation = 90 + static_cast<std::uint64_t>(slot);
+        slots[slot].count = 100 + static_cast<std::uint64_t>(slot);
+    }
+    slots[canonical_slot].generation = 7;
+    slots[canonical_slot].count = 0;
+}
+
+void check_wait_peer(
+    const ReleaseProtocolModel& protocol,
+    const transport::TransportTopology& topology, int expected_world_sender,
+    std::uint32_t expected_signal_index, bool local) {
+    if (local) {
+        CHECK(protocol.wait_count == 0);
+        return;
+    }
+    transport::TeamPeer expected{};
+    CHECK(transport::device::detail::checked_device_team_peer_for_world_rank(
+        topology, expected_world_sender, &expected));
+    CHECK(protocol.wait_count == 1);
+    CHECK(protocol.waited_team == expected.team);
+    CHECK(protocol.waited_peer == expected.peer);
+    CHECK(protocol.waited_signal_index == expected_signal_index);
+}
+
+void check_hybrid_release_observation_boundaries() {
+    constexpr int dispatch_senders[4][4] = {
+        {0, 1, 2, 1},
+        {0, 1, 0, 3},
+        {0, 3, 2, 3},
+        {2, 1, 2, 3},
+    };
+    constexpr int combine_senders[4][4] = {
+        {0, 1, 2, 2},
+        {0, 1, 3, 3},
+        {0, 0, 2, 3},
+        {1, 1, 2, 3},
+    };
+
+    for (int receiver = 0; receiver < 4; ++receiver) {
+        transport::TransportTopology topology{};
+        CHECK(transport::build_transport_topology(
+            receiver, 4, 2,
+            transport::TransportTopologyKind::kLogicalSimulation,
+            1, &topology).ok());
+        for (int source = 0; source < 4; ++source) {
+            ReleaseProtocolModel protocol;
+            ReleaseControlFixture slots[4]{};
+            reset_release_fixture(&protocol, slots, source);
+            const auto boundary = elastic::dispatch_release_boundary(
+                source, receiver, 2);
+            const auto observation = release_protocol::observe_release_control(
+                protocol, topology, boundary, receiver, slots,
+                sync_layout::kDispatchReleaseSignalIndex, 7, 64);
+            CHECK(boundary.control_slot_world_rank == source);
+            CHECK(observation.acquired);
+            CHECK(observation.generation == 7);
+            CHECK(observation.count == 0);
+            check_wait_peer(
+                protocol, topology, dispatch_senders[receiver][source],
+                sync_layout::kDispatchReleaseSignalIndex,
+                source == receiver);
+        }
+
+        for (int contributor = 0; contributor < 4; ++contributor) {
+            ReleaseProtocolModel protocol;
+            ReleaseControlFixture slots[4]{};
+            reset_release_fixture(&protocol, slots, contributor);
+            const auto boundary = elastic::combine_release_boundary(
+                receiver, contributor, 2);
+            const auto observation = release_protocol::observe_release_control(
+                protocol, topology, boundary, receiver, slots,
+                sync_layout::kCombineReleaseSignalIndex, 7, 64);
+            CHECK(boundary.control_slot_world_rank == contributor);
+            CHECK(observation.acquired);
+            CHECK(observation.generation == 7);
+            CHECK(observation.count == 0);
+            check_wait_peer(
+                protocol, topology, combine_senders[receiver][contributor],
+                sync_layout::kCombineReleaseSignalIndex,
+                contributor == receiver);
+        }
+    }
+}
 
 void check_release_acquire_and_selected_barrier_sequence() {
     transport::TransportTopology topology{};
@@ -294,6 +403,7 @@ int main() {
     check_barrier_failure_preserves_failed_world_peer();
     check_service_uses_translated_world_peer();
     check_protocol_validation_precedes_dispatch();
+    check_hybrid_release_observation_boundaries();
     check_release_acquire_and_selected_barrier_sequence();
     return failures == 0 ? 0 : 1;
 }

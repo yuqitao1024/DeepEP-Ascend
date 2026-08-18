@@ -20,6 +20,11 @@ struct WorldRoute {
     int ingress_world_rank = 0;
 };
 
+struct ReleaseBoundary {
+    int control_slot_world_rank = 0;
+    int signal_sender_world_rank = 0;
+};
+
 #if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
 #define DEEP_EP_ASCEND_KERNEL_CALLEE __SIMT_DEVICE_FUNCTIONS_DECL__ inline
 #else
@@ -47,6 +52,28 @@ DEEP_EP_ASCEND_KERNEL_CALLEE int final_release_sender_world_rank(
     const WorldRoute& route, int direct_sender_world_rank) noexcept {
     return route.kind == WorldRouteKind::kDiagonal ?
         route.ingress_world_rank : direct_sender_world_rank;
+}
+
+DEEP_EP_ASCEND_KERNEL_CALLEE ReleaseBoundary dispatch_release_boundary(
+    int source_world_rank, int destination_world_rank,
+    int scale_up_size) noexcept {
+    const auto route = classify_world_route(
+        source_world_rank, destination_world_rank, scale_up_size);
+    return {
+        source_world_rank,
+        final_release_sender_world_rank(route, source_world_rank),
+    };
+}
+
+DEEP_EP_ASCEND_KERNEL_CALLEE ReleaseBoundary combine_release_boundary(
+    int origin_world_rank, int contributor_world_rank,
+    int scale_up_size) noexcept {
+    const auto route = classify_world_route(
+        origin_world_rank, contributor_world_rank, scale_up_size);
+    return {
+        contributor_world_rank,
+        final_release_sender_world_rank(route, contributor_world_rank),
+    };
 }
 
 struct BarrierArguments {
