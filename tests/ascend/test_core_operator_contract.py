@@ -274,11 +274,39 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                     "std::uintptr_t transport_backend_context"):
                 self.assertIn(argument, signature, function_name)
 
+        barrier_producer_signature = signatures["barrier_producer_vf"]
+        for argument in (
+                "std::uint32_t transport_topology_abi_version",
+                "std::uint32_t transport_topology_struct_size",
+                "int transport_world_size",
+                "int transport_scale_up_rank",
+                "int transport_scale_up_size",
+                "int transport_scale_out_rank",
+                "int transport_scale_out_size",
+                "std::uint32_t transport_scale_up_direct",
+                "std::uint32_t transport_topology_kind",
+                "std::uint64_t transport_topology_epoch"):
+            self.assertIn(
+                argument, barrier_producer_signature,
+                "barrier producer must reconstruct the topology used by "
+                "SIMT team validation")
+
         expected_transport_arguments = {
             "barrier_producer_vf": {
                 "tiling.transport_context.abi_version",
                 "tiling.transport_context.struct_size",
                 "tiling.transport_context.local_window_base",
+                "tiling.transport_context.topology.abi_version",
+                "tiling.transport_context.topology.struct_size",
+                "tiling.transport_context.topology.world_rank",
+                "tiling.transport_context.topology.world_size",
+                "tiling.transport_context.topology.scale_up_rank",
+                "tiling.transport_context.topology.scale_up_size",
+                "tiling.transport_context.topology.scale_out_rank",
+                "tiling.transport_context.topology.scale_out_size",
+                "tiling.transport_context.topology.scale_up_direct",
+                "tiling.transport_context.topology.kind",
+                "tiling.transport_context.topology.epoch",
                 "tiling.transport_context.backend_context",
             },
             "barrier_continuation_vf": {
