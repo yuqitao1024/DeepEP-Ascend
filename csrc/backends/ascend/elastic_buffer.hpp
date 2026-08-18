@@ -970,6 +970,47 @@ public:
                 TORCH_CHECK(route_status.ok(),
                             "DeepEP Ascend backend: dispatch ",
                             route_status.message);
+
+                std::vector<std::int32_t> host_source_metadata(
+                    host_route_records.size() *
+                    static_cast<std::size_t>(num_topk + 2));
+                std::vector<std::int64_t> host_received_topk(
+                    host_route_records.size() *
+                        static_cast<std::size_t>(num_topk),
+                    -1);
+                if (!host_route_records.empty()) {
+                    status = resources_->copy_to_host(
+                        host_source_metadata.data(),
+                        cached_recv_src_metadata->data_ptr(),
+                        host_source_metadata.size() * sizeof(std::int32_t));
+                    if (!status.ok())
+                        raise_transport_status(status, rank_idx_);
+                    for (std::size_t index = 0;
+                         index < host_route_records.size(); ++index) {
+                        const auto encoded_lane = host_source_metadata[
+                            index * static_cast<std::size_t>(num_topk + 2) + 1];
+                        if (encoded_lane < 0)
+                            continue;
+                        const auto master_lane =
+                            static_cast<std::uint64_t>(encoded_lane) % num_topk;
+                        host_received_topk[
+                            index * static_cast<std::size_t>(num_topk) +
+                            static_cast<std::size_t>(master_lane)] =
+                                host_route_records[index]
+                                    .destination_local_expert;
+                    }
+                }
+                const elastic::HybridRouteBindingView bindings{
+                    host_source_metadata.data(), host_received_topk.data(),
+                    host_route_records.size(), num_topk, capacity};
+                const auto binding_status =
+                    elastic::validate_hybrid_route_bindings(
+                        descriptor,
+                        {host_route_records.data(), host_route_records.size()},
+                        bindings);
+                TORCH_CHECK(binding_status.ok(),
+                            "DeepEP Ascend backend: dispatch ",
+                            binding_status.message);
             }
             rank_prefix = *cached_psum_num_recv_tokens_per_scaleup_rank;
             expert_prefix = *cached_psum_num_recv_tokens_per_expert;

@@ -504,7 +504,7 @@ bool cached_hybrid_route_validation_probe() {
     auto* record = reinterpret_cast<elastic::HybridRouteRecord*>(
         static_cast<std::uint8_t*>(std::get<13>(corrupted)->data_ptr()) +
         sizeof(elastic::DispatchHandleDescriptor));
-    record->origin_source_row = 4;
+    record->origin_source_row = 1;
     try {
         (void)cached_hybrid_dispatch(*buffer, inputs, corrupted);
         std::cerr << "corrupted cached hybrid dispatch was accepted\n";
