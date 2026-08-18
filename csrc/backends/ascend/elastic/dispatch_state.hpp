@@ -577,19 +577,25 @@ inline DispatchHandleStatus validate_hybrid_route_bindings(
         const auto& record = route_table.records[index];
         const auto* metadata = bindings.source_metadata +
             index * (bindings.num_topk + 2);
-        const int metadata_origin = decode_dispatch_source_rank(
-            metadata[0], bindings.shard_capacity);
-        const std::int32_t metadata_row = decode_dispatch_local_index(
-            metadata[0], bindings.shard_capacity);
-        const int lane_origin = decode_dispatch_source_rank(
-            metadata[1], bindings.num_topk);
-        const std::int32_t master_lane = decode_dispatch_local_index(
-            metadata[1], bindings.num_topk);
+        const int metadata_origin = metadata[0] < 0 ? -1 :
+            static_cast<int>(static_cast<std::uint64_t>(metadata[0]) /
+                             bindings.shard_capacity);
+        const std::int32_t metadata_row = metadata[0] < 0 ? -1 :
+            static_cast<std::int32_t>(
+                static_cast<std::uint64_t>(metadata[0]) %
+                bindings.shard_capacity);
+        const int lane_origin = metadata[1] < 0 ? -1 :
+            static_cast<int>(static_cast<std::uint64_t>(metadata[1]) /
+                             bindings.num_topk);
+        const std::int32_t master_lane = metadata[1] < 0 ? -1 :
+            static_cast<std::int32_t>(
+                static_cast<std::uint64_t>(metadata[1]) % bindings.num_topk);
         if (metadata_origin != record.origin_world_rank ||
             lane_origin != record.origin_world_rank || metadata_row < 0 ||
             static_cast<std::uint64_t>(metadata_row) !=
                 record.origin_source_row ||
-            !is_dispatch_local_index(master_lane, bindings.num_topk) ||
+            master_lane < 0 ||
+            static_cast<std::uint64_t>(master_lane) >= bindings.num_topk ||
             record.destination_world_rank != descriptor.topology.world_rank)
             return {DispatchHandleStatusCode::kMismatch,
                     "hybrid route record does not match source metadata"};

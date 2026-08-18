@@ -22,6 +22,8 @@ PRODUCTION_COMBINE_DEVICE_POINTER_PROBE = \
     ROOT / "tests/ascend/production_combine_device_pointer_probe.cpp"
 PRODUCTION_DISPATCH_STATE_PROBE = \
     ROOT / "tests/ascend/production_dispatch_state_probe.cpp"
+DISPATCH_STATE_HOST_DOMAIN_PROBE = \
+    ROOT / "tests/ascend/dispatch_state_host_domain_probe.cpp"
 PRODUCTION_BARRIER_STATE_PROBE = \
     ROOT / "tests/ascend/production_barrier_state_probe.cpp"
 PRODUCTION_OPERATION_COORDINATOR_PROBE = \
@@ -789,6 +791,20 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                  f"-I{ROOT}", str(PRODUCTION_DISPATCH_STATE_PROBE),
                  "-o", str(binary)], capture_output=True, text=True,
                 check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_hybrid_route_binding_validator_is_host_domain_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "dispatch_state_host_domain_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 "-fno-inline", f"-I{ROOT}",
+                 str(DISPATCH_STATE_HOST_DOMAIN_PROBE), "-o", str(binary)],
+                capture_output=True, text=True, check=False)
             self.assertEqual(compile_result.returncode, 0,
                              compile_result.stderr)
             run_result = subprocess.run(
