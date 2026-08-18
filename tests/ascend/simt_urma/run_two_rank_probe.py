@@ -25,7 +25,7 @@ def runtime_contract():
         "payload-signal-order": {
             **phased, "iterations": ORDERING_ITERATIONS,
         },
-        "barrier-repeat": {**phased, "iterations": 2},
+        "barrier-repeat": {**phased, "iterations": 50},
         "queue-wrap": {**phased, "requires_sq_wrap": True},
         "phase-boundary": dict(phased),
         "teardown": {"phases": ["host"]},
