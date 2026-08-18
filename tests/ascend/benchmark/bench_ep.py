@@ -17,6 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Benchmark synchronous Ascend EPv2 kernels",
     )
     parser.add_argument("--list-cases", action="store_true")
+    parser.add_argument(
+        "--suite",
+        choices=("all", "performance", "functional"),
+        default="all",
+    )
     parser.add_argument("--format", choices=("table", "json"), default="table")
     parser.add_argument("--output", default="ascend-ep-benchmark.json")
     parser.add_argument("--workload-manifest")
@@ -49,32 +54,38 @@ def _case_records() -> list[dict]:
         records.append({
             "case_id": case.case_id,
             "mode": asdict(case),
-            "status": "supported" if capability.supported else "unsupported",
+            "suite": capability.suite,
+            "status": "supported" if capability.supported else "deferred",
             "reason": capability.reason,
         })
     return records
 
 
-def list_cases(output_format: str) -> None:
-    cases = _case_records()
+def list_cases(output_format: str, suite: str) -> None:
+    cases = [
+        case
+        for case in _case_records()
+        if suite == "all" or case["suite"] == suite
+    ]
     summary = {
+        "total": len(cases),
         "supported": sum(case["status"] == "supported" for case in cases),
-        "unsupported": sum(case["status"] == "unsupported" for case in cases),
+        "deferred": sum(case["status"] == "deferred" for case in cases),
     }
     if output_format == "json":
         print(json.dumps({"summary": summary, "cases": cases}, sort_keys=True))
         return
 
-    print("| # | Case ID | Ascend status | Reason |")
-    print("| ---: | --- | --- | --- |")
+    print("| # | Case ID | Suite | Ascend status | Reason |")
+    print("| ---: | --- | --- | --- | --- |")
     for index, case in enumerate(cases, start=1):
         print(
-            f"| {index} | `{case['case_id']}` | {case['status']} | "
-            f"{case['reason']} |"
+            f"| {index} | `{case['case_id']}` | {case['suite']} | "
+            f"{case['status']} | {case['reason']} |"
         )
     print(
-        f"\nSummary: {summary['supported']} supported, "
-        f"{summary['unsupported']} unsupported"
+        f"\nSummary: {summary['total']} total, "
+        f"{summary['supported']} supported, {summary['deferred']} deferred"
     )
 
 
@@ -96,8 +107,10 @@ def main() -> int:
     args = parser.parse_args()
     selected_case_ids = _selected_case_ids(parser, args.cases)
     if args.list_cases:
-        list_cases(args.format)
+        list_cases(args.format, args.suite)
         return 0
+    if args.suite != "all":
+        parser.error("--suite is only valid with --list-cases")
 
     from tests.ascend.benchmark.runtime import run_benchmark
 

@@ -36,22 +36,26 @@ def test_case_matrix_matches_upstream_order_and_size():
         "ep-bf16-align1-bias2-hcopy0-prev1-async1-alloc1")
 
 
-def test_ascend_capability_counts_are_exhaustive():
-    capabilities = [
+def test_case_suite_counts_are_exhaustive():
+    classified = [
         classify_ascend_case(case) for case in enumerate_ep_mode_cases()
     ]
-    counts = Counter(
-        capability.reason
-        for capability in capabilities
-        if not capability.supported
-    )
-
-    assert sum(capability.supported for capability in capabilities) == 12
-    assert counts == {
-        "fp8_runtime_deferred": 72,
-        "event_chaining_deferred": 24,
-        "async_overlap_deferred": 24,
-        "comm_stream_allocation_deferred": 12,
+    assert Counter(
+        (classification.suite, classification.supported)
+        for classification in classified
+    ) == {
+        ("performance", True): 12,
+        ("performance", False): 12,
+        ("functional", False): 120,
+    }
+    assert Counter(
+        classification.reason
+        for classification in classified
+        if classification.suite == "functional"
+    ) == {
+        "event_chaining_deferred": 48,
+        "async_overlap_deferred": 48,
+        "comm_stream_allocation_deferred": 24,
     }
 
 
@@ -148,12 +152,20 @@ def test_benchmark_parser_preserves_production_size_defaults():
     assert args.allow_multiple_reduction == 1
 
 
-def test_list_cases_is_host_only_and_exhaustive():
+@pytest.mark.parametrize(
+    ("suite", "expected_count"),
+    (("all", 144), ("performance", 24), ("functional", 120)),
+)
+def test_list_cases_filters_by_suite_without_runtime_imports(
+    suite, expected_count,
+):
     result = subprocess.run(
         [
             sys.executable,
             str(BENCH_EP),
             "--list-cases",
+            "--suite",
+            suite,
             "--format",
             "json",
         ],
@@ -164,12 +176,11 @@ def test_list_cases_is_host_only_and_exhaustive():
     )
     payload = json.loads(result.stdout)
 
-    assert len(payload["cases"]) == 144
-    assert payload["summary"] == {"supported": 12, "unsupported": 132}
+    assert len(payload["cases"]) == expected_count
     assert all(
         case["reason"]
         for case in payload["cases"]
-        if case["status"] == "unsupported"
+        if case["status"] == "deferred"
     )
 
 

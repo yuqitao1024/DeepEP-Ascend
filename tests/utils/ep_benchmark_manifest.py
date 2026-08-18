@@ -63,6 +63,16 @@ def enumerate_ep_mode_cases() -> tuple[EPModeCase, ...]:
     return tuple(cases)
 
 
+def case_suite(case: EPModeCase) -> str:
+    if (
+        case.with_previous_event
+        or case.async_with_compute_stream
+        or case.allocate_on_comm_stream
+    ):
+        return "functional"
+    return "performance"
+
+
 @dataclass(frozen=True)
 class WorkloadSpec:
     world_size: int
