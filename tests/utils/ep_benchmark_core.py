@@ -1,0 +1,147 @@
+from dataclasses import dataclass
+from typing import Iterable, Optional, Sequence
+
+
+CORRECTNESS_OPERATIONS = (
+    "dispatch",
+    "expanded_dispatch",
+    "cached_dispatch",
+    "cached_expanded_padding",
+    "combine",
+    "reduced_combine",
+)
+
+PERFORMANCE_OPERATIONS = (
+    "dispatch",
+    "expanded_dispatch",
+    "cached_dispatch",
+    "combine",
+    "reduced_combine",
+)
+
+
+@dataclass(frozen=True)
+class TensorBytes:
+    rows: int
+    row_bytes: int
+
+    def __post_init__(self) -> None:
+        if self.rows < 0 or self.row_bytes < 0:
+            raise ValueError("tensor byte dimensions must be nonnegative")
+
+
+@dataclass(frozen=True)
+class DispatchTraffic:
+    bytes_per_token: int
+    scaleout_bytes: int
+    scaleup_bytes: int
+    copy_bytes: int
+
+
+@dataclass(frozen=True)
+class CombineTraffic:
+    scaleout_bytes: int
+    scaleup_bytes: int
+    reduction_bytes: int
+
+
+def calculate_dispatch_traffic(
+    tensors: Iterable[TensorBytes],
+    num_recv_tokens: int,
+    num_scaleup_recv_tokens: int,
+    num_scaleout_send_tokens: int,
+) -> DispatchTraffic:
+    tensors = tuple(tensors)
+    if any(value < 0 for value in (
+        num_recv_tokens,
+        num_scaleup_recv_tokens,
+        num_scaleout_send_tokens,
+    )):
+        raise ValueError("dispatch token counts must be nonnegative")
+    if any(tensor.rows != tensors[0].rows for tensor in tensors[1:]):
+        raise ValueError("dispatch tensors must have matching row counts")
+
+    bytes_per_token = sum(tensor.row_bytes for tensor in tensors)
+    return DispatchTraffic(
+        bytes_per_token=bytes_per_token,
+        scaleout_bytes=bytes_per_token * num_scaleout_send_tokens,
+        scaleup_bytes=bytes_per_token * num_scaleup_recv_tokens,
+        copy_bytes=2 * num_recv_tokens * bytes_per_token,
+    )
+
+
+def expanded_dispatch_copy_bytes(
+    num_recv_tokens: int,
+    num_expanded_tokens: int,
+    payload_bytes_per_token: int,
+    metadata_bytes_per_token: int,
+) -> int:
+    values = (
+        num_recv_tokens,
+        num_expanded_tokens,
+        payload_bytes_per_token,
+        metadata_bytes_per_token,
+    )
+    if any(value < 0 for value in values):
+        raise ValueError("expanded dispatch byte inputs must be nonnegative")
+    return (
+        num_recv_tokens
+        * (metadata_bytes_per_token + payload_bytes_per_token)
+        + num_expanded_tokens * payload_bytes_per_token
+    )
+
+
+def calculate_combine_traffic(
+    num_scaleout_tokens: int,
+    num_scaleup_tokens: int,
+    num_reduction_read_tokens: int,
+    bytes_per_token: int,
+    bias_bytes: int,
+    reduction_write_bytes: int,
+) -> CombineTraffic:
+    values = (
+        num_scaleout_tokens,
+        num_scaleup_tokens,
+        num_reduction_read_tokens,
+        bytes_per_token,
+        bias_bytes,
+        reduction_write_bytes,
+    )
+    if any(value < 0 for value in values):
+        raise ValueError("combine traffic inputs must be nonnegative")
+    return CombineTraffic(
+        scaleout_bytes=num_scaleout_tokens * bytes_per_token,
+        scaleup_bytes=num_scaleup_tokens * bytes_per_token,
+        reduction_bytes=(
+            bias_bytes
+            + num_reduction_read_tokens * bytes_per_token
+            + reduction_write_bytes
+        ),
+    )
+
+
+def count_unique_destinations(
+    routes: Sequence[Sequence[int]],
+    divisor: int = 1,
+    ignored_range: Optional[tuple[int, int]] = None,
+) -> int:
+    if divisor <= 0:
+        raise ValueError("divisor must be positive")
+    if ignored_range is not None and ignored_range[0] > ignored_range[1]:
+        raise ValueError("ignored destination range must be ordered")
+
+    count = 0
+    for row in routes:
+        destinations = set()
+        for route in row:
+            if route < 0:
+                continue
+            destination = route // divisor
+            if (
+                ignored_range is not None
+                and ignored_range[0] <= destination < ignored_range[1]
+            ):
+                continue
+            destinations.add(destination)
+        count += len(destinations)
+    return count

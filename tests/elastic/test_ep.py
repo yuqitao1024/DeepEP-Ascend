@@ -16,19 +16,27 @@ from deep_ep.utils.refs import dispatch as ref_dispatch
 from deep_ep.utils.refs import combine as ref_combine
 from deep_ep.utils.refs import generate_pre_combine_data, ordered_accumulate
 from deep_ep.utils.testing import bench_kineto
+from tests.utils.ep_benchmark_core import (
+    TensorBytes,
+    calculate_combine_traffic,
+    calculate_dispatch_traffic,
+    expanded_dispatch_copy_bytes,
+)
+from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
 
 
 # noinspection PyUnusedLocal,PyShadowingNames
 def enumerate_ep_modes():
-    for do_handle_copy in (1, 0):
-        for expert_alignment in (128, 1):
-            for use_fp8_dispatch in (1, 0):
-                for num_bias in (0, 1, 2):
-                    for with_previous_event in (0, 1):
-                        for async_with_compute_stream in (0, 1):
-                            for allocate_on_comm_stream in ((1, ) if with_previous_event else (0, 1)):
-                                yield (do_handle_copy, expert_alignment, use_fp8_dispatch, num_bias,
-                                       with_previous_event, async_with_compute_stream, allocate_on_comm_stream)
+    for case in enumerate_ep_mode_cases():
+        yield (
+            int(case.do_handle_copy),
+            case.expert_alignment,
+            int(case.use_fp8_dispatch),
+            case.num_bias,
+            int(case.with_previous_event),
+            int(case.async_with_compute_stream),
+            int(case.allocate_on_comm_stream),
+        )
 
 
 def launch(buffer: deep_ep.ElasticBuffer, name: str,
@@ -251,8 +259,14 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
 
             # Test dispatch performance
             num_bytes_per_dispatch_token = safe_div(count_bytes(recv_x, recv_topk_idx, recv_topk_weights), recv_topk_idx.size(0))
-            num_scaleup_bytes = num_bytes_per_dispatch_token * num_scaleup_recv_tokens  # Received via scaleup
-            num_scaleout_bytes = num_bytes_per_dispatch_token * num_scaleout_send_tokens    # Send via scaleout
+            dispatch_traffic = calculate_dispatch_traffic(
+                tensors=(TensorBytes(recv_topk_idx.size(0), int(num_bytes_per_dispatch_token)),),
+                num_recv_tokens=num_recv_tokens,
+                num_scaleup_recv_tokens=num_scaleup_recv_tokens,
+                num_scaleout_send_tokens=num_scaleout_send_tokens,
+            )
+            num_scaleup_bytes = dispatch_traffic.scaleup_bytes
+            num_scaleout_bytes = dispatch_traffic.scaleout_bytes
             t, copy_t = bench_kineto(lambda: buffer.dispatch(**dispatch_args),
                                     kernel_names=('dispatch_impl', 'dispatch_copy_epilogue_impl'),
                                     barrier_comm_profiling=True, barrier=buffer.barrier, trace_path=get_trace_path('dispatch'))
@@ -260,7 +274,7 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
                     f'dispatch: '
                     f'{num_scaleout_bytes / t / 1e9:.0f} GB/s (SO), '
                     f'{num_scaleup_bytes / t / 1e9:.0f} GB/s (SU), {t * 1e6:.3f} us, {num_scaleup_bytes:.0f} bytes | '
-                    f'copy: {2 * num_recv_tokens * num_bytes_per_dispatch_token / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
+                    f'copy: {dispatch_traffic.copy_bytes / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
 
             # Test expanded dispatch performance
             num_bytes_per_dispatch_token_meta = safe_div(count_bytes(expanded_handle.recv_src_metadata), expanded_handle.recv_src_metadata.size(0))
@@ -271,7 +285,7 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
                     f'expanded dispatch: '
                     f'{num_scaleout_bytes / t / 1e9:.0f} GB/s (SO), '
                     f'{num_scaleup_bytes / t / 1e9:.0f} GB/s (SU), {t * 1e6:.3f} us, {num_scaleup_bytes:.0f} bytes | '
-                    f'copy: {(num_recv_tokens * (num_bytes_per_dispatch_token_meta + num_bytes_per_dispatch_token) + num_expanded_tokens * num_bytes_per_dispatch_token) / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
+                    f'copy: {expanded_dispatch_copy_bytes(num_recv_tokens, num_expanded_tokens, int(num_bytes_per_dispatch_token), int(num_bytes_per_dispatch_token_meta)) / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
 
             # Test cached dispatch performance
             t, copy_t = bench_kineto(lambda: buffer.dispatch(**cached_dispatch_args),
@@ -288,7 +302,7 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
             num_bias_bytes = count_bytes(bias)
             num_reduction_write_bytes = count_bytes(combined_x, combined_topk_weights)
 
-            def get_combine_bytes(is_expand_mode: bool) -> Tuple[float, float, float]:
+            def get_combine_token_counts(is_expand_mode: bool) -> Tuple[int, int, int]:
                 num_experts_per_rank = num_experts // (num_scaleup_ranks * num_scaleout_ranks)
                 num_experts_per_scaleout_rank = num_experts_per_rank * num_scaleup_ranks
 
@@ -333,9 +347,16 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
                         num_reduction_read_tokens = get_unique_and_valid_dst_count(topk_idx // num_experts_per_rank)
                 if not args.ignore_local_traffic and num_scaleout_ranks == 1:
                     num_scaleout_tokens = 0
-                return num_scaleout_tokens * num_bytes_per_combine_token, num_scaleup_tokens * num_bytes_per_combine_token, num_reduction_read_tokens * num_bytes_per_combine_token
+                return num_scaleout_tokens, num_scaleup_tokens, num_reduction_read_tokens
 
-            num_scaleout_bytes, num_scaleup_bytes, num_reduction_read_bytes = get_combine_bytes(False)
+            combine_traffic = calculate_combine_traffic(
+                *get_combine_token_counts(False),
+                bytes_per_token=int(num_bytes_per_combine_token),
+                bias_bytes=num_bias_bytes,
+                reduction_write_bytes=num_reduction_write_bytes,
+            )
+            num_scaleout_bytes = combine_traffic.scaleout_bytes
+            num_scaleup_bytes = combine_traffic.scaleup_bytes
             t, copy_t = bench_kineto(lambda: buffer.combine(**combine_args),
                                     kernel_names=('combine_impl', 'combine_reduce_epilogue_impl'),
                                     barrier_comm_profiling=True, barrier=buffer.barrier, trace_path=get_trace_path('combine'))
@@ -343,10 +364,17 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
                     f'combine: '
                     f'{num_scaleout_bytes / t / 1e9:.0f} GB/s (SO), '
                     f'{num_scaleup_bytes / t / 1e9:.0f} GB/s (SU), {t * 1e6:.3f} us, {num_scaleup_bytes:.0f} bytes | '
-                    f'reduce: {(num_bias_bytes + num_reduction_read_bytes + num_reduction_write_bytes) / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
+                    f'reduce: {combine_traffic.reduction_bytes / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
 
             # Test reduced combine performance
-            num_scaleout_bytes, num_scaleup_bytes, num_reduction_read_bytes = get_combine_bytes(True)
+            combine_traffic = calculate_combine_traffic(
+                *get_combine_token_counts(True),
+                bytes_per_token=int(num_bytes_per_combine_token),
+                bias_bytes=num_bias_bytes,
+                reduction_write_bytes=num_reduction_write_bytes,
+            )
+            num_scaleout_bytes = combine_traffic.scaleout_bytes
+            num_scaleup_bytes = combine_traffic.scaleup_bytes
             t, copy_t = bench_kineto(lambda: buffer.combine(**reduced_combine_args),
                                     kernel_names=('combine_impl', 'combine_reduce_epilogue_impl'),
                                     barrier_comm_profiling=True, barrier=buffer.barrier, trace_path=get_trace_path('reduced_combine'))
@@ -354,7 +382,7 @@ def test_dispatch_combine(buffer: deep_ep.ElasticBuffer, args: argparse.Namespac
                     f'reduced combine: '
                     f'{num_scaleout_bytes / t / 1e9:.0f} GB/s (SO), '
                     f'{num_scaleup_bytes / t / 1e9:.0f} GB/s (SU), {t * 1e6:.3f} us, {num_scaleup_bytes:.0f} bytes | '
-                    f'reduce: {(num_bias_bytes + num_reduction_read_bytes + num_reduction_write_bytes) / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
+                    f'reduce: {combine_traffic.reduction_bytes / copy_t / 1e9:.0f} GB/s, {copy_t * 1e6:.3f} us')
             dist_print(once_in_node=True)
 
         # Checks
