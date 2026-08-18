@@ -11,6 +11,7 @@ from tests.ascend.benchmark.report import (
     validate_comparable,
     write_report_atomic,
 )
+from tests.ascend.benchmark.compare import compare_reports
 from tests.ascend.benchmark.bench_ep import build_parser
 from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
 from tests.ascend.benchmark.timing import NpuEventTimer
@@ -21,6 +22,7 @@ from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
 ROOT = Path(__file__).resolve().parents[2]
 BENCH_EP = ROOT / "tests/ascend/benchmark/bench_ep.py"
 RUNTIME = ROOT / "tests/ascend/benchmark/runtime.py"
+COMPARE = ROOT / "tests/ascend/benchmark/compare.py"
 
 
 def test_case_matrix_matches_upstream_order_and_size():
@@ -237,3 +239,67 @@ def test_runtime_source_pins_supported_ascend_contract():
     assert "num_qps=0" in source
     assert source.index("buffer.destroy()") < source.index(
         "dist.destroy_process_group()")
+
+
+def _report_fixture(platform, *, mean=2e-6, gbps=100.0,
+                    fingerprint="a" * 64):
+    return {
+        "schema_version": 1,
+        "formula_version": 1,
+        "platform": platform,
+        "world_size": 2,
+        "workload_fingerprint": fingerprint,
+        "cases": [{
+            "case_id": (
+                "ep-bf16-align1-bias0-hcopy0-prev0-async0-alloc0"
+            ),
+            "status": "passed",
+            "operations": [{
+                "operation_id": "dispatch",
+                "formula_version": 1,
+                "device_seconds": {
+                    "mean": mean,
+                    "p50": mean,
+                    "p95": mean * 1.1,
+                },
+                "logical_gbps": gbps,
+            }],
+        }],
+    }
+
+
+def test_compare_reports_computes_latency_and_bandwidth_ratios():
+    rows = compare_reports(
+        _report_fixture("cuda", mean=2e-6, gbps=100.0),
+        _report_fixture("ascend", mean=4e-6, gbps=50.0),
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["latency_ratio_ascend_over_cuda"] == 2.0
+    assert rows[0]["bandwidth_ratio_ascend_over_cuda"] == 0.5
+
+
+def test_compare_reports_rejects_workload_mismatch():
+    with pytest.raises(ValueError, match="workload_fingerprint"):
+        compare_reports(
+            _report_fixture("cuda", fingerprint="a" * 64),
+            _report_fixture("ascend", fingerprint="b" * 64),
+        )
+
+
+def test_compare_cli_table_displays_mean_p50_and_p95(tmp_path):
+    cuda_path = tmp_path / "cuda.json"
+    ascend_path = tmp_path / "ascend.json"
+    cuda_path.write_text(json.dumps(_report_fixture("cuda")))
+    ascend_path.write_text(json.dumps(_report_fixture("ascend")))
+
+    result = subprocess.run(
+        [sys.executable, str(COMPARE), str(cuda_path), str(ascend_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={},
+    )
+
+    assert "CUDA mean/p50/p95 us" in result.stdout
+    assert "Ascend mean/p50/p95 us" in result.stdout
