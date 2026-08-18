@@ -43,6 +43,12 @@ DEEP_EP_ASCEND_KERNEL_CALLEE WorldRoute classify_world_route(
             destination_domain * scale_up_size + origin_rail};
 }
 
+DEEP_EP_ASCEND_KERNEL_CALLEE int final_release_sender_world_rank(
+    const WorldRoute& route, int direct_sender_world_rank) noexcept {
+    return route.kind == WorldRouteKind::kDiagonal ?
+        route.ingress_world_rank : direct_sender_world_rank;
+}
+
 struct BarrierArguments {
     void* workspace = nullptr;
     std::uint64_t generation = 0;

@@ -975,6 +975,85 @@ int main() {
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
+    def test_hybrid_release_sender_matrices_execute_on_host(self):
+        """Catches using the canonical slot key as a diagonal sender."""
+        probe_source = r'''
+#include "csrc/backends/ascend/elastic/kernels.hpp"
+
+using namespace deep_ep::ascend::elastic;
+
+int main() {
+    constexpr int dispatch_senders[4][4] = {
+        {0, 1, 2, 1},
+        {0, 1, 0, 3},
+        {0, 3, 2, 3},
+        {2, 1, 2, 3},
+    };
+    constexpr int combine_senders[4][4] = {
+        {0, 1, 2, 2},
+        {0, 1, 3, 3},
+        {0, 0, 2, 3},
+        {1, 1, 2, 3},
+    };
+    for (int receiver = 0; receiver < 4; ++receiver) {
+        for (int origin = 0; origin < 4; ++origin) {
+            const auto route = classify_world_route(origin, receiver, 2);
+            if (final_release_sender_world_rank(route, origin) !=
+                    dispatch_senders[receiver][origin])
+                return 1;
+        }
+        for (int contributor = 0; contributor < 4; ++contributor) {
+            const auto route = classify_world_route(receiver, contributor, 2);
+            if (final_release_sender_world_rank(route, contributor) !=
+                    combine_senders[receiver][contributor])
+                return 2;
+        }
+    }
+    return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            source = directory / "hybrid_release_sender_probe.cpp"
+            binary = directory / "hybrid_release_sender_probe"
+            source.write_text(probe_source)
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(source), "-o", str(binary)],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_hybrid_epilogues_acquire_from_final_route_sender(self):
+        """Catches unwired dispatch or combine final-sender selection."""
+        dispatch = (ELASTIC / "dispatch.asc").read_text()
+        dispatch = dispatch[
+            dispatch.index("__simt_vf__ inline void dispatch_epilogue_vf"):
+            dispatch.index(
+                'extern "C" int deep_ep_ascend_launch_dispatch')]
+        for marker in (
+                "classify_world_route(\n"
+                "                    source_rank, transport_world_rank,\n"
+                "                    transport_scale_up_size)",
+                "final_release_sender_world_rank(\n"
+                "                    route, source_rank)"):
+            self.assertIn(marker, dispatch)
+
+        combine = (ELASTIC / "combine.asc").read_text()
+        combine = combine[
+            combine.index("__simt_vf__ inline void combine_epilogue_vf"):
+            combine.index('extern "C" int deep_ep_ascend_launch_combine')]
+        for marker in (
+                "classify_world_route(\n"
+                "                transport_world_rank, contributor_rank,\n"
+                "                transport_scale_up_size)",
+                "final_release_sender_world_rank(\n"
+                "                route, contributor_rank)"):
+            self.assertIn(marker, combine)
+
     def test_pure_cpp_runtime_contract(self):
         runtime = ELASTIC / "runtime.cpp"
         self.assertTrue(runtime.is_file(), str(runtime))

@@ -53,11 +53,11 @@ DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void publish_control_and_release(
 template <typename Transport>
 DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE bool acquire_release(
     Transport& facade, const transport::TransportTopology& topology,
-    int source_world_rank, std::uint32_t signal_index,
+    int signal_sender_world_rank, std::uint32_t signal_index,
     std::uint64_t generation, std::uint64_t timeout_cycles) {
     transport::TeamPeer route{};
     if (!transport::device::detail::checked_device_team_peer_for_world_rank(
-            topology, source_world_rank, &route))
+            topology, signal_sender_world_rank, &route))
         return false;
     facade.wait_signal(
         route.team, route.peer, signal_index, generation, timeout_cycles);
