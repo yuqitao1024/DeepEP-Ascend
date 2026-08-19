@@ -35,6 +35,13 @@ struct CompletionRecipe {
     std::uint64_t scratch_status_offset = 0;
 };
 
+const char* diagnostic_name(
+    transport::DeviceTransportError error) noexcept;
+transport::TransportStatus diagnostic_failure_status(
+    BufferOperationKind kind,
+    const transport::DeviceTransportDiagnostic& diagnostic,
+    const char* detail);
+
 class AsyncCompletionResources {
 public:
     virtual ~AsyncCompletionResources() = default;

@@ -53,12 +53,31 @@ The 300-second hard limit interrupted the task before these rows ran:
 
 The failed runner captured child stderr but did not persist it before suite
 completion; the corresponding targeted TorchElastic directories contain no
-rank log or error JSON. The common distributed failure therefore remains
-unresolved. No serialized/overlapped median or p95 measurement and no NPU
-profiler overlap interval were produced. The runner now writes an atomic
-checkpoint after every case, streams a failed child's diagnostic, and stops at
-the first failure, but that host-verified observability fix has not been rerun
-on NPU8P and is not acceptance evidence.
+rank log or error JSON. That job therefore did not establish the common
+distributed failure. No serialized/overlapped median or p95 measurement and no
+NPU profiler overlap interval were produced. The runner was then changed to
+write an atomic checkpoint after every case, stream failed-child diagnostics,
+and stop at the first failure.
+
+A follow-up fail-fast matrix, task
+`task_20260819_213704_141211314907`, reran the corrected synchronization scope
+and persistent two-rank launcher. It completed in 1m42s and passed capture,
+all cached dispatch/combine allocation combinations, previous-event ordering,
+empty and asymmetric routes, 100 generations, and two independent buffers.
+It then stopped at `diagnostic-failure`: the injected
+`kCompletionTimeout` reached async finalization, but the returned stable
+`TransportStatus` retained only `device diagnostic reported failure` and
+dropped the error name, command, rank/peer, backend, and generation fields.
+The five standalone lifecycle rows and `overlap-vs-serialized` were therefore
+not run.
+
+A deterministic host RED reproduced that loss in `AsyncBufferState`.
+Finalization now uses the same qualified diagnostic-to-status mapping as the
+established barrier and dispatch paths, preserving the complete device
+diagnostic while retaining exactly-once failure storage. The focused host
+probe and all sanitizer-backed production probes are green. Phase 3E.1 remains
+not accepted pending an exact rebuilt extension and a complete passing matrix
+with overlap timing and profiler evidence.
 
 ## Decisions
 

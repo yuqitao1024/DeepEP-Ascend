@@ -93,6 +93,56 @@ TransportStatus invalid_publish(const char* message) {
 
 }  // namespace
 
+const char* diagnostic_name(
+    transport::DeviceTransportError error) noexcept {
+    switch (error) {
+        case transport::DeviceTransportError::kNone: return "none";
+        case transport::DeviceTransportError::kInvalidAbi:
+            return "invalid_abi";
+        case transport::DeviceTransportError::kInvalidRank:
+            return "invalid_rank";
+        case transport::DeviceTransportError::kInvalidChannel:
+            return "invalid_channel";
+        case transport::DeviceTransportError::kInvalidAddress:
+            return "invalid_address";
+        case transport::DeviceTransportError::kInvalidProtocol:
+            return "invalid_protocol";
+        case transport::DeviceTransportError::kInvalidQueue:
+            return "invalid_queue";
+        case transport::DeviceTransportError::kUnsupportedOperation:
+            return "unsupported_operation";
+        case transport::DeviceTransportError::kCommandOverflow:
+            return "command_overflow";
+        case transport::DeviceTransportError::kCompletionTimeout:
+            return "completion_timeout";
+        case transport::DeviceTransportError::kCompletionFailure:
+            return "completion_failure";
+    }
+    return "unknown";
+}
+
+TransportStatus diagnostic_failure_status(
+    BufferOperationKind kind,
+    const transport::DeviceTransportDiagnostic& diagnostic,
+    const char* detail) {
+    auto message = std::string("device diagnostic ") + detail +
+        " error=" + diagnostic_name(diagnostic.error) +
+        " command_index=" + std::to_string(diagnostic.command_index) +
+        " opcode=" + std::to_string(
+            static_cast<std::uint32_t>(diagnostic.opcode)) +
+        " peer=" + std::to_string(diagnostic.peer) +
+        " world_peer=" + std::to_string(diagnostic.world_peer) +
+        " team=" + std::to_string(
+            static_cast<std::uint32_t>(diagnostic.team)) +
+        " channel=" + std::to_string(diagnostic.channel) +
+        " backend_status=" + std::to_string(diagnostic.backend_status) +
+        " reserved=" + std::to_string(diagnostic.reserved) +
+        " generation=" + std::to_string(diagnostic.generation);
+    return TransportStatus::runtime_failure(
+        operation_name(kind), static_cast<int>(diagnostic.backend_status),
+        std::move(message));
+}
+
 struct PendingOperation::Impl {
     Impl(
         std::shared_ptr<SharedAsyncContext> shared_context,
@@ -124,9 +174,8 @@ struct PendingOperation::Impl {
         }
         if (status.ok() &&
             diagnostic.error != transport::DeviceTransportError::kNone) {
-            status = completion_failure(
-                recipe.kind, "device diagnostic reported failure",
-                static_cast<int>(diagnostic.backend_status));
+            status = diagnostic_failure_status(
+                recipe.kind, diagnostic, "reported failure");
         }
         if (status.ok() && diagnostic.generation != recipe.generation) {
             status = completion_failure(

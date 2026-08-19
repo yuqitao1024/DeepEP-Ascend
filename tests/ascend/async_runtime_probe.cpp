@@ -692,12 +692,38 @@ int check_diagnostic_abi_mismatch_abandons() {
 
 int check_diagnostic_error_abandons() {
     PendingFixture fixture;
-    auto launched = fixture.launch();
+    auto launched = fixture.launch(elastic::BufferOperationKind::kBarrier);
     ASYNC_CHECK(launched.status.ok());
     fixture.resources->diagnostic.error =
-        transport::DeviceTransportError::kInvalidProtocol;
+        transport::DeviceTransportError::kCompletionTimeout;
+    fixture.resources->diagnostic.command_index = 7;
+    fixture.resources->diagnostic.opcode =
+        transport::TransportCommandOpcode::kBarrier;
+    fixture.resources->diagnostic.peer = 3;
+    fixture.resources->diagnostic.world_peer = 5;
+    fixture.resources->diagnostic.team = transport::TransportTeam::kScaleOut;
+    fixture.resources->diagnostic.channel = 11;
+    fixture.resources->diagnostic.backend_status = 37;
+    fixture.resources->diagnostic.reserved = 0x1234;
+    fixture.resources->diagnostic.generation = 41;
     const auto status = launched.operation->finish(20);
-    ASYNC_CHECK(!status.ok());
+    ASYNC_CHECK(is_failure(
+        status, transport::TransportStatusCode::kRuntimeFailure,
+        "barrier", 37));
+    for (const auto* expected : {
+             "device diagnostic reported failure",
+             "error=completion_timeout",
+             "command_index=7",
+             "opcode=6",
+             "peer=3",
+             "world_peer=5",
+             "team=2",
+             "channel=11",
+             "backend_status=37",
+             "reserved=4660",
+             "generation=41"}) {
+        ASYNC_CHECK(status.message.find(expected) != std::string::npos);
+    }
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
     ASYNC_CHECK(fixture.trace->completion_reads == 0);
     ASYNC_CHECK(fixture.event_api.destroy_calls == 1);

@@ -328,34 +328,6 @@ private:
         transport::TransportServiceState service{};
     };
 
-    static const char* diagnostic_name(
-        transport::DeviceTransportError error) {
-        switch (error) {
-            case transport::DeviceTransportError::kNone: return "none";
-            case transport::DeviceTransportError::kInvalidAbi:
-                return "invalid_abi";
-            case transport::DeviceTransportError::kInvalidRank:
-                return "invalid_rank";
-            case transport::DeviceTransportError::kInvalidChannel:
-                return "invalid_channel";
-            case transport::DeviceTransportError::kInvalidAddress:
-                return "invalid_address";
-            case transport::DeviceTransportError::kInvalidProtocol:
-                return "invalid_protocol";
-            case transport::DeviceTransportError::kInvalidQueue:
-                return "invalid_queue";
-            case transport::DeviceTransportError::kUnsupportedOperation:
-                return "unsupported_operation";
-            case transport::DeviceTransportError::kCommandOverflow:
-                return "command_overflow";
-            case transport::DeviceTransportError::kCompletionTimeout:
-                return "completion_timeout";
-            case transport::DeviceTransportError::kCompletionFailure:
-                return "completion_failure";
-        }
-        return "unknown";
-    }
-
     transport::TransportStatus read_combine_lifecycle_snapshot(
         std::uint64_t scratch_status_offset,
         CombineLifecycleSnapshot* snapshot) const {
@@ -429,7 +401,7 @@ private:
         const auto diagnostic = staged.diagnostic.value_or(
             transport::DeviceTransportDiagnostic{});
         auto message = std::string("device diagnostic completion mismatch") +
-            " error=" + diagnostic_name(diagnostic.error) +
+            " error=" + elastic::diagnostic_name(diagnostic.error) +
             " command_index=" + std::to_string(diagnostic.command_index) +
             " opcode=" + std::to_string(
                 static_cast<std::uint32_t>(diagnostic.opcode)) +
@@ -444,7 +416,8 @@ private:
             " generation=" + std::to_string(diagnostic.generation) +
             " diagnostic_generation=" +
                 std::to_string(diagnostic.generation) +
-            " diagnostic_error=" + diagnostic_name(diagnostic.error);
+            " diagnostic_error=" +
+                elastic::diagnostic_name(diagnostic.error);
         CombineLifecycleSnapshot snapshot{};
         const auto snapshot_status = read_combine_lifecycle_snapshot(
             staged.scratch_status_offset, &snapshot);
@@ -652,77 +625,21 @@ class ElasticBuffer {
             raise_transport_status(status, rank_idx_);
     }
 
-    static const char* diagnostic_name(
-        transport::DeviceTransportError error) {
-        switch (error) {
-            case transport::DeviceTransportError::kNone: return "none";
-            case transport::DeviceTransportError::kInvalidAbi:
-                return "invalid_abi";
-            case transport::DeviceTransportError::kInvalidRank:
-                return "invalid_rank";
-            case transport::DeviceTransportError::kInvalidChannel:
-                return "invalid_channel";
-            case transport::DeviceTransportError::kInvalidAddress:
-                return "invalid_address";
-            case transport::DeviceTransportError::kInvalidProtocol:
-                return "invalid_protocol";
-            case transport::DeviceTransportError::kInvalidQueue:
-                return "invalid_queue";
-            case transport::DeviceTransportError::kUnsupportedOperation:
-                return "unsupported_operation";
-            case transport::DeviceTransportError::kCommandOverflow:
-                return "command_overflow";
-            case transport::DeviceTransportError::kCompletionTimeout:
-                return "completion_timeout";
-            case transport::DeviceTransportError::kCompletionFailure:
-                return "completion_failure";
-        }
-        return "unknown";
-    }
-
     [[noreturn]] void raise_barrier_diagnostic(
         const transport::DeviceTransportDiagnostic& diagnostic,
         const char* detail) const {
-        auto message = std::string("device diagnostic ") + detail +
-            " error=" + diagnostic_name(diagnostic.error) +
-            " command_index=" + std::to_string(diagnostic.command_index) +
-            " opcode=" + std::to_string(
-                static_cast<std::uint32_t>(diagnostic.opcode)) +
-            " peer=" + std::to_string(diagnostic.peer) +
-            " world_peer=" + std::to_string(diagnostic.world_peer) +
-            " team=" + std::to_string(
-                static_cast<std::uint32_t>(diagnostic.team)) +
-            " channel=" + std::to_string(diagnostic.channel) +
-            " backend_status=" + std::to_string(diagnostic.backend_status) +
-            " reserved=" + std::to_string(diagnostic.reserved) +
-            " generation=" + std::to_string(diagnostic.generation);
         raise_transport_status(
-            transport::TransportStatus::runtime_failure(
-                "barrier", static_cast<int>(diagnostic.backend_status),
-                std::move(message)),
+            elastic::diagnostic_failure_status(
+                elastic::BufferOperationKind::kBarrier, diagnostic, detail),
             rank_idx_);
     }
 
     [[noreturn]] void raise_dispatch_diagnostic(
         const transport::DeviceTransportDiagnostic& diagnostic,
         const char* detail) const {
-        auto message = std::string("device diagnostic ") + detail +
-            " error=" + diagnostic_name(diagnostic.error) +
-            " command_index=" + std::to_string(diagnostic.command_index) +
-            " opcode=" + std::to_string(
-                static_cast<std::uint32_t>(diagnostic.opcode)) +
-            " peer=" + std::to_string(diagnostic.peer) +
-            " world_peer=" + std::to_string(diagnostic.world_peer) +
-            " team=" + std::to_string(
-                static_cast<std::uint32_t>(diagnostic.team)) +
-            " channel=" + std::to_string(diagnostic.channel) +
-            " backend_status=" + std::to_string(diagnostic.backend_status) +
-            " reserved=" + std::to_string(diagnostic.reserved) +
-            " generation=" + std::to_string(diagnostic.generation);
         raise_transport_status(
-            transport::TransportStatus::runtime_failure(
-                "dispatch", static_cast<int>(diagnostic.backend_status),
-                std::move(message)),
+            elastic::diagnostic_failure_status(
+                elastic::BufferOperationKind::kDispatch, diagnostic, detail),
             rank_idx_);
     }
 

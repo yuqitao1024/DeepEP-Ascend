@@ -280,10 +280,21 @@ its 300-second hard limit before `100-generations`, `two-independent-buffers`,
 `overlap-vs-serialized` ran. It produced no overlap median/p95 or NPU profiler
 interval. Captured child diagnostics were lost at outer timeout and the
 targeted TorchElastic directories were empty, so the distributed root cause
-remains unresolved. The runner's subsequent host-only checkpoint, diagnostic,
-and fail-fast hardening has not been rerun on NPU8P. Phase 3E.2 remains the
+was not established by that job. The runner subsequently gained checkpoint,
+diagnostic, fail-fast, and persistent-launch hardening. Phase 3E.2 remains the
 next planned development slice, but it does not waive the incomplete 3E.1
 acceptance gate.
+
+Follow-up task `task_20260819_213704_141211314907` validated the persistent
+two-rank launcher and passed capture plus 13 distributed correctness rows,
+including 100 generations and two independent buffers, in 1m42s before
+failing fast at the injected diagnostic row. The failure identified a
+production finalizer regression: async completion converted the structured
+device diagnostic to a generic status and lost its error name, command,
+peer/rank, backend, and generation detail. A host RED/GREEN now routes async
+diagnostics through the established qualified status mapping. The extension
+must be rebuilt and the complete matrix, including overlap median/p95 and the
+profiler interval, must pass before 3E.1 is accepted.
 
 ### Deliverables
 
