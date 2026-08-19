@@ -267,9 +267,17 @@ publication. Phase 3E.3 (a real pre-epilogue dependency boundary) and Phase
 3E.4 (same-buffer multiflight resource slots) remain deferred design
 directions. FP8 remains Phase 3F and is not credited to any Phase 3E slice.
 
-Phase 3E.1 is not accepted as of 2026-08-19. The exact-archive build/import
-task `task_20260819_203518_127255030913` passed, and one-NPU event/lifecycle
-task `task_20260819_203858_128526415799` passed its five cases. Two-NPU matrix
+Phase 3E.1 is accepted as of 2026-08-20. The production-backed final evidence
+appears after the qualification history below. Phase 3E overall remains
+incomplete; 3E.2 is the next planned development slice, while 3E.3, 3E.4, and
+FP8 Phase 3F remain outside this acceptance boundary.
+
+#### Qualification history
+
+Before final qualification, Phase 3E.1 was not accepted. The exact-archive
+build/import task `task_20260819_203518_127255030913` passed, and one-NPU
+event/lifecycle task `task_20260819_203858_128526415799` passed its five cases.
+Two-NPU matrix
 task `task_20260819_204026_128929210009` passed only
 `capture-current-stream`; cached dispatch sync/async with allocation
 false/true, previous-event allocation, combine sync/async with allocation
@@ -281,9 +289,9 @@ its 300-second hard limit before `100-generations`, `two-independent-buffers`,
 interval. Captured child diagnostics were lost at outer timeout and the
 targeted TorchElastic directories were empty, so the distributed root cause
 was not established by that job. The runner subsequently gained checkpoint,
-diagnostic, fail-fast, and persistent-launch hardening. Phase 3E.2 remains the
-next planned development slice, but it does not waive the incomplete 3E.1
-acceptance gate.
+diagnostic, fail-fast, and persistent-launch hardening. At that time, Phase
+3E.2 was the next planned development slice, but it did not waive the
+incomplete 3E.1 acceptance gate.
 
 Follow-up task `task_20260819_213704_141211314907` validated the persistent
 two-rank launcher and passed capture plus 13 distributed correctness rows,
@@ -301,8 +309,8 @@ qualified diagnostic row, before `overlap-vs-serialized` exceeded the
 production event-specific 5-second completion deadline on both ranks. It
 exited 1 after 1m0s with one failed and five not run. Profiling was never
 reached, so no serialized/overlapped median or p95, stream IDs, or positive
-NPU profiler interval exist. The complete matrix and overlap evidence must
-pass before 3E.1 is accepted.
+NPU profiler interval existed. The complete matrix and overlap evidence still
+had to pass before 3E.1 could be accepted.
 
 Bounded follow-up evidence on 2026-08-20 shows that the 4096-token control was
 too long for the five-second event deadline, while a 256-token matrix completed
@@ -315,13 +323,12 @@ about 268-270ms at 256 and 588-594ms at 512. The old runner lost the associated
 wall-time summaries, and no 1024 trace exists, so this is hardware-overlap
 evidence but not Phase 3E.1 acceptance.
 
-The next proposed NPU action is not another three-point sweep. It is one
+The next proposed NPU action was not another three-point sweep. It was one
 diagnostic-only 1024 point with zero warmups, one repetition, explicit phase
 checkpoints, a 150-second controller bound, and the required 300-second
-TaskQueue bound.
-The fixed 5% threshold remains unchanged, and one sample cannot be promoted to
-the warmed-median acceptance result. No retry is submitted until that bounded
-shape and the current runner evidence are reviewed.
+TaskQueue bound. The fixed 5% threshold remained unchanged, and one sample
+could not be promoted to the warmed-median acceptance result. No retry was
+submitted until that bounded shape and the runner evidence were reviewed.
 
 The approved diagnostic, `task_20260820_025915_29863145111`, subsequently
 exited 0. Both ranks completed all event waits and profiler phases. At 1024
@@ -334,7 +341,7 @@ both ranks. Runtime objects expose those streams as logical IDs `0/128`.
 This closes the bounded diagnostic question: hardware overlap is present, but
 the tested load ratio cannot satisfy the fixed 5% wall-time criterion. Because
 the run used one sample and is explicitly acceptance-ineligible, Phase 3E.1
-remains not accepted.
+remained not accepted after that task.
 
 The final acceptance matrix therefore retains 256 communication tokens,
 `4096x4096` BF16 compute, three warmups, seven repetitions, the fixed 5% gate,
@@ -350,8 +357,8 @@ production change, event-deadline increase, or acceptance-threshold decrease.
 The runner also separates logical runtime stream IDs from physical profiler
 lane IDs. Physical lanes must be uniquely identified by the `MatMulV3` and
 DeepEP `dispatch_kernel` event families, must differ, and must have a positive
-overlap interval. One final complete 21-case two-rank matrix is required before
-Phase 3E.1 can be accepted.
+overlap interval. At that point, one final complete 21-case two-rank matrix
+remained required before Phase 3E.1 could be accepted.
 
 Final full-matrix task `task_20260820_031911_304861030703` reached the overlap
 row but did not pass it. The fail-fast report contains 21 selected, 16
@@ -362,10 +369,10 @@ improvement; rank 1 medians were `0.361493950`/`0.358961650` for
 positive physical overlap of `268335.5us` and `270927.0us`, with logical IDs
 `0/143` and physical IDs `61/11` on both ranks.
 
-This result keeps Phase 3E.1 unaccepted and narrows the next action to one
-bounded component-timing diagnostic. It must distinguish an unserialized
+That result kept Phase 3E.1 unaccepted and narrowed the next action to one
+bounded component-timing diagnostic. It had to distinguish an unserialized
 control from true compute/communication resource contention before any
-production change or further full-matrix run is considered.
+production change or further full-matrix run was considered.
 
 The single authorized component diagnostic,
 `task_20260820_033904_310487927692`, then completed successfully on devices
@@ -383,8 +390,8 @@ Overlapped wall was `0.357143020`/`0.357857410`, saving only
 `0.342516940`/`0.342942600` seconds even though the profiler proved
 `269032.25us`/`268594.75us` of physical overlap on streams `61/26`. This rules
 out an unserialized control and supports compute/communication resource
-contention. No production change or unchanged full-matrix retry follows from
-this result; Phase 3E.1 remains unaccepted under its fixed 5% gate while the
+contention. No production change or unchanged full-matrix retry followed from
+this result; Phase 3E.1 remained unaccepted under its fixed 5% gate while the
 specific contention source is investigated separately.
 
 Static investigation also rules out two immediate tuning assumptions. In the
@@ -411,8 +418,8 @@ while event waits remained stretched to `0.341599990`/`0.340491320` seconds
 despite `268224.5us`/`269994.5us` of physical overlap on streams `61/26`.
 Removing the elementwise chain reduced compute-only time but did not remove
 the communication stretch, so the `mul_` contention hypothesis is rejected.
-The formal mixed workload and fixed 5% gate remain unchanged, no further full
-matrix is justified, and Phase 3E.1 remains unaccepted.
+The formal mixed workload and fixed 5% gate remained unchanged, no further full
+matrix was justified, and Phase 3E.1 remained unaccepted.
 
 The next component-only capability probe used BF16 NCDHW
 `torch.nn.functional.conv3d` with primary `Conv3DV2` compute. Runner commit
@@ -430,9 +437,9 @@ the intended 0.20-0.30s range. Each trace also inventories tiny `Greater` and
 `ZerosLike` auxiliary AIV families and no TransData, so the primary kernel is
 AIC-only but the complete compute path is not. The report SHA-256 is
 `88a4fa784c660ffa078b1a443e6b0b9573230ceed458a3932eb2c7944c31a813`.
-This single-sample result establishes capability and motivates a formal
-fixed-workload matrix; Phase 3E.1 remains unaccepted until that entire matrix
-passes its unchanged 5% and profiler gates.
+This single-sample result established capability and motivated a formal
+fixed-workload matrix; Phase 3E.1 remained unaccepted pending that matrix's
+unchanged 5% and profiler gates.
 
 The resulting final matrix keeps communication fixed at 256 tokens, hidden
 size 4096, and `num_sms=1`, and replaces only its formal compute workload with
@@ -449,9 +456,61 @@ Formal profiler acceptance requires exact `Conv3DV2=KERNEL_AICORE` and
 overlap, retained logical/physical IDs, and an inventory of every auxiliary AIV
 family. Auxiliary AIV total duration must stay below 1% of the primary Conv3D
 span. Known tiny `Greater` and `ZerosLike` families are allowed within that
-bound, but `compute_path_aic_only` remains false and no whole-path pure-AIC
-claim is made. Phase 3E.1 still requires one complete 21/21 matrix with both
-ranks above 5% and every profiler gate passing.
+bound, but `compute_path_aic_only` remained false and no whole-path pure-AIC
+claim was made. The declared gate required one complete 21/21 matrix with both
+ranks above 5% and every profiler check passing.
+
+#### Production-backed final acceptance
+
+Independent review rejected task `task_20260820_052826_33515907092` as final
+acceptance evidence because five failure and lifecycle rows used host
+fake-runtime contracts rather than production workers. Fix round 1 removed
+that routing, reduced the one-NPU suite to its three true event cases, moved
+the remaining lifecycle rows into the persistent two-rank worker, and added
+testing-only exact-value native failure controls. The earlier result remains
+diagnostic history and is superseded for the acceptance decision.
+
+Exact-source build task `task_20260820_062500_37256458511` produced extension
+SHA-256
+`dd9e91a69b8526ba9b828387fdc1b655a46f4a4ae10ce4af3d36fec7fd41bb67`
+from production commit/tree
+`28f3deaed1b950e782ba57a0d0256cd2f35687f9`/
+`47ed60717b538b88436fa2602628f28b9a76f234`. Runner commit
+`b185d95c28864c22faf99dc67f5492028e6383fb` has file SHA-256
+`e3154dd502d1f9986d16d7b131520d6ab3d292d191e4cb949ecb7a686491300f`.
+The corrected one-NPU event task `task_20260820_063113_375337613415` passed
+3/3 on device 6. The first corrected full task,
+`task_20260820_063252_376006031537`, passed 16 rows before `drop-event`
+failed on a stale generation-bound dispatch handle, leaving four rows not run.
+A deterministic host RED reproduced the invalid reuse: event drop finalized
+the first generation, so the buffer remained reusable but its seed handle did
+not. Runner commit `b185d95c28864c22faf99dc67f5492028e6383fb` reseeds the
+buffer before the second dispatch and passed the full host suite with 199
+passed, 7 skipped, and 48 subtests.
+
+Final task `task_20260820_064309_380109210223` ran on devices `6,7` with
+`--max-time 300`, reached authoritative `completed (exit=0)`, and passed
+21/21 selected and executed cases. Rank 0 serialized/overlapped medians were
+`0.304671370`/`0.277607860` seconds for an `8.8829%` gain; rank 1 measured
+`0.304223720`/`0.277838260` for `8.6730%`. Both cleared the unchanged 5%
+gate with three warmups, seven measured samples, and zero global
+synchronizations.
+
+Profiler evidence identifies `Conv3DV2=KERNEL_AICORE` and
+`dispatch_kernel=KERNEL_AIVEC`, logical streams `0/146`, and positive overlap
+of `110.5us`/`112.0us` on distinct rank-local physical lane pairs `56/6` and
+`61/8`. Auxiliary AIV ratios were `0.012324%`/`0.010512%`, below 1%, and
+neither trace contains TransData. Both ranks also passed real event drop and
+buffer reuse, completion mismatch, and retryable pending destroy. Record
+failure and event timeout passed through the one-NPU production workers.
+
+Report SHA-256 is
+`0e6d7674f03967285ead97a75d7c99cb7537a8157ca9794c2a2bb644221c82ee`;
+rank trace hashes are
+`0c079bbdc9bc5c722394079fb5bd14dba9e23ec0b369ce5479cc486e04a8b5f9`
+and `e9dc5c3c487a63ed3d0f8f70c75884171aa0a15e435f14bf80fcef5ef4882001`.
+Every Phase 3E.1 gate passed. All 120 full functional benchmark rows remain
+deferred to 3E.2, and 3E.3, 3E.4, and FP8 Phase 3F remain incomplete.
 
 ### Deliverables
 

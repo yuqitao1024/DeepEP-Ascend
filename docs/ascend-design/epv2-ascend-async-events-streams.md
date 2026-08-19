@@ -7,8 +7,8 @@ It builds on the rank-parameterized, one-operation-per-buffer contract from
 Phase 3B and the synchronous BF16 dispatch/combine implementation. DeepEP V1,
 GPU execution, FP8, and performance parity with CUDA are outside this phase.
 
-Phase 3E is split into independently accepted vertical slices. The active
-slice is 3E.1: native event and communication-stream ownership plus real
+Phase 3E is split into independently accepted vertical slices. The accepted
+3E.1 slice provides native event and communication-stream ownership plus real
 communication/computation overlap for cached BF16 pure-scale-up dispatch and
 combine. Later slices extend the same ownership model to dynamic-shape and
 hybrid paths; an interface or compile probe alone is not runtime support.
@@ -18,9 +18,16 @@ The 3E.1 production gate is
 sub-operation coverage independently from the 144-row parity benchmark; no
 full functional benchmark row is credited by partial sub-operation coverage.
 
-### Acceptance status (2026-08-19)
+### Acceptance status (2026-08-20)
 
-Phase 3E.1 is not accepted. Exact-archive build/import task
+Phase 3E.1 is accepted. The complete production-backed evidence is recorded
+after the qualification history below. Phase 3E overall remains incomplete;
+3E.2-3E.4 and FP8 Phase 3F retain their separate acceptance boundaries.
+
+#### Qualification history
+
+Before final qualification, Phase 3E.1 was not accepted. Exact-archive
+build/import task
 `task_20260819_203518_127255030913` passed, and one-NPU event/lifecycle task
 `task_20260819_203858_128526415799` passed all five selected cases with two
 repeated waits and zero global synchronizations. The required two-NPU matrix
@@ -94,7 +101,7 @@ reached, its trace directory remained empty, and the later `record-failure`,
 `event-timeout`, `completion-mismatch`, `drop-event`, and
 `destroy-pending-retry` cases did not run. No serialized/overlapped median or
 p95 values, stream IDs, or positive profiler interval were produced. Phase
-3E.1 therefore remains not accepted.
+3E.1 therefore remained not accepted after that task.
 
 Subsequent bounded diagnostics refined that result without changing the
 production five-second deadline or the fixed 5% overlap threshold. Task
@@ -118,14 +125,13 @@ teardown.
 The acceptance runner now accepts both trace containers, recognizes
 Torch-NPU's `Physic Stream Id`, normalizes byte-valued timeout output before
 marker recovery, and retains completed timing summaries plus stream/profiler
-failure evidence. Phase 3E.1 remains not accepted: 256 did not meet the fixed
-wall-time threshold, 512 timing summaries were lost by the old runner, and
-1024 has not completed a bounded diagnostic. The next proposed target action
-was a diagnostic-only 1024 point with zero warmups, one repetition, phase
-checkpoints, a 150-second controller bound, and the required 300-second
-TaskQueue bound. One
-sample may guide workload selection but cannot satisfy the warmed-median
-acceptance requirement.
+failure evidence. At that point, Phase 3E.1 remained not accepted: 256 did not
+meet the fixed wall-time threshold, 512 timing summaries were lost by the old
+runner, and 1024 had not completed a bounded diagnostic. The next proposed
+target action was a diagnostic-only 1024 point with zero warmups, one
+repetition, phase checkpoints, a 150-second controller bound, and the required
+300-second TaskQueue bound. One sample could guide workload selection but
+could not satisfy the warmed-median acceptance requirement.
 
 That diagnostic, `task_20260820_025915_29863145111`, exited 0 after the runner
 completed in 116.488 seconds. Both ranks completed every event wait and phase.
@@ -162,7 +168,8 @@ warmups and repetitions are not reduced. The profiler parser now resolves
 physical streams only from the unique `MatMulV3` compute event family and
 unique DeepEP `dispatch_kernel` communication event family, rejects aliased
 or ambiguous physical lanes, and reports runtime logical IDs separately from
-trace physical IDs. A final 21-case matrix is still required for acceptance.
+trace physical IDs. At that point, a final 21-case matrix remained required
+for acceptance.
 
 Final full-matrix task `task_20260820_031911_304861030703` used those exact
 parameters on devices `6,7` and reached terminal `completed (exit=1)` after
@@ -172,7 +179,7 @@ retained seven raw samples per mode and rank. Rank 0 measured serialized
 median/p95 `0.360265130`/`0.362707628` seconds and overlapped
 `0.360237910`/`0.362412710`, an improvement of `0.000075555`. Rank 1 measured
 `0.361493950`/`0.362399942` versus `0.358961650`/`0.360509258`, an improvement
-of `0.007005097`. Both remain below the unchanged 5% gate.
+of `0.007005097`. Both remained below the unchanged 5% gate.
 
 The same report proves positive `MatMulV3`/DeepEP-dispatch profiler overlap:
 rank 0 `268335.5us` and rank 1 `270927.0us`. Runtime logical
@@ -181,9 +188,9 @@ Report SHA-256 is
 `db667b7e4a2afd490b3f5b9ae59a176432cae69cbc22b8b0bc8ce1a907236189`.
 Because the overlap row failed, fail-fast did not run `record-failure`,
 `event-timeout`, `completion-mismatch`, `drop-event`, or
-`destroy-pending-retry`. Phase 3E.1 remains unaccepted while a bounded
-component-timing diagnostic determines why positive physical overlap does not
-improve the current wall-time control.
+`destroy-pending-retry`. Phase 3E.1 remained unaccepted while a bounded
+component-timing diagnostic determined why positive physical overlap did not
+improve the wall-time control.
 
 Component diagnostic task `task_20260820_033904_310487927692` used a fresh
 buffer per rank with 256 communication tokens, 256 compute iterations, zero
@@ -211,8 +218,8 @@ traces still prove `269032.25us` and `268594.75us` of positive
 `0/128`). The report SHA-256 is
 `13a5d76521841f9bfbf55aaa74e9b85828567417c078b0ce530cd031255ebb3e`.
 This evidence supports resource contention, not a synchronous baseline defect;
-production remains unchanged and rerunning the same full matrix is not
-justified. Phase 3E.1 remains unaccepted under the fixed 5% wall-time gate.
+production remained unchanged and rerunning the same full matrix was not
+justified. Phase 3E.1 remained unaccepted under the fixed 5% wall-time gate.
 
 Static investigation does not support changing the Torch-NPU pool selector as
 a contention fix. The qualified `torch_npu 2.10.0.post2` wheel records revision
@@ -262,8 +269,8 @@ Removing `mul_` reduced compute-only time from approximately 95ms to 87ms but
 did not remove the communication stretch or produce material wall-time gain.
 The elementwise-chain contention hypothesis is therefore rejected. No
 production change, formal-workload substitution, full-matrix retry, or
-additional NPU task follows from this result; the mixed formal acceptance case
-remains unchanged and Phase 3E.1 remains unaccepted.
+additional NPU task followed from this result; the mixed formal acceptance case
+remained unchanged and Phase 3E.1 remained unaccepted.
 
 A bounded AIC-only primary-kernel capability diagnostic then replaced only
 the component compute path with BF16 NCDHW `torch.nn.functional.conv3d`.
@@ -293,7 +300,7 @@ The report correctly records `compute_path_aic_only=false` and remains
 acceptance-ineligible as a single-sample capability diagnostic. Report
 SHA-256 is
 `88a4fa784c660ffa078b1a443e6b0b9573230ceed458a3932eb2c7944c31a813`.
-Phase 3E.1 remains unaccepted until the complete formal matrix passes.
+Phase 3E.1 remained unaccepted pending the complete formal matrix.
 
 The capability result authorizes one formal-workload substitution. The final
 `overlap-vs-serialized` row keeps 256 communication tokens, hidden size 4096,
@@ -318,9 +325,75 @@ positive interval; logical and physical IDs are reported separately. Every
 other AIV family, including the known tiny `Greater` and `ZerosLike` work, is
 inventoried with total duration. That total must be below 1% of the primary
 Conv3D span. The report always records `compute_path_aic_only=false` and never
-promotes primary-kernel task type into a whole-path purity claim. Phase 3E.1 is
-accepted only if the complete matrix passes 21/21, both ranks clear 5%, and
-every profiler gate passes.
+promotes primary-kernel task type into a whole-path purity claim. The declared
+gate required the complete matrix to pass 21/21, both ranks to clear 5%, and
+every profiler check to pass.
+
+#### Production-backed final acceptance
+
+Independent review rejected the earlier acceptance decision based on task
+`task_20260820_052826_33515907092`: five negative and lifecycle rows were
+routed through host contract tests rather than the production workers. That
+result remains qualification history, but its fake-runtime rows cannot support
+an NPU acceptance claim. The corrected runner removed that routing. Its
+one-NPU event suite contains exactly `capture-current-stream`,
+`record-failure`, and `event-timeout`; `completion-mismatch`, `drop-event`, and
+`destroy-pending-retry` execute inside the persistent two-rank production
+worker.
+
+Exact-source build task `task_20260820_062500_37256458511` compiled with
+`DEEP_EP_ASCEND_TESTING=1` against the pinned HCOMM package and imported the
+Ascend extension. The accepted production commit/tree are
+`28f3deaed1b950e782ba57a0d0256cd2f35687f9`/
+`47ed60717b538b88436fa2602628f28b9a76f234`; the extension SHA-256 is
+`dd9e91a69b8526ba9b828387fdc1b655a46f4a4ae10ce4af3d36fec7fd41bb67`.
+Runner commit `b185d95c28864c22faf99dc67f5492028e6383fb` has file SHA-256
+`e3154dd502d1f9986d16d7b131520d6ab3d292d191e4cb949ecb7a686491300f`.
+
+The corrected one-NPU event task `task_20260820_063113_375337613415`
+passed 3/3 on device 6. The first corrected full task,
+`task_20260820_063252_376006031537`, passed 16 rows before `drop-event`
+failed on a stale generation-bound dispatch handle and the remaining four rows
+did not run. A deterministic host RED reproduced that sequence: dropping the
+first event finalized its generation, so reusing the original seed handle for
+the second dispatch was invalid even though the buffer itself was reusable.
+Runner commit `b185d95c28864c22faf99dc67f5492028e6383fb` reseeds the same
+buffer before the second dispatch; its full host GREEN was 199 passed, 7
+skipped, and 48 subtests.
+
+Final two-NPU task
+`task_20260820_064309_380109210223` ran on devices `6,7` with
+`--max-time 300`, reached authoritative `completed (exit=0)`, and passed all
+21 selected and executed cases with zero failures and zero not-run rows. Both
+ranks passed `drop-event` with the same buffer reused after event drop and
+garbage collection. Both retained runtime ownership after the injected first
+destroy failure and released it after retry. Record failure, event timeout,
+qualified diagnostic failure, and post-bookkeeping completion mismatch also
+passed through production code.
+
+| Rank | Serialized median/p95 | Overlapped median/p95 | Median gain |
+|---:|---:|---:|---:|
+| 0 | `0.304671370/0.305792395s` | `0.277607860/0.278358744s` | `8.8829%` |
+| 1 | `0.304223720/0.306510999s` | `0.277838260/0.278617760s` | `8.6730%` |
+
+Both ranks retained three warmups and seven measured samples, reported zero
+global synchronizations, and exceeded the unchanged 5% gate. The profiler
+identified `Conv3DV2=KERNEL_AICORE` and `dispatch_kernel=KERNEL_AIVEC` with
+logical compute/communication stream IDs `0/146`. Rank 0 used distinct
+physical lanes `56/6` with `110.5us` overlap; rank 1 used `61/8` with
+`112.0us` overlap. Auxiliary AIV ratios were `0.012324%` and `0.010512%`,
+below the 1% gate, and neither trace contains TransData.
+`compute_path_aic_only=false` remains explicit, so no whole-path pure-AIC
+claim is made.
+
+The final report SHA-256 is
+`0e6d7674f03967285ead97a75d7c99cb7537a8157ca9794c2a2bb644221c82ee`.
+Rank 0 and rank 1 trace SHA-256 values are
+`0c079bbdc9bc5c722394079fb5bd14dba9e23ec0b369ce5479cc486e04a8b5f9`
+and `e9dc5c3c487a63ed3d0f8f70c75884171aa0a15e435f14bf80fcef5ef4882001`.
+Every fixed Phase 3E.1 gate passed, so Phase 3E.1 is accepted. This does not
+promote any of the 120 deferred full functional benchmark rows or change the
+3E.2-3E.4 and FP8 Phase 3F boundaries.
 
 ## Decisions
 
