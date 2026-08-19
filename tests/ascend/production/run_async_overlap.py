@@ -25,6 +25,7 @@ HIDDEN = 4
 
 OVERLAP_WARMUPS = 3
 OVERLAP_REPETITIONS = 7
+OVERLAP_COMMUNICATION_TOKENS = 256
 OVERLAP_COMPUTE_SHAPE = (4096, 4096)
 OVERLAP_COMPUTE_ITERATIONS = 8
 OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT = 0.05
@@ -226,6 +227,7 @@ def _contract():
         "full_cases": list(CASE_NAMES),
         "matrix_groups": list(MATRIX_GROUPS),
         "overlap": {
+            "communication_tokens": OVERLAP_COMMUNICATION_TOKENS,
             "compute_iterations": OVERLAP_COMPUTE_ITERATIONS,
             "compute_shape": list(OVERLAP_COMPUTE_SHAPE),
             "minimum_median_improvement":
@@ -427,13 +429,22 @@ def _classify_overlap_diagnostic(variants):
         row.get("event_wait", {}).get("bound_seconds", 0)
         for row in rank_rows("combined-heavy")
     )
+    pure_comm_rows = rank_rows("pure-communication")
+    pure_comm_exceeded = len(pure_comm_rows) == WORLD_SIZE and all(
+        row.get("event_wait", {}).get("outcome") == "timeout" and
+        row.get("queries", {}).get("comm_tail_after_grace") and
+        (row.get("queries", {}).get("comm_tail_first_complete_seconds") or 0) >
+        row.get("event_wait", {}).get("bound_seconds", 0)
+        for row in pure_comm_rows
+    )
     pure_compute_exceeded = all(
         row.get("event_wait", {}).get("outcome") == "timeout" and
         row.get("queries", {}).get("compute_tail_after_grace")
         for row in rank_rows("pure-compute")
     )
-    if (controls_pass and heavy_timed_out and
-            (heavy_eventually_completed or pure_compute_exceeded)):
+    if (pure_comm_exceeded or
+            (controls_pass and heavy_timed_out and
+             (heavy_eventually_completed or pure_compute_exceeded))):
         return "workload-exceeds-event-deadline"
 
     pure_comm_stalled = any(
@@ -1220,7 +1231,7 @@ class AsyncOverlapWorker:
         return {"aggregated_failure": aggregate}
 
     def _make_overlap_inputs(self):
-        tokens = 4096
+        tokens = OVERLAP_COMMUNICATION_TOKENS
         hidden = OVERLAP_COMPUTE_SHAPE[0]
         cpu = self.torch.arange(
             tokens * hidden, dtype=self.torch.float32).reshape(
@@ -1483,6 +1494,7 @@ class AsyncOverlapWorker:
         return {
             "warmups": OVERLAP_WARMUPS,
             "repetitions": OVERLAP_REPETITIONS,
+            "communication_tokens": OVERLAP_COMMUNICATION_TOKENS,
             "compute_shape": list(OVERLAP_COMPUTE_SHAPE),
             "compute_iterations": OVERLAP_COMPUTE_ITERATIONS,
             "serialized": serialized_summary,

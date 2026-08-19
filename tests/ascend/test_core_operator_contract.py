@@ -2017,6 +2017,7 @@ int main() {
                     "overlap-vs-serialized",
                 ],
                 "overlap": {
+                    "communication_tokens": 256,
                     "compute_iterations": 8,
                     "compute_shape": [4096, 4096],
                     "minimum_median_improvement": 0.05,
@@ -2182,6 +2183,45 @@ int main() {
             len({rank_row["buffer_instance"]
                  for row in report["variants"] for rank_row in row["ranks"]}),
             10)
+
+    def test_async_overlap_diagnostic_classifies_long_communication_control(
+            self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_long_communication", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        outcomes = {
+            "pure-communication": "timeout",
+            "pure-compute": "completed",
+            "combined-light": "timeout",
+            "post-dispatch-idle": "completed",
+            "combined-heavy": "timeout",
+        }
+        observations = []
+        for variant in module.OVERLAP_DIAGNOSTIC_VARIANTS:
+            ranks = []
+            for rank in range(2):
+                outcome = outcomes[variant]
+                ranks.append({
+                    "rank": rank,
+                    "event_wait": {
+                        "outcome": outcome,
+                        "bound_seconds": 5.0,
+                    },
+                    "queries": {
+                        "comm_tail_after_grace": True,
+                        "comm_tail_first_complete_seconds": (
+                            14.4 if variant != "pure-compute" else 0.07),
+                        "compute_tail_after_grace": True,
+                    },
+                })
+            observations.append({"variant": variant, "ranks": ranks})
+
+        self.assertEqual(
+            module._classify_overlap_diagnostic(observations),
+            "workload-exceeds-event-deadline",
+        )
 
     def test_async_overlap_suite_checkpoints_each_completed_case(self):
         spec = importlib.util.spec_from_file_location(
