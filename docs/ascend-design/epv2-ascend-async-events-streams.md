@@ -75,9 +75,26 @@ A deterministic host RED reproduced that loss in `AsyncBufferState`.
 Finalization now uses the same qualified diagnostic-to-status mapping as the
 established barrier and dispatch paths, preserving the complete device
 diagnostic while retaining exactly-once failure storage. The focused host
-probe and all sanitizer-backed production probes are green. Phase 3E.1 remains
-not accepted pending an exact rebuilt extension and a complete passing matrix
-with overlap timing and profiler evidence.
+probe and all sanitizer-backed production probes are green.
+
+Exact-source rebuild task `task_20260819_221458_163301111405` then passed on
+devices `6,7` in 2m54s for commit `9854a4e24fd918f30f0360ee45870dcb8f3a7bc9`
+and tree `016a76c6561d503d8293261986c787497c226674`. The first build submission,
+`task_20260819_221134_162617630198`, had exited before compilation because its
+staging script omitted the qualified CMake directory from `PATH`; the retry
+changed only that environment entry and used a fresh extraction directory.
+
+The subsequent fail-fast matrix task `task_20260819_222014_164400825732`
+completed in 1m0s with 15 passed, one failed, and five not run. It validated
+the complete qualified `completion_timeout` diagnostic, then failed at
+`overlap-vs-serialized` on both ranks because the production event-specific
+5-second completion deadline expired (`synchronize_event`, backend `-1`). The
+same terminal error recurred during buffer cleanup. The profiler stage was not
+reached, its trace directory remained empty, and the later `record-failure`,
+`event-timeout`, `completion-mismatch`, `drop-event`, and
+`destroy-pending-retry` cases did not run. No serialized/overlapped median or
+p95 values, stream IDs, or positive profiler interval were produced. Phase
+3E.1 therefore remains not accepted.
 
 ## Decisions
 

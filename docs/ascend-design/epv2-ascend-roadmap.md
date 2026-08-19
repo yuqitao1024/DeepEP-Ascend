@@ -292,9 +292,17 @@ failing fast at the injected diagnostic row. The failure identified a
 production finalizer regression: async completion converted the structured
 device diagnostic to a generic status and lost its error name, command,
 peer/rank, backend, and generation detail. A host RED/GREEN now routes async
-diagnostics through the established qualified status mapping. The extension
-must be rebuilt and the complete matrix, including overlap median/p95 and the
-profiler interval, must pass before 3E.1 is accepted.
+diagnostics through the established qualified status mapping.
+
+Exact-source rebuild task `task_20260819_221458_163301111405` passed on
+devices `6,7` in 2m54s. Fail-fast matrix task
+`task_20260819_222014_164400825732` then passed 15 cases, including the
+qualified diagnostic row, before `overlap-vs-serialized` exceeded the
+production event-specific 5-second completion deadline on both ranks. It
+exited 1 after 1m0s with one failed and five not run. Profiling was never
+reached, so no serialized/overlapped median or p95, stream IDs, or positive
+NPU profiler interval exist. The complete matrix and overlap evidence must
+pass before 3E.1 is accepted.
 
 ### Deliverables
 
