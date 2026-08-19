@@ -1344,7 +1344,8 @@ class CombineMatrix:
             self._run_step(lambda: self._expect_rejection(
                 lambda: self._combine(
                     target, expert_x, handle, recv_weights, None),
-                "dispatch handle"), "cross-buffer: reject foreign handle")
+                "invalid_dispatch_handle"),
+                "cross-buffer: reject foreign handle")
             self._round_trip(spec, variant=2, buffer=target)
         finally:
             if target in self.live_buffers:
@@ -1415,7 +1416,7 @@ class CombineMatrix:
             self._run_step(lambda: self._expect_rejection(
                 lambda: self._combine(
                     buffer, expert_x, handle, recv_weights, None),
-                "dispatch handle"), "malformed-handle: reject")
+                "invalid_dispatch_handle"), "malformed-handle: reject")
         finally:
             handle.token_metadata_at_forward = original_descriptor
         self._run_step(
