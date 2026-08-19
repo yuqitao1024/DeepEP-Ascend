@@ -60,6 +60,78 @@ ELASTIC = ROOT / "csrc/backends/ascend/elastic"
 CORE_OPS = ROOT / "tests/ascend/core_ops"
 
 
+def _component_stage_seconds():
+    return {
+        "communication-only": {
+            "async_dispatch_return": 0.01,
+            "event_wait": 0.19,
+        },
+        "compute-only": {
+            "compute_enqueue": 0.20,
+            "compute_completion": 0.10,
+        },
+        "serialized": {
+            "serialized_dispatch_return": 0.20,
+            "compute_enqueue": 0.20,
+            "compute_completion": 0.10,
+        },
+        "overlapped": {
+            "async_dispatch_return": 0.01,
+            "compute_enqueue": 0.20,
+            "event_wait": 0.19,
+            "compute_completion": 0.10,
+        },
+    }
+
+
+def _valid_component_rank(rank):
+    return {
+        "rank": rank,
+        "communication_tokens": 256,
+        "compute_input_shape": [1, 64, 8, 32, 32],
+        "compute_iterations": 16,
+        "compute_variant": "aic-only-conv3d",
+        "compute_weight_shape": [64, 64, 3, 3, 3],
+        "compute_calibration": {
+            "completion_wait": "npu-event-synchronize",
+            "initial_iterations": 8,
+            "iteration_bounds": [1, 2048],
+            "measured_initial_seconds": 0.125 + rank * 0.001,
+            "selected_iterations": 16,
+            "target_range_seconds": [0.20, 0.30],
+            "target_seconds": 0.25,
+            "warmup_iterations": 1,
+        },
+        "buffer_instance": f"rank-{rank}-component-buffer",
+        "communication_only_seconds": 0.20,
+        "compute_only_seconds": 0.30,
+        "serialized_seconds": 0.50,
+        "overlapped_seconds": 0.45,
+        "serialized_dispatch_return_duration_seconds": 0.20,
+        "async_dispatch_return_duration_seconds": 0.01,
+        "event_wait_duration_seconds": 0.19,
+        "compute_completion_duration_seconds": 0.10,
+        "stage_seconds": _component_stage_seconds(),
+        "profiler_overlap": {
+            "overlap_us": 100000.0 + rank,
+            "compute_event": "aclnnConvolution_Conv3DV2",
+            "communication_event": "dispatch_kernel",
+            "compute_task_type": "KERNEL_AICORE",
+            "communication_task_type": "KERNEL_AIVEC",
+            "logical_compute_stream_id": 0,
+            "logical_communication_stream_id": 143,
+            "physical_compute_stream_id": 61,
+            "physical_communication_stream_id": 11,
+            "auxiliary_aiv_events": [],
+            "transdata_events": [],
+            "compute_path_aic_only": True,
+        },
+        "completed_phase": "profiler",
+        "active_phase": None,
+        "phase_status": "completed",
+    }
+
+
 class AscendCoreOperatorContractTest(unittest.TestCase):
     def test_async_runtime_stream_event_contract(self):
         runtime = ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"
@@ -2024,9 +2096,18 @@ int main() {
                             "effective-overlap",
                         ],
                         "communication_tokens": 256,
-                        "compute_iterations": 256,
-                        "compute_shape": [4096, 4096],
-                        "compute_variant": "pure-matmul",
+                        "compute_calibration": {
+                            "initial_iterations": 8,
+                            "iteration_bounds": [1, 2048],
+                            "target_range_seconds": [0.2, 0.3],
+                            "target_seconds": 0.25,
+                            "warmup_iterations": 1,
+                        },
+                        "compute_input_shape": [1, 64, 8, 32, 32],
+                        "compute_variant": "aic-only-conv3d",
+                        "compute_weight_shape": [64, 64, 3, 3, 3],
+                        "event_wait_limit_seconds": 5.0,
+                        "minimum_wall_gain": 0.05,
                         "repetitions": 1,
                         "timeout_seconds": 120,
                         "warmups": 0,
@@ -2892,49 +2973,10 @@ int main() {
         spec.loader.exec_module(module)
 
         def rank_row(rank, serialized, overlapped):
-            return {
-                "rank": rank,
-                "communication_tokens": 256,
-                "compute_iterations": 256,
-                "compute_variant": "pure-matmul",
-                "buffer_instance": f"rank-{rank}-component-buffer",
-                "communication_only_seconds": 0.20,
-                "compute_only_seconds": 0.30,
-                "serialized_seconds": serialized,
-                "overlapped_seconds": overlapped,
-                "serialized_dispatch_return_duration_seconds": 0.20,
-                "async_dispatch_return_duration_seconds": 0.01,
-                "event_wait_duration_seconds": 0.19,
-                "compute_completion_duration_seconds": 0.10,
-                "stage_seconds": {
-                    "communication-only": {
-                        "async_dispatch_return": 0.01,
-                        "event_wait": 0.19,
-                    },
-                    "compute-only": {
-                        "compute_enqueue": 0.20,
-                        "compute_completion": 0.10,
-                    },
-                    "serialized": {
-                        "serialized_dispatch_return": 0.20,
-                        "compute_enqueue": 0.20,
-                        "compute_completion": 0.10,
-                    },
-                    "overlapped": {
-                        "async_dispatch_return": 0.01,
-                        "compute_enqueue": 0.20,
-                        "event_wait": 0.19,
-                        "compute_completion": 0.10,
-                    },
-                },
-                "profiler_overlap": {
-                    "overlap_us": 100000.0,
-                    "logical_compute_stream_id": 0,
-                    "logical_communication_stream_id": 143,
-                    "physical_compute_stream_id": 61,
-                    "physical_communication_stream_id": 11,
-                },
-            }
+            row = _valid_component_rank(rank)
+            row["serialized_seconds"] = serialized
+            row["overlapped_seconds"] = overlapped
+            return row
 
         scenarios = (
             ("unserialized-baseline", 0.40, 0.38),
@@ -2964,29 +3006,46 @@ int main() {
                         serialized * 0.05,
                     )
 
-    def test_async_overlap_component_compute_submits_only_pure_matmuls(self):
+    def test_async_overlap_component_compute_uses_only_bf16_ncdhw_conv3d(self):
         spec = importlib.util.spec_from_file_location(
             "run_async_overlap_component_compute", ASYNC_OVERLAP)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        class MatmulResult:
+        class Conv3dResult:
+            device = type("Device", (), {"type": "npu"})()
+
             def mul(self, *_args, **_kwargs):
-                raise AssertionError("pure matmul called mul")
+                raise AssertionError("Conv3D component path called mul")
 
             def mul_(self, *_args, **_kwargs):
-                raise AssertionError("pure matmul called mul_")
+                raise AssertionError("Conv3D component path called mul_")
+
+        class FakeFunctional:
+            def __init__(self):
+                self.calls = []
+
+            def conv3d(self, input_tensor, weight, **kwargs):
+                self.calls.append((input_tensor, weight, kwargs))
+                return Conv3dResult()
 
         class FakeTorch:
-            def __init__(self):
-                self.matmul_calls = []
-                self.results = []
+            bfloat16 = "bfloat16"
 
-            def matmul(self, left, right):
-                self.matmul_calls.append((left, right))
-                result = MatmulResult()
-                self.results.append(result)
-                return result
+            def __init__(self):
+                self.ones_calls = []
+                self.nn = type("FakeNn", (), {
+                    "functional": FakeFunctional(),
+                })()
+
+            def ones(self, shape, **kwargs):
+                value = object()
+                self.ones_calls.append((shape, kwargs, value))
+                return value
+
+            @staticmethod
+            def matmul(*_args, **_kwargs):
+                raise AssertionError("Conv3D component path called matmul")
 
         class FakeDist:
             @staticmethod
@@ -2994,18 +3053,141 @@ int main() {
                 return 0
 
         torch = FakeTorch()
-        left = object()
-        right = object()
         worker = module.AsyncOverlapWorker(
-            torch, None, FakeDist, None, object(), None, "/tmp")
+            torch, None, FakeDist, None, object(), "npu:0", "/tmp")
 
-        result = worker._component_compute(left, right)
+        input_tensor, weight = worker._make_component_compute_inputs()
+        result = worker._component_compute(
+            input_tensor, weight, iterations=3)
 
-        self.assertEqual(len(torch.matmul_calls), 256)
+        self.assertEqual(torch.ones_calls, [
+            ((1, 64, 8, 32, 32), {
+                "dtype": "bfloat16", "device": "npu:0"}, input_tensor),
+            ((64, 64, 3, 3, 3), {
+                "dtype": "bfloat16", "device": "npu:0"}, weight),
+        ])
+        self.assertEqual(len(torch.nn.functional.calls), 3)
         self.assertTrue(all(
-            call_left is left and call_right is right
-            for call_left, call_right in torch.matmul_calls))
-        self.assertIs(result, torch.results[-1])
+            call_input is input_tensor and call_weight is weight and
+            kwargs == {
+                "bias": None,
+                "stride": (1, 1, 1),
+                "padding": (1, 1, 1),
+                "dilation": (1, 1, 1),
+                "groups": 1,
+            }
+            for call_input, call_weight, kwargs
+            in torch.nn.functional.calls))
+        self.assertIsInstance(result, Conv3dResult)
+
+    def test_async_overlap_component_calibrates_with_npu_event_completion(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_component_calibration", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class FakeDist:
+            @staticmethod
+            def get_rank(_group):
+                return 0
+
+        class FakeValue:
+            device = type("Device", (), {"type": "npu"})()
+
+        class FakeEvent:
+            def __init__(self):
+                self.synchronize_calls = 0
+
+            def synchronize(self):
+                self.synchronize_calls += 1
+
+        worker = module.AsyncOverlapWorker(
+            None, None, FakeDist, None, object(), object(), "/tmp")
+        worker._component_compute = mock.Mock(return_value=FakeValue())
+        warmup_event = FakeEvent()
+        calibration_event = FakeEvent()
+        worker._record_tail_event = mock.Mock(side_effect=(
+            warmup_event, calibration_event))
+
+        with mock.patch.object(
+                module.time, "monotonic", side_effect=(10.0, 10.125)):
+            calibration = worker._calibrate_component_compute(
+                "input", "weight")
+
+        self.assertEqual(worker._component_compute.call_args_list, [
+            mock.call("input", "weight", iterations=1),
+            mock.call("input", "weight", iterations=8),
+        ])
+        self.assertEqual(warmup_event.synchronize_calls, 1)
+        self.assertEqual(calibration_event.synchronize_calls, 1)
+        self.assertEqual(calibration, {
+            "completion_wait": "npu-event-synchronize",
+            "initial_iterations": 8,
+            "iteration_bounds": [1, 2048],
+            "measured_initial_seconds": 0.125,
+            "selected_iterations": 16,
+            "target_range_seconds": [0.20, 0.30],
+            "target_seconds": 0.25,
+            "warmup_iterations": 1,
+        })
+
+    def test_async_overlap_component_profiler_requires_task_types_and_inventories_auxiliary_events(
+            self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_component_trace", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        events = [
+            {"ph": "X", "name": "aclnnConvolution_Conv3DV2",
+             "ts": 100.0, "dur": 60.0,
+             "args": {"Physic Stream Id": 61,
+                      "Task Type": "KERNEL_AICORE"}},
+            {"ph": "X", "name": "dispatch_kernel",
+             "ts": 120.0, "dur": 50.0,
+             "args": {"Physic Stream Id": 26,
+                      "Task Type": "KERNEL_AIVEC"}},
+            {"ph": "X", "name": "Cast",
+             "ts": 99.0, "dur": 5.0,
+             "args": {"Physic Stream Id": 61,
+                      "Task Type": "KERNEL_AIVEC"}},
+            {"ph": "X", "name": "TransData_5D_to_ND",
+             "ts": 105.0, "dur": 7.0,
+             "args": {"Physic Stream Id": 62,
+                      "Task Type": "KERNEL_AIVEC"}},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            trace = pathlib.Path(directory) / "trace.json"
+            trace.write_text(json.dumps({"traceEvents": events}))
+            overlap = module._find_component_npu_overlap_interval((trace,))
+
+        self.assertEqual(overlap["overlap_us"], 40.0)
+        self.assertEqual(overlap["compute_task_type"], "KERNEL_AICORE")
+        self.assertEqual(overlap["communication_task_type"], "KERNEL_AIVEC")
+        self.assertEqual(overlap["physical_compute_stream_id"], 61)
+        self.assertEqual(overlap["physical_communication_stream_id"], 26)
+        self.assertEqual(
+            [row["name"] for row in overlap["auxiliary_aiv_events"]],
+            ["Cast", "TransData_5D_to_ND"],
+        )
+        self.assertEqual(
+            [row["name"] for row in overlap["transdata_events"]],
+            ["TransData_5D_to_ND"],
+        )
+        self.assertFalse(overlap["compute_path_aic_only"])
+
+        for family, index, wrong_type in (
+                ("compute", 0, "KERNEL_MIX_AIC"),
+                ("communication", 1, "KERNEL_AICORE")):
+            with self.subTest(family=family):
+                wrong_events = json.loads(json.dumps(events[:2]))
+                wrong_events[index]["args"]["Task Type"] = wrong_type
+                with tempfile.TemporaryDirectory() as directory:
+                    trace = pathlib.Path(directory) / "wrong-trace.json"
+                    trace.write_text(json.dumps(wrong_events))
+                    with self.assertRaisesRegex(
+                            AssertionError, f"{family} task type"):
+                        module._find_component_npu_overlap_interval((trace,))
 
     def test_async_overlap_component_diagnostic_is_bounded_and_preserves_stages(
             self):
@@ -3014,55 +3196,8 @@ int main() {
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        stage_seconds = {
-            "communication-only": {
-                "async_dispatch_return": 0.01,
-                "event_wait": 0.19,
-            },
-            "compute-only": {
-                "compute_enqueue": 0.20,
-                "compute_completion": 0.10,
-            },
-            "serialized": {
-                "serialized_dispatch_return": 0.20,
-                "compute_enqueue": 0.20,
-                "compute_completion": 0.10,
-            },
-            "overlapped": {
-                "async_dispatch_return": 0.01,
-                "compute_enqueue": 0.20,
-                "event_wait": 0.19,
-                "compute_completion": 0.10,
-            },
-        }
-        ranks = []
-        for rank in range(2):
-            ranks.append({
-                "rank": rank,
-                "communication_tokens": 256,
-                "compute_iterations": 256,
-                "compute_variant": "pure-matmul",
-                "buffer_instance": f"rank-{rank}-component-buffer",
-                "communication_only_seconds": 0.20,
-                "compute_only_seconds": 0.30,
-                "serialized_seconds": 0.50,
-                "overlapped_seconds": 0.49,
-                "serialized_dispatch_return_duration_seconds": 0.20,
-                "async_dispatch_return_duration_seconds": 0.01,
-                "event_wait_duration_seconds": 0.19,
-                "compute_completion_duration_seconds": 0.10,
-                "stage_seconds": stage_seconds,
-                "profiler_overlap": {
-                    "overlap_us": 100000.0 + rank,
-                    "logical_compute_stream_id": 0,
-                    "logical_communication_stream_id": 143,
-                    "physical_compute_stream_id": 61,
-                    "physical_communication_stream_id": 11,
-                },
-                "completed_phase": "profiler",
-                "active_phase": None,
-                "phase_status": "completed",
-            })
+        stage_seconds = _component_stage_seconds()
+        ranks = [_valid_component_rank(rank) for rank in range(2)]
 
         bounded_calls = []
 
@@ -3092,13 +3227,39 @@ int main() {
         self.assertEqual(timeout_seconds, 120)
         self.assertIsNone(environment)
         self.assertIn("--overlap-component-diagnostic-worker", command)
-        self.assertEqual(report["classification"], "resource-contention")
-        self.assertEqual(report["compute_variant"], "pure-matmul")
+        self.assertEqual(report["classification"], "effective-overlap")
+        self.assertTrue(report["diagnostic_success"])
+        self.assertEqual(report["compute_variant"], "aic-only-conv3d")
+        self.assertEqual(report["compute_input_shape"], [1, 64, 8, 32, 32])
+        self.assertEqual(report["compute_weight_shape"], [64, 64, 3, 3, 3])
         self.assertFalse(report["acceptance_eligible"])
         self.assertEqual(report["warmups"], 0)
         self.assertEqual(report["repetitions"], 1)
-        self.assertEqual(report["ranks"][0]["compute_variant"], "pure-matmul")
+        self.assertEqual(
+            report["ranks"][0]["compute_variant"], "aic-only-conv3d")
+        self.assertAlmostEqual(report["ranks"][0]["wall_gain_ratio"], 0.10)
         self.assertEqual(report["ranks"][0]["stage_seconds"], stage_seconds)
+
+    def test_async_overlap_component_validation_enforces_capability_gates(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_component_validation", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        valid = [_valid_component_rank(rank) for rank in range(2)]
+        module._validate_overlap_component(valid)
+
+        invalid_cases = (
+            ("serialized baseline", "serialized_seconds", 0.40),
+            ("event wait", "event_wait_duration_seconds", 5.0),
+            ("wall gain", "overlapped_seconds", 0.49),
+        )
+        for message, field, value in invalid_cases:
+            with self.subTest(field=field):
+                invalid = json.loads(json.dumps(valid))
+                invalid[0][field] = value
+                with self.assertRaisesRegex(AssertionError, message):
+                    module._validate_overlap_component(invalid)
 
     def test_async_overlap_component_diagnostic_checkpoints_each_phase(self):
         spec = importlib.util.spec_from_file_location(
@@ -3134,9 +3295,27 @@ int main() {
         tensor = FakeTensor()
         worker = module.AsyncOverlapWorker(
             None, None, FakeDist, FakeDeepEp, object(), object(), "/tmp")
-        worker.new_buffer = mock.Mock(return_value=FakeBuffer())
+        actions = []
+        component_buffer = FakeBuffer()
+        worker.new_buffer = mock.Mock(side_effect=lambda **_kwargs: (
+            actions.append("buffer"), component_buffer)[1])
         worker._make_overlap_inputs = mock.Mock(
             return_value=(tensor, tensor, tensor, tensor))
+        worker._make_component_compute_inputs = mock.Mock(
+            return_value=("conv-input", "conv-weight"))
+        calibration = {
+            "completion_wait": "npu-event-synchronize",
+            "initial_iterations": 8,
+            "iteration_bounds": [1, 2048],
+            "measured_initial_seconds": 0.125,
+            "selected_iterations": 16,
+            "target_range_seconds": [0.20, 0.30],
+            "target_seconds": 0.25,
+            "warmup_iterations": 1,
+        }
+        worker._calibrate_component_compute = mock.Mock(
+            side_effect=lambda *_args: (
+                actions.append("calibration"), calibration)[1])
         worker._component_communication_iteration = mock.Mock(return_value={
             "duration_seconds": 0.20,
             "stage_seconds": {
@@ -3187,6 +3366,8 @@ int main() {
         self.assertEqual(
             [(phase, row["phase_status"]) for phase, row in checkpoints],
             [
+                ("calibration", "started"),
+                ("calibration", "completed"),
                 ("communication-only", "started"),
                 ("communication-only", "completed"),
                 ("compute-only", "started"),
@@ -3199,8 +3380,15 @@ int main() {
                 ("profiler", "completed"),
             ],
         )
+        self.assertEqual(actions[:2], ["calibration", "buffer"])
         self.assertEqual(measurement["communication_only_seconds"], 0.20)
-        self.assertEqual(measurement["compute_variant"], "pure-matmul")
+        self.assertEqual(measurement["compute_variant"], "aic-only-conv3d")
+        self.assertEqual(measurement["compute_input_shape"],
+                         [1, 64, 8, 32, 32])
+        self.assertEqual(measurement["compute_weight_shape"],
+                         [64, 64, 3, 3, 3])
+        self.assertEqual(measurement["compute_iterations"], 16)
+        self.assertEqual(measurement["compute_calibration"], calibration)
         self.assertEqual(measurement["compute_only_seconds"], 0.30)
         self.assertEqual(measurement["serialized_seconds"], 0.50)
         self.assertEqual(measurement["overlapped_seconds"], 0.49)
@@ -3215,9 +3403,23 @@ int main() {
                          0.10)
         self.assertEqual(measurement["profiler_overlap"]["overlap_us"],
                          100000.0)
+        worker._component_compute_iteration.assert_called_once_with(
+            "conv-input", "conv-weight", 16)
+        self.assertEqual(
+            worker._component_combined_iteration.call_args_list,
+            [
+                mock.call(
+                    component_buffer, "handle", tensor,
+                    "conv-input", "conv-weight", 16, overlap=False),
+                mock.call(
+                    component_buffer, "handle", tensor,
+                    "conv-input", "conv-weight", 16, overlap=True),
+            ],
+        )
         worker._profile_overlap.assert_called_once_with(
-            worker.new_buffer.return_value, "handle", tensor, tensor, tensor,
-            component=True)
+            component_buffer, "handle", tensor,
+            "conv-input", "conv-weight", component=True,
+            component_iterations=16)
         self.assertEqual(measurement, checkpoints[-1][1])
 
     def test_async_overlap_suite_checkpoints_each_completed_case(self):
