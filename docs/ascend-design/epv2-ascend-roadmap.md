@@ -304,6 +304,24 @@ reached, so no serialized/overlapped median or p95, stream IDs, or positive
 NPU profiler interval exist. The complete matrix and overlap evidence must
 pass before 3E.1 is accepted.
 
+Bounded follow-up evidence on 2026-08-20 shows that the 4096-token control was
+too long for the five-second event deadline, while a 256-token matrix completed
+and measured only `0.014373`/`0.012169` median improvement, below the fixed 5%
+gate. Sweep task `task_20260820_022734_29035825747` then completed 256 and 512
+before timing out during pre-profiler work at 1024. Its Torch-NPU traces use a
+top-level JSON array; after a host-tested runner parser correction, offline
+analysis proves positive NPU overlap on both ranks at both completed points:
+about 268-270ms at 256 and 588-594ms at 512. The old runner lost the associated
+wall-time summaries, and no 1024 trace exists, so this is hardware-overlap
+evidence but not Phase 3E.1 acceptance.
+
+The next proposed NPU action is not another three-point sweep. It is one
+diagnostic-only 1024 point with zero warmups, one repetition, explicit phase
+checkpoints, a 150-second controller bound, and a 175-second TaskQueue bound.
+The fixed 5% threshold remains unchanged, and one sample cannot be promoted to
+the warmed-median acceptance result. No retry is submitted until that bounded
+shape and the current runner evidence are reviewed.
+
 ### Deliverables
 
 - implement native Ascend event ownership behind `EventOverlap`;

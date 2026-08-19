@@ -250,6 +250,12 @@ def _contract():
     }
 
 
+def _text_output(value):
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
 def _run_bounded(command, timeout_seconds=CASE_TIMEOUT_SECONDS, env=None):
     started = time.monotonic()
     try:
@@ -262,8 +268,8 @@ def _run_bounded(command, timeout_seconds=CASE_TIMEOUT_SECONDS, env=None):
             "failure": f"process timeout after {timeout_seconds}s",
             "duration_seconds": time.monotonic() - started,
             "exit_code": None,
-            "stdout": error.stdout or "",
-            "stderr": error.stderr or "",
+            "stdout": _text_output(error.stdout),
+            "stderr": _text_output(error.stderr),
         }
     return {
         "status": "passed" if completed.returncode == 0 else "failed",
@@ -311,7 +317,7 @@ def _stream_id(event):
     for key, value in (event.get("args") or {}).items():
         normalized = "".join(character.lower() for character in str(key)
                              if character.isalnum())
-        if normalized in ("streamid", "stream"):
+        if normalized in ("physicstreamid", "streamid", "stream"):
             return value
     return event.get("tid")
 
@@ -324,7 +330,10 @@ def _find_npu_overlap_interval(
             payload = json.loads(pathlib.Path(trace_path).read_text())
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
-        events.extend(payload.get("traceEvents", ()))
+        trace_events = payload if isinstance(payload, list) else \
+            payload.get("traceEvents", ()) if isinstance(payload, dict) else ()
+        events.extend(
+            event for event in trace_events if isinstance(event, dict))
 
     def intervals(stream_id):
         selected = []
@@ -335,8 +344,13 @@ def _find_npu_overlap_interval(
             if str(_stream_id(event)) != str(stream_id):
                 continue
             category = str(event.get("cat", "")).lower()
+            has_stream_id = any(
+                "".join(character.lower() for character in str(key)
+                        if character.isalnum()) in
+                ("physicstreamid", "streamid", "stream")
+                for key in (event.get("args") or {}))
             if "npu" not in category and "kernel" not in category and \
-                    "ascend" not in category:
+                    "ascend" not in category and not has_stream_id:
                 continue
             start = float(event["ts"])
             duration = float(event["dur"])
@@ -1624,8 +1638,10 @@ class AsyncOverlapWorker:
                 compute_stream_id=compute_stream.stream_id,
                 comm_stream_id=comm_stream.stream_id,
             )
-        except AssertionError as error:
-            interval = {"overlap_us": 0.0, "failure": str(error)}
+        except Exception as error:
+            failure = str(error) if isinstance(error, AssertionError) else \
+                f"{type(error).__name__}: {error}"
+            interval = {"overlap_us": 0.0, "failure": failure}
         interval["trace"] = str(trace_path)
         interval["compute_stream_id"] = compute_stream.stream_id
         interval["communication_stream_id"] = comm_stream.stream_id
@@ -1764,25 +1780,26 @@ class AsyncOverlapWorker:
         observed = 1.0 - (
             overlapped_summary["median_seconds"] /
             serialized_summary["median_seconds"])
-        profiler = self._profile_overlap(
-            buffer, handle, changed_x, left, right)
-        return {
+        measurement = {
             "rank": self.rank,
             "tokens": tokens,
             "buffer_instance":
                 f"rank-{self.rank}:sweep-{tokens}:{id(buffer)}",
             "event_wait_completed": True,
-            "compute_stream_id": profiler["compute_stream_id"],
-            "communication_stream_id":
-                profiler["communication_stream_id"],
             "communication": communication_summary,
             "compute": compute_summary,
             "serialized": serialized_summary,
             "overlapped": overlapped_summary,
             "theoretical_maximum_improvement": theoretical,
             "median_improvement": observed,
-            "profiler_overlap": profiler,
         }
+        profiler = self._profile_overlap(
+            buffer, handle, changed_x, left, right)
+        measurement["compute_stream_id"] = profiler["compute_stream_id"]
+        measurement["communication_stream_id"] = \
+            profiler["communication_stream_id"]
+        measurement["profiler_overlap"] = profiler
+        return measurement
 
     def run(self, case):
         with _forbid_global_sync(self.torch):

@@ -96,6 +96,36 @@ reached, its trace directory remained empty, and the later `record-failure`,
 p95 values, stream IDs, or positive profiler interval were produced. Phase
 3E.1 therefore remains not accepted.
 
+Subsequent bounded diagnostics refined that result without changing the
+production five-second deadline or the fixed 5% overlap threshold. Task
+`task_20260820_015907_282885225738` showed that the 4096-token communication
+control itself completes only near 14.4 seconds, so the original event timeout
+was workload-bound rather than evidence of a stalled completion event. A
+256-token full-matrix retry reached the overlap measurement but its median
+improvements, `0.014373` and `0.012169`, were below 5%.
+
+Sweep task `task_20260820_022734_29035825747` persisted profiler traces for
+256 and 512 before its 180-second controller bound expired during 1024. The
+runner initially failed to parse them because this Torch-NPU version exports a
+top-level JSON array rather than a `{traceEvents: [...]}` object. Offline
+structured parsing of the exact hashed traces proves positive overlap on both
+ranks: 256 uses compute/communication streams `61/26` with `269777.0us` and
+`268351.5us`; 512 uses streams `61/25` with `587813.0us` and `594118.25us`.
+No 1024 trace was created. Artifact mtimes place that timeout before profiling,
+inside the token-scaled 1024 warmup/timing work, not trace export, parsing, or
+teardown.
+
+The acceptance runner now accepts both trace containers, recognizes
+Torch-NPU's `Physic Stream Id`, normalizes byte-valued timeout output before
+marker recovery, and retains completed timing summaries plus stream/profiler
+failure evidence. Phase 3E.1 remains not accepted: 256 did not meet the fixed
+wall-time threshold, 512 timing summaries were lost by the old runner, and
+1024 has not completed a bounded diagnostic. The next proposed target action
+is a diagnostic-only 1024 point with zero warmups, one repetition, phase
+checkpoints, a 150-second controller bound, and a 175-second outer bound. One
+sample may guide workload selection but cannot satisfy the warmed-median
+acceptance requirement.
+
 ## Decisions
 
 ### Native resource model

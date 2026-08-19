@@ -2086,6 +2086,55 @@ int main() {
         self.assertEqual(overlap["compute_event"], "matmul")
         self.assertEqual(overlap["communication_event"], "dispatch")
 
+    def test_async_overlap_profiler_accepts_torch_npu_list_trace(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_list_trace", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            trace = pathlib.Path(directory) / "trace.json"
+            trace.write_text(json.dumps([
+                {"ph": "X", "name": "matmul", "ts": 100.0,
+                 "dur": 40.0, "tid": 7,
+                 "args": {"Physic Stream Id": 7}},
+                {"ph": "X", "name": "dispatch", "ts": 120.0,
+                 "dur": 50.0, "tid": 11,
+                 "args": {"Physic Stream Id": 11}},
+            ]))
+            overlap = module._find_npu_overlap_interval(
+                (trace,), compute_stream_id=7, comm_stream_id=11)
+
+        self.assertEqual(overlap["overlap_us"], 20.0)
+        self.assertEqual(overlap["compute_event"], "matmul")
+        self.assertEqual(overlap["communication_event"], "dispatch")
+
+    def test_async_overlap_timeout_output_is_normalized_to_text(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_timeout_text", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        command = [
+            sys.executable,
+            "-c",
+            "import sys, time; "
+            "print('PHASE3E_OVERLAP_SWEEP_RESULT {}', flush=True); "
+            "print('partial diagnostic', file=sys.stderr, flush=True); "
+            "time.sleep(5)",
+        ]
+        bounded = module._run_bounded(command, timeout_seconds=0.2)
+
+        self.assertIsInstance(bounded["stdout"], str)
+        self.assertIsInstance(bounded["stderr"], str)
+        self.assertIn("PHASE3E_OVERLAP_SWEEP_RESULT {}", bounded["stdout"])
+        self.assertIn("partial diagnostic", bounded["stderr"])
+        self.assertEqual(
+            module._marker_payload(
+                bounded["stdout"], module.OVERLAP_SWEEP_RESULT_PREFIX),
+            {},
+        )
+
     def test_async_overlap_diagnostic_is_bounded_and_classifies_long_workload(
             self):
         spec = importlib.util.spec_from_file_location(
@@ -2361,6 +2410,104 @@ int main() {
         self.assertEqual(evidence["compute_stream_id"], 7)
         self.assertEqual(evidence["communication_stream_id"], 11)
         self.assertEqual(evidence["failure"], "no positive profiler interval")
+
+    def test_async_overlap_sweep_keeps_timings_on_profiler_parse_failure(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_sweep_profiler_failure", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class FakeTensor:
+            shape = (256, 7168)
+
+            def add(self, _value):
+                return self
+
+        class FakeStream:
+            def __init__(self, stream_id):
+                self.stream_id = stream_id
+
+        class FakeBuffer:
+            def dispatch(self, *_args, **_kwargs):
+                return None, None, None, "handle", None
+
+            @staticmethod
+            def get_comm_stream():
+                return FakeStream(11)
+
+        class FakeElasticBuffer:
+            @staticmethod
+            def get_buffer_size_hint(*_args, **_kwargs):
+                return 4096
+
+        class FakeDeepEp:
+            ElasticBuffer = FakeElasticBuffer
+
+        class FakeDist:
+            @staticmethod
+            def get_rank(_group):
+                return 0
+
+        class FakeNpu:
+            @staticmethod
+            def current_stream():
+                return FakeStream(7)
+
+        class FakeTorch:
+            npu = FakeNpu()
+
+        class FakeProfile:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def export_chrome_trace(path):
+                pathlib.Path(path).write_text(json.dumps([{
+                    "ph": "X",
+                    "name": "malformed-duration",
+                    "ts": 100.0,
+                    "dur": "not-a-duration",
+                    "tid": 7,
+                    "args": {"Physic Stream Id": 7},
+                }]))
+
+        class FakeProfiler:
+            class ProfilerActivity:
+                NPU = "npu"
+
+            @staticmethod
+            def profile(*_args, **_kwargs):
+                return FakeProfile()
+
+        tensor = FakeTensor()
+        worker = module.AsyncOverlapWorker(
+            FakeTorch, type("FakeTorchNpu", (), {"profiler": FakeProfiler}),
+            FakeDist, FakeDeepEp, object(), object(), "/tmp")
+        worker.new_buffer = mock.Mock(return_value=FakeBuffer())
+        worker._make_overlap_inputs = mock.Mock(
+            return_value=(tensor, tensor, tensor, tensor))
+        worker._communication_iteration = mock.Mock(return_value=0.10)
+        worker._compute_iteration = mock.Mock(return_value=0.20)
+        worker._overlap_iteration = mock.Mock(
+            side_effect=lambda *_args, overlap: 0.27 if overlap else 0.30)
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(module, "OVERLAP_SWEEP_WARMUPS", 0), \
+                mock.patch.object(module, "OVERLAP_SWEEP_REPETITIONS", 3):
+            worker.trace_dir = pathlib.Path(directory)
+            measurement = worker._run_overlap_sweep_point(256)
+
+        self.assertEqual(measurement["communication"]["median_seconds"], 0.10)
+        self.assertEqual(measurement["compute"]["median_seconds"], 0.20)
+        self.assertEqual(measurement["serialized"]["median_seconds"], 0.30)
+        self.assertEqual(measurement["overlapped"]["median_seconds"], 0.27)
+        self.assertEqual(measurement["compute_stream_id"], 7)
+        self.assertEqual(measurement["communication_stream_id"], 11)
+        self.assertEqual(measurement["profiler_overlap"]["overlap_us"], 0.0)
+        self.assertIn("ValueError", measurement["profiler_overlap"]["failure"])
 
     def test_async_overlap_failed_result_keeps_both_rank_measurements(self):
         spec = importlib.util.spec_from_file_location(
