@@ -34,6 +34,15 @@ int main() {
     CHECK(hybrid_trailer.route_metadata_offset == 88);
     CHECK(hybrid_trailer.route_metadata_offset +
               sizeof(HybridCombineRouteMetadata) <= 128);
+    const auto minimum_hybrid_trailer =
+        combine_record_trailer_layout(40, true);
+    CHECK(minimum_hybrid_trailer.valid);
+    CHECK(minimum_hybrid_trailer.header_offset == 0);
+    CHECK(minimum_hybrid_trailer.has_route_metadata);
+    CHECK(minimum_hybrid_trailer.route_metadata_offset == 24);
+    CHECK(minimum_hybrid_trailer.route_metadata_offset +
+              sizeof(HybridCombineRouteMetadata) == 40);
+    CHECK(!combine_record_trailer_layout(39, true).valid);
     CHECK(!combine_record_trailer_layout(32, true).valid);
 
     CombineSequence sequence;

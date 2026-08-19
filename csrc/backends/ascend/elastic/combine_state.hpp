@@ -67,12 +67,16 @@ CombineRecordTrailerLayout combine_record_trailer_layout(
     std::uint64_t record_bytes, bool hybrid) noexcept {
     CombineRecordTrailerLayout result{};
     result.has_route_metadata = hybrid;
-    const std::uint64_t trailer_bytes = hybrid ?
+    const std::uint64_t minimum_bytes = hybrid ?
+        sizeof(CombineRecordHeader) + sizeof(HybridCombineRouteMetadata) :
+        sizeof(CombineRecordHeader);
+    if (record_bytes < minimum_bytes)
+        return result;
+    const std::uint64_t reserved_trailer_bytes = hybrid ?
         kHybridCombineRecordTrailerBytes :
         kDirectCombineRecordTrailerBytes;
-    if (record_bytes < trailer_bytes)
-        return result;
-    result.header_offset = record_bytes - trailer_bytes;
+    result.header_offset = record_bytes >= reserved_trailer_bytes ?
+        record_bytes - reserved_trailer_bytes : 0;
     if (result.header_offset + sizeof(CombineRecordHeader) > record_bytes)
         return result;
     if (hybrid) {
