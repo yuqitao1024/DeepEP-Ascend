@@ -2015,7 +2015,8 @@ class RealAscendPythonApiTest(unittest.TestCase):
 
     def test_constructor_rejects_empty_group_before_hccl_use(self):
         with self.assertRaisesRegex(
-                RuntimeError, "world_size must be at least two"):
+                RuntimeError,
+                "DeepEP Ascend backend: topology requires at least two ranks"):
             self.deep_ep.ElasticBuffer(
                 self.FakeGroup(), num_bytes=2 * 1024 * 1024,
                 allow_hybrid_mode=False, explicitly_destroy=True)
