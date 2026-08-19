@@ -15,6 +15,12 @@ namespace runtime = deep_ep::ascend::runtime;
 namespace transport = deep_ep::ascend::transport;
 namespace elastic = deep_ep::ascend::elastic;
 
+enum class LifecycleFailure {
+    kNone,
+    kMaskedProducerProtocol,
+    kConsumedGenerationMismatch,
+};
+
 struct Trace {
     int launches = 0;
     int copies = 0;
@@ -25,6 +31,7 @@ struct Trace {
     bool fail_sync = false;
     bool bad_diagnostic = false;
     bool bad_completion = false;
+    LifecycleFailure lifecycle_failure = LifecycleFailure::kNone;
     std::uint64_t generation = 0;
     std::vector<std::uint64_t> generations;
     elastic::CoreModeFlags mode_flags = 0;
@@ -32,6 +39,7 @@ struct Trace {
     const void* bias_1 = nullptr;
     std::uint32_t communicator_rank = 0;
     std::uint32_t communicator_size = 2;
+    std::vector<void*> transport_allocations;
 } trace;
 
 int alloc(void*, std::uint64_t bytes, void** pointer) {
@@ -55,7 +63,14 @@ int d2h(void*, void* destination, const void* source, std::uint64_t bytes) {
     const int copy = trace.copies++;
     if (copy == trace.fail_copy_at)
         return 84;
-    if (bytes == sizeof(transport::DeviceTransportDiagnostic)) {
+    bool diagnostic_source = false;
+    for (std::size_t index = 3; index < trace.transport_allocations.size();
+         index += 5)
+        diagnostic_source = diagnostic_source ||
+            source == trace.transport_allocations[index];
+    if (diagnostic_source) {
+        if (bytes != sizeof(transport::DeviceTransportDiagnostic))
+            return 85;
         auto* diagnostic =
             static_cast<transport::DeviceTransportDiagnostic*>(destination);
         *diagnostic = {};
@@ -84,7 +99,10 @@ int window(void*, std::int64_t, std::uintptr_t, void*, std::uint64_t,
            std::uintptr_t* value) { *value = 3; return 0; }
 int channels(void*, std::int64_t, std::uintptr_t, std::uint32_t) { return 0; }
 int ha(void*, std::uint64_t bytes, void** pointer) {
-    return alloc(nullptr, bytes, pointer);
+    const int result = alloc(nullptr, bytes, pointer);
+    if (result == 0)
+        trace.transport_allocations.push_back(*pointer);
+    return result;
 }
 int hz(void*, void* pointer, std::uint64_t bytes) {
     return zero(nullptr, pointer, bytes);
@@ -166,11 +184,34 @@ extern "C" int deep_ep_ascend_launch_combine(
              index < tiling.num_tokens * tiling.num_topk; ++index)
             arguments.combined_topk_weights[index] = 0.25F * (index + 1);
     }
+    if (trace.lifecycle_failure != LifecycleFailure::kNone) {
+        auto* scratch_status = reinterpret_cast<std::uint64_t*>(
+            static_cast<std::uint8_t*>(arguments.workspace) +
+            tiling.workspace_layout.scratch_status_offset);
+        auto* staged = reinterpret_cast<transport::StagedTransportContext*>(
+            tiling.transport_context.backend_context);
+        auto* queue = reinterpret_cast<transport::TransportCommandQueue*>(
+            staged->command_queue);
+        auto* service = reinterpret_cast<transport::TransportServiceState*>(
+            queue->service_state);
+        queue->generation = arguments.generation;
+        if (trace.lifecycle_failure ==
+            LifecycleFailure::kMaskedProducerProtocol) {
+            *scratch_status = (std::uint64_t{2} << 32U) | 4U;
+            queue->count = 0;
+            service->consumed_generation = arguments.generation;
+        } else {
+            *scratch_status = 0;
+            queue->count = 4;
+            service->consumed_generation = 0;
+        }
+    }
     auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(
         arguments.local_window_base +
         tiling.symmetric_window_layout.control_offset);
     control->combine_generation = arguments.generation +
-        (trace.bad_completion ? 1 : 0);
+        (trace.bad_completion ||
+         trace.lifecycle_failure != LifecycleFailure::kNone ? 1 : 0);
     return 0;
 }
 extern "C" int deep_ep_ascend_launch_combine_epilogue(
@@ -263,6 +304,8 @@ std::unique_ptr<Buffer> buffer(bool allow_multiple_reduction = true) {
 bool error_contains(
     const std::function<void()>& operation, const char* expected);
 
+std::string error_message(const std::function<void()>& operation);
+
 bool rank_parameterized_capacity() {
     trace = {};
     auto owned = resources(3);
@@ -352,14 +395,18 @@ auto run_cached_dispatch(
 
 bool error_contains(const std::function<void()>& operation,
                     const char* expected) {
+    return error_message(operation).find(expected) != std::string::npos;
+}
+
+std::string error_message(const std::function<void()>& operation) {
     try {
         operation();
     } catch (const std::runtime_error& error) {
-        return std::string(error.what()).find(expected) != std::string::npos;
+        return error.what();
     } catch (const pybind11::error_already_set&) {
-        return python_error.find(expected) != std::string::npos;
+        return python_error;
     }
-    return false;
+    return {};
 }
 
 template <typename Value, std::size_t Size>
@@ -393,6 +440,7 @@ bool normal_and_expanded_success() {
         std::get<1>(result)->scalar_type() != torch::kFloat ||
         !has_values(*std::get<1>(result), output_weights) ||
         std::get<2>(result).has_value() || trace.launches != 1 ||
+        trace.copies != 5 ||
         trace.generations != std::vector<std::uint64_t>{1} ||
         trace.bias_0 != normal.bias0.data_ptr() ||
         trace.bias_1 != normal.bias1.data_ptr())
@@ -408,6 +456,7 @@ bool normal_and_expanded_success() {
             std::vector<std::int64_t>{1, 8} &&
         std::get<1>(expanded_result).has_value() &&
         !std::get<2>(expanded_result).has_value() && trace.launches == 1 &&
+        trace.copies == 5 &&
         elastic::has_mode(trace.mode_flags, elastic::CoreMode::kExpanded) &&
         elastic::has_mode(
             trace.mode_flags, elastic::CoreMode::kAllowMultipleReduction) &&
@@ -772,6 +821,55 @@ bool runtime_failures_poison() {
                                 "copy_to_host");
 }
 
+bool masked_producer_failure_reports_lifecycle() {
+    trace = {};
+    auto target = buffer();
+    Inputs inputs;
+    trace.lifecycle_failure = LifecycleFailure::kMaskedProducerProtocol;
+    const auto message = error_message([&] { (void)call(*target, inputs); });
+    return message.find("completion mismatch") != std::string::npos &&
+        message.find("lifecycle_snapshot=available") != std::string::npos &&
+        message.find("scratch_status=8589934596") != std::string::npos &&
+        message.find("scratch_peer=1") != std::string::npos &&
+        message.find("scratch_error=4") != std::string::npos &&
+        message.find("queue_generation=1") != std::string::npos &&
+        message.find("queue_count=0") != std::string::npos &&
+        message.find("consumed_generation=1") != std::string::npos &&
+        message.find("diagnostic_generation=1") != std::string::npos &&
+        message.find("diagnostic_error=none") != std::string::npos;
+}
+
+bool consumed_generation_mismatch_reports_lifecycle() {
+    trace = {};
+    auto target = buffer();
+    Inputs inputs;
+    trace.lifecycle_failure = LifecycleFailure::kConsumedGenerationMismatch;
+    const auto message = error_message([&] { (void)call(*target, inputs); });
+    return message.find("completion mismatch") != std::string::npos &&
+        message.find("lifecycle_snapshot=available") != std::string::npos &&
+        message.find("scratch_status=0") != std::string::npos &&
+        message.find("scratch_peer=-1") != std::string::npos &&
+        message.find("scratch_error=0") != std::string::npos &&
+        message.find("queue_generation=1") != std::string::npos &&
+        message.find("queue_count=4") != std::string::npos &&
+        message.find("consumed_generation=0") != std::string::npos &&
+        message.find("diagnostic_generation=1") != std::string::npos &&
+        message.find("diagnostic_error=none") != std::string::npos;
+}
+
+bool snapshot_failure_preserves_combine_failure() {
+    trace = {};
+    auto target = buffer();
+    Inputs inputs;
+    trace.lifecycle_failure = LifecycleFailure::kConsumedGenerationMismatch;
+    trace.fail_copy_at = 5;
+    const auto message = error_message([&] { (void)call(*target, inputs); });
+    return message.find("completion mismatch") != std::string::npos &&
+        message.find("lifecycle_snapshot=unavailable") != std::string::npos &&
+        message.find("snapshot_operation=copy_to_host") != std::string::npos &&
+        message.find("snapshot_backend_code=84") != std::string::npos;
+}
+
 int main() {
     int failures = 0;
     const auto check = [&failures](bool passed, const char* name) {
@@ -800,5 +898,11 @@ int main() {
     check(single_reduction_constructor_flag(), "single reduction constructor flag");
     check(tensor_and_flag_validation(), "tensor and deferred flags");
     check(runtime_failures_poison(), "post-launch failure poisoning");
+    check(masked_producer_failure_reports_lifecycle(),
+          "masked producer failure lifecycle diagnostic");
+    check(consumed_generation_mismatch_reports_lifecycle(),
+          "consumed generation mismatch lifecycle diagnostic");
+    check(snapshot_failure_preserves_combine_failure(),
+          "snapshot failure preserves combine failure");
     return failures == 0 ? 0 : 1;
 }

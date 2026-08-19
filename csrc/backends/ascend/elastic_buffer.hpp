@@ -170,6 +170,56 @@ class ElasticBuffer {
         return "unknown";
     }
 
+    struct CombineLifecycleSnapshot {
+        std::uint64_t scratch_status = 0;
+        transport::TransportCommandQueue queue{};
+        transport::TransportServiceState service{};
+    };
+
+    transport::TransportStatus read_combine_lifecycle_snapshot(
+        std::uint64_t scratch_status_offset,
+        CombineLifecycleSnapshot* snapshot) const {
+        *snapshot = {};
+        const auto* scratch_status = static_cast<const std::uint8_t*>(
+            resources_->workspace()) + scratch_status_offset;
+        auto status = resources_->copy_to_host(
+            &snapshot->scratch_status, scratch_status,
+            sizeof(snapshot->scratch_status));
+        if (!status.ok())
+            return status;
+
+        transport::StagedTransportContext staged{};
+        const auto& context = resources_->device_context();
+        if (context.backend_context == 0)
+            return transport::TransportStatus::invalid(
+                "combine_lifecycle_snapshot",
+                "staged transport context is unavailable");
+        status = resources_->copy_to_host(
+            &staged, reinterpret_cast<const void*>(context.backend_context),
+            sizeof(staged));
+        if (!status.ok())
+            return status;
+        if (staged.command_queue == 0)
+            return transport::TransportStatus::invalid(
+                "combine_lifecycle_snapshot",
+                "transport command queue is unavailable");
+
+        status = resources_->copy_to_host(
+            &snapshot->queue,
+            reinterpret_cast<const void*>(staged.command_queue),
+            sizeof(snapshot->queue));
+        if (!status.ok())
+            return status;
+        if (snapshot->queue.service_state == 0)
+            return transport::TransportStatus::invalid(
+                "combine_lifecycle_snapshot",
+                "transport service state is unavailable");
+        return resources_->copy_to_host(
+            &snapshot->service,
+            reinterpret_cast<const void*>(snapshot->queue.service_state),
+            sizeof(snapshot->service));
+    }
+
     [[noreturn]] void raise_barrier_diagnostic(
         const transport::DeviceTransportDiagnostic& diagnostic,
         const char* detail) const {
@@ -218,7 +268,7 @@ class ElasticBuffer {
 
     [[noreturn]] void raise_combine_diagnostic(
         const transport::DeviceTransportDiagnostic& diagnostic,
-        const char* detail) const {
+        const char* detail, std::uint64_t scratch_status_offset) const {
         auto message = std::string("device diagnostic ") + detail +
             " error=" + diagnostic_name(diagnostic.error) +
             " command_index=" + std::to_string(diagnostic.command_index) +
@@ -231,7 +281,36 @@ class ElasticBuffer {
             " channel=" + std::to_string(diagnostic.channel) +
             " backend_status=" + std::to_string(diagnostic.backend_status) +
             " reserved=" + std::to_string(diagnostic.reserved) +
-            " generation=" + std::to_string(diagnostic.generation);
+            " generation=" + std::to_string(diagnostic.generation) +
+            " diagnostic_generation=" +
+                std::to_string(diagnostic.generation) +
+            " diagnostic_error=" + diagnostic_name(diagnostic.error);
+        CombineLifecycleSnapshot snapshot{};
+        const auto snapshot_status = read_combine_lifecycle_snapshot(
+            scratch_status_offset, &snapshot);
+        if (snapshot_status.ok()) {
+            const auto encoded_peer = snapshot.scratch_status >> 32U;
+            const auto scratch_peer = encoded_peer == 0 ? std::int64_t{-1} :
+                static_cast<std::int64_t>(encoded_peer - 1);
+            message +=
+                " lifecycle_snapshot=available scratch_status=" +
+                std::to_string(snapshot.scratch_status) +
+                " scratch_peer=" + std::to_string(scratch_peer) +
+                " scratch_error=" + std::to_string(
+                    static_cast<std::uint32_t>(snapshot.scratch_status)) +
+                " queue_generation=" +
+                std::to_string(snapshot.queue.generation) +
+                " queue_count=" + std::to_string(snapshot.queue.count) +
+                " consumed_generation=" +
+                std::to_string(snapshot.service.consumed_generation);
+        } else {
+            message +=
+                " lifecycle_snapshot=unavailable snapshot_operation=" +
+                snapshot_status.operation +
+                " snapshot_backend_code=" +
+                std::to_string(snapshot_status.backend_code) +
+                " snapshot_error=" + snapshot_status.message;
+        }
         raise_transport_status(
             transport::TransportStatus::runtime_failure(
                 "combine", static_cast<int>(diagnostic.backend_status),
@@ -1735,7 +1814,9 @@ public:
                 transport::kTransportCommandAbiVersion ||
             diagnostic.error != transport::DeviceTransportError::kNone ||
             diagnostic.generation != generation)
-            raise_combine_diagnostic(diagnostic, "reported failure");
+            raise_combine_diagnostic(
+                diagnostic, "reported failure",
+                tiling.workspace_layout.scratch_status_offset);
         std::uint64_t completion = 0;
         const auto completion_offset =
             tiling.symmetric_window_layout.control_offset +
@@ -1748,7 +1829,9 @@ public:
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         if (completion != generation)
-            raise_combine_diagnostic(diagnostic, "completion mismatch");
+            raise_combine_diagnostic(
+                diagnostic, "completion mismatch",
+                tiling.workspace_layout.scratch_status_offset);
         lease.complete();
         return {combined_x, combined_weights, std::nullopt};
     }
