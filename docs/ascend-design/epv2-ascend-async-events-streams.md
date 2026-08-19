@@ -121,10 +121,48 @@ marker recovery, and retains completed timing summaries plus stream/profiler
 failure evidence. Phase 3E.1 remains not accepted: 256 did not meet the fixed
 wall-time threshold, 512 timing summaries were lost by the old runner, and
 1024 has not completed a bounded diagnostic. The next proposed target action
-is a diagnostic-only 1024 point with zero warmups, one repetition, phase
-checkpoints, a 150-second controller bound, and a 175-second outer bound. One
+was a diagnostic-only 1024 point with zero warmups, one repetition, phase
+checkpoints, a 150-second controller bound, and the required 300-second
+TaskQueue bound. One
 sample may guide workload selection but cannot satisfy the warmed-median
 acceptance requirement.
+
+That diagnostic, `task_20260820_025915_29863145111`, exited 0 after the runner
+completed in 116.488 seconds. Both ranks completed every event wait and phase.
+Communication took approximately 1.388 seconds, isolated compute 11-12ms,
+serialized execution approximately 1.397 seconds, and overlapped execution
+approximately 1.394-1.395 seconds. The theoretical maximum improvement was
+only `0.008096`/`0.008735`; observed improvement was
+`0.002188`/`0.001010`. This 1024 workload therefore cannot meet the fixed 5%
+gate even with ideal scheduling.
+
+Torch runtime stream objects reported logical compute/communication IDs
+`0/128`, while the exported profiler trace labels the physical lanes `61/26`.
+Offline structured parsing of the exact hashed traces shows positive
+MatMulV3/DeepEP-dispatch overlap of `1381206.75us` and `1381206.0us`. Thus the
+implementation produces real hardware overlap, but that diagnostic's
+resource/workload balance does not produce a 5% wall-time gain. The result
+remains diagnostic-only and does not accept Phase 3E.1.
+
+The final acceptance workload keeps 256 communication tokens, the
+`4096x4096` BF16 matmul shape, three warmups, seven measured repetitions, the
+fixed 5% median-improvement threshold, and the 30-second external per-case
+watchdog. It changes only the runner's compute workload from 8 to 256 matmul
+iterations; production C++ and the five-second event deadline are unchanged.
+The 256-token traces place communication between approximately 0.27 and 0.59
+seconds. Scaling the measured 1024-token diagnostic's 8-iteration compute
+time of 0.011-0.012 seconds by 32 estimates 256 iterations at approximately
+0.36-0.39 seconds, putting compute and communication in the same range.
+
+At the high ends of those evidence ranges, the complete overlap case's three
+warmup serialized/overlapped pairs, seven measured pairs, and one profiler
+iteration consume approximately 14.3 seconds. Buffer creation and seeding
+therefore retain substantial margin under the unchanged 30-second watchdog;
+warmups and repetitions are not reduced. The profiler parser now resolves
+physical streams only from the unique `MatMulV3` compute event family and
+unique DeepEP `dispatch_kernel` communication event family, rejects aliased
+or ambiguous physical lanes, and reports runtime logical IDs separately from
+trace physical IDs. A final 21-case matrix is still required for acceptance.
 
 ## Decisions
 

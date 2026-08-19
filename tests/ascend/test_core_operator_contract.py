@@ -2018,7 +2018,7 @@ int main() {
                 ],
                 "overlap": {
                     "communication_tokens": 256,
-                    "compute_iterations": 8,
+                    "compute_iterations": 256,
                     "compute_shape": [4096, 4096],
                     "diagnostic_repetitions": 1,
                     "diagnostic_timeout_seconds": 150,
@@ -2075,18 +2075,33 @@ int main() {
         with tempfile.TemporaryDirectory() as directory:
             trace = pathlib.Path(directory) / "trace.json"
             trace.write_text(json.dumps({"traceEvents": [
-                {"ph": "X", "cat": "NPU", "name": "matmul",
+                {"ph": "X", "cat": "NPU",
+                 "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
                  "ts": 100.0, "dur": 40.0,
-                 "args": {"Stream Id": 7}},
-                {"ph": "X", "cat": "NPU", "name": "dispatch",
+                 "args": {"Physic Stream Id": 61}},
+                {"ph": "X", "cat": "NPU",
+                 "name": "deep_ep::ascend::elastic::dispatch_kernel",
                  "ts": 120.0, "dur": 50.0,
-                 "args": {"Stream Id": 11}},
+                 "args": {"Physic Stream Id": 26}},
+                {"ph": "X", "cat": "NPU", "name": "unrelated_kernel_a",
+                 "ts": 90.0, "dur": 100.0,
+                 "args": {"Physic Stream Id": 7}},
+                {"ph": "X", "cat": "NPU", "name": "unrelated_kernel_b",
+                 "ts": 95.0, "dur": 90.0,
+                 "args": {"Physic Stream Id": 11}},
             ]}))
-            overlap = module._find_npu_overlap_interval(
-                (trace,), compute_stream_id=7, comm_stream_id=11)
+            overlap = module._find_npu_overlap_interval((trace,))
         self.assertEqual(overlap["overlap_us"], 20.0)
-        self.assertEqual(overlap["compute_event"], "matmul")
-        self.assertEqual(overlap["communication_event"], "dispatch")
+        self.assertEqual(
+            overlap["compute_event"],
+            "aclnnMatmul_MatMulV3Common_MatMulV3",
+        )
+        self.assertEqual(
+            overlap["communication_event"],
+            "deep_ep::ascend::elastic::dispatch_kernel",
+        )
+        self.assertEqual(overlap["physical_compute_stream_id"], 61)
+        self.assertEqual(overlap["physical_communication_stream_id"], 26)
 
     def test_async_overlap_profiler_accepts_torch_npu_list_trace(self):
         spec = importlib.util.spec_from_file_location(
@@ -2097,19 +2112,45 @@ int main() {
         with tempfile.TemporaryDirectory() as directory:
             trace = pathlib.Path(directory) / "trace.json"
             trace.write_text(json.dumps([
-                {"ph": "X", "name": "matmul", "ts": 100.0,
-                 "dur": 40.0, "tid": 7,
-                 "args": {"Physic Stream Id": 7}},
-                {"ph": "X", "name": "dispatch", "ts": 120.0,
-                 "dur": 50.0, "tid": 11,
-                 "args": {"Physic Stream Id": 11}},
+                {"ph": "X",
+                 "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
+                 "ts": 100.0, "dur": 40.0, "tid": 61,
+                 "args": {"Physic Stream Id": 61}},
+                {"ph": "X", "name": "dispatch_kernel",
+                 "ts": 120.0, "dur": 50.0, "tid": 26,
+                 "args": {"Physic Stream Id": 26}},
             ]))
-            overlap = module._find_npu_overlap_interval(
-                (trace,), compute_stream_id=7, comm_stream_id=11)
+            overlap = module._find_npu_overlap_interval((trace,))
 
         self.assertEqual(overlap["overlap_us"], 20.0)
-        self.assertEqual(overlap["compute_event"], "matmul")
-        self.assertEqual(overlap["communication_event"], "dispatch")
+        self.assertEqual(
+            overlap["compute_event"],
+            "aclnnMatmul_MatMulV3Common_MatMulV3",
+        )
+        self.assertEqual(overlap["communication_event"], "dispatch_kernel")
+        self.assertEqual(overlap["physical_compute_stream_id"], 61)
+        self.assertEqual(overlap["physical_communication_stream_id"], 26)
+
+    def test_async_overlap_profiler_rejects_ambiguous_event_family_streams(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_ambiguous_trace", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            trace = pathlib.Path(directory) / "trace.json"
+            trace.write_text(json.dumps([
+                {"ph": "X", "name": "MatMulV3", "ts": 100.0,
+                 "dur": 40.0, "args": {"Physic Stream Id": 61}},
+                {"ph": "X", "name": "MatMulV3", "ts": 110.0,
+                 "dur": 40.0, "args": {"Physic Stream Id": 62}},
+                {"ph": "X", "name": "dispatch_kernel", "ts": 120.0,
+                 "dur": 50.0, "args": {"Physic Stream Id": 26}},
+            ]))
+            with self.assertRaisesRegex(
+                    AssertionError,
+                    "compute event family spans physical streams 61/62"):
+                module._find_npu_overlap_interval((trace,))
 
     def test_async_overlap_timeout_output_is_normalized_to_text(self):
         spec = importlib.util.spec_from_file_location(
@@ -2324,8 +2365,10 @@ int main() {
             "compute_interval_us": [100.0, 140.0],
             "communication_interval_us": [120.0, 170.0],
             "trace": "/tmp/overlap-rank0.json",
-            "compute_stream_id": 7,
-            "communication_stream_id": 11,
+            "logical_compute_stream_id": 0,
+            "logical_communication_stream_id": 128,
+            "physical_compute_stream_id": 61,
+            "physical_communication_stream_id": 26,
         }
         worker._profile_overlap = mock.Mock(return_value=profiler)
 
@@ -2346,6 +2389,10 @@ int main() {
         })
         self.assertAlmostEqual(measurement["median_improvement"], 0.01)
         self.assertEqual(measurement["profiler_overlap"], profiler)
+        self.assertEqual(measurement["logical_compute_stream_id"], 0)
+        self.assertEqual(measurement["logical_communication_stream_id"], 128)
+        self.assertEqual(measurement["physical_compute_stream_id"], 61)
+        self.assertEqual(measurement["physical_communication_stream_id"], 26)
         self.assertIn("below 0.050000", measurement["acceptance_failure"])
 
     def test_async_overlap_missing_profiler_interval_keeps_stream_evidence(
@@ -2409,8 +2456,10 @@ int main() {
                     FakeBuffer(), "handle", object(), object(), object())
 
         self.assertEqual(evidence["overlap_us"], 0.0)
-        self.assertEqual(evidence["compute_stream_id"], 7)
-        self.assertEqual(evidence["communication_stream_id"], 11)
+        self.assertEqual(evidence["logical_compute_stream_id"], 7)
+        self.assertEqual(evidence["logical_communication_stream_id"], 11)
+        self.assertNotIn("physical_compute_stream_id", evidence)
+        self.assertNotIn("physical_communication_stream_id", evidence)
         self.assertEqual(evidence["failure"], "no positive profiler interval")
 
     def test_async_overlap_sweep_keeps_timings_on_profiler_parse_failure(self):
@@ -2469,7 +2518,7 @@ int main() {
             def export_chrome_trace(path):
                 pathlib.Path(path).write_text(json.dumps([{
                     "ph": "X",
-                    "name": "malformed-duration",
+                    "name": "aclnnMatmul_MatMulV3Common_MatMulV3",
                     "ts": 100.0,
                     "dur": "not-a-duration",
                     "tid": 7,
@@ -2506,8 +2555,10 @@ int main() {
         self.assertEqual(measurement["compute"]["median_seconds"], 0.20)
         self.assertEqual(measurement["serialized"]["median_seconds"], 0.30)
         self.assertEqual(measurement["overlapped"]["median_seconds"], 0.27)
-        self.assertEqual(measurement["compute_stream_id"], 7)
-        self.assertEqual(measurement["communication_stream_id"], 11)
+        self.assertEqual(measurement["logical_compute_stream_id"], 7)
+        self.assertEqual(measurement["logical_communication_stream_id"], 11)
+        self.assertNotIn("physical_compute_stream_id", measurement)
+        self.assertNotIn("physical_communication_stream_id", measurement)
         self.assertEqual(measurement["profiler_overlap"]["overlap_us"], 0.0)
         self.assertIn("ValueError", measurement["profiler_overlap"]["failure"])
 
@@ -2552,8 +2603,10 @@ int main() {
             side_effect=lambda *_args, overlap: 0.27 if overlap else 0.30)
         worker._profile_overlap = mock.Mock(return_value={
             "overlap_us": 17.0,
-            "compute_stream_id": 7,
-            "communication_stream_id": 11,
+            "logical_compute_stream_id": 7,
+            "logical_communication_stream_id": 11,
+            "physical_compute_stream_id": 61,
+            "physical_communication_stream_id": 26,
         })
         checkpoints = []
 
@@ -2623,8 +2676,10 @@ int main() {
                     "minimum_median_improvement": 0.05,
                     "profiler_overlap": {
                         "overlap_us": 9.0 + rank,
-                        "compute_stream_id": 7 + rank,
-                        "communication_stream_id": 17 + rank,
+                        "logical_compute_stream_id": 7 + rank,
+                        "logical_communication_stream_id": 17 + rank,
+                        "physical_compute_stream_id": 61,
+                        "physical_communication_stream_id": 26,
                     },
                     "acceptance_failure":
                         f"overlap median improvement {improvement:.6f} "
@@ -2641,8 +2696,8 @@ int main() {
                          [0, 1])
         self.assertEqual(
             measurements["ranks"][0]["profiler_overlap"]
-            ["communication_stream_id"],
-            17,
+            ["physical_communication_stream_id"],
+            26,
         )
         self.assertEqual(len(failures), 2)
         self.assertTrue(any(
@@ -2666,8 +2721,10 @@ int main() {
             for rank in range(2):
                 profiler = {
                     "overlap_us": overlap_us,
-                    "compute_stream_id": 7 + rank,
-                    "communication_stream_id": 17 + rank,
+                    "logical_compute_stream_id": 7 + rank,
+                    "logical_communication_stream_id": 17 + rank,
+                    "physical_compute_stream_id": 61,
+                    "physical_communication_stream_id": 26,
                 }
                 if overlap_us == 0:
                     profiler["failure"] = "no positive profiler interval"

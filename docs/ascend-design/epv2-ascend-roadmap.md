@@ -317,10 +317,41 @@ evidence but not Phase 3E.1 acceptance.
 
 The next proposed NPU action is not another three-point sweep. It is one
 diagnostic-only 1024 point with zero warmups, one repetition, explicit phase
-checkpoints, a 150-second controller bound, and a 175-second TaskQueue bound.
+checkpoints, a 150-second controller bound, and the required 300-second
+TaskQueue bound.
 The fixed 5% threshold remains unchanged, and one sample cannot be promoted to
 the warmed-median acceptance result. No retry is submitted until that bounded
 shape and the current runner evidence are reviewed.
+
+The approved diagnostic, `task_20260820_025915_29863145111`, subsequently
+exited 0. Both ranks completed all event waits and profiler phases. At 1024
+tokens, communication was approximately 1.388 seconds while isolated compute
+was only 11-12ms, limiting ideal improvement to 0.81-0.87%; observed
+improvement was 0.10-0.22%. Exact traces also show approximately 1.381 seconds
+of positive MatMulV3/DeepEP-dispatch overlap on physical streams `61/26` on
+both ranks. Runtime objects expose those streams as logical IDs `0/128`.
+
+This closes the bounded diagnostic question: hardware overlap is present, but
+the tested load ratio cannot satisfy the fixed 5% wall-time criterion. Because
+the run used one sample and is explicitly acceptance-ineligible, Phase 3E.1
+remains not accepted.
+
+The final acceptance matrix therefore retains 256 communication tokens,
+`4096x4096` BF16 compute, three warmups, seven repetitions, the fixed 5% gate,
+and the 30-second per-case watchdog, while increasing only the runner compute
+iterations from 8 to 256. The 256-token trace evidence puts communication at
+approximately 0.27-0.59 seconds; scaling the measured 8-iteration compute
+component estimates 256 iterations at 0.36-0.39 seconds. Even the high-end
+static estimate for all warmup, measured, and profiler iterations is about
+14.3 seconds, so the existing watchdog retains margin without reducing the
+meaningful seven-sample median. This is runner-only load balancing, not a
+production change, event-deadline increase, or acceptance-threshold decrease.
+
+The runner also separates logical runtime stream IDs from physical profiler
+lane IDs. Physical lanes must be uniquely identified by the `MatMulV3` and
+DeepEP `dispatch_kernel` event families, must differ, and must have a positive
+overlap interval. One final complete 21-case two-rank matrix is required before
+Phase 3E.1 can be accepted.
 
 ### Deliverables
 

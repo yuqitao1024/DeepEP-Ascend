@@ -27,7 +27,7 @@ OVERLAP_WARMUPS = 3
 OVERLAP_REPETITIONS = 7
 OVERLAP_COMMUNICATION_TOKENS = 256
 OVERLAP_COMPUTE_SHAPE = (4096, 4096)
-OVERLAP_COMPUTE_ITERATIONS = 8
+OVERLAP_COMPUTE_ITERATIONS = 256
 OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT = 0.05
 OVERLAP_DIAGNOSTIC_TIMEOUT_SECONDS = 180
 OVERLAP_DIAGNOSTIC_GRACE_SECONDS = 10.0
@@ -324,8 +324,7 @@ def _stream_id(event):
     return event.get("tid")
 
 
-def _find_npu_overlap_interval(
-        trace_paths, compute_stream_id, comm_stream_id):
+def _find_npu_overlap_interval(trace_paths):
     events = []
     for trace_path in trace_paths:
         try:
@@ -337,33 +336,56 @@ def _find_npu_overlap_interval(
         events.extend(
             event for event in trace_events if isinstance(event, dict))
 
-    def intervals(stream_id):
+    def event_family_intervals(name_fragment):
         selected = []
         for event in events:
             if event.get("ph") != "X" or "ts" not in event or \
                     "dur" not in event:
                 continue
-            if str(_stream_id(event)) != str(stream_id):
+            name = str(event.get("name", ""))
+            if name_fragment not in name:
                 continue
-            category = str(event.get("cat", "")).lower()
             has_stream_id = any(
                 "".join(character.lower() for character in str(key)
                         if character.isalnum()) in
                 ("physicstreamid", "streamid", "stream")
                 for key in (event.get("args") or {}))
-            if "npu" not in category and "kernel" not in category and \
-                    "ascend" not in category and not has_stream_id:
+            if not has_stream_id:
                 continue
             start = float(event["ts"])
             duration = float(event["dur"])
             if duration > 0:
-                selected.append((start, start + duration,
-                                 str(event.get("name", "unnamed"))))
+                selected.append((start, start + duration, name,
+                                 _stream_id(event)))
         return selected
 
+    compute_intervals = event_family_intervals("MatMulV3")
+    communication_intervals = event_family_intervals("dispatch_kernel")
+
+    def unique_stream(intervals, family):
+        streams = sorted({row[3] for row in intervals}, key=lambda value: str(value))
+        _check(streams, f"NPU profiler did not contain {family} events")
+        _check(
+            len(streams) == 1,
+            f"{family} event family spans physical streams " +
+            "/".join(str(value) for value in streams),
+        )
+        return streams[0]
+
+    physical_compute_stream_id = unique_stream(
+        compute_intervals, "compute")
+    physical_communication_stream_id = unique_stream(
+        communication_intervals, "communication")
+    _check(
+        str(physical_compute_stream_id) !=
+        str(physical_communication_stream_id),
+        "profiler compute and communication event families alias physical "
+        f"stream {physical_compute_stream_id}",
+    )
+
     best = None
-    for compute in intervals(compute_stream_id):
-        for communication in intervals(comm_stream_id):
+    for compute in compute_intervals:
+        for communication in communication_intervals:
             overlap = min(compute[1], communication[1]) - \
                 max(compute[0], communication[0])
             if overlap > 0 and (best is None or overlap > best[0]):
@@ -371,13 +393,17 @@ def _find_npu_overlap_interval(
     if best is None:
         raise AssertionError(
             "NPU profiler did not contain an overlapping compute/communication "
-            f"interval for streams {compute_stream_id}/{comm_stream_id}")
+            "interval for MatMulV3/dispatch_kernel on physical streams "
+            f"{physical_compute_stream_id}/{physical_communication_stream_id}")
     return {
         "overlap_us": best[0],
         "compute_event": best[1][2],
         "communication_event": best[2][2],
         "compute_interval_us": [best[1][0], best[1][1]],
         "communication_interval_us": [best[2][0], best[2][1]],
+        "physical_compute_stream_id": physical_compute_stream_id,
+        "physical_communication_stream_id":
+            physical_communication_stream_id,
     }
 
 
@@ -654,13 +680,26 @@ def _validate_overlap_sweep(points):
             _check(row.get("tokens") == point.get("tokens"),
                    "overlap sweep rank token count mismatches its point")
             buffer_instances.append(row.get("buffer_instance"))
-            _check(row.get("compute_stream_id",
+            _check(row.get("logical_compute_stream_id",
                            row.get("profiler_overlap", {}).get(
-                               "compute_stream_id")) !=
-                   row.get("communication_stream_id",
+                               "logical_compute_stream_id")) !=
+                   row.get("logical_communication_stream_id",
                            row.get("profiler_overlap", {}).get(
-                               "communication_stream_id")),
+                               "logical_communication_stream_id")),
                    "overlap sweep compute and communication streams alias")
+            profiler = row.get("profiler_overlap", {})
+            if profiler.get("overlap_us", 0) > 0:
+                physical_compute = row.get(
+                    "physical_compute_stream_id",
+                    profiler.get("physical_compute_stream_id"))
+                physical_communication = row.get(
+                    "physical_communication_stream_id",
+                    profiler.get("physical_communication_stream_id"))
+                _check(physical_compute is not None and
+                       physical_communication is not None,
+                       "positive overlap omitted physical stream IDs")
+                _check(str(physical_compute) != str(physical_communication),
+                       "profiler compute and communication streams alias")
             for name in required_summaries:
                 _check(set(row.get(name, {})) == required_summary_fields,
                        f"overlap sweep {name} summary is incomplete")
@@ -1678,18 +1717,14 @@ class AsyncOverlapWorker:
         compute_stream = self.torch.npu.current_stream()
         comm_stream = buffer.get_comm_stream()
         try:
-            interval = _find_npu_overlap_interval(
-                (trace_path,),
-                compute_stream_id=compute_stream.stream_id,
-                comm_stream_id=comm_stream.stream_id,
-            )
+            interval = _find_npu_overlap_interval((trace_path,))
         except Exception as error:
             failure = str(error) if isinstance(error, AssertionError) else \
                 f"{type(error).__name__}: {error}"
             interval = {"overlap_us": 0.0, "failure": failure}
         interval["trace"] = str(trace_path)
-        interval["compute_stream_id"] = compute_stream.stream_id
-        interval["communication_stream_id"] = comm_stream.stream_id
+        interval["logical_compute_stream_id"] = compute_stream.stream_id
+        interval["logical_communication_stream_id"] = comm_stream.stream_id
         return interval
 
     def _run_overlap(self):
@@ -1751,6 +1786,13 @@ class AsyncOverlapWorker:
             "profiler_overlap": interval,
             "global_synchronizations": 0,
         }
+        for key in (
+                "logical_compute_stream_id",
+                "logical_communication_stream_id",
+                "physical_compute_stream_id",
+                "physical_communication_stream_id"):
+            if key in interval:
+                measurement[key] = interval[key]
         failures = []
         if improvement < OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT:
             failures.append(
@@ -1863,9 +1905,13 @@ class AsyncOverlapWorker:
         checkpoint_phase("profiler", "started")
         profiler = self._profile_overlap(
             buffer, handle, changed_x, left, right)
-        measurement["compute_stream_id"] = profiler["compute_stream_id"]
-        measurement["communication_stream_id"] = \
-            profiler["communication_stream_id"]
+        for key in (
+                "logical_compute_stream_id",
+                "logical_communication_stream_id",
+                "physical_compute_stream_id",
+                "physical_communication_stream_id"):
+            if key in profiler:
+                measurement[key] = profiler[key]
         measurement["profiler_overlap"] = profiler
         checkpoint_phase("profiler", "completed")
         return measurement
