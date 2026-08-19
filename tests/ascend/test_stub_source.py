@@ -96,6 +96,7 @@ inline constexpr ScalarType kLong = 2;
 inline constexpr ScalarType kFloat = 3;
 inline constexpr ScalarType kInt = 4;
 inline constexpr ScalarType kByte = 5;
+inline constexpr ScalarType kFloat8_e4m3fn = 6;
 
 class TensorOptions {
     ScalarType type_ = kBFloat16;
@@ -133,6 +134,13 @@ public:
     std::int64_t dim() const { return sizes_.size(); }
     ScalarType scalar_type() const { return type_; }
     std::int64_t size(std::int64_t dimension) const { return sizes_.at(dimension); }
+    std::int64_t stride(std::int64_t dimension) const {
+        std::int64_t result = 1;
+        for (std::int64_t index = dimension + 1;
+             index < static_cast<std::int64_t>(sizes_.size()); ++index)
+            result *= sizes_[index];
+        return result;
+    }
     const std::vector<std::int64_t>& sizes() const { return sizes_; }
     std::int64_t numel() const { std::int64_t result = 1; for (auto value : sizes_) result *= value; return result; }
     TensorOptions options() const {
@@ -153,6 +161,12 @@ private:
 };
 
 inline Tensor empty(std::initializer_list<std::int64_t> sizes, const TensorOptions& options) {
+    return Tensor(sizes, options);
+}
+
+inline Tensor empty_strided(std::initializer_list<std::int64_t> sizes,
+                            std::initializer_list<std::int64_t>,
+                            const TensorOptions& options) {
     return Tensor(sizes, options);
 }
 
@@ -353,10 +367,11 @@ int main() {
             std::string::npos)
             return 30;
     }
-    if (!raises_transport_error(
-            "calculate_elastic_buffer_size", "does not support FP8", [] {
-                Buffer::calculate_buffer_size(7, 128, 7168, 8, true, false, true);
-            }))
+    const auto fp8_buffer_bytes = Buffer::calculate_buffer_size(
+        7, 128, 7168, 8, true, false, true);
+    if (fp8_buffer_bytes <= 0 ||
+        fp8_buffer_bytes % deep_ep::ascend::elastic::kPublicElasticBufferAlignment != 0 ||
+        fp8_buffer_bytes == buffer_bytes)
         return 31;
     if (!raises_transport_error(
             "calculate_elastic_buffer_size", "does not support hybrid mode", [] {
@@ -513,6 +528,8 @@ int main() {
     host_api.get_size = fake_get_size;
     const auto buffer_bytes = Buffer::calculate_buffer_size_for_testing(
         7, 128, 7168, 8, false, false, true, host_api);
+    const auto fp8_buffer_bytes = Buffer::calculate_buffer_size_for_testing(
+        7, 128, 7168, 8, true, false, true, host_api);
     deep_ep::ascend::elastic::SymmetricWindowInput input{};
     input.world_size = 3;
     input.num_max_tokens_per_rank = 128;
@@ -526,6 +543,13 @@ int main() {
             input, &layout).ok() ||
         buffer_bytes != static_cast<std::int64_t>(layout.total_bytes))
         return 3;
+    input.element_bytes = 1;
+    input.scale_factor_bytes = ((input.hidden + 31) / 32) * 4;
+    if (!deep_ep::ascend::elastic::build_symmetric_window_layout(
+            input, &layout).ok() ||
+        fp8_buffer_bytes != static_cast<std::int64_t>(layout.total_bytes) ||
+        fp8_buffer_bytes == buffer_bytes)
+        return 4;
     try {
         Buffer::calculate_buffer_size(
             7, 128, 7168, 8, false, false, true);
@@ -535,11 +559,6 @@ int main() {
                 "CANN public host headers are unavailable") == std::string::npos)
             return 8;
     }
-    if (!raises_transport_error(
-            "calculate_elastic_buffer_size", "does not support FP8", [] {
-                Buffer::calculate_buffer_size(7, 128, 7168, 8, true, false, true);
-            }))
-        return 4;
     try {
         Buffer::cpu_comm_t cpu_comm;
         Buffer invalid_timeout(0, 2, 7, cpu_comm, 2 * 1024 * 1024, 0,

@@ -116,12 +116,16 @@ struct BarrierArguments {
 struct DispatchArguments {
     const void* x = nullptr;
     const void* scale_factors = nullptr;
+    std::uint64_t scale_factor_token_stride = 0;
+    std::uint64_t scale_factor_pack_stride = 0;
     const std::int64_t* topk_indices = nullptr;
     const float* topk_weights = nullptr;
     void* communication_buffer = nullptr;
     void* workspace = nullptr;
     void* recv_x = nullptr;
     void* recv_scale_factors = nullptr;
+    std::uint64_t recv_scale_factor_token_stride = 0;
+    std::uint64_t recv_scale_factor_pack_stride = 0;
     std::int64_t* recv_topk_indices = nullptr;
     float* recv_topk_weights = nullptr;
     std::int32_t* prefix_per_rank = nullptr;

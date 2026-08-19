@@ -1130,6 +1130,12 @@ def _scenario_ascend_implicit_size():
         lambda: deep_ep.ElasticBuffer.get_buffer_size_hint(group, 2, 32, 4))
     assert extension.size_calls[-1] == (4242, 2, 32, 4, False, True, True)
 
+    extension.size_failure = None
+    assert deep_ep.ElasticBuffer.get_buffer_size_hint(
+        group, 2, 32, 4, use_fp8_dispatch=True,
+        allow_hybrid_mode=False) == 2 * 1024 * 1024
+    assert extension.size_calls[-1] == (4242, 2, 32, 4, True, False, True)
+
 
 def _scenario_ascend_method_gates():
     deep_ep, extension, events = _load_package("ascend", True)

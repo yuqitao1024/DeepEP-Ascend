@@ -366,11 +366,13 @@ class ElasticBuffer {
         std::uint64_t num_experts, std::uint64_t num_topk,
         std::uint64_t expert_alignment,
         std::uint64_t num_max_tokens_per_rank,
-        elastic::CoreModeFlags mode_flags) const {
+        elastic::CoreModeFlags mode_flags,
+        elastic::ElementKind element_kind,
+        std::uint64_t num_scale_factor_packs) const {
         const auto& context = resources_->device_context();
         elastic::CoreTilingInput input{};
         input.operation = elastic::OperationKind::kDispatch;
-        input.element_kind = elastic::ElementKind::kBFloat16;
+        input.element_kind = element_kind;
         input.mode_flags = mode_flags;
         input.num_tokens = num_tokens;
         input.hidden = hidden;
@@ -378,6 +380,8 @@ class ElasticBuffer {
         input.num_topk = num_topk;
         input.expert_alignment = expert_alignment;
         input.num_max_tokens_per_rank = num_max_tokens_per_rank;
+        input.num_scale_factor_packs = num_scale_factor_packs;
+        input.scale_factor_pack_bytes = num_scale_factor_packs == 0 ? 0 : 4;
         input.has_reusable_slots =
             elastic::has_mode(mode_flags, elastic::CoreMode::kCached);
         input.topology.world_rank = context.topology.world_rank;
@@ -748,9 +752,6 @@ public:
             comm_handle != 0,
             "DeepEP Ascend backend: calculate_elastic_buffer_size "
             "communicator_handle must be nonzero");
-        if (use_fp8_dispatch)
-            raise_unsupported(
-                "calculate_elastic_buffer_size", "does not support FP8");
         TORCH_CHECK(
             num_max_tokens_per_rank > 0 && hidden > 0 && num_topk >= 0,
             "DeepEP Ascend backend: calculate_elastic_buffer_size requires "
@@ -766,7 +767,7 @@ public:
             query_status.backend_code, ": ", query_status.message);
         return calculate_buffer_size_for_world_size(
             world_size, num_max_tokens_per_rank, hidden, num_topk,
-            allow_multiple_reduction, allow_hybrid_mode);
+            use_fp8_dispatch, allow_multiple_reduction, allow_hybrid_mode);
     }
 
 #if DEEP_EP_ASCEND_TESTING
@@ -780,9 +781,6 @@ public:
             comm_handle != 0,
             "DeepEP Ascend backend: calculate_elastic_buffer_size "
             "communicator_handle must be nonzero");
-        if (use_fp8_dispatch)
-            raise_unsupported(
-                "calculate_elastic_buffer_size", "does not support FP8");
         TORCH_CHECK(
             num_max_tokens_per_rank > 0 && hidden > 0 && num_topk >= 0,
             "DeepEP Ascend backend: calculate_elastic_buffer_size requires "
@@ -797,21 +795,24 @@ public:
             query_status.backend_code, ": ", query_status.message);
         return calculate_buffer_size_for_world_size(
             world_size, num_max_tokens_per_rank, hidden, num_topk,
-            allow_multiple_reduction, allow_hybrid_mode);
+            use_fp8_dispatch, allow_multiple_reduction, allow_hybrid_mode);
     }
 #endif
 
 private:
     static int64_t calculate_buffer_size_for_world_size(
         std::uint32_t world_size, int num_max_tokens_per_rank, int hidden,
-        int num_topk, bool allow_multiple_reduction, bool hybrid) {
+        int num_topk, bool use_fp8_dispatch,
+        bool allow_multiple_reduction, bool hybrid) {
         elastic::SymmetricWindowInput input{};
         input.world_size = static_cast<int>(world_size);
         input.num_max_tokens_per_rank =
             static_cast<std::uint64_t>(num_max_tokens_per_rank);
         input.hidden = static_cast<std::uint64_t>(hidden);
         input.num_topk = static_cast<std::uint64_t>(num_topk);
-        input.element_bytes = 2;
+        input.element_bytes = use_fp8_dispatch ? 1 : 2;
+        input.scale_factor_bytes = use_fp8_dispatch ?
+            ((static_cast<std::uint64_t>(hidden) + 31U) / 32U) * 4U : 0U;
         input.expanded = true;
         input.allow_multiple_reduction = allow_multiple_reduction;
         input.hybrid = hybrid;
@@ -864,15 +865,13 @@ public:
              const bool& do_cpu_sync, const bool& do_expand,
              const bool& do_zero_padding,
              const bool& use_tma_aligned_col_major_sf) const {
-        TORCH_CHECK(!sf.has_value() && !cumulative_local_expert_recv_stats.has_value(),
-                    "DeepEP Ascend backend: dispatch does not support scale factors "
-                    "or cumulative expert stats");
+        TORCH_CHECK(!cumulative_local_expert_recv_stats.has_value(),
+                    "DeepEP Ascend backend: dispatch does not support "
+                    "cumulative expert stats");
         TORCH_CHECK(!previous_event.has_value() &&
                         !previous_event_before_epilogue.has_value() &&
                         !async_with_compute_stream && !allocate_on_comm_stream,
                     "DeepEP Ascend backend: dispatch is synchronous");
-        TORCH_CHECK(!use_tma_aligned_col_major_sf,
-                    "DeepEP Ascend backend: dispatch does not support TMA mode");
         const bool cached_mode = cached_num_recv_tokens.has_value();
         TORCH_CHECK(do_cpu_sync || cached_mode,
                     "DeepEP Ascend backend: dispatch requires do_cpu_sync unless cached");
@@ -888,7 +887,18 @@ public:
                     "DeepEP Ascend backend: dispatch requires positive, "
                     "rank-partitioned expert capacity");
         const auto device = x.device();
-        validate_npu_tensor(x, 2, torch::kBFloat16, device, "BF16 x");
+        const bool fp8_dispatch = x.scalar_type() == torch::kFloat8_e4m3fn;
+        TORCH_CHECK(
+            (fp8_dispatch && sf.has_value()) ||
+                (x.scalar_type() == torch::kBFloat16 && !sf.has_value()),
+            "DeepEP Ascend backend: dispatch requires BF16 x without scale "
+            "factors or E4M3 x with scale factors");
+        validate_npu_tensor(
+            x, 2, fp8_dispatch ? torch::kFloat8_e4m3fn : torch::kBFloat16,
+            device, fp8_dispatch ? "E4M3 x" : "BF16 x");
+        TORCH_CHECK(fp8_dispatch || !use_tma_aligned_col_major_sf,
+                    "DeepEP Ascend backend: dispatch column-major scale "
+                    "factors require FP8");
         validate_npu_tensor(topk_idx, 2, torch::kLong, device, "int64 topk_idx");
         TORCH_CHECK(x.size(0) == topk_idx.size(0) && x.size(0) >= 0 &&
                         x.size(0) <= num_max_tokens_per_rank && x.size(1) > 0 &&
@@ -899,6 +909,26 @@ public:
                 *topk_weights, 2, torch::kFloat, device, "float32 topk_weights");
             TORCH_CHECK(topk_weights->sizes() == topk_idx.sizes(),
                         "DeepEP Ascend backend: dispatch topk_weights shape mismatch");
+        }
+        std::uint64_t num_scale_factor_packs = 0;
+        if (sf.has_value()) {
+            TORCH_CHECK(
+                sf->device().type() == c10::DeviceType::PrivateUse1 &&
+                    sf->device() == device && sf->dim() == 2 &&
+                    (sf->scalar_type() == torch::kFloat ||
+                     sf->scalar_type() == torch::kInt) &&
+                    sf->size(0) == x.size(0) && sf->size(1) > 0 &&
+                    sf->stride(0) > 0 && sf->stride(1) > 0,
+                "DeepEP Ascend backend: dispatch scale factors require a "
+                "same-device rank-2 float32 or int32 tensor with matching "
+                "tokens, positive pack count, and positive strides");
+            num_scale_factor_packs =
+                static_cast<std::uint64_t>(sf->size(1));
+            const auto max_scale_factor_packs =
+                (static_cast<std::uint64_t>(x.size(1)) + 31U) / 32U;
+            TORCH_CHECK(num_scale_factor_packs <= max_scale_factor_packs,
+                        "DeepEP Ascend backend: dispatch scale factor packs "
+                        "exceed the supported hidden-width bound");
         }
         if (allow_hybrid_mode_)
             require_transport("dispatch",
@@ -946,7 +976,11 @@ public:
         const auto experts = static_cast<std::uint64_t>(num_experts);
         const auto alignment = static_cast<std::uint64_t>(expert_alignment);
         const auto tiling = build_dispatch_tiling(
-            num_tokens, hidden, experts, num_topk, alignment, capacity, mode_flags);
+            num_tokens, hidden, experts, num_topk, alignment, capacity,
+            mode_flags,
+            fp8_dispatch ? elastic::ElementKind::kFloat8E4M3 :
+                           elastic::ElementKind::kBFloat16,
+            num_scale_factor_packs);
         TORCH_CHECK(tiling.communication_buffer_bytes <=
                         static_cast<std::uint64_t>(num_buffer_bytes_) &&
                         tiling.workspace_bytes <= resources_->workspace_bytes(),
@@ -1221,6 +1255,26 @@ public:
         auto recv_x = torch::empty(
             {static_cast<int64_t>(do_expand ? expanded_records : max_recv_tokens),
              x.size(1)}, x.options());
+        auto recv_sf = std::optional<torch::Tensor>();
+        if (sf.has_value()) {
+            const auto allocated_tokens = static_cast<int64_t>(
+                do_expand ? expanded_records : max_recv_tokens);
+            const auto sf_token_stride = use_tma_aligned_col_major_sf ?
+                int64_t{1} : static_cast<int64_t>(num_scale_factor_packs);
+            std::uint64_t aligned_tokens = 0;
+            TORCH_CHECK(
+                !use_tma_aligned_col_major_sf ||
+                    align_without_overflow(
+                        static_cast<std::uint64_t>(allocated_tokens), 4,
+                        &aligned_tokens),
+                "DeepEP Ascend backend: dispatch scale factor output stride overflow");
+            const auto sf_pack_stride = use_tma_aligned_col_major_sf ?
+                static_cast<int64_t>(aligned_tokens) : int64_t{1};
+            recv_sf = torch::empty_strided(
+                {allocated_tokens,
+                 static_cast<int64_t>(num_scale_factor_packs)},
+                {sf_token_stride, sf_pack_stride}, sf->options());
+        }
         auto recv_topk_indices = torch::empty(
             {static_cast<int64_t>(max_recv_tokens), topk_idx.size(1)},
             topk_idx.options());
@@ -1250,12 +1304,23 @@ public:
 
         elastic::DispatchArguments arguments{};
         arguments.x = x.data_ptr();
+        arguments.scale_factors = sf.has_value() ? sf->data_ptr() : nullptr;
+        arguments.scale_factor_token_stride = sf.has_value() ?
+            static_cast<std::uint64_t>(sf->stride(0)) : 0;
+        arguments.scale_factor_pack_stride = sf.has_value() ?
+            static_cast<std::uint64_t>(sf->stride(1)) : 0;
         arguments.topk_indices = topk_idx.data_ptr<std::int64_t>();
         arguments.topk_weights = topk_weights.has_value() ?
             topk_weights->data_ptr<float>() : nullptr;
         arguments.communication_buffer = resources_->window_base();
         arguments.workspace = resources_->workspace();
         arguments.recv_x = recv_x.data_ptr();
+        arguments.recv_scale_factors = recv_sf.has_value() ?
+            recv_sf->data_ptr() : nullptr;
+        arguments.recv_scale_factor_token_stride = recv_sf.has_value() ?
+            static_cast<std::uint64_t>(recv_sf->stride(0)) : 0;
+        arguments.recv_scale_factor_pack_stride = recv_sf.has_value() ?
+            static_cast<std::uint64_t>(recv_sf->stride(1)) : 0;
         arguments.recv_topk_indices = recv_topk_indices.data_ptr<std::int64_t>();
         arguments.recv_topk_weights = recv_topk_weights.has_value() ?
             recv_topk_weights->data_ptr<float>() : nullptr;
@@ -1455,6 +1520,9 @@ public:
         lease.complete();
         const int output_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
         auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
+        auto narrowed_sf = recv_sf.has_value() ?
+            std::optional<torch::Tensor>(recv_sf->narrow(0, 0, output_tokens)) :
+            std::optional<torch::Tensor>();
         auto narrowed_topk_idx = do_expand ? std::optional<torch::Tensor>() :
             std::optional<torch::Tensor>(recv_topk_indices.narrow(0, 0, output_tokens));
         auto narrowed_topk_weights = recv_topk_weights.has_value() ?
@@ -1469,7 +1537,7 @@ public:
                     static_cast<std::uint64_t>(num_recv_tokens) *
                         sizeof(elastic::HybridRouteRecord))) :
             descriptor_tensor;
-        return {narrowed_x, std::nullopt, narrowed_topk_idx,
+        return {narrowed_x, narrowed_sf, narrowed_topk_idx,
                 narrowed_topk_weights, copied_topk_idx, num_recv_tokens,
                 num_expanded_tokens, per_expert_list, rank_prefix,
                 expert_prefix, unaligned, narrowed_metadata,
