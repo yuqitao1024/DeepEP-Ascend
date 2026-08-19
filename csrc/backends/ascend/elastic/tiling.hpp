@@ -42,7 +42,7 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 11;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 12;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;

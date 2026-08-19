@@ -16,6 +16,25 @@ int main() {
     static_assert(std::is_standard_layout_v<CombineRecordHeader>);
     static_assert(std::is_trivially_copyable_v<CombineRecordHeader>);
     static_assert(sizeof(CombineRecordHeader) == 24);
+    static_assert(std::is_standard_layout_v<HybridCombineRouteMetadata>);
+    static_assert(std::is_trivially_copyable_v<HybridCombineRouteMetadata>);
+    static_assert(sizeof(HybridCombineRouteMetadata) == 16);
+    static_assert(kDirectCombineRecordTrailerBytes == 32);
+    static_assert(kHybridCombineRecordTrailerBytes == 64);
+
+    const auto direct_trailer = combine_record_trailer_layout(96, false);
+    CHECK(direct_trailer.valid);
+    CHECK(direct_trailer.header_offset == 64);
+    CHECK(!direct_trailer.has_route_metadata);
+    CHECK(direct_trailer.route_metadata_offset == 0);
+    const auto hybrid_trailer = combine_record_trailer_layout(128, true);
+    CHECK(hybrid_trailer.valid);
+    CHECK(hybrid_trailer.header_offset == 64);
+    CHECK(hybrid_trailer.has_route_metadata);
+    CHECK(hybrid_trailer.route_metadata_offset == 88);
+    CHECK(hybrid_trailer.route_metadata_offset +
+              sizeof(HybridCombineRouteMetadata) <= 128);
+    CHECK(!combine_record_trailer_layout(32, true).valid);
 
     CombineSequence sequence;
     {

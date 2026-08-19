@@ -9,12 +9,18 @@ namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kAscendElasticAlignment = 32;
 inline constexpr std::uint64_t kPublicElasticBufferAlignment = 2ULL << 20U;
-inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 6;
+inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 7;
 inline constexpr std::uint64_t kHybridRouteRecordBytes = 64;
 inline constexpr std::uint64_t kCombineControlSlotBytes =
     2 * sizeof(std::uint64_t);
 inline constexpr std::uint64_t kCombineRecordHeaderBytes =
     2 * sizeof(std::uint32_t) + 4 * sizeof(std::int32_t);
+inline constexpr std::uint64_t kHybridCombineRouteMetadataBytes =
+    2 * sizeof(std::uint64_t);
+inline constexpr std::uint64_t kDirectCombineRecordTrailerBytes =
+    kAscendElasticAlignment;
+inline constexpr std::uint64_t kHybridCombineRecordTrailerBytes =
+    2 * kAscendElasticAlignment;
 
 enum class CoreMode : std::uint8_t {
     kCached,
@@ -415,7 +421,10 @@ inline LayoutStatus build_symmetric_window_layout(
         if (!combine_record.append(hidden_bytes, &ignored) ||
             !combine_record.append(topk_weight_bytes,
                                    &layout.combine_weight_offset) ||
-            !combine_record.append(kCombineRecordHeaderBytes, &ignored) ||
+            !combine_record.append(
+                input.hybrid ? kHybridCombineRecordTrailerBytes :
+                               kDirectCombineRecordTrailerBytes,
+                &ignored) ||
             !combine_record.finish(&layout.combine_record_bytes))
             return LayoutStatus::overflow("combine record layout overflow");
 

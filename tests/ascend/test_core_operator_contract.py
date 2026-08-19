@@ -750,6 +750,67 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             combine.index("__simt_vf__ inline void hybrid_combine_return_vf")]
         self.assertIn("is_complete_hybrid_route_stage_flags(", producer)
 
+    def test_combine_record_trailer_geometry_is_shared_by_all_stages(self):
+        def block_end(source, statement_start):
+            opening = source.index("{", statement_start)
+            depth = 0
+            for index in range(opening, len(source)):
+                if source[index] == "{":
+                    depth += 1
+                elif source[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return index + 1
+            raise AssertionError("unterminated route metadata guard")
+
+        source = (ELASTIC / "combine.asc").read_text()
+        producer = source[
+            source.index("__simt_vf__ inline void combine_producer_vf"):
+            source.index("__simt_vf__ inline void hybrid_combine_return_vf")]
+        reverse_return = source[
+            source.index("__simt_vf__ inline void hybrid_combine_return_vf"):
+            source.index(
+                "__simt_vf__ inline void hybrid_combine_prepare_epilogue_vf")]
+        prepare = source[
+            source.index(
+                "__simt_vf__ inline void hybrid_combine_prepare_epilogue_vf"):
+            source.index("struct CombineOriginDeviceRecordSource")]
+        epilogue = source[
+            source.index("__simt_vf__ inline void combine_epilogue_vf"):
+            source.index("__global__ __vector__ void combine_kernel")]
+
+        self.assertIn(
+            "combine_record_trailer_layout(combine_record_bytes, hybrid)",
+            producer)
+        self.assertIn("record + record_trailer.header_offset", producer)
+        metadata_guard = producer.index(
+            "if (record_trailer.has_route_metadata)")
+        metadata_write = producer.index(
+            "record + record_trailer.route_metadata_offset")
+        self.assertLess(metadata_guard, metadata_write)
+        self.assertLess(metadata_write, block_end(producer, metadata_guard))
+
+        self.assertIn(
+            "combine_record_trailer_layout(combine_record_bytes, true)",
+            reverse_return)
+        self.assertEqual(
+            reverse_return.count(
+                "record_trailer.route_metadata_offset"), 3)
+        self.assertNotIn("combine_record_bytes -", reverse_return)
+
+        self.assertNotIn("CombineRecordHeader", prepare)
+        self.assertNotIn("HybridCombineRouteMetadata", prepare)
+        self.assertNotIn("combine_record_bytes -", prepare)
+
+        self.assertIn(
+            "combine_record_trailer_layout(combine_record_bytes, hybrid)",
+            epilogue)
+        self.assertIn("record_trailer.header_offset", epilogue)
+        self.assertNotIn("combine_record_bytes -", epilogue)
+        self.assertNotIn(
+            "kAscendElasticAlignment + sizeof(CombineRecordHeader)",
+            source)
+
     def test_rank_indexed_kernel_state_uses_workspace_views(self):
         """Catches fixed-rank SIMT arrays and two-rank device admission."""
         sources = {

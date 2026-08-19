@@ -41,6 +41,51 @@ struct CombineRecordHeader {
 
 static_assert(sizeof(CombineRecordHeader) == kCombineRecordHeaderBytes);
 
+struct HybridCombineRouteMetadata {
+    std::uint64_t ingress_slot = kInvalidHybridRouteSlot;
+    std::uint64_t forwarded_slot = kInvalidHybridRouteSlot;
+};
+
+static_assert(
+    sizeof(HybridCombineRouteMetadata) ==
+    kHybridCombineRouteMetadataBytes);
+static_assert(
+    kDirectCombineRecordTrailerBytes >= sizeof(CombineRecordHeader));
+static_assert(
+    kHybridCombineRecordTrailerBytes >=
+    sizeof(CombineRecordHeader) + sizeof(HybridCombineRouteMetadata));
+
+struct CombineRecordTrailerLayout {
+    std::uint64_t header_offset = 0;
+    std::uint64_t route_metadata_offset = 0;
+    bool has_route_metadata = false;
+    bool valid = false;
+};
+
+DEEP_EP_ASCEND_COMBINE_STATE_SIMT_CALLEE constexpr
+CombineRecordTrailerLayout combine_record_trailer_layout(
+    std::uint64_t record_bytes, bool hybrid) noexcept {
+    CombineRecordTrailerLayout result{};
+    result.has_route_metadata = hybrid;
+    const std::uint64_t trailer_bytes = hybrid ?
+        kHybridCombineRecordTrailerBytes :
+        kDirectCombineRecordTrailerBytes;
+    if (record_bytes < trailer_bytes)
+        return result;
+    result.header_offset = record_bytes - trailer_bytes;
+    if (result.header_offset + sizeof(CombineRecordHeader) > record_bytes)
+        return result;
+    if (hybrid) {
+        result.route_metadata_offset =
+            result.header_offset + sizeof(CombineRecordHeader);
+        if (result.route_metadata_offset +
+                sizeof(HybridCombineRouteMetadata) > record_bytes)
+            return result;
+    }
+    result.valid = true;
+    return result;
+}
+
 // A source-specific adapter exposes received records in this neutral form so
 // origin reduction can be exercised on the host and run on the device.
 struct CombineOriginRecordView {

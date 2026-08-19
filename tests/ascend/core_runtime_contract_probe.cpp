@@ -417,7 +417,7 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 }
 
 int main() {
-    static_assert(kCoreTilingAbiVersion == 11);
+    static_assert(kCoreTilingAbiVersion == 12);
     auto hybrid_tiling = valid_two_dimensional_tiling(
         OperationKind::kDispatch, 0,
         transport::TransportTopologyKind::kLogicalSimulation,
