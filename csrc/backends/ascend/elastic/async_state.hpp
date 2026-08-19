@@ -5,6 +5,11 @@
 #include <optional>
 #include <vector>
 
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+#include <condition_variable>
+#include <mutex>
+#endif
+
 #include "operation_coordinator.hpp"
 #include "../runtime/stream_event.hpp"
 #include "../transport/transport_commands.hpp"
@@ -76,12 +81,27 @@ struct PendingOperationCreateResult {
     std::shared_ptr<PendingOperation> operation;
 };
 
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+struct AsyncStateHostTestControl {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool pause_destroy_after_snapshot = false;
+    bool destroy_paused_after_snapshot = false;
+    bool resume_destroy = false;
+    std::uint64_t finalization_waiter_entries = 0;
+};
+#endif
+
 class AsyncBufferState {
 public:
     explicit AsyncBufferState(
         std::shared_ptr<AsyncCompletionResources> resources,
         std::uint64_t owned_timeout_ms = 5000,
-        std::uint64_t last_generation = 0);
+        std::uint64_t last_generation = 0
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+        , std::shared_ptr<AsyncStateHostTestControl> host_test_control = nullptr
+#endif
+        );
     ~AsyncBufferState();
 
     AsyncBufferState(const AsyncBufferState&) = delete;

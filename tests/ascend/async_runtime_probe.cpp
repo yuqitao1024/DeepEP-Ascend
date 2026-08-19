@@ -426,11 +426,13 @@ bool same_status(const transport::TransportStatus& lhs,
 struct PendingFixture {
     explicit PendingFixture(
         std::uint64_t last_generation = 0,
-        std::uint64_t destroy_timeout_ms = 5)
+        std::uint64_t destroy_timeout_ms = 5,
+        std::shared_ptr<elastic::AsyncStateHostTestControl> control = nullptr)
         : trace(std::make_shared<CompletionTrace>()),
           resources(std::make_shared<FakeCompletionResources>(trace)),
           state(std::make_shared<elastic::AsyncBufferState>(
-              resources, destroy_timeout_ms, last_generation)) {}
+              resources, destroy_timeout_ms, last_generation,
+              std::move(control))) {}
 
     elastic::PendingOperationCreateResult launch(
         elastic::BufferOperationKind kind =
@@ -504,7 +506,8 @@ int check_asynchronous_publish_stays_pending() {
 }
 
 int check_two_thread_finish_is_exactly_once() {
-    PendingFixture fixture;
+    auto control = std::make_shared<elastic::AsyncStateHostTestControl>();
+    PendingFixture fixture(0, 5, control);
     fixture.event_api.block_query = true;
     auto launched = fixture.launch();
     ASYNC_CHECK(launched.status.ok());
@@ -518,6 +521,14 @@ int check_two_thread_finish_is_exactly_once() {
         });
     }
     std::thread second_waiter([&] { second = launched.operation->finish(500); });
+    bool second_entered_finalization_wait = false;
+    {
+        std::unique_lock<std::mutex> lock(control->mutex);
+        second_entered_finalization_wait = control->cv.wait_for(
+            lock, std::chrono::seconds(1), [&] {
+                return control->finalization_waiter_entries >= 1;
+            });
+    }
     {
         std::lock_guard<std::mutex> lock(fixture.event_api.query_mutex);
         fixture.event_api.release_query = true;
@@ -525,6 +536,8 @@ int check_two_thread_finish_is_exactly_once() {
     fixture.event_api.query_cv.notify_all();
     first_waiter.join();
     second_waiter.join();
+    ASYNC_CHECK(second_entered_finalization_wait);
+    ASYNC_CHECK(control->finalization_waiter_entries == 1);
     ASYNC_CHECK(first.ok() && same_status(first, second));
     ASYNC_CHECK(fixture.event_api.query_calls == 1);
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
@@ -777,6 +790,122 @@ int check_post_activation_publish_failure_retains_event_for_destroy() {
     return 0;
 }
 
+int check_destroy_race_retains_publish_owners_until_event_is_safe() {
+    auto trace = std::make_shared<CompletionTrace>();
+    auto resources = std::make_shared<FakeCompletionResources>(trace);
+    auto control = std::make_shared<elastic::AsyncStateHostTestControl>();
+    auto state = std::make_shared<elastic::AsyncBufferState>(
+        resources, 100, 0, control);
+    FakeApi event_api;
+    auto lease = state->coordinator().reserve(
+        elastic::BufferOperationKind::kDispatch);
+    ASYNC_CHECK(lease.valid() && lease.activate());
+    resources->diagnostic.generation = lease.generation();
+    resources->completion = lease.generation();
+    auto created = runtime::create_native_event(api_for(&event_api), 2);
+    ASYNC_CHECK(created.status.ok());
+    ASYNC_CHECK(created.event->record(stream_for(2)).ok());
+    std::weak_ptr<runtime::NativeEventState> event_lifetime = created.event;
+
+    FakeApi predecessor_api;
+    auto predecessor = runtime::create_native_event(api_for(&predecessor_api), 2);
+    ASYNC_CHECK(predecessor.status.ok());
+    ASYNC_CHECK(predecessor.event->record(stream_for(2)).ok());
+    std::weak_ptr<runtime::NativeEventState> predecessor_lifetime =
+        predecessor.event;
+    auto tensor_lifetime = std::make_shared<int>(19);
+    std::weak_ptr<int> retained_tensor_lifetime = tensor_lifetime;
+    std::vector<std::optional<torch::Tensor>> tensors;
+    tensors.emplace_back(torch::Tensor(tensor_lifetime));
+    std::vector<elastic::EventDependency> predecessors;
+    predecessors.push_back({predecessor.event, nullptr});
+
+    {
+        std::lock_guard<std::mutex> lock(control->mutex);
+        control->pause_destroy_after_snapshot = true;
+    }
+    transport::TransportStatus destroy_status;
+    std::thread destroyer([&] { destroy_status = state->destroy(); });
+    bool destroy_paused = false;
+    {
+        std::unique_lock<std::mutex> lock(control->mutex);
+        destroy_paused = control->cv.wait_for(
+            lock, std::chrono::seconds(1), [&] {
+                return control->destroy_paused_after_snapshot;
+            });
+    }
+
+    const auto published = state->publish(
+        std::move(lease), std::move(created.event),
+        {elastic::BufferOperationKind::kDispatch, 1, kCompletionOffset,
+         kScratchStatusOffset},
+        std::move(tensors), std::move(predecessors));
+    tensor_lifetime.reset();
+    predecessor.event.reset();
+    const bool owners_retained = !event_lifetime.expired() &&
+        !retained_tensor_lifetime.expired() && !predecessor_lifetime.expired();
+    {
+        std::lock_guard<std::mutex> lock(control->mutex);
+        control->resume_destroy = true;
+    }
+    control->cv.notify_all();
+    destroyer.join();
+
+    ASYNC_CHECK(destroy_paused);
+    ASYNC_CHECK(!published.status.ok() && published.operation == nullptr);
+    ASYNC_CHECK(owners_retained);
+    ASYNC_CHECK(same_status(published.status, destroy_status));
+    ASYNC_CHECK(event_lifetime.expired());
+    ASYNC_CHECK(retained_tensor_lifetime.expired());
+    ASYNC_CHECK(predecessor_lifetime.expired());
+    ASYNC_CHECK(event_api.query_calls == 1);
+    ASYNC_CHECK(event_api.destroy_calls == 1);
+    ASYNC_CHECK(trace->diagnostic_reads == 0);
+    ASYNC_CHECK(trace->completion_reads == 0);
+    ASYNC_CHECK(trace->destroy_calls == 1);
+    return 0;
+}
+
+int check_foreign_lease_is_rejected_and_retained_by_target_state() {
+    PendingFixture source;
+    PendingFixture target;
+    auto lease = source.state->coordinator().reserve(
+        elastic::BufferOperationKind::kDispatch);
+    ASYNC_CHECK(lease.valid() && lease.activate());
+    auto created = runtime::create_native_event(api_for(&source.event_api), 2);
+    ASYNC_CHECK(created.status.ok());
+    ASYNC_CHECK(created.event->record(stream_for(2)).ok());
+    std::weak_ptr<runtime::NativeEventState> event_lifetime = created.event;
+
+    const auto published = target.state->publish(
+        std::move(lease), std::move(created.event),
+        {elastic::BufferOperationKind::kDispatch, 1, kCompletionOffset,
+         kScratchStatusOffset},
+        {}, {});
+
+    ASYNC_CHECK(!published.status.ok() && published.operation == nullptr);
+    ASYNC_CHECK(source.state->coordinator().state() ==
+                elastic::CoordinatorState::kPoisoned);
+    ASYNC_CHECK(source.state->coordinator().completed_operation_count() == 0);
+    ASYNC_CHECK(source.state->coordinator().abandoned_operation_count() == 1);
+    ASYNC_CHECK(target.state->coordinator().state() ==
+                elastic::CoordinatorState::kIdle);
+    ASYNC_CHECK(!event_lifetime.expired());
+    ASYNC_CHECK(same_status(
+        published.status, *target.state->terminal_failure()));
+
+    const auto destroy_status = target.state->destroy();
+    ASYNC_CHECK(same_status(published.status, destroy_status));
+    ASYNC_CHECK(event_lifetime.expired());
+    ASYNC_CHECK(source.event_api.query_calls == 1);
+    ASYNC_CHECK(source.event_api.destroy_calls == 1);
+    ASYNC_CHECK(target.trace->diagnostic_reads == 0);
+    ASYNC_CHECK(target.trace->completion_reads == 0);
+    ASYNC_CHECK(target.trace->destroy_calls == 1);
+    ASYNC_CHECK(source.state->destroy().ok());
+    return 0;
+}
+
 int check_dropped_final_event_is_drained_by_destroy() {
     PendingFixture fixture;
     std::weak_ptr<runtime::NativeEventState> event;
@@ -959,6 +1088,10 @@ int run_async_state_contract() {
     if (const int status = check_event_destroy_failure_is_stable_and_retryable())
         return status;
     if (const int status = check_post_activation_publish_failure_retains_event_for_destroy())
+        return status;
+    if (const int status = check_destroy_race_retains_publish_owners_until_event_is_safe())
+        return status;
+    if (const int status = check_foreign_lease_is_rejected_and_retained_by_target_state())
         return status;
     if (const int status = check_dropped_final_event_is_drained_by_destroy())
         return status;

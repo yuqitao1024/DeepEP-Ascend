@@ -18,9 +18,17 @@ using transport::TransportStatus;
 struct SharedAsyncContext {
     SharedAsyncContext(
         std::shared_ptr<AsyncCompletionResources> completion_resources,
-        std::uint64_t last_generation)
+        std::uint64_t last_generation
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+        , std::shared_ptr<AsyncStateHostTestControl> test_control
+#endif
+        )
         : coordinator(last_generation),
-          resources(std::move(completion_resources)) {}
+          resources(std::move(completion_resources))
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+          , host_test_control(std::move(test_control))
+#endif
+          {}
 
     void record_terminal_failure(const TransportStatus& status) {
         if (status.ok())
@@ -39,6 +47,9 @@ struct SharedAsyncContext {
     std::shared_ptr<AsyncCompletionResources> resources;
     mutable std::mutex failure_mutex;
     std::optional<TransportStatus> first_terminal_failure;
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+    std::shared_ptr<AsyncStateHostTestControl> host_test_control;
+#endif
 };
 
 namespace {
@@ -219,6 +230,16 @@ TransportStatus PendingOperation::finish(std::uint64_t timeout_ms) {
     if (terminal(impl_->state))
         return impl_->terminal_status;
     if (impl_->state == PendingState::kFinalizing) {
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+        if (impl_->context->host_test_control != nullptr) {
+            auto control = impl_->context->host_test_control;
+            {
+                std::lock_guard<std::mutex> control_lock(control->mutex);
+                ++control->finalization_waiter_entries;
+            }
+            control->cv.notify_all();
+        }
+#endif
         const auto deadline = impl_->finalization_deadline;
         if (!impl_->cv.wait_until(lock, deadline, [&] {
                 return terminal(impl_->state);
@@ -268,13 +289,26 @@ struct AsyncBufferState::Impl {
 
     Impl(
         std::shared_ptr<AsyncCompletionResources> resources,
-        std::uint64_t timeout_ms, std::uint64_t last_generation)
+        std::uint64_t timeout_ms, std::uint64_t last_generation
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+        , std::shared_ptr<AsyncStateHostTestControl> test_control
+#endif
+        )
         : context(std::make_shared<SharedAsyncContext>(
-              std::move(resources), last_generation)),
-          owned_timeout_ms(timeout_ms) {}
+              std::move(resources), last_generation
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+              , test_control
+#endif
+              )),
+          owned_timeout_ms(timeout_ms)
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+          , host_test_control(std::move(test_control))
+#endif
+          {}
 
     void finish_destroy_attempt() {
         std::lock_guard<std::mutex> lock(mutex);
+        destroy_reserved = false;
         destroy_state = DestroyState::kAlive;
         cv.notify_all();
     }
@@ -286,13 +320,25 @@ struct AsyncBufferState::Impl {
     std::shared_ptr<PendingOperation> pending;
     DestroyState destroy_state = DestroyState::kAlive;
     TransportStatus destroy_result = TransportStatus::success();
+    bool destroy_reserved = false;
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+    std::shared_ptr<AsyncStateHostTestControl> host_test_control;
+#endif
 };
 
 AsyncBufferState::AsyncBufferState(
     std::shared_ptr<AsyncCompletionResources> resources,
-    std::uint64_t owned_timeout_ms, std::uint64_t last_generation)
+    std::uint64_t owned_timeout_ms, std::uint64_t last_generation
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+    , std::shared_ptr<AsyncStateHostTestControl> host_test_control
+#endif
+    )
     : impl_(std::make_shared<Impl>(
-          std::move(resources), owned_timeout_ms, last_generation)) {}
+          std::move(resources), owned_timeout_ms, last_generation
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+          , std::move(host_test_control)
+#endif
+          )) {}
 
 AsyncBufferState::~AsyncBufferState() {
     try {
@@ -316,36 +362,17 @@ PendingOperationCreateResult AsyncBufferState::publish(
         status = invalid_publish("completion resources are unavailable");
     else if (!lease.valid() || !lease.active())
         status = invalid_publish("operation lease is not active");
+    else if (!lease.belongs_to(impl_->context->coordinator))
+        status = invalid_publish("operation lease belongs to another buffer");
     else if (event == nullptr)
         status = invalid_publish("completion event is unavailable");
     else if (recipe.generation == 0 ||
              recipe.generation != lease.generation())
         status = invalid_publish("completion generation does not match the lease");
-    if (!status.ok()) {
-        lease.abandon();
-        impl_->context->record_terminal_failure(status);
-        if (event != nullptr) {
-            auto failed_impl = std::make_shared<PendingOperation::Impl>(
-                impl_->context, std::move(lease), std::move(event), recipe,
-                std::move(retained_tensors), std::move(predecessors));
-            failed_impl->terminal_status = status;
-            failed_impl->state = PendingState::kFailed;
-            auto failed = std::shared_ptr<PendingOperation>(
-                new PendingOperation(std::move(failed_impl)));
-            std::lock_guard<std::mutex> lock(impl_->mutex);
-            if (impl_->destroy_state == Impl::DestroyState::kAlive &&
-                (impl_->pending == nullptr ||
-                 (terminal(impl_->pending->state()) &&
-                  impl_->pending->lifetime_safe())))
-                impl_->pending = std::move(failed);
-        }
-        return {status, nullptr};
-    }
-
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (impl_->destroy_state != Impl::DestroyState::kAlive) {
+    if (status.ok() && impl_->destroy_state != Impl::DestroyState::kAlive) {
         status = invalid_publish("async state is being destroyed");
-    } else if (impl_->pending != nullptr &&
+    } else if (status.ok() && impl_->pending != nullptr &&
                (!terminal(impl_->pending->state()) ||
                 !impl_->pending->lifetime_safe())) {
         status = invalid_publish("another operation is still pending");
@@ -353,6 +380,18 @@ PendingOperationCreateResult AsyncBufferState::publish(
     if (!status.ok()) {
         lease.abandon();
         impl_->context->record_terminal_failure(status);
+        if (event != nullptr && !impl_->destroy_reserved &&
+            (impl_->pending == nullptr ||
+             (terminal(impl_->pending->state()) &&
+              impl_->pending->lifetime_safe()))) {
+            auto failed_impl = std::make_shared<PendingOperation::Impl>(
+                impl_->context, std::move(lease), std::move(event), recipe,
+                std::move(retained_tensors), std::move(predecessors));
+            failed_impl->terminal_status = status;
+            failed_impl->state = PendingState::kFailed;
+            impl_->pending = std::shared_ptr<PendingOperation>(
+                new PendingOperation(std::move(failed_impl)));
+        }
         return {status, nullptr};
     }
 
@@ -394,30 +433,57 @@ TransportStatus AsyncBufferState::destroy() {
         pending = impl_->pending;
     }
 
-    auto pending_status = TransportStatus::success();
-    if (pending != nullptr) {
-        const bool was_terminal = terminal(pending->state());
-        pending_status = pending->finish(impl_->owned_timeout_ms);
-        if (!pending->lifetime_safe()) {
-            if (!was_terminal) {
-                impl_->finish_destroy_attempt();
-                return pending_status;
-            }
-            const auto teardown_status = pending->teardown(
-                impl_->owned_timeout_ms);
-            if (!teardown_status.ok()) {
-                impl_->finish_destroy_attempt();
-                return teardown_status;
-            }
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+    if (impl_->host_test_control != nullptr) {
+        auto control = impl_->host_test_control;
+        std::unique_lock<std::mutex> lock(control->mutex);
+        if (control->pause_destroy_after_snapshot) {
+            control->destroy_paused_after_snapshot = true;
+            control->cv.notify_all();
+            (void)control->cv.wait_for(
+                lock, std::chrono::seconds(5), [&] {
+                    return control->resume_destroy;
+                });
         }
     }
+#endif
 
-    auto teardown = impl_->context->coordinator.reserve_destroy();
-    if (!teardown.valid()) {
-        impl_->finish_destroy_attempt();
-        return TransportStatus::invalid(
-            "destroy_async_state", "operation coordinator is busy");
+    auto pending_status = TransportStatus::success();
+    BufferOperationCoordinator::DestroyLease teardown;
+    while (true) {
+        if (pending != nullptr) {
+            const bool was_terminal = terminal(pending->state());
+            pending_status = pending->finish(impl_->owned_timeout_ms);
+            if (!pending->lifetime_safe()) {
+                if (!was_terminal) {
+                    impl_->finish_destroy_attempt();
+                    return pending_status;
+                }
+                const auto teardown_status = pending->teardown(
+                    impl_->owned_timeout_ms);
+                if (!teardown_status.ok()) {
+                    impl_->finish_destroy_attempt();
+                    return teardown_status;
+                }
+            }
+        }
+
+        std::unique_lock<std::mutex> lock(impl_->mutex);
+        if (impl_->pending != pending) {
+            pending = impl_->pending;
+            continue;
+        }
+        teardown = impl_->context->coordinator.reserve_destroy();
+        if (!teardown.valid()) {
+            lock.unlock();
+            impl_->finish_destroy_attempt();
+            return TransportStatus::invalid(
+                "destroy_async_state", "operation coordinator is busy");
+        }
+        impl_->destroy_reserved = true;
+        break;
     }
+
     const auto resource_status = impl_->context->resources == nullptr ?
         TransportStatus::invalid(
             "destroy_async_state", "completion resources are unavailable") :

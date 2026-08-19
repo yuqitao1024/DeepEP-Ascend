@@ -61,6 +61,10 @@ public:
         LeaseStatus status() const noexcept { return status_; }
         std::uint64_t generation() const noexcept { return generation_; }
         bool active() const noexcept { return active_; }
+        bool belongs_to(
+            const BufferOperationCoordinator& coordinator) const noexcept {
+            return coordinator_ == &coordinator;
+        }
 
         bool activate() noexcept {
             if (!valid() || active_)
