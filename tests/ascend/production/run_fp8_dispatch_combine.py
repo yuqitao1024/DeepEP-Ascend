@@ -7,9 +7,9 @@ from datetime import timedelta
 
 SUPPORTED_WORLD_SIZES = (2, 4, 8)
 CAPACITY = 4
-HIDDEN = 64
+HIDDEN = 512
 NUM_TOPK = 2
-SF_PACKS = 2
+SF_PACKS = 4
 
 CASE_NAMES = (
     "normal-fp32",
@@ -49,9 +49,12 @@ def _contract():
             "independent-all-gather-reference",
             "exact-payload-bytes",
             "exact-scale-factor-packs",
+            "exact-column-major-scale-stride",
             "fp32-and-packed-int32-scales",
             "row-and-column-major-scale-output",
-            "cached-routing-across-representations",
+            "cached-bf16-to-fp8-and-fp8-to-bf16",
+            "independent-fp8-dequantization",
+            "one-rank-malformed-recovery",
             "distributed-failure-aggregation",
             "finally-protected-teardown",
         ],
@@ -81,7 +84,8 @@ class FP8RuntimeMatrix:
             num_max_tokens_per_rank=CAPACITY,
             hidden=HIDDEN,
             num_topk=NUM_TOPK,
-            use_fp8_dispatch=True,
+            # BF16 sizing covers both cached representation transitions.
+            use_fp8_dispatch=False,
             deterministic=False,
             allow_hybrid_mode=False,
             explicitly_destroy=True,
@@ -119,13 +123,14 @@ class FP8RuntimeMatrix:
             rows, dtype=self.torch.int64, device=self.device).reshape(
                 count, NUM_TOPK).contiguous()
 
-    def _materialize(self, spec, salt=0):
+    def _materialize(self, spec, salt=0, fp8=True):
         count = self._token_count(spec.name)
         values = self.torch.arange(
             count * HIDDEN, dtype=self.torch.float32,
             device=self.device).reshape(count, HIDDEN)
         values = values.remainder(31) - 15 + self.rank * 2 + salt
-        x = values.to(self.torch.float8_e4m3fn).contiguous()
+        x = values.to(
+            self.torch.float8_e4m3fn if fp8 else self.torch.bfloat16).contiguous()
         routes = self._routes(count, spec.name)
         weights = None
         if spec.weighted:
@@ -133,6 +138,8 @@ class FP8RuntimeMatrix:
                 count * NUM_TOPK, dtype=self.torch.float32,
                 device=self.device).reshape(count, NUM_TOPK)
             weights = (weights + 1 + self.rank) / 16
+        if not fp8:
+            return x, None, routes, weights
         if spec.packed_sf:
             scale_values = self.torch.arange(
                 count * SF_PACKS, dtype=self.torch.int32,
@@ -152,18 +159,22 @@ class FP8RuntimeMatrix:
         metadata = torch.tensor(
             [count, int(weights is not None)], dtype=torch.int32,
             device=self.device)
+        fp8 = sf is not None
         payload = torch.zeros(
-            (CAPACITY, HIDDEN), dtype=torch.uint8, device=self.device)
-        sf_bits = torch.zeros(
+            (CAPACITY, HIDDEN), dtype=torch.uint8 if fp8 else x.dtype,
+            device=self.device)
+        sf_bits = (torch.zeros(
             (CAPACITY, SF_PACKS), dtype=torch.int32, device=self.device)
+            if fp8 else None)
         route_rows = torch.full(
             (CAPACITY, NUM_TOPK), -1, dtype=torch.int64,
             device=self.device)
         weight_rows = torch.zeros(
             (CAPACITY, NUM_TOPK), dtype=torch.float32, device=self.device)
         if count:
-            payload[:count].copy_(x.view(torch.uint8))
-            sf_bits[:count].copy_(sf.view(torch.int32))
+            payload[:count].copy_(x.view(torch.uint8) if fp8 else x)
+            if fp8:
+                sf_bits[:count].copy_(sf.view(torch.int32))
             route_rows[:count].copy_(routes)
             if weights is not None:
                 weight_rows[:count].copy_(weights)
@@ -176,7 +187,7 @@ class FP8RuntimeMatrix:
 
         gathered_metadata = gather(metadata)
         gathered_payload = gather(payload)
-        gathered_sf = gather(sf_bits)
+        gathered_sf = gather(sf_bits) if fp8 else None
         gathered_routes = gather(route_rows)
         gathered_weights = gather(weight_rows)
         result = []
@@ -189,18 +200,19 @@ class FP8RuntimeMatrix:
             result.append({
                 "count": source_count,
                 "payload": gathered_payload[source_rank][:source_count],
-                "sf": gathered_sf[source_rank][:source_count],
+                "sf": (gathered_sf[source_rank][:source_count]
+                       if fp8 else None),
                 "routes": gathered_routes[source_rank][:source_count],
                 "weights": (gathered_weights[source_rank][:source_count]
                             if weights is not None else None),
             })
-        return result
+        return result, fp8
 
     @staticmethod
     def _align(value, alignment):
         return ((value + alignment - 1) // alignment) * alignment
 
-    def _reference(self, gathered, spec):
+    def _reference(self, gathered, spec, fp8):
         torch = self.torch
         first_expert = self.rank * 2
         last_expert = first_expert + 2
@@ -216,11 +228,13 @@ class FP8RuntimeMatrix:
             payload = torch.stack([
                 source["payload"][token]
                 for _, token, source in incoming
-            ]) if incoming else torch.empty((0, HIDDEN), dtype=torch.uint8)
-            sf = torch.stack([
+            ]) if incoming else torch.empty(
+                (0, HIDDEN), dtype=gathered[0]["payload"].dtype)
+            sf = (torch.stack([
                 source["sf"][token]
                 for _, token, source in incoming
-            ]) if incoming else torch.empty((0, SF_PACKS), dtype=torch.int32)
+            ]) if incoming else torch.empty((0, SF_PACKS), dtype=torch.int32)) \
+                if fp8 else None
             localized = []
             gathered_weight_rows = []
             for _, token, source in incoming:
@@ -236,7 +250,7 @@ class FP8RuntimeMatrix:
             weights = torch.stack(gathered_weight_rows) \
                 if gathered_weight_rows else None
             return {"payload": payload, "sf": sf, "topk": topk,
-                    "weights": weights, "rows": incoming}
+                    "weights": weights, "rows": incoming, "fp8": fp8}
 
         expert_counts = [0, 0]
         for _, token, source in incoming:
@@ -248,8 +262,9 @@ class FP8RuntimeMatrix:
         starts.append(self._align(expert_counts[0], spec.expert_alignment))
         total = starts[1] + self._align(
             expert_counts[1], spec.expert_alignment)
-        payload = torch.zeros((total, HIDDEN), dtype=torch.uint8)
-        sf = torch.zeros((total, SF_PACKS), dtype=torch.int32)
+        payload = torch.zeros(
+            (total, HIDDEN), dtype=gathered[0]["payload"].dtype)
+        sf = torch.zeros((total, SF_PACKS), dtype=torch.int32) if fp8 else None
         weights = torch.zeros((total,), dtype=torch.float32) \
             if spec.weighted else None
         occurrences = [0, 0]
@@ -262,11 +277,12 @@ class FP8RuntimeMatrix:
                 destination = starts[local_expert] + occurrences[local_expert]
                 occurrences[local_expert] += 1
                 payload[destination].copy_(source["payload"][token])
-                sf[destination].copy_(source["sf"][token])
+                if fp8:
+                    sf[destination].copy_(source["sf"][token])
                 if weights is not None:
                     weights[destination] = source["weights"][token, lane]
         return {"payload": payload, "sf": sf, "topk": None,
-                "weights": weights, "rows": incoming}
+                "weights": weights, "rows": incoming, "fp8": fp8}
 
     def _assert_exact(self, actual, expected, label):
         _check(tuple(actual.shape) == tuple(expected.shape),
@@ -275,24 +291,50 @@ class FP8RuntimeMatrix:
         _check(self.torch.equal(observed, expected),
                f"{label} differs: {observed.tolist()} != {expected.tolist()}")
 
+    def _dequantize_fp8(self, payload, sf, packed):
+        torch = self.torch
+        values = payload.view(torch.float8_e4m3fn).to(torch.float32)
+        if packed:
+            shifts = torch.tensor([0, 8, 16, 24], dtype=torch.int64)
+            exponents = (sf.to(torch.int64).unsqueeze(-1) >> shifts) & 0xff
+            factors = torch.pow(
+                torch.tensor(2.0, dtype=torch.float32),
+                exponents.to(torch.float32) - 127).reshape(sf.shape[0], -1)
+        else:
+            factors = sf.view(torch.float32)
+        groups = torch.arange(HIDDEN, dtype=torch.int64) // 128
+        return values * factors[:, groups]
+
     def _verify_dispatch(self, result, reference, spec, expected_handle=None):
         recv, recv_topk, recv_weights, handle, event = result
-        _check(isinstance(recv, tuple) and len(recv) == 2,
-               "FP8 dispatch did not return payload and scales")
-        recv_x, recv_sf = recv
-        self._assert_exact(
-            recv_x.view(self.torch.uint8), reference["payload"],
-            "FP8 payload bytes")
-        self._assert_exact(
-            recv_sf.view(self.torch.int32), reference["sf"],
-            "scale factor packs")
-        if spec.column_major_output:
-            _check(recv_sf.stride(0) == 1 and recv_sf.stride(1) % 4 == 0 and
-                   recv_sf.stride(1) >= max(recv_sf.shape[0], 1),
-                   f"invalid column-major SF stride {recv_sf.stride()}")
+        if reference["fp8"]:
+            _check(isinstance(recv, tuple) and len(recv) == 2,
+                   "FP8 dispatch did not return payload and scales")
+            recv_x, recv_sf = recv
+            self._assert_exact(
+                recv_x.view(self.torch.uint8), reference["payload"],
+                "FP8 payload bytes")
+            self._assert_exact(
+                recv_sf.view(self.torch.int32), reference["sf"],
+                "scale factor packs")
+            expected_values = self._dequantize_fp8(
+                reference["payload"], reference["sf"], spec.packed_sf)
+            actual_values = self._dequantize_fp8(
+                recv_x.detach().cpu().view(self.torch.uint8),
+                recv_sf.detach().cpu(), spec.packed_sf)
+            _check(self.torch.allclose(actual_values, expected_values,
+                                       rtol=0, atol=0),
+                   "independent FP8 dequantization differs")
+            if spec.column_major_output:
+                _check(recv_sf.stride() ==
+                       (1, self._align(recv_sf.shape[0], 4)),
+                       f"invalid column-major SF stride {recv_sf.stride()}")
+            else:
+                _check(recv_sf.stride() == (SF_PACKS, 1),
+                       f"invalid row-major SF stride {recv_sf.stride()}")
         else:
-            _check(recv_sf.stride() == (SF_PACKS, 1),
-                   f"invalid row-major SF stride {recv_sf.stride()}")
+            recv_x = recv
+            self._assert_exact(recv_x, reference["payload"], "BF16 payload")
         if reference["topk"] is None:
             _check(recv_topk is None, "expanded dispatch returned top-k")
         else:
@@ -307,12 +349,12 @@ class FP8RuntimeMatrix:
         _check(event.event is None, "synchronous dispatch returned event")
         return recv, handle
 
-    def _dispatch(self, spec, salt=0, handle=None):
-        x, sf, routes, weights = self._materialize(spec, salt)
-        gathered = self._all_gather(x, sf, routes, weights)
-        reference = self._reference(gathered, spec)
+    def _dispatch(self, spec, salt=0, handle=None, fp8=True):
+        x, sf, routes, weights = self._materialize(spec, salt, fp8)
+        gathered, gathered_fp8 = self._all_gather(x, sf, routes, weights)
+        reference = self._reference(gathered, spec, gathered_fp8)
         result = self.buffer.dispatch(
-            (x, sf),
+            (x, sf) if fp8 else x,
             topk_idx=None if handle is not None else routes,
             topk_weights=weights,
             handle=handle,
@@ -325,23 +367,26 @@ class FP8RuntimeMatrix:
             do_cpu_sync=None if handle is not None else True,
             do_expand=spec.expanded,
             do_zero_padding=spec.zero_padding,
-            use_tma_aligned_col_major_sf=spec.column_major_output,
+            use_tma_aligned_col_major_sf=(spec.column_major_output and fp8),
         )
         recv, returned_handle = self._verify_dispatch(
             result, reference, spec, expected_handle=handle)
         return recv, returned_handle, gathered, reference
 
     def _run_cached(self):
-        first = CaseSpec("normal-fp32")
-        first_recv, handle, _, _ = self._dispatch(first)
-        changed = CaseSpec("normal-fp32", packed_sf=True)
-        second_recv, _, _, _ = self._dispatch(changed, salt=7, handle=handle)
-        _check(not self.torch.equal(
-            first_recv[0].view(self.torch.uint8).cpu(),
-            second_recv[0].view(self.torch.uint8).cpu()),
-            "cached dispatch ignored changed FP8 payload")
-        _check(second_recv[1].dtype == self.torch.int32,
-               "cached dispatch did not change SF representation")
+        bf16 = CaseSpec("cached-bf16")
+        _, bf16_handle, _, _ = self._dispatch(bf16, fp8=False)
+        fp8 = CaseSpec("cached-fp8", packed_sf=True)
+        fp8_recv, _, _, _ = self._dispatch(
+            fp8, salt=7, handle=bf16_handle, fp8=True)
+        _check(isinstance(fp8_recv, tuple) and
+               fp8_recv[1].dtype == self.torch.int32,
+               "cached BF16-to-FP8 dispatch lost packed scale factors")
+        _, fp8_handle, _, _ = self._dispatch(fp8, salt=11, fp8=True)
+        bf16_recv, _, _, _ = self._dispatch(
+            bf16, salt=13, handle=fp8_handle, fp8=False)
+        _check(not isinstance(bf16_recv, tuple),
+               "cached FP8-to-BF16 dispatch returned scale factors")
 
     def _run_combine(self):
         spec = CaseSpec("normal-fp32")
@@ -378,15 +423,15 @@ class FP8RuntimeMatrix:
     def _run_malformed(self):
         spec = CaseSpec("normal-fp32")
         x, sf, routes, _ = self._materialize(spec)
-        for invalid in (x, (x, sf.to(self.torch.bfloat16))):
-            try:
-                self.buffer.dispatch(
-                    invalid, topk_idx=routes, num_experts=self.num_experts,
-                    num_max_tokens_per_rank=CAPACITY, num_sms=1, num_qps=0)
-            except RuntimeError:
-                pass
-            else:
-                raise AssertionError("malformed FP8 input was accepted")
+        invalid = (x, sf.to(self.torch.bfloat16)) if self.rank == 0 else (x, sf)
+        try:
+            self.buffer.dispatch(
+                invalid, topk_idx=routes, num_experts=self.num_experts,
+                num_max_tokens_per_rank=CAPACITY, num_sms=1, num_qps=0)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("one-rank malformed FP8 input was accepted")
         self._dispatch(spec, salt=3)
 
     def _case_boundary(self, name, operation):

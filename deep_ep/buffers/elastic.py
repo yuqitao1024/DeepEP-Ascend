@@ -205,19 +205,23 @@ class EPHandle:
             self.recv_src_metadata[:, 2:][valid_mask] = to_indices_for_expanded_tensors[self.recv_src_metadata[:, 2:][valid_mask]]
 
 
-def _ascend_tensor_contract(tensor, dimensions: int, dtype,
-                            name: str):
+def _ascend_tensor_contract(tensor, dimensions: int, dtype, name: str,
+                            owner_device=None):
     if not isinstance(tensor, torch.Tensor):
         return None, f"invalid_{name}_tensor"
     shape = tuple(tensor.shape)
     contiguous = tensor.is_contiguous()
-    if (tensor.device.type != 'npu' or len(shape) != dimensions or
+    if (tensor.device.type != 'npu' or
+            (owner_device is not None and
+             getattr(tensor.device, 'index', None) != owner_device) or
+            len(shape) != dimensions or
             tensor.dtype != dtype or not contiguous):
         return None, f"invalid_{name}_tensor"
     return shape, None
 
 
-def _ascend_scale_factor_contract(tensor, x_shape, x_device):
+def _ascend_scale_factor_contract(tensor, x_shape, x_device,
+                                  owner_device=None):
     if not isinstance(tensor, torch.Tensor):
         return None, None, "invalid_sf_tensor"
     shape = tuple(tensor.shape)
@@ -228,7 +232,10 @@ def _ascend_scale_factor_contract(tensor, x_shape, x_device):
     if (tensor.device.type != 'npu' or
             tensor.device.type != getattr(x_device, 'type', None) or
             getattr(tensor.device, 'index', None) !=
-            getattr(x_device, 'index', None) or len(shape) != 2 or
+            getattr(x_device, 'index', None) or
+            (owner_device is not None and
+             getattr(tensor.device, 'index', None) != owner_device) or
+            len(shape) != 2 or
             tensor.dtype not in (torch.float32, torch.int32) or
             len(strides) != 2 or any(stride <= 0 for stride in strides) or
             shape[1] <= 0):
@@ -244,6 +251,21 @@ def _ascend_scale_factor_contract(tensor, x_shape, x_device):
     else:
         layout = "strided"
     return shape, layout, None
+
+
+def _ascend_handle_tensors_match_owner(handle, owner_device):
+    for name in (
+            "topk_idx", "psum_num_recv_tokens_per_scaleup_rank",
+            "psum_num_recv_tokens_per_expert",
+            "num_unaligned_recv_tokens_per_expert", "dst_buffer_slot_idx",
+            "token_metadata_at_forward", "recv_src_metadata",
+            "channel_linked_list"):
+        tensor = getattr(handle, name, None)
+        if (isinstance(tensor, torch.Tensor) and
+                (tensor.device.type != "npu" or
+                 getattr(tensor.device, "index", None) != owner_device)):
+            return False
+    return True
 
 
 def _ascend_descriptor_fingerprint(tensor):
@@ -355,9 +377,11 @@ class ElasticBuffer:
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
         self.deterministic = deterministic
         self._ascend_topology = None
+        self._ascend_owner_device = None
 
         if not is_cuda():
             self._ascend_topology = preflight_ascend_topology(group)
+            self._ascend_owner_device = torch.npu.current_device()
 
         if is_cuda():
             if os.environ.get('NCCL_GIN_CROSS_NIC') == '0':
@@ -567,7 +591,7 @@ class ElasticBuffer:
                             (torch.bfloat16, torch.float8_e4m3fn)
                             else torch.bfloat16)
         x_shape, x_error = _ascend_tensor_contract(
-            x, 2, expected_x_dtype, "x")
+            x, 2, expected_x_dtype, "x", self._ascend_owner_device)
         fp8_dispatch = x_dtype == torch.float8_e4m3fn
         pairing_error = None
         if fp8_dispatch != (sf is not None):
@@ -575,13 +599,31 @@ class ElasticBuffer:
         sf_shape, sf_layout, sf_error = (None, None, None)
         if sf is not None:
             sf_shape, sf_layout, sf_error = _ascend_scale_factor_contract(
-                sf, x_shape, x.device if x_shape is not None else None)
+                sf, x_shape, x.device if x_shape is not None else None,
+                self._ascend_owner_device)
         topk_shape, topk_error = _ascend_tensor_contract(
-            topk_idx, 2, torch.int64, "topk")
+            topk_idx, 2, torch.int64, "topk", self._ascend_owner_device)
         weights_shape, weights_error = (None, None)
         if topk_weights is not None:
             weights_shape, weights_error = _ascend_tensor_contract(
-                topk_weights, 2, torch.float32, "topk_weights")
+                topk_weights, 2, torch.float32, "topk_weights",
+                self._ascend_owner_device)
+        handle_device_error = (
+            "invalid_buffer_device" if cached and
+            not _ascend_handle_tensors_match_owner(
+                handle, self._ascend_owner_device) else None)
+        if ((isinstance(x, torch.Tensor) and
+             getattr(x.device, "index", None) != self._ascend_owner_device) or
+                (isinstance(topk_idx, torch.Tensor) and
+                 getattr(topk_idx.device, "index", None) !=
+                 self._ascend_owner_device) or
+                (isinstance(topk_weights, torch.Tensor) and
+                 getattr(topk_weights.device, "index", None) !=
+                 self._ascend_owner_device) or
+                (isinstance(sf, torch.Tensor) and
+                 getattr(sf.device, "index", None) !=
+                 self._ascend_owner_device)):
+            handle_device_error = "invalid_buffer_device"
         capacity = (self.num_max_tokens_per_rank
                     if num_max_tokens_per_rank is None
                     else num_max_tokens_per_rank)
@@ -618,7 +660,8 @@ class ElasticBuffer:
             scalar_error = "invalid_zero_padding_mode"
 
         error = _first_error(
-            handle_error, scalar_error, pairing_error, x_error, sf_error,
+            handle_error, handle_device_error, scalar_error, pairing_error,
+            x_error, sf_error,
             topk_error, weights_error, shape_error)
         contract = {
             "buffer_bytes": self.num_bytes,
@@ -682,13 +725,14 @@ class ElasticBuffer:
             handle_error = "invalid_dispatch_handle"
             descriptor_valid = False
         x_shape, x_error = _ascend_tensor_contract(
-            x, 2, torch.bfloat16, "x")
+            x, 2, torch.bfloat16, "x", self._ascend_owner_device)
         weights_error = None
         weights_shape = None
         if topk_weights is not None:
             dimensions = 1 if getattr(handle, 'do_expand', False) else 2
             weights_shape, weights_error = _ascend_tensor_contract(
-                topk_weights, dimensions, torch.float32, "topk_weights")
+                topk_weights, dimensions, torch.float32, "topk_weights",
+                self._ascend_owner_device)
         bias_values = ()
         bias_error = None
         if bias is not None:
@@ -700,7 +744,7 @@ class ElasticBuffer:
                 bias_error = "invalid_bias"
         for value in bias_values:
             shape, tensor_error = _ascend_tensor_contract(
-                value, 2, torch.bfloat16, "bias")
+                value, 2, torch.bfloat16, "bias", self._ascend_owner_device)
             if tensor_error is not None or (x_shape is not None and
                                             shape[1] != x_shape[1]):
                 bias_error = "invalid_bias"
@@ -712,8 +756,22 @@ class ElasticBuffer:
               previous_event_before_epilogue is not None or
               async_with_compute_stream or allocate_on_comm_stream):
             scalar_error = "unsupported_combine_mode"
+        handle_device_error = (
+            "invalid_buffer_device" if isinstance(handle, EPHandle) and
+            not _ascend_handle_tensors_match_owner(
+                handle, self._ascend_owner_device) else None)
+        if ((isinstance(x, torch.Tensor) and
+             getattr(x.device, "index", None) != self._ascend_owner_device) or
+                (isinstance(topk_weights, torch.Tensor) and
+                 getattr(topk_weights.device, "index", None) !=
+                 self._ascend_owner_device) or
+                any(isinstance(value, torch.Tensor) and
+                    getattr(value.device, "index", None) !=
+                    self._ascend_owner_device for value in bias_values)):
+            handle_device_error = "invalid_buffer_device"
         error = _first_error(
-            handle_error, x_error, weights_error, bias_error, scalar_error)
+            handle_error, handle_device_error, x_error, weights_error,
+            bias_error, scalar_error)
         contract = {
             "buffer_bytes": self.num_bytes,
             "handle_generation": getattr(handle, '_ascend_generation', None),

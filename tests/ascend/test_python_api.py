@@ -55,8 +55,8 @@ class _FakeDType:
 
 class _FakeTensor:
     def __init__(self, device_type="cpu", shape=(), dtype=None,
-                 contiguous=True, values=None, strides=None):
-        self.device = types.SimpleNamespace(type=device_type)
+                 contiguous=True, values=None, strides=None, device_index=0):
+        self.device = types.SimpleNamespace(type=device_type, index=device_index)
         self.shape = shape
         self.dtype = dtype
         self._contiguous = contiguous
@@ -232,6 +232,12 @@ def _install_fake_torch(platform, events):
     torch.cuda = FakeCuda()
 
     class FakeNpu:
+        def current_device(self):
+            if platform != "ascend":
+                raise AssertionError("CUDA import touched torch.npu.current_device")
+            events.append("torch.npu.current_device")
+            return 0
+
         def synchronize(self):
             if platform != "ascend":
                 raise AssertionError("CUDA import touched torch.npu.synchronize")
@@ -312,14 +318,22 @@ def _install_fake_extension(platform, events):
 
         def dispatch(self, *args):
             self.dispatch_calls.append(args)
-            recv_src_metadata = _FakeTensor(shape=(1,))
+            device = args[0].device
+            recv_src_metadata = _FakeTensor(
+                device.type, (1,), device_index=device.index)
             cloned_topk_idx = _FakeTensor(
-                args[2].device.type, args[2].shape, args[2].dtype)
+                args[2].device.type, args[2].shape, args[2].dtype,
+                device_index=args[2].device.index)
             token_metadata_at_forward = (
-                _FakeTensor(shape=(120,)) if platform == "ascend" else None)
+                _FakeTensor(device.type, (120,), device_index=device.index)
+                if platform == "ascend" else None)
             return (args[0], args[1], args[2], args[3], cloned_topk_idx,
-                    1, 1, [], _FakeTensor(), _FakeTensor(), _FakeTensor(),
-                    recv_src_metadata, _FakeTensor(), token_metadata_at_forward,
+                    1, 1, [], _FakeTensor(device.type, device_index=device.index),
+                    _FakeTensor(device.type, device_index=device.index),
+                    _FakeTensor(device.type, device_index=device.index),
+                    recv_src_metadata,
+                    _FakeTensor(device.type, device_index=device.index),
+                    token_metadata_at_forward,
                     None, None if platform == "ascend" else EventHandle())
 
         def combine(self, *args):
@@ -1414,6 +1428,45 @@ def _scenario_ascend_fp8_dispatch():
     buffer.destroy()
 
 
+def _scenario_ascend_owner_device_preflight():
+    deep_ep, extension, events = _load_package("ascend", True)
+    group = _FakeGroup(events, rank=0, size=2)
+    buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+        explicitly_destroy=True)
+    runtime = extension.runtime_instances[-1]
+    torch = sys.modules["torch"]
+    assert buffer._ascend_owner_device == 0
+    x = _FakeTensor("npu", (1, 16), torch.bfloat16, device_index=1)
+    topk_idx = _FakeTensor("npu", (1, 1), torch.int64, device_index=1)
+
+    def one_rank_mismatch(value):
+        assert value[0] == "dispatch", value
+        assert value[1] == 0 and value[2] == "invalid_buffer_device", value
+        return [value, _fixed_preflight_record(
+            "dispatch", _fixed_preflight_contract(value))]
+
+    group.gathered_objects = one_rank_mismatch
+    try:
+        buffer.dispatch(
+            x, topk_idx=topk_idx, num_experts=2,
+            num_max_tokens_per_rank=1)
+    except RuntimeError as error:
+        assert "dispatch preflight failed on rank 0 (invalid_buffer_device)" in str(error)
+    else:
+        raise AssertionError("owner-device mismatch reached runtime")
+    assert not runtime.dispatch_calls
+
+    group.gathered_objects = None
+    healthy_x = _FakeTensor("npu", (1, 16), torch.bfloat16)
+    healthy_topk = _FakeTensor("npu", (1, 1), torch.int64)
+    buffer.dispatch(
+        healthy_x, topk_idx=healthy_topk, num_experts=2,
+        num_max_tokens_per_rank=1)
+    assert len(runtime.dispatch_calls) == 1
+    buffer.destroy()
+
+
 def _scenario_ascend_dispatch_optimized():
     deep_ep, extension, events = _load_package("ascend", True)
     buffer = deep_ep.ElasticBuffer(
@@ -1480,6 +1533,24 @@ def _scenario_ascend_combine():
         x, topk_weights, bias_0, bias_1, recv_src_metadata, topk_idx,
         rank_prefix, descriptor, None, 2, 4, 1, 0,
         None, None, False, False, False)
+
+    def expect_owner_rejection(call):
+        calls = len(runtime.combine_calls)
+        try:
+            call()
+        except RuntimeError as error:
+            assert "combine preflight failed on rank 0 (invalid_buffer_device)" in str(error)
+        else:
+            raise AssertionError("owner-device mismatch reached combine runtime")
+        assert len(runtime.combine_calls) == calls
+
+    expect_owner_rejection(lambda: buffer.combine(
+        x, handle, topk_weights=_FakeTensor(
+            "npu", (2, 2), torch.float32, device_index=1)))
+    recv_src_metadata.device.index = 1
+    expect_owner_rejection(lambda: buffer.combine(x, handle))
+    recv_src_metadata.device.index = 0
+    buffer.combine(x, handle)
 
     _, _, one_bias_event = buffer.combine(x, handle, bias=bias_0, num_sms=1)
     assert runtime.combine_calls[-1][2:4] == (bias_0, None)
@@ -1707,6 +1778,7 @@ SCENARIOS = {
     "ascend_contextmanager_gate": _scenario_ascend_contextmanager_gate,
     "ascend_dispatch": _scenario_ascend_dispatch,
     "ascend_fp8_dispatch": _scenario_ascend_fp8_dispatch,
+    "ascend_owner_device_preflight": _scenario_ascend_owner_device_preflight,
     "ascend_dispatch_optimized": _scenario_ascend_dispatch_optimized,
     "ascend_combine": _scenario_ascend_combine,
     "ascend_weak_lru_gate": _scenario_ascend_weak_lru_gate,
@@ -1745,6 +1817,10 @@ class PythonApiIsolationTest(unittest.TestCase):
         self.assertEqual(contract["supported_world_sizes"], [2, 4, 8])
         self.assertIn("exact-payload-bytes", contract["contract_checks"])
         self.assertIn("exact-scale-factor-packs", contract["contract_checks"])
+        self.assertIn("exact-column-major-scale-stride", contract["contract_checks"])
+        self.assertIn("cached-bf16-to-fp8-and-fp8-to-bf16", contract["contract_checks"])
+        self.assertIn("independent-fp8-dequantization", contract["contract_checks"])
+        self.assertIn("one-rank-malformed-recovery", contract["contract_checks"])
 
     def run_scenario(self, scenario, optimize=False):
         command = [sys.executable]
@@ -1799,6 +1875,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_fp8_dispatch_collectively_validates_scale_factor_contract(self):
         self.run_scenario("ascend_fp8_dispatch")
+
+    def test_owner_device_mismatch_is_collective_and_allows_retry(self):
+        self.run_scenario("ascend_owner_device_preflight")
 
     def test_dispatch_count_validation_survives_optimized_python(self):
         self.run_scenario("ascend_dispatch_optimized", optimize=True)

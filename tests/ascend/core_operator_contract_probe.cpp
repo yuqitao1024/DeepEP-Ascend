@@ -104,9 +104,19 @@ int main() {
     input.num_scale_factor_packs = 2;
     input.scale_factor_pack_bytes = 8;
     status = build_core_tiling(input, &tiling);
-    if (!status.ok() || tiling.token_layout.hidden_bytes != 64 ||
-        tiling.token_layout.scale_factor_bytes != 16)
+    if (status.code != TilingStatusCode::kInvalidArgument)
         return 10;
+    input.scale_factor_pack_bytes = 4;
+    status = build_core_tiling(input, &tiling);
+    if (!status.ok() || tiling.token_layout.hidden_bytes != 64 ||
+        tiling.token_layout.scale_factor_bytes != 8)
+        return 17;
+    input = valid_input();
+    input.num_scale_factor_packs = 1;
+    input.scale_factor_pack_bytes = 4;
+    status = build_core_tiling(input, &tiling);
+    if (status.code != TilingStatusCode::kInvalidArgument)
+        return 18;
 
     input = valid_input();
     input.topology.world_size = 3;

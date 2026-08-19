@@ -156,6 +156,7 @@ public:
             std::make_shared<std::vector<std::uint8_t>>(*storage_);
         return result;
     }
+    Tensor& copy_(const Tensor&) { return *this; }
 private:
     std::size_t bytes() const { return type_ == kBFloat16 ? 2 : type_ == kLong ? 8 : type_ == kFloat || type_ == kInt ? 4 : 1; }
 };

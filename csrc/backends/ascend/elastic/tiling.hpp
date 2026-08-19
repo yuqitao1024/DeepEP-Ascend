@@ -339,12 +339,19 @@ inline TilingStatus build_core_tiling(
         !input.has_reusable_slots)
         return TilingStatus::invalid_mode(
             "cached mode requires reusable slots");
-    if (requires_token_shape &&
+    const bool has_scale_factor_geometry =
+        input.num_scale_factor_packs != 0 || input.scale_factor_pack_bytes != 0;
+    if (input.operation == OperationKind::kDispatch &&
         input.element_kind == ElementKind::kFloat8E4M3 &&
         (input.num_scale_factor_packs == 0 ||
-         input.scale_factor_pack_bytes == 0))
+         input.scale_factor_pack_bytes != 4))
         return TilingStatus::invalid(
-            "FP8 dispatch requires scale factor packs");
+            "FP8 dispatch requires four-byte scale factor packs");
+    if ((input.element_kind == ElementKind::kBFloat16 ||
+         input.operation == OperationKind::kBarrier) &&
+        has_scale_factor_geometry)
+        return TilingStatus::invalid(
+            "BF16 operations and barriers do not accept scale factor packs");
 
     const std::uint64_t element_bytes =
         input.element_kind == ElementKind::kBFloat16 ? 2 : 1;

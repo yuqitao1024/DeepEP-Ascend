@@ -930,14 +930,6 @@ public:
                         "DeepEP Ascend backend: dispatch scale factor packs "
                         "exceed the supported hidden-width bound");
         }
-        if (allow_hybrid_mode_)
-            require_transport("dispatch",
-                              operation_capabilities(kDispatchCapabilities));
-        auto lease = reserve_operation(
-            elastic::BufferOperationKind::kDispatch, "dispatch");
-        if (!allow_hybrid_mode_)
-            require_transport("dispatch",
-                              operation_capabilities(kDispatchCapabilities));
         int current_device = -1;
         auto device_status = resources_->current_device(&current_device);
         if (!device_status.ok())
@@ -946,7 +938,14 @@ public:
                         current_device == resources_->owning_device(),
                     "DeepEP Ascend backend: dispatch tensors and current NPU "
                     "must match the buffer device");
-
+        if (allow_hybrid_mode_)
+            require_transport("dispatch",
+                              operation_capabilities(kDispatchCapabilities));
+        auto lease = reserve_operation(
+            elastic::BufferOperationKind::kDispatch, "dispatch");
+        if (!allow_hybrid_mode_)
+            require_transport("dispatch",
+                              operation_capabilities(kDispatchCapabilities));
         const bool any_cached_tensor = cached_num_expanded_tokens.has_value() ||
             cached_num_recv_tokens_per_expert_list.has_value() ||
             cached_psum_num_recv_tokens_per_scaleup_rank.has_value() ||
@@ -1523,6 +1522,20 @@ public:
         auto narrowed_sf = recv_sf.has_value() ?
             std::optional<torch::Tensor>(recv_sf->narrow(0, 0, output_tokens)) :
             std::optional<torch::Tensor>();
+        if (narrowed_sf.has_value() && use_tma_aligned_col_major_sf) {
+            std::uint64_t aligned_output_tokens = 0;
+            TORCH_CHECK(
+                align_without_overflow(
+                    static_cast<std::uint64_t>(output_tokens), 4,
+                    &aligned_output_tokens),
+                "DeepEP Ascend backend: dispatch scale factor output stride overflow");
+            auto exact_stride_sf = torch::empty_strided(
+                {output_tokens, static_cast<int64_t>(num_scale_factor_packs)},
+                {int64_t{1}, static_cast<int64_t>(aligned_output_tokens)},
+                narrowed_sf->options());
+            exact_stride_sf.copy_(*narrowed_sf);
+            narrowed_sf = std::move(exact_stride_sf);
+        }
         auto narrowed_topk_idx = do_expand ? std::optional<torch::Tensor>() :
             std::optional<torch::Tensor>(recv_topk_indices.narrow(0, 0, output_tokens));
         auto narrowed_topk_weights = recv_topk_weights.has_value() ?
@@ -1582,15 +1595,6 @@ public:
                     "rank-partitioned expert capacity");
         TORCH_CHECK(token_metadata_at_forward.has_value(),
                     "DeepEP Ascend backend: combine requires a dispatch handle");
-        if (allow_hybrid_mode_)
-            require_transport("combine",
-                              operation_capabilities(kCombineCapabilities));
-        auto lease = reserve_operation(
-            elastic::BufferOperationKind::kCombine, "combine");
-        if (!allow_hybrid_mode_)
-            require_transport("combine",
-                              operation_capabilities(kCombineCapabilities));
-
         const auto device = x.device();
         int current_device = -1;
         auto status = resources_->current_device(&current_device);
@@ -1600,6 +1604,14 @@ public:
                         current_device == resources_->owning_device(),
                     "DeepEP Ascend backend: combine tensors and current NPU "
                     "must match the buffer device");
+        if (allow_hybrid_mode_)
+            require_transport("combine",
+                              operation_capabilities(kCombineCapabilities));
+        auto lease = reserve_operation(
+            elastic::BufferOperationKind::kCombine, "combine");
+        if (!allow_hybrid_mode_)
+            require_transport("combine",
+                              operation_capabilities(kCombineCapabilities));
         const auto validate = [&](const torch::Tensor& tensor,
                                   int64_t dimensions,
                                   torch::ScalarType type,
