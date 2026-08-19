@@ -27,6 +27,13 @@ int main() {
     CHECK(direct_trailer.header_offset == 64);
     CHECK(!direct_trailer.has_route_metadata);
     CHECK(direct_trailer.route_metadata_offset == 0);
+    CHECK(!combine_record_trailer_layout(31, false).valid);
+    const auto minimum_direct_trailer =
+        combine_record_trailer_layout(32, false);
+    CHECK(minimum_direct_trailer.valid);
+    CHECK(minimum_direct_trailer.header_offset == 0);
+    CHECK(!minimum_direct_trailer.has_route_metadata);
+    CHECK(minimum_direct_trailer.route_metadata_offset == 0);
     const auto hybrid_trailer = combine_record_trailer_layout(128, true);
     CHECK(hybrid_trailer.valid);
     CHECK(hybrid_trailer.header_offset == 64);

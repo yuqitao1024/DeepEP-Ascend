@@ -69,7 +69,7 @@ CombineRecordTrailerLayout combine_record_trailer_layout(
     result.has_route_metadata = hybrid;
     const std::uint64_t minimum_bytes = hybrid ?
         sizeof(CombineRecordHeader) + sizeof(HybridCombineRouteMetadata) :
-        sizeof(CombineRecordHeader);
+        kDirectCombineRecordTrailerBytes;
     if (record_bytes < minimum_bytes)
         return result;
     const std::uint64_t reserved_trailer_bytes = hybrid ?
