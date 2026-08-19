@@ -601,9 +601,17 @@ class DispatchMatrix:
             "dst_buffer_slot_idx", "token_metadata_at_forward",
             "channel_linked_list", "num_recv_tokens",
             "num_expanded_tokens", "cached_recv_src_metadata_before_sort",
+            "_ascend_owner", "_ascend_generation",
+            "_ascend_descriptor_fingerprint",
         }
         _check(set(vars(handle)) == expected_fields,
                f"EPHandle fields differ: {sorted(vars(handle))}")
+        _check(handle._ascend_owner is self.buffer,
+               "handle Ascend owner differs")
+        _check(handle._ascend_generation > 0 and
+               handle._ascend_generation ==
+               self.buffer._ascend_handle_generation,
+               "handle Ascend generation differs")
         _check(handle.do_expand is spec.do_expand, "handle.do_expand")
         _check(handle.num_experts == NUM_EXPERTS, "handle.num_experts")
         _check(handle.expert_alignment == spec.expert_alignment,
@@ -651,6 +659,10 @@ class DispatchMatrix:
                descriptor.dtype == self.torch.uint8 and descriptor.dim() == 1 and
                descriptor.numel() > 0 and descriptor.is_contiguous(),
                "handle dispatch attestation is not an opaque NPU byte tensor")
+        observed_fingerprint = tuple(
+            int(value) for value in descriptor.detach().cpu().reshape(-1).tolist())
+        _check(handle._ascend_descriptor_fingerprint == observed_fingerprint,
+               "handle dispatch attestation fingerprint differs")
 
     def _verify_result(self, spec, local_routes, reference, result,
                        expected_handle=None):
