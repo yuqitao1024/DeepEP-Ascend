@@ -199,10 +199,12 @@ class ElasticBuffer {
             sizeof(staged));
         if (!status.ok())
             return status;
-        if (staged.command_queue == 0)
+        if (!transport::command::valid_staged_context_header(
+                staged.abi_version, staged.struct_size,
+                staged.cann_compatibility, staged.command_queue))
             return transport::TransportStatus::invalid(
                 "combine_lifecycle_snapshot",
-                "transport command queue is unavailable");
+                "malformed staged transport context");
 
         status = resources_->copy_to_host(
             &snapshot->queue,
@@ -210,14 +212,35 @@ class ElasticBuffer {
             sizeof(snapshot->queue));
         if (!status.ok())
             return status;
-        if (snapshot->queue.service_state == 0)
+        if (!transport::command::valid_command_queue_header(
+                snapshot->queue.abi_version, snapshot->queue.struct_size,
+                snapshot->queue.commands, snapshot->queue.capacity,
+                snapshot->queue.count, snapshot->queue.service_state,
+                snapshot->queue.diagnostic))
             return transport::TransportStatus::invalid(
                 "combine_lifecycle_snapshot",
-                "transport service state is unavailable");
-        return resources_->copy_to_host(
+                "malformed transport command queue");
+        if (!transport::command::valid_registration_cookie(
+                staged.reserved, staged.command_queue,
+                snapshot->queue.commands, snapshot->queue.service_state,
+                snapshot->queue.diagnostic, snapshot->queue.capacity))
+            return transport::TransportStatus::invalid(
+                "combine_lifecycle_snapshot",
+                "malformed transport registration cookie");
+
+        status = resources_->copy_to_host(
             &snapshot->service,
             reinterpret_cast<const void*>(snapshot->queue.service_state),
             sizeof(snapshot->service));
+        if (!status.ok())
+            return status;
+        if (!transport::command::valid_service_state_header(
+                snapshot->service.abi_version,
+                snapshot->service.struct_size))
+            return transport::TransportStatus::invalid(
+                "combine_lifecycle_snapshot",
+                "malformed transport service state");
+        return transport::TransportStatus::success();
     }
 
     [[noreturn]] void raise_barrier_diagnostic(

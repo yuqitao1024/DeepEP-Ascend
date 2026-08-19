@@ -21,6 +21,15 @@ enum class LifecycleFailure {
     kConsumedGenerationMismatch,
 };
 
+enum class LifecycleSnapshotMutation {
+    kNone,
+    kStagedHeader,
+    kQueueHeader,
+    kQueueCount,
+    kRegistrationCookie,
+    kServiceHeader,
+};
+
 struct Trace {
     int launches = 0;
     int copies = 0;
@@ -32,6 +41,8 @@ struct Trace {
     bool bad_diagnostic = false;
     bool bad_completion = false;
     LifecycleFailure lifecycle_failure = LifecycleFailure::kNone;
+    LifecycleSnapshotMutation lifecycle_snapshot_mutation =
+        LifecycleSnapshotMutation::kNone;
     std::uint64_t generation = 0;
     std::vector<std::uint64_t> generations;
     elastic::CoreModeFlags mode_flags = 0;
@@ -204,6 +215,25 @@ extern "C" int deep_ep_ascend_launch_combine(
             *scratch_status = 0;
             queue->count = 4;
             service->consumed_generation = 0;
+        }
+        switch (trace.lifecycle_snapshot_mutation) {
+            case LifecycleSnapshotMutation::kNone:
+                break;
+            case LifecycleSnapshotMutation::kStagedHeader:
+                staged->abi_version = 0;
+                break;
+            case LifecycleSnapshotMutation::kQueueHeader:
+                queue->abi_version = 0;
+                break;
+            case LifecycleSnapshotMutation::kQueueCount:
+                queue->count = queue->capacity + 1;
+                break;
+            case LifecycleSnapshotMutation::kRegistrationCookie:
+                staged->reserved = 0;
+                break;
+            case LifecycleSnapshotMutation::kServiceHeader:
+                service->abi_version = 0;
+                break;
         }
     }
     auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(
@@ -870,6 +900,21 @@ bool snapshot_failure_preserves_combine_failure() {
         message.find("snapshot_backend_code=84") != std::string::npos;
 }
 
+bool malformed_lifecycle_snapshot_reports_unavailable(
+    LifecycleSnapshotMutation mutation, const char* expected_error) {
+    trace = {};
+    auto target = buffer();
+    Inputs inputs;
+    trace.lifecycle_failure = LifecycleFailure::kConsumedGenerationMismatch;
+    trace.lifecycle_snapshot_mutation = mutation;
+    const auto message = error_message([&] { (void)call(*target, inputs); });
+    return message.find("completion mismatch") != std::string::npos &&
+        message.find("lifecycle_snapshot=unavailable") != std::string::npos &&
+        message.find("snapshot_operation=combine_lifecycle_snapshot") !=
+            std::string::npos &&
+        message.find(expected_error) != std::string::npos;
+}
+
 int main() {
     int failures = 0;
     const auto check = [&failures](bool passed, const char* name) {
@@ -904,5 +949,25 @@ int main() {
           "consumed generation mismatch lifecycle diagnostic");
     check(snapshot_failure_preserves_combine_failure(),
           "snapshot failure preserves combine failure");
+    check(malformed_lifecycle_snapshot_reports_unavailable(
+              LifecycleSnapshotMutation::kStagedHeader,
+              "malformed staged transport context"),
+          "malformed staged header snapshot");
+    check(malformed_lifecycle_snapshot_reports_unavailable(
+              LifecycleSnapshotMutation::kQueueHeader,
+              "malformed transport command queue"),
+          "malformed queue header snapshot");
+    check(malformed_lifecycle_snapshot_reports_unavailable(
+              LifecycleSnapshotMutation::kQueueCount,
+              "malformed transport command queue"),
+          "malformed queue count snapshot");
+    check(malformed_lifecycle_snapshot_reports_unavailable(
+              LifecycleSnapshotMutation::kRegistrationCookie,
+              "malformed transport registration cookie"),
+          "malformed registration cookie snapshot");
+    check(malformed_lifecycle_snapshot_reports_unavailable(
+              LifecycleSnapshotMutation::kServiceHeader,
+              "malformed transport service state"),
+          "malformed service header snapshot");
     return failures == 0 ? 0 : 1;
 }
