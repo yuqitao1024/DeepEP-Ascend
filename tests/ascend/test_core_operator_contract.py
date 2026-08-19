@@ -42,11 +42,27 @@ STREAM_EVENT_CAPABILITY_PROBE = \
     ROOT / "tests/ascend/stream_event/capability_probe.cpp"
 STREAM_EVENT_CAPABILITY_RUNNER = \
     ROOT / "tests/ascend/stream_event/run_capability_probe.py"
+ASYNC_RUNTIME_PROBE = ROOT / "tests/ascend/async_runtime_probe.cpp"
 ELASTIC = ROOT / "csrc/backends/ascend/elastic"
 CORE_OPS = ROOT / "tests/ascend/core_ops"
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
+    def test_async_runtime_stream_event_contract(self):
+        runtime = ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "async_runtime_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(ASYNC_RUNTIME_PROBE), str(runtime),
+                 "-o", str(binary)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
     def test_stream_event_capability_probe_contract(self):
         probe = STREAM_EVENT_CAPABILITY_PROBE.read_text()
         runner = STREAM_EVENT_CAPABILITY_RUNNER.read_text()
