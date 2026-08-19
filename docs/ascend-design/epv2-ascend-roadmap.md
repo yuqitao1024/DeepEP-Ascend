@@ -414,6 +414,26 @@ the communication stretch, so the `mul_` contention hypothesis is rejected.
 The formal mixed workload and fixed 5% gate remain unchanged, no further full
 matrix is justified, and Phase 3E.1 remains unaccepted.
 
+The next component-only capability probe used BF16 NCDHW
+`torch.nn.functional.conv3d` with primary `Conv3DV2` compute. Runner commit
+`8aaa624` and task `task_20260820_045758_323960612146` changed no production
+code or formal acceptance workload. Both ranks established valid serialized
+baselines, event waits near 0.221 seconds, exact primary
+`Conv3DV2=KERNEL_AICORE` and dispatch `KERNEL_AIVEC` task types, distinct
+physical streams `61/26`, and positive `28.5/28.75us` intervals. Serialized
+walls of `0.332164400/0.332342290` seconds fell to overlapped walls of
+`0.275529020/0.275268150`, gains of `17.0504%/17.1733%`.
+
+The capability remains qualified rather than accepted. Calibration reached
+its `2039/2048` iteration clamp while compute-only remained about 56ms, below
+the intended 0.20-0.30s range. Each trace also inventories tiny `Greater` and
+`ZerosLike` auxiliary AIV families and no TransData, so the primary kernel is
+AIC-only but the complete compute path is not. The report SHA-256 is
+`88a4fa784c660ffa078b1a443e6b0b9573230ceed458a3932eb2c7944c31a813`.
+This single-sample result establishes capability and motivates a formal
+fixed-workload matrix; Phase 3E.1 remains unaccepted until that entire matrix
+passes its unchanged 5% and profiler gates.
+
 ### Deliverables
 
 - implement native Ascend event ownership behind `EventOverlap`;

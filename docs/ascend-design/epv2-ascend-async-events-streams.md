@@ -265,6 +265,36 @@ production change, formal-workload substitution, full-matrix retry, or
 additional NPU task follows from this result; the mixed formal acceptance case
 remains unchanged and Phase 3E.1 remains unaccepted.
 
+A bounded AIC-only primary-kernel capability diagnostic then replaced only
+the component compute path with BF16 NCDHW `torch.nn.functional.conv3d`.
+Runner commit `8aaa624` used input shape `(1,64,8,32,32)`, weight shape
+`(64,64,3,3,3)`, and NPU-event-specific calibration; production and the
+formal acceptance workload remained unchanged. The only capability task,
+`task_20260820_045758_323960612146`, completed on devices `6,7` with exit 0
+and a runner duration of `44.573933470` seconds.
+
+Rank 0 measured communication-only/compute-only/component-sum/serialized/
+overlapped walls of `0.279388210`/`0.056249980`/`0.335638190`/
+`0.332164400`/`0.275529020` seconds, a `17.0504%` gain. Rank 1 measured
+`0.282109590`/`0.056503370`/`0.338612960`/`0.332342290`/
+`0.275268150`, a `17.1733%` gain. Event waits were only
+`0.220873860`/`0.221500330` seconds. Both profiler traces identify primary
+`Conv3DV2` as exactly `KERNEL_AICORE`, DeepEP dispatch as exactly
+`KERNEL_AIVEC`, distinct physical streams `61/26`, and positive intervals of
+`28.5/28.75us`.
+
+Calibration selected `2039/2048` iterations at its upper clamp, but
+compute-only wall remained about 56ms rather than the intended 0.20-0.30s.
+Each trace also contains tiny `Greater` and `ZerosLike` AIV families totaling
+`3.401us` and `2.738us`; neither contains TransData. The evidence therefore
+proves that an AIC-only primary kernel can overlap AIV dispatch and produce a
+material wall reduction, but it does not prove a wholly pure-AIC compute path.
+The report correctly records `compute_path_aic_only=false` and remains
+acceptance-ineligible as a single-sample capability diagnostic. Report
+SHA-256 is
+`88a4fa784c660ffa078b1a443e6b0b9573230ceed458a3932eb2c7944c31a813`.
+Phase 3E.1 remains unaccepted until the complete formal matrix passes.
+
 ## Decisions
 
 ### Native resource model
