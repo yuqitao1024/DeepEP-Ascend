@@ -277,18 +277,32 @@ fail before resource publication.
 
 Status: synchronous E4M3 dispatch with FP32 or packed UE8M0x4 scale-factor
 transport is implemented; BF16 combine remains the selected upstream-compatible
-combine path. Final two-rank qualification passed on devices 6 and 7, but
-four-rank and eight-rank qualification was not run because the active policy
-authorizes at most two devices. Phase 3F therefore remains incomplete.
+combine path. The synchronous Phase 3F scope is complete for single-host 2-,
+4-, and 8-rank execution.
 
-The final two-rank TaskQueue run `task_20260819_161435_313220230238` used a
-clean `DEEP_EP_ASCEND_TESTING=0` production build/import and exited 0. It
-recorded no CUDA, NCCL, or NVSHMEM dependency; 174 CANN host-suite tests
-passed with 2 skipped across 23 subtests; the FP8 runtime matrix covered 12
-cases; the barrier covered 100 generations; BF16 dispatch covered 14 cases;
-and BF16 combine covered 24 cases. This is correctness evidence for the
-authorized two-rank topology only, not performance qualification or physical
-multi-host support.
+TaskQueue run `task_20260819_171408_412650329832` established the clean
+`DEEP_EP_ASCEND_TESTING=0` CANN 9.2.0 production build/import and dependency
+audit: no CUDA, NCCL, or NVSHMEM dependency was present. Before a benchmark
+verifier failure, 176 host tests passed with 2 skipped across 23 subtests, the
+two-rank FP8 matrix passed 12 cases including empty column-major output, the
+barrier passed 100 generations, BF16 dispatch passed 14 cases, and BF16
+combine passed 24 cases. The verifier incorrectly indexed an NPU E4M3 tensor
+directly; commit `fa30444` changed correctness indexing to its byte view.
+
+The next multi-rank run `task_20260819_173647_53443028121` passed the repaired
+two-rank BF16/FP8 benchmark and reached four-rank combine. It exposed that the
+test oracle summed integer values before BF16 conversion, while the runtime
+correctly receives individually quantized BF16 contributions and accumulates
+them in FP32. Commit `72de60f` fixed the oracle and added a host regression for
+the quantization order.
+
+Final serialized run `task_20260819_184826_108102819968` used devices 0-7 at
+commit `72de60f` and exited 0. It passed 56 focused host tests plus 20 subtests,
+the two-rank BF16/FP8 benchmark smoke with 2 cases, and the complete 12-case
+FP8 runtime matrix at both four and eight ranks. Together with the clean-build,
+dependency, and broad two-rank evidence above, this closes synchronous Phase
+3F. It is not performance qualification, physical multi-host qualification,
+FP8 combine support, or evidence for the Phase 3E async/stream-overlap path.
 
 ### Deliverables
 

@@ -2,8 +2,9 @@
 
 ## Status
 
-Approved for implementation by the user's instruction to use the recommended
-approach and report the consolidated design choice after implementation.
+Implemented and qualified for synchronous single-host 2-, 4-, and 8-rank
+execution. Performance qualification, physical multi-host execution, FP8
+combine, and Phase 3E async/stream overlap remain outside this scope.
 
 ## Goal
 
@@ -132,7 +133,8 @@ No device conversion is performed. E4M3 payload and both SF representations
 are transported bitwise. Numerical acceptance dequantizes with an independent
 PyTorch reference: FP32 factors multiply each 128-value group; packed UE8M0x4
 factors are decoded from exponent bytes before multiplication. Dispatch bytes
-and SF values are checked exactly; BF16 combine uses the existing tolerance.
+and SF values are checked exactly. BF16 combine is compared after reproducing
+the runtime's BF16-input, FP32-accumulation, BF16-output quantization order.
 
 ## Failure Model
 
@@ -168,5 +170,26 @@ tests then verify rank-parameterized behavior. One final serialized TaskQueue
 run performs a clean production build, dependency audit, host tests, BF16
 regressions, and the complete selected FP8 runtime matrix.
 
-Phase 3F is complete only when those runtime checks pass. Compile coverage or
-an enabled benchmark case alone is not completion.
+### Qualification Record
+
+Task `task_20260819_171408_412650329832` established a clean CANN 9.2.0
+production build/import without CUDA, NCCL, or NVSHMEM dependencies. It passed
+176 host tests with 2 skipped across 23 subtests, the 12-case two-rank FP8
+matrix, 100 barrier generations, 14 BF16 dispatch cases, and 24 BF16 combine
+cases before exposing a benchmark-only E4M3 indexing limitation. Commit
+`fa30444` changed the benchmark verifier to index payload bytes.
+
+Task `task_20260819_173647_53443028121` passed the repaired two-rank BF16/FP8
+benchmark and exposed a four-rank BF16 reference-order error. Commit `72de60f`
+made the reference quantize each BF16 contribution before FP32 accumulation
+and added a host regression.
+
+Final task `task_20260819_184826_108102819968` ran on devices 0-7 at commit
+`72de60f` and exited 0. It passed 56 focused host tests plus 20 subtests, both
+two-rank benchmark cases, and all 12 FP8 runtime cases at four and eight ranks.
+Combined with the clean-build and broad two-rank evidence, this completes the
+synchronous Phase 3F acceptance boundary.
+
+Compile coverage or an enabled benchmark case alone is not completion, and the
+qualification above does not claim performance, physical multi-host,
+FP8-combine, or async/stream-overlap support.
