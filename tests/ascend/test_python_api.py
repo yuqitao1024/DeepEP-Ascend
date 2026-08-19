@@ -53,11 +53,19 @@ class _FakeDType:
 
 class _FakeTensor:
     def __init__(self, device_type="cpu", shape=(), dtype=None,
-                 contiguous=True, values=None):
+                 contiguous=True, values=None, strides=None):
         self.device = types.SimpleNamespace(type=device_type)
         self.shape = shape
         self.dtype = dtype
         self._contiguous = contiguous
+        if strides is None:
+            running = 1
+            computed = []
+            for extent in reversed(shape):
+                computed.append(running)
+                running *= extent
+            strides = tuple(reversed(computed))
+        self._strides = tuple(strides)
         numel = 1
         for extent in shape:
             numel *= extent
@@ -68,6 +76,9 @@ class _FakeTensor:
 
     def is_contiguous(self):
         return self._contiguous
+
+    def stride(self, dimension=None):
+        return self._strides if dimension is None else self._strides[dimension]
 
     def detach(self):
         return self
@@ -1313,6 +1324,94 @@ def _scenario_ascend_dispatch():
     buffer.destroy()
 
 
+def _scenario_ascend_fp8_dispatch():
+    deep_ep, extension, events = _load_package("ascend", True)
+    group = _FakeGroup(events, rank=0, size=2)
+    buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+        explicitly_destroy=True)
+    runtime = extension.runtime_instances[-1]
+    torch = sys.modules["torch"]
+    x = _FakeTensor("npu", (2, 64), torch.float8_e4m3fn)
+    topk_idx = _FakeTensor("npu", (2, 1), torch.int64)
+
+    def gather_valid(value):
+        contract = _fixed_preflight_contract(value)
+        assert contract["x_dtype"] == str(torch.float8_e4m3fn), contract
+        assert contract["sf_dtype"] == str(torch.float32), contract
+        assert contract["sf_shape"] == [None, 2], contract
+        assert contract["sf_layout"] == "row_major", contract
+        assert contract["column_major_sf"] == 0, contract
+        return [value, value]
+
+    sf = _FakeTensor("npu", (2, 2), torch.float32, strides=(2, 1))
+    group.gathered_objects = gather_valid
+    recv_x, _, _, handle, _ = buffer.dispatch(
+        (x, sf), topk_idx=topk_idx, num_experts=2,
+        num_max_tokens_per_rank=2)
+    assert isinstance(recv_x, tuple) and recv_x == (x, sf), recv_x
+    assert runtime.dispatch_calls[-1][1] is sf
+
+    packed_sf = _FakeTensor(
+        "npu", (2, 2), torch.int32, contiguous=False, strides=(1, 4))
+
+    def gather_column_major(value):
+        contract = _fixed_preflight_contract(value)
+        assert contract["sf_dtype"] == str(torch.int32), contract
+        assert contract["sf_layout"] == "column_major", contract
+        assert contract["column_major_sf"] == 1, contract
+        return [value, value]
+
+    group.gathered_objects = gather_column_major
+    recv_x, _, _, _, _ = buffer.dispatch(
+        (x, packed_sf), handle=handle,
+        use_tma_aligned_col_major_sf=True)
+    assert recv_x == (x, packed_sf), recv_x
+    assert runtime.dispatch_calls[-1][28] is True
+
+    invalid_cases = (
+        (x, None),
+        (_FakeTensor("npu", (2, 64), torch.bfloat16), sf),
+        (x, _FakeTensor("npu", (2, 2), torch.bfloat16)),
+        (x, _FakeTensor("cpu", (2, 2), torch.float32)),
+        (x, _FakeTensor("npu", (1, 2), torch.float32)),
+        (x, _FakeTensor("npu", (2, 0), torch.float32)),
+        (x, _FakeTensor("npu", (2, 2), torch.float32,
+                        contiguous=False, strides=(0, 1))),
+    )
+    group.gathered_objects = None
+    for invalid_x, invalid_sf in invalid_cases:
+        calls = len(runtime.dispatch_calls)
+        value = invalid_x if invalid_sf is None else (invalid_x, invalid_sf)
+        try:
+            buffer.dispatch(
+                value, topk_idx=topk_idx, num_experts=2,
+                num_max_tokens_per_rank=2)
+        except RuntimeError as error:
+            assert "dispatch preflight failed" in str(error), error
+        else:
+            raise AssertionError("invalid FP8 dispatch reached runtime")
+        assert len(runtime.dispatch_calls) == calls
+
+    def gather_mismatched_layout(value):
+        remote_contract = _fixed_preflight_contract(value)
+        remote_contract["sf_layout"] = "strided"
+        return [value, _fixed_preflight_record("dispatch", remote_contract)]
+
+    group.gathered_objects = gather_mismatched_layout
+    calls = len(runtime.dispatch_calls)
+    try:
+        buffer.dispatch(
+            (x, sf), topk_idx=topk_idx, num_experts=2,
+            num_max_tokens_per_rank=2)
+    except RuntimeError as error:
+        assert "sf_layout_mismatch" in str(error), error
+    else:
+        raise AssertionError("asymmetric SF layout reached runtime")
+    assert len(runtime.dispatch_calls) == calls
+    buffer.destroy()
+
+
 def _scenario_ascend_dispatch_optimized():
     deep_ep, extension, events = _load_package("ascend", True)
     buffer = deep_ep.ElasticBuffer(
@@ -1605,6 +1704,7 @@ SCENARIOS = {
     "ascend_method_gates": _scenario_ascend_method_gates,
     "ascend_contextmanager_gate": _scenario_ascend_contextmanager_gate,
     "ascend_dispatch": _scenario_ascend_dispatch,
+    "ascend_fp8_dispatch": _scenario_ascend_fp8_dispatch,
     "ascend_dispatch_optimized": _scenario_ascend_dispatch_optimized,
     "ascend_combine": _scenario_ascend_combine,
     "ascend_weak_lru_gate": _scenario_ascend_weak_lru_gate,
@@ -1664,6 +1764,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_dispatch_routes_to_the_synchronous_ascend_runtime(self):
         self.run_scenario("ascend_dispatch")
+
+    def test_fp8_dispatch_collectively_validates_scale_factor_contract(self):
+        self.run_scenario("ascend_fp8_dispatch")
 
     def test_dispatch_count_validation_survives_optimized_python(self):
         self.run_scenario("ascend_dispatch_optimized", optimize=True)

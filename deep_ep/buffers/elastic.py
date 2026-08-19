@@ -217,6 +217,35 @@ def _ascend_tensor_contract(tensor, dimensions: int, dtype,
     return shape, None
 
 
+def _ascend_scale_factor_contract(tensor, x_shape, x_device):
+    if not isinstance(tensor, torch.Tensor):
+        return None, None, "invalid_sf_tensor"
+    shape = tuple(tensor.shape)
+    try:
+        strides = tuple(tensor.stride())
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return None, None, "invalid_sf_tensor"
+    if (tensor.device.type != 'npu' or
+            tensor.device.type != getattr(x_device, 'type', None) or
+            getattr(tensor.device, 'index', None) !=
+            getattr(x_device, 'index', None) or len(shape) != 2 or
+            tensor.dtype not in (torch.float32, torch.int32) or
+            len(strides) != 2 or any(stride <= 0 for stride in strides) or
+            shape[1] <= 0):
+        return None, None, "invalid_sf_tensor"
+    if x_shape is not None:
+        max_packs = (x_shape[1] + 31) // 32
+        if shape[0] != x_shape[0] or shape[1] > max_packs:
+            return None, None, "invalid_sf_shape"
+    if strides == (shape[1], 1):
+        layout = "row_major"
+    elif strides[0] == 1 and strides[1] >= max(shape[0], 1):
+        layout = "column_major"
+    else:
+        layout = "strided"
+    return shape, layout, None
+
+
 def _ascend_descriptor_fingerprint(tensor):
     if not isinstance(tensor, torch.Tensor):
         return None
@@ -502,7 +531,8 @@ class ElasticBuffer:
             num_experts, num_max_tokens_per_rank, expert_alignment,
             num_sms, num_qps, previous_event,
             previous_event_before_epilogue, async_with_compute_stream,
-            allocate_on_comm_stream, do_expand, do_zero_padding):
+            allocate_on_comm_stream, do_expand, do_zero_padding,
+            use_tma_aligned_col_major_sf):
         cached = handle is not None
         handle_error = None
         descriptor_valid = True
@@ -532,8 +562,20 @@ class ElasticBuffer:
                                     if expert_alignment is None
                                     else expert_alignment)
 
+        x_dtype = x.dtype if isinstance(x, torch.Tensor) else None
+        expected_x_dtype = (x_dtype if x_dtype in
+                            (torch.bfloat16, torch.float8_e4m3fn)
+                            else torch.bfloat16)
         x_shape, x_error = _ascend_tensor_contract(
-            x, 2, torch.bfloat16, "x")
+            x, 2, expected_x_dtype, "x")
+        fp8_dispatch = x_dtype == torch.float8_e4m3fn
+        pairing_error = None
+        if fp8_dispatch != (sf is not None):
+            pairing_error = "invalid_fp8_pairing"
+        sf_shape, sf_layout, sf_error = (None, None, None)
+        if sf is not None:
+            sf_shape, sf_layout, sf_error = _ascend_scale_factor_contract(
+                sf, x_shape, x.device if x_shape is not None else None)
         topk_shape, topk_error = _ascend_tensor_contract(
             topk_idx, 2, torch.int64, "topk")
         weights_shape, weights_error = (None, None)
@@ -566,16 +608,18 @@ class ElasticBuffer:
             scalar_error = "invalid_capacity"
         elif not isinstance(alignment, int) or alignment <= 0:
             scalar_error = "invalid_expert_alignment"
-        elif (sf is not None or previous_event is not None or
+        elif (previous_event is not None or
               previous_event_before_epilogue is not None or
               async_with_compute_stream or allocate_on_comm_stream):
             scalar_error = "unsupported_dispatch_mode"
+        elif use_tma_aligned_col_major_sf and not fp8_dispatch:
+            scalar_error = "invalid_column_major_sf_mode"
         elif do_zero_padding and not do_expand:
             scalar_error = "invalid_zero_padding_mode"
 
         error = _first_error(
-            handle_error, scalar_error, x_error, topk_error, weights_error,
-            shape_error)
+            handle_error, scalar_error, pairing_error, x_error, sf_error,
+            topk_error, weights_error, shape_error)
         contract = {
             "buffer_bytes": self.num_bytes,
             "cached": cached,
@@ -583,6 +627,11 @@ class ElasticBuffer:
                                   if cached else 0),
             "x_dtype": str(x.dtype) if x_shape is not None else None,
             "x_shape": [None, x_shape[1]] if x_shape is not None else None,
+            "sf_dtype": (str(sf.dtype) if sf_shape is not None else None),
+            "sf_shape": ([None, sf_shape[1]]
+                         if sf_shape is not None else None),
+            "sf_layout": sf_layout,
+            "column_major_sf": int(use_tma_aligned_col_major_sf),
             "topk_dtype": (str(topk_idx.dtype)
                            if topk_shape is not None else None),
             "topk_shape": ([None, topk_shape[1]]
@@ -1310,7 +1359,8 @@ class ElasticBuffer:
                 num_max_tokens_per_rank, expert_alignment, num_sms, num_qps,
                 previous_event, previous_event_before_epilogue,
                 async_with_compute_stream, allocate_on_comm_stream,
-                do_expand, do_zero_padding)
+                do_expand, do_zero_padding,
+                use_tma_aligned_col_major_sf)
             num_sms = 1
 
         # Unpack handles
