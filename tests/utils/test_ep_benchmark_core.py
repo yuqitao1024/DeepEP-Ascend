@@ -1,6 +1,8 @@
 import ast
 from pathlib import Path
 
+import pytest
+
 from tests.utils.ep_benchmark_core import (
     CORRECTNESS_OPERATIONS,
     PERFORMANCE_OPERATIONS,
@@ -105,15 +107,29 @@ def test_cuda_benchmark_imports_shared_case_and_traffic_logic():
     } <= imports
 
 
-def test_shared_dispatch_arguments_cover_normal_expanded_and_cached_modes():
+@pytest.mark.parametrize(
+    ("case_id", "use_column_major_scale_layout"),
+    (
+        (
+            "ep-bf16-align128-bias2-hcopy1-prev0-async0-alloc0",
+            False,
+        ),
+        (
+            "ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0",
+            True,
+        ),
+    ),
+)
+def test_shared_dispatch_arguments_cover_normal_expanded_and_cached_modes(
+    case_id, use_column_major_scale_layout,
+):
     case = next(
         case
         for case in __import__(
             "tests.utils.ep_benchmark_manifest",
             fromlist=["enumerate_ep_mode_cases"],
         ).enumerate_ep_mode_cases()
-        if case.case_id
-        == "ep-bf16-align128-bias2-hcopy1-prev0-async0-alloc0"
+        if case.case_id == case_id
     )
 
     arguments = build_dispatch_arguments(
@@ -131,11 +147,19 @@ def test_shared_dispatch_arguments_cover_normal_expanded_and_cached_modes():
     assert arguments.normal["do_handle_copy"] is True
     assert arguments.normal["do_cpu_sync"] is True
     assert arguments.expanded["do_expand"] is True
-    assert arguments.expanded["use_tma_aligned_col_major_sf"] is False
+    assert (
+        arguments.expanded["use_tma_aligned_col_major_sf"]
+        is use_column_major_scale_layout
+    )
     assert arguments.cached("normal-handle") == {
         "x": "payload",
         "handle": "normal-handle",
         "num_sms": 1,
         "num_qps": 0,
     }
-    assert arguments.cached_expanded("expanded-handle")["do_zero_padding"] is True
+    cached_expanded = arguments.cached_expanded("expanded-handle")
+    assert (
+        cached_expanded["use_tma_aligned_col_major_sf"]
+        is use_column_major_scale_layout
+    )
+    assert cached_expanded["do_zero_padding"] is True

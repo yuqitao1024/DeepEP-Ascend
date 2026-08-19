@@ -30,6 +30,7 @@ class DispatchArguments:
     _topk_weights: Any
     _num_sms: int
     _num_qps: int
+    _use_column_major_scale_layout: bool
 
     def cached(self, handle: Any) -> dict[str, Any]:
         return {
@@ -44,7 +45,9 @@ class DispatchArguments:
             **self.cached(handle),
             "topk_weights": self._topk_weights,
             "do_expand": True,
-            "use_tma_aligned_col_major_sf": False,
+            "use_tma_aligned_col_major_sf": (
+                self._use_column_major_scale_layout
+            ),
             "do_zero_padding": True,
         }
 
@@ -76,7 +79,7 @@ def build_dispatch_arguments(
     expanded = {
         **normal,
         "do_expand": True,
-        "use_tma_aligned_col_major_sf": False,
+        "use_tma_aligned_col_major_sf": case.use_fp8_dispatch,
     }
     return DispatchArguments(
         normal=normal,
@@ -85,6 +88,7 @@ def build_dispatch_arguments(
         _topk_weights=topk_weights,
         _num_sms=num_sms,
         _num_qps=num_qps,
+        _use_column_major_scale_layout=case.use_fp8_dispatch,
     )
 
 

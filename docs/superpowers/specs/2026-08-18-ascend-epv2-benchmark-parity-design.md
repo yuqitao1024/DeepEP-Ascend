@@ -101,9 +101,13 @@ performance measurements.
 Ascend uses `num_sms=1` and `num_qps=0`. The zero QP value means the CUDA QP
 argument is unused; Ascend communication still uses HCOMM/URMA resources.
 
-For BF16 expanded dispatch, `use_tma_aligned_col_major_sf` is set to `False` on
-both backends. The flag controls FP8 scale-factor layout and does not change
-BF16 payload bytes or routing.
+FP8 expanded and cached-expanded dispatch set
+`use_tma_aligned_col_major_sf=True` on both backends, matching the upstream
+column-major scale-factor layout. Upstream also passes `True` for BF16, where
+the flag has no semantic effect because there are no scale factors. The Ascend
+public API rejects that meaningless BF16 combination, so its parity adapter
+passes `False`; BF16 payload bytes, routing, and measured operations are
+unchanged.
 
 The FP8 benchmark materializes contiguous E4M3 payloads and contiguous FP32
 scale factors, one factor per 128 hidden values. The hidden width must therefore
@@ -309,7 +313,7 @@ requested feature flag so no information is lost.
 | Operation | Correctness | Performance | Notes |
 | --- | --- | --- | --- |
 | Normal dispatch | Yes | Yes | Same routing manifest |
-| Expanded dispatch | Yes | Yes | BF16 has no scales; FP8 scales use shared layout selection |
+| Expanded dispatch | Yes | Yes | FP8 uses upstream column-major scales; Ascend leaves the meaningless BF16 scale-layout flag false |
 | Cached dispatch | Yes | Yes | Reuses validated handle |
 | Cached expanded zero padding | Yes | No | Upstream has no separate timing result |
 | Normal combine | Yes | Yes | Same weights and bias count |

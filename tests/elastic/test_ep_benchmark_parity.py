@@ -63,7 +63,15 @@ def test_cuda_help_is_host_only_when_run_as_a_script():
     assert "--benchmark-profile {upstream,parity}" in result.stdout
 
 
-def test_cuda_parity_rejects_unsupported_case_before_torch_import():
+@pytest.mark.parametrize(
+    "case_id",
+    (
+        "ep-fp8-align128-bias0-hcopy1-prev1-async0-alloc1",
+        "ep-fp8-align128-bias0-hcopy1-prev0-async1-alloc0",
+        "ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc1",
+    ),
+)
+def test_cuda_parity_rejects_unsupported_case_before_torch_import(case_id):
     result = subprocess.run(
         [
             sys.executable,
@@ -71,7 +79,7 @@ def test_cuda_parity_rejects_unsupported_case_before_torch_import():
             "--benchmark-profile",
             "parity",
             "--cases",
-            "ep-fp8-align128-bias0-hcopy1-prev1-async0-alloc1",
+            case_id,
         ],
         capture_output=True,
         text=True,
