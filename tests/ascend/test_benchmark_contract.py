@@ -90,6 +90,9 @@ class _ContractTensor:
     def data_ptr(self):
         return 1
 
+    def view(self, _dtype):
+        return self
+
     def __getitem__(self, _key):
         return self
 
@@ -144,8 +147,22 @@ class _ExpandedWeights(_ContractTensor):
         return _GatheredExpandedWeights()
 
 
+class _IndexableByteTensor(_ContractTensor):
+    pass
+
+
+class _NoIndexFloat8Tensor(_ContractTensor):
+    def __getitem__(self, _key):
+        raise AssertionError("FP8 payload was indexed without byte view")
+
+    def view(self, dtype):
+        assert dtype == "uint8"
+        return _IndexableByteTensor()
+
+
 class _ContractTorch:
     int32 = "int32"
+    uint8 = "uint8"
     testing = SimpleNamespace(assert_close=lambda *_args, **_kwargs: None)
 
     @staticmethod
@@ -166,8 +183,9 @@ class _ContractTorch:
         return _ContractTensor()
 
 
-def _run_correctness_contract_check(expanded_weights=None):
+def _run_correctness_contract_check(expanded_weights=None, fp8=False):
     tensor = _ContractTensor()
+    payload = _NoIndexFloat8Tensor() if fp8 else tensor
     expanded_weights = expanded_weights or tensor
     handle = SimpleNamespace(
         topk_idx=tensor,
@@ -175,12 +193,16 @@ def _run_correctness_contract_check(expanded_weights=None):
         psum_num_recv_tokens_per_expert=tensor,
     )
     event = SimpleNamespace(event=None)
-    normal = (tensor, tensor, tensor, handle, event)
-    expanded = (tensor, None, expanded_weights, handle, event)
-    cached = (tensor, tensor, None, handle, event)
-    cached_expanded = (tensor, None, expanded_weights, handle, event)
+    x = (payload, tensor) if fp8 else tensor
+    normal = (x, tensor, tensor, handle, event)
+    expanded = (x, None, expanded_weights, handle, event)
+    cached = (x, tensor, None, handle, event)
+    cached_expanded = (x, None, expanded_weights, handle, event)
     combined = (tensor, tensor, event)
-    case = EPModeCase(False, 1, False, 0, False, False, False)
+    case = EPModeCase(
+        do_handle_copy=False, expert_alignment=1, use_fp8_dispatch=fp8,
+        num_bias=0, with_previous_event=False,
+        async_with_compute_stream=False, allocate_on_comm_stream=False)
     runtime = AscendRuntime.__new__(AscendRuntime)
     runtime.torch = _ContractTorch()
     runtime.device = "npu"
@@ -200,7 +222,8 @@ def _run_correctness_contract_check(expanded_weights=None):
         cached_expanded,
         combined,
         combined,
-        ((tensor, tensor, tensor, tensor, None), tensor, tensor),
+        (((payload, tensor) if fp8 else tensor, tensor, tensor, tensor, None),
+         tensor, tensor),
         num_recv_tokens=1,
     )
 
@@ -211,6 +234,10 @@ def test_correctness_check_accepts_missing_cached_weights_like_upstream():
 
 def test_correctness_check_preserves_all_expanded_weight_lanes():
     _run_correctness_contract_check(_ExpandedWeights())
+
+
+def test_correctness_check_indexes_fp8_payloads_as_bytes():
+    _run_correctness_contract_check(fp8=True)
 
 
 def test_summary_uses_linear_percentiles_and_decimal_gbps():

@@ -497,7 +497,7 @@ class AscendRuntime:
                 self.torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
         def index_payload(value, index):
-            return ((value[0][index], value[1][index])
+            return ((value[0].view(self.torch.uint8)[index], value[1][index])
                     if case.use_fp8_dispatch else value[index])
 
         assert_payload_equal(recv_x, cached_x)
@@ -522,7 +522,8 @@ class AscendRuntime:
         )
         if case.use_fp8_dispatch:
             folded_x = (
-                expanded_x[0][safe_indices][row_indices, first_valid],
+                expanded_x[0].view(self.torch.uint8)[safe_indices][
+                    row_indices, first_valid],
                 expanded_x[1][safe_indices][row_indices, first_valid],
             )
         else:
@@ -548,7 +549,8 @@ class AscendRuntime:
             start = int(expanded_handle.psum_num_recv_tokens_per_expert[expert].item())
             end = ((start + case.expert_alignment - 1) // case.expert_alignment) * case.expert_alignment
             if case.use_fp8_dispatch:
-                assert bool((cached_expanded_x[0][start:end] == 0).all().item())
+                assert bool((cached_expanded_x[0].view(self.torch.uint8)[
+                    start:end] == 0).all().item())
                 assert bool((cached_expanded_x[1][start:end] == 0).all().item())
             else:
                 assert bool((cached_expanded_x[start:end] == 0).all().item())
