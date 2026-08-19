@@ -1984,10 +1984,13 @@ int main() {
                     "literal-bf16-torch-reference",
                     "rank-qualified-failure-aggregation",
                     "per-case-process-timeout",
+                    "single-process-distributed-batch",
+                    "per-case-process-watchdog",
                     "finally-buffer-before-process-group-teardown",
                     "zero-global-synchronization",
                     "npu-profiler-overlap-interval",
                 ],
+                "distributed_launches_per_full_suite": 1,
                 "event_cases": [
                     "capture-current-stream",
                     "record-failure",
@@ -2023,6 +2026,7 @@ int main() {
                     "warmups": 3,
                 },
                 "reference": "rank-gathered-literal-inputs-and-torch-ops",
+                "watchdog_seconds": 30,
                 "world_size": 2,
             })
 
@@ -2187,6 +2191,166 @@ int main() {
             "DIAGNOSTIC capture-current-stream:\nrank 0 traceback\n",
             live_output,
         )
+
+    def test_async_overlap_sync_guard_exempts_only_buffer_construction(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_sync_scope", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        synchronizations = []
+
+        class FakeNpu:
+            @staticmethod
+            def synchronize():
+                synchronizations.append("buffer construction")
+
+        class FakeTorch:
+            npu = FakeNpu()
+
+        class FakeBuffer:
+            def __init__(self, *_args, **_kwargs):
+                FakeTorch.npu.synchronize()
+
+        class FakeDeepEp:
+            ElasticBuffer = FakeBuffer
+
+        class FakeDist:
+            @staticmethod
+            def get_rank(_group):
+                return 0
+
+        worker = module.AsyncOverlapWorker(
+            FakeTorch, None, FakeDist, FakeDeepEp, object(), object(), "/tmp")
+        with module._forbid_global_sync(FakeTorch):
+            worker.new_buffer()
+            with self.assertRaisesRegex(
+                    AssertionError, "global NPU synchronization is forbidden"):
+                FakeTorch.npu.synchronize()
+
+        self.assertEqual(synchronizations, ["buffer construction"])
+
+    def test_async_overlap_full_suite_uses_one_distributed_launcher(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_batch_launch", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        distributed = module.CASE_NAMES[1:3]
+        selected = (*distributed, "record-failure")
+        batch_calls = []
+        bounded_calls = []
+
+        def run_distributed_batch(cases, _trace_dir, record_result):
+            batch_calls.append(tuple(cases))
+            for case in cases:
+                record_result({
+                    "case": case,
+                    "status": "passed",
+                    "duration_seconds": 0.25,
+                    "exit_code": 0,
+                    "failure": None,
+                    "measurements": {},
+                })
+            return True
+
+        def run_bounded(_command):
+            bounded_calls.append(True)
+            return {
+                "status": "passed",
+                "failure": None,
+                "duration_seconds": 0.25,
+                "exit_code": 0,
+                "stdout": "",
+                "stderr": "",
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "report.json"
+            with mock.patch.object(module, "CASE_NAMES", selected), \
+                    mock.patch.object(
+                        module, "_run_distributed_batch",
+                        run_distributed_batch, create=True), \
+                    mock.patch.object(module, "_run_bounded", run_bounded), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                exit_code = module._run_suite(
+                    "full", output, pathlib.Path(directory) / "traces")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(batch_calls, [distributed])
+        self.assertEqual(len(bounded_calls), 1)
+
+    def test_async_overlap_distributed_batch_checkpoints_each_case(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_batch_checkpoint", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        selected = module.CASE_NAMES[1:3]
+        observed_checkpoint = []
+
+        def run_distributed_batch(cases, _trace_dir, record_result):
+            for index, case in enumerate(cases):
+                record_result({
+                    "case": case,
+                    "status": "passed",
+                    "duration_seconds": 0.25,
+                    "exit_code": 0,
+                    "failure": None,
+                    "measurements": {},
+                })
+                if index == 0:
+                    observed_checkpoint.append(
+                        json.loads(output.read_text()))
+            return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "report.json"
+            with mock.patch.object(module, "CASE_NAMES", selected), \
+                    mock.patch.object(
+                        module, "_run_distributed_batch",
+                        run_distributed_batch, create=True), \
+                    mock.patch.object(module, "_run_bounded"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                module._run_suite(
+                    "full", output, pathlib.Path(directory) / "traces")
+
+        self.assertEqual(
+            [row["case"] for row in observed_checkpoint[0]["results"]],
+            [selected[0]],
+        )
+
+    def test_async_overlap_distributed_case_watchdog_is_external_and_bounded(
+            self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_batch_watchdog", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        run_streaming_batch = getattr(module, "_run_streaming_batch", None)
+        self.assertIsNotNone(run_streaming_batch)
+        if run_streaming_batch is None:
+            return
+
+        case = "cached-dispatch-sync-allocate-false"
+        child = (
+            "import json, time; "
+            f"print('{module.CASE_START_PREFIX} ' + "
+            f"json.dumps({{'case': '{case}'}}), flush=True); "
+            "time.sleep(5)"
+        )
+        rows = []
+        started = __import__("time").monotonic()
+        passed = run_streaming_batch(
+            [sys.executable, "-c", child], (case,), rows.append,
+            timeout_seconds=0.2)
+        elapsed = __import__("time").monotonic() - started
+
+        self.assertFalse(passed)
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(rows[0]["case"], case)
+        self.assertEqual(
+            rows[0]["failure"], "case watchdog timeout after 0.2s")
 
     def test_two_rank_dispatch_harness_contract(self):
         expected_cases = [

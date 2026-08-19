@@ -5,6 +5,8 @@ import json
 import math
 import os
 import pathlib
+import selectors
+import signal
 import statistics
 import subprocess
 import sys
@@ -59,6 +61,9 @@ EVENT_CASES = (
     "destroy-pending-retry",
 )
 
+CASE_START_PREFIX = "PHASE3E_CASE_START"
+CASE_RESULT_PREFIX = "PHASE3E_CASE_RESULT"
+
 HOST_CONTRACT_CASES = {
     "record-failure": (
         "tests/ascend/test_core_operator_contract.py::"
@@ -82,6 +87,11 @@ HOST_CONTRACT_CASES = {
         "test_barrier_buffer_lifecycle_resource_concurrency"
     ),
 }
+
+DISTRIBUTED_CASES = tuple(
+    case for case in CASE_NAMES
+    if case != "capture-current-stream" and case not in HOST_CONTRACT_CASES
+)
 
 MATRIX_GROUPS = (
     "capture-current-stream",
@@ -155,10 +165,10 @@ def _contract():
                      if isinstance(node, ast.Call)]
     aggregate_calls = [
         _call_name(node) for node in ast.walk(
-            functions["_run_distributed_worker"])
+            functions["_run_distributed_batch_worker"])
         if isinstance(node, ast.Call)
     ]
-    teardown = functions["_run_distributed_worker"]
+    teardown = functions["_run_distributed_batch_worker"]
     teardown_finally = [node for node in ast.walk(teardown)
                         if isinstance(node, ast.Try) and node.finalbody]
     reference_calls = [
@@ -194,10 +204,13 @@ def _contract():
             "literal-bf16-torch-reference",
             "rank-qualified-failure-aggregation",
             "per-case-process-timeout",
+            "single-process-distributed-batch",
+            "per-case-process-watchdog",
             "finally-buffer-before-process-group-teardown",
             "zero-global-synchronization",
             "npu-profiler-overlap-interval",
         ],
+        "distributed_launches_per_full_suite": 1,
         "event_cases": list(EVENT_CASES),
         "full_cases": list(CASE_NAMES),
         "matrix_groups": list(MATRIX_GROUPS),
@@ -212,6 +225,7 @@ def _contract():
             "warmups": OVERLAP_WARMUPS,
         },
         "reference": "rank-gathered-literal-inputs-and-torch-ops",
+        "watchdog_seconds": CASE_TIMEOUT_SECONDS,
         "world_size": WORLD_SIZE,
     }
 
@@ -350,6 +364,13 @@ def _case_command(case, trace_dir):
             f"--nproc-per-node={WORLD_SIZE}", *worker]
 
 
+def _distributed_batch_command(cases, trace_dir):
+    worker = [str(pathlib.Path(__file__).resolve()),
+              "--trace-dir", str(trace_dir), "--batch-worker", *cases]
+    return [sys.executable, "-m", "torch.distributed.run", "--standalone",
+            f"--nproc-per-node={WORLD_SIZE}", *worker]
+
+
 def _suite_report(suite, selected, results):
     executed = len(results)
     return {
@@ -376,11 +397,236 @@ def _write_suite_report(output_path, report):
     temporary.replace(output_path)
 
 
+def _terminate_process_group(process):
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    if process.poll() is not None:
+        return
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def _run_streaming_batch(command, cases, record_result,
+                         timeout_seconds=CASE_TIMEOUT_SECONDS):
+    cases = tuple(cases)
+    _check(cases, "distributed batch requires at least one case")
+    process = subprocess.Popen(
+        command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        bufsize=0, start_new_session=True)
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    pending = b""
+    transcript = ""
+    next_index = 0
+    active_case = cases[0]
+    active_started = time.monotonic()
+    saw_start = False
+    protocol_failed = False
+
+    def diagnostic():
+        return transcript
+
+    def failed_row(case, failure, exit_code=None):
+        row = {
+            "case": case,
+            "status": "failed",
+            "duration_seconds": time.monotonic() - active_started,
+            "exit_code": exit_code,
+            "failure": failure,
+            "measurements": {},
+        }
+        if diagnostic():
+            row["diagnostic"] = diagnostic()
+        return row
+
+    def fail_protocol(message, case=None):
+        nonlocal protocol_failed
+        protocol_failed = True
+        record_result(failed_row(case or active_case, message))
+
+    def parse_marker(line, prefix):
+        suffix = line[len(prefix):]
+        if not suffix.startswith(" "):
+            raise ValueError(f"malformed {prefix} marker")
+        payload = json.loads(suffix[1:])
+        if not isinstance(payload, dict):
+            raise ValueError(f"{prefix} payload is not an object")
+        return payload
+
+    def handle_line(line):
+        nonlocal active_case, active_started, next_index, protocol_failed
+        nonlocal saw_start, transcript
+        transcript = (transcript + line + "\n")[-4000:]
+        print(line, flush=True)
+        try:
+            if line.startswith(CASE_START_PREFIX):
+                payload = parse_marker(line, CASE_START_PREFIX)
+                case = payload.get("case")
+                if next_index >= len(cases):
+                    fail_protocol(f"unexpected case start after batch completion: {case}",
+                                  cases[-1])
+                    return
+                expected = cases[next_index]
+                if saw_start:
+                    fail_protocol(f"duplicate case start for {case}", expected)
+                    return
+                if case != expected:
+                    fail_protocol(
+                        f"out-of-order case start: expected {expected}, got {case}",
+                        expected)
+                    return
+                active_case = case
+                active_started = time.monotonic()
+                saw_start = True
+            elif line.startswith(CASE_RESULT_PREFIX):
+                payload = parse_marker(line, CASE_RESULT_PREFIX)
+                case = payload.get("case")
+                if next_index >= len(cases):
+                    fail_protocol(
+                        f"unexpected case result after batch completion: {case}",
+                        cases[-1])
+                    return
+                expected = cases[next_index]
+                if not saw_start:
+                    fail_protocol(
+                        f"case result before start: expected {expected}, got {case}",
+                        expected)
+                    return
+                if case != expected:
+                    fail_protocol(
+                        f"out-of-order case result: expected {expected}, got {case}",
+                        expected)
+                    return
+                status = payload.get("status")
+                if status not in ("passed", "failed"):
+                    fail_protocol(f"invalid result status for {case}: {status}", case)
+                    return
+                duration = payload.get(
+                    "duration_seconds", time.monotonic() - active_started)
+                if not isinstance(duration, (int, float)) or duration < 0:
+                    fail_protocol(f"invalid result duration for {case}: {duration}",
+                                  case)
+                    return
+                failure = payload.get("failure")
+                if status == "failed" and not failure:
+                    fail_protocol(f"failed result omitted failure for {case}", case)
+                    return
+                row = {
+                    "case": case,
+                    "status": status,
+                    "duration_seconds": duration,
+                    "exit_code": payload.get(
+                        "exit_code", 0 if status == "passed" else 1),
+                    "failure": failure,
+                    "measurements": payload.get("measurements") or {},
+                }
+                if status == "failed" and diagnostic():
+                    row["diagnostic"] = diagnostic()
+                record_result(row)
+                if status == "failed":
+                    protocol_failed = True
+                    return
+                next_index += 1
+                saw_start = False
+                active_case = cases[next_index] if next_index < len(cases) \
+                    else cases[-1]
+                active_started = time.monotonic()
+        except (json.JSONDecodeError, ValueError) as error:
+            fail_protocol(f"invalid batch protocol: {error}")
+
+    try:
+        while True:
+            remaining = timeout_seconds - (time.monotonic() - active_started)
+            if remaining <= 0:
+                record_result(failed_row(
+                    active_case,
+                    f"case watchdog timeout after {timeout_seconds}s"))
+                protocol_failed = True
+                _terminate_process_group(process)
+                break
+
+            events = selector.select(timeout=min(remaining, 0.1))
+            for key, _mask in events:
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                pending += chunk
+                while b"\n" in pending:
+                    raw_line, pending = pending.split(b"\n", 1)
+                    handle_line(raw_line.decode("utf-8", errors="replace"))
+                    if protocol_failed:
+                        break
+                if protocol_failed:
+                    break
+            if protocol_failed:
+                _terminate_process_group(process)
+                break
+            if process.poll() is not None and not selector.get_map():
+                if pending:
+                    handle_line(pending.decode("utf-8", errors="replace"))
+                    pending = b""
+                break
+
+        if protocol_failed:
+            return False
+
+        return_code = process.wait()
+        if next_index < len(cases):
+            record_result(failed_row(
+                cases[next_index],
+                f"batch launcher exited {return_code} before case result",
+                return_code))
+            return False
+        if return_code != 0:
+            record_result(failed_row(
+                cases[-1],
+                f"batch launcher exited {return_code} after successful results",
+                return_code))
+            return False
+        return True
+    finally:
+        selector.close()
+        _terminate_process_group(process)
+
+
+def _run_distributed_batch(cases, trace_dir, record_result):
+    return _run_streaming_batch(
+        _distributed_batch_command(cases, trace_dir), cases, record_result)
+
+
 def _run_suite(suite, output, trace_dir):
     selected = EVENT_CASES if suite == "event" else CASE_NAMES
     results = []
     pathlib.Path(trace_dir).mkdir(parents=True, exist_ok=True)
-    for case in selected:
+
+    def record_result(row):
+        existing = next(
+            (index for index, result in enumerate(results)
+             if result["case"] == row["case"]), None)
+        if existing is None:
+            results.append(row)
+        else:
+            results[existing] = row
+        if row["status"] == "failed":
+            print(f"FAIL {row['case']}: {row['failure']}", flush=True)
+            if row.get("diagnostic"):
+                print(f"DIAGNOSTIC {row['case']}:\n{row['diagnostic']}",
+                      flush=True)
+        else:
+            print(f"PASS {row['case']} ({row['duration_seconds']:.3f}s)",
+                  flush=True)
+        _write_suite_report(output, _suite_report(suite, selected, results))
+
+    def run_standalone(case):
         result = _run_bounded(_case_command(case, trace_dir))
         payload = _worker_payload(result["stdout"])
         row = {
@@ -394,17 +640,23 @@ def _run_suite(suite, output, trace_dir):
         if result["status"] == "failed":
             row["diagnostic"] = (
                 result["stderr"] or result["stdout"])[-4000:]
-            print(f"FAIL {case}: {row['failure']}", flush=True)
-            if row["diagnostic"]:
-                print(f"DIAGNOSTIC {case}:\n{row['diagnostic']}", flush=True)
-        else:
-            print(f"PASS {case} ({result['duration_seconds']:.3f}s)",
-                  flush=True)
-        results.append(row)
-        report = _suite_report(suite, selected, results)
-        _write_suite_report(output, report)
-        if result["status"] == "failed":
+        record_result(row)
+        return result["status"] == "passed"
+
+    distributed = tuple(case for case in selected
+                        if case in DISTRIBUTED_CASES)
+    batch_pending = bool(distributed)
+    for case in selected:
+        if case in DISTRIBUTED_CASES:
+            if batch_pending:
+                batch_pending = False
+                if not _run_distributed_batch(
+                        distributed, trace_dir, record_result):
+                    break
+            continue
+        if not run_standalone(case):
             break
+    report = _suite_report(suite, selected, results)
     print("PHASE3E_SUITE_RESULT " + json.dumps(report, sort_keys=True),
           flush=True)
     return 0 if report["summary"]["failed"] == 0 else 1
@@ -417,11 +669,23 @@ def _forbid_global_sync(torch):
     def forbidden(*_args, **_kwargs):
         raise AssertionError("global NPU synchronization is forbidden")
 
+    forbidden.phase3e_original = original
     torch.npu.synchronize = forbidden
     try:
         yield
     finally:
         torch.npu.synchronize = original
+
+
+@contextmanager
+def _allow_buffer_construction_sync(torch):
+    guarded = torch.npu.synchronize
+    original = getattr(guarded, "phase3e_original", guarded)
+    torch.npu.synchronize = original
+    try:
+        yield
+    finally:
+        torch.npu.synchronize = guarded
 
 
 def _run_capture_worker():
@@ -497,14 +761,15 @@ class AsyncOverlapWorker:
         self.buffers = []
 
     def new_buffer(self, num_bytes=8 * 1024 * 1024):
-        buffer = self.deep_ep.ElasticBuffer(
-            self.group,
-            num_bytes=num_bytes,
-            num_gpu_timeout_secs=5,
-            deterministic=False,
-            allow_hybrid_mode=False,
-            explicitly_destroy=True,
-        )
+        with _allow_buffer_construction_sync(self.torch):
+            buffer = self.deep_ep.ElasticBuffer(
+                self.group,
+                num_bytes=num_bytes,
+                num_gpu_timeout_secs=5,
+                deterministic=False,
+                allow_hybrid_mode=False,
+                explicitly_destroy=True,
+            )
         self.buffers.append(buffer)
         return buffer
 
@@ -931,7 +1196,7 @@ class AsyncOverlapWorker:
         raise AssertionError(f"distributed case is not implemented: {case}")
 
 
-def _run_distributed_worker(case, trace_dir):
+def _run_distributed_batch_worker(cases, trace_dir, batch_protocol=True):
     import torch
     import torch.distributed as dist
     import torch_npu
@@ -939,9 +1204,7 @@ def _run_distributed_worker(case, trace_dir):
 
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.npu.set_device(local_rank)
-    worker = None
     initialized = False
-    primary_error = None
     try:
         dist.init_process_group(
             backend="hccl", timeout=timedelta(seconds=25))
@@ -949,43 +1212,70 @@ def _run_distributed_worker(case, trace_dir):
         group = dist.group.WORLD
         _check(dist.get_world_size(group) == WORLD_SIZE,
                f"async overlap requires {WORLD_SIZE} ranks")
-        worker = AsyncOverlapWorker(
-            torch, torch_npu, dist, deep_ep, group,
-            torch.device("npu", local_rank), trace_dir)
-        local_failure = None
-        measurements = None
-        try:
-            measurements = worker.run(case)
-        except BaseException as error:
-            local_failure = f"{type(error).__name__}: {error}"
-        reports = [None] * WORLD_SIZE
-        dist.all_gather_object(
-            reports,
-            {"rank": dist.get_rank(group), "failure": local_failure},
-            group=group,
-        )
-        aggregate = _aggregate_rank_failures(reports)
-        if aggregate:
-            raise RuntimeError(f"{case} failed: {aggregate}")
-        if dist.get_rank(group) == 0:
-            print("PHASE3E_WORKER_RESULT " + json.dumps({
-                "case": case,
-                "measurements": measurements,
-            }, sort_keys=True), flush=True)
-    except BaseException as error:
-        primary_error = error
-        raise
-    finally:
-        cleanup_error = None
-        if worker is not None:
+        rank = dist.get_rank(group)
+        for case in cases:
+            dist.barrier(group=group)
+            if rank == 0 and batch_protocol:
+                print(CASE_START_PREFIX + " " + json.dumps({"case": case}),
+                      flush=True)
+            started = time.monotonic()
+            worker = AsyncOverlapWorker(
+                torch, torch_npu, dist, deep_ep, group,
+                torch.device("npu", local_rank), trace_dir)
+            local_failure = None
+            measurements = None
             try:
-                worker.destroy_buffers()
+                measurements = worker.run(case)
             except BaseException as error:
-                cleanup_error = error
+                local_failure = f"{type(error).__name__}: {error}"
+            finally:
+                try:
+                    worker.destroy_buffers()
+                except BaseException as error:
+                    cleanup_failure = \
+                        f"cleanup {type(error).__name__}: {error}"
+                    local_failure = "; ".join(
+                        value for value in (local_failure, cleanup_failure)
+                        if value)
+
+            reports = [None] * WORLD_SIZE
+            dist.all_gather_object(
+                reports,
+                {
+                    "rank": rank,
+                    "failure": local_failure,
+                    "duration_seconds": time.monotonic() - started,
+                },
+                group=group,
+            )
+            aggregate = _aggregate_rank_failures(reports)
+            if rank == 0:
+                if batch_protocol:
+                    print(CASE_RESULT_PREFIX + " " + json.dumps({
+                        "case": case,
+                        "status": "failed" if aggregate else "passed",
+                        "duration_seconds": max(
+                            report["duration_seconds"] for report in reports),
+                        "exit_code": 1 if aggregate else 0,
+                        "failure": aggregate or None,
+                        "measurements": measurements or {},
+                    }, sort_keys=True), flush=True)
+                elif not aggregate:
+                    print("PHASE3E_WORKER_RESULT " + json.dumps({
+                        "case": case,
+                        "measurements": measurements,
+                    }, sort_keys=True), flush=True)
+            if aggregate:
+                return 1
+        return 0
+    finally:
         if initialized:
             dist.destroy_process_group()
-        if primary_error is None and cleanup_error is not None:
-            raise cleanup_error
+
+
+def _run_distributed_worker(case, trace_dir):
+    return _run_distributed_batch_worker(
+        (case,), trace_dir, batch_protocol=False)
 
 
 def _run_worker(case, trace_dir):
@@ -996,8 +1286,7 @@ def _run_worker(case, trace_dir):
             "measurements": measurements,
         }, sort_keys=True), flush=True)
         return 0
-    _run_distributed_worker(case, trace_dir)
-    return 0
+    return _run_distributed_worker(case, trace_dir)
 
 
 def main():
@@ -1005,6 +1294,9 @@ def main():
     parser.add_argument("--contract", action="store_true")
     parser.add_argument("--suite", choices=("event", "full"))
     parser.add_argument("--worker", choices=CASE_NAMES)
+    parser.add_argument(
+        "--batch-worker", nargs="+", choices=DISTRIBUTED_CASES,
+        metavar="CASE")
     parser.add_argument("--output", default="/tmp/phase3e-async-overlap.json")
     parser.add_argument("--trace-dir", default="/tmp/phase3e-async-traces")
     args = parser.parse_args()
@@ -1013,9 +1305,12 @@ def main():
         return 0
     if args.worker:
         return _run_worker(args.worker, args.trace_dir)
+    if args.batch_worker:
+        return _run_distributed_batch_worker(args.batch_worker, args.trace_dir)
     if args.suite:
         return _run_suite(args.suite, args.output, args.trace_dir)
-    parser.error("one of --contract, --suite, or --worker is required")
+    parser.error(
+        "one of --contract, --suite, --worker, or --batch-worker is required")
 
 
 if __name__ == "__main__":
