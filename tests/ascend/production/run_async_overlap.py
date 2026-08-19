@@ -2201,6 +2201,7 @@ class AsyncOverlapWorker:
         gc.collect()
         self._assert_tensor(first_x, first_expected, "dropped-event recv_x")
 
+        handle = self._seed(buffer)
         second_fixture = _offset_fixture(REGULAR_FIXTURE, 200)
         second_x, _, second_expected, _ = self._cached_dispatch(
             buffer, handle, second_fixture,

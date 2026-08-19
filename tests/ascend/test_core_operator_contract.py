@@ -2325,6 +2325,107 @@ int main() {
                     ]},
                 )
 
+    def test_async_overlap_completion_mismatch_then_drop_event_reseeds(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_lifecycle_sequence", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        fault_name = "DEEP_EP_ASCEND_TEST_COMPLETION_FAULT"
+        original_fault = os.environ.pop(fault_name, None)
+        try:
+            class MismatchBuffer:
+                def __init__(self):
+                    self.runtime = object()
+
+                def destroy(self):
+                    self.runtime = None
+                    raise RuntimeError(
+                        "device completion generation mismatch")
+
+            class MismatchEvent:
+                @staticmethod
+                def current_stream_wait():
+                    self.assertEqual(
+                        os.environ.get(fault_name), "completion_mismatch")
+                    raise RuntimeError(
+                        "device completion generation mismatch")
+
+            class Gather:
+                @staticmethod
+                def all_gather_object(reports, local, group):
+                    reports[:] = [
+                        local,
+                        {"rank": 1, "failure": None},
+                    ]
+
+            mismatch = object.__new__(module.AsyncOverlapWorker)
+            mismatch.rank = 0
+            mismatch.group = object()
+            mismatch.dist = Gather()
+            mismatch.buffers = []
+            mismatch_buffer = MismatchBuffer()
+
+            def new_mismatch_buffer():
+                mismatch.buffers.append(mismatch_buffer)
+                return mismatch_buffer
+
+            mismatch.new_buffer = new_mismatch_buffer
+            mismatch._seed = lambda _buffer: object()
+            mismatch._cached_dispatch = lambda *_args, **_kwargs: (
+                object(), MismatchEvent(), object(), object())
+            mismatch._assert_tensor = lambda *_args: None
+
+            mismatch_measurements = \
+                module.AsyncOverlapWorker._run_completion_mismatch(mismatch)
+            self.assertTrue(mismatch_measurements["runtime_released"])
+            self.assertIsNone(mismatch_buffer.runtime)
+            self.assertEqual(mismatch.buffers, [])
+            self.assertNotIn(fault_name, os.environ)
+
+            class Handle:
+                def __init__(self):
+                    self.valid = True
+
+            class DroppedEvent:
+                def __init__(self, handle):
+                    self.handle = handle
+
+                def __del__(self):
+                    self.handle.valid = False
+
+            drop = object.__new__(module.AsyncOverlapWorker)
+            drop_buffer = object()
+            drop.new_buffer = lambda: drop_buffer
+            handles = iter((Handle(), Handle()))
+            drop._seed = lambda buffer: next(handles)
+            cached_calls = []
+
+            def cached_dispatch(buffer, handle, fixture, **options):
+                if not handle.valid:
+                    raise RuntimeError(
+                        "dispatch preflight failed (invalid_dispatch_handle)")
+                cached_calls.append((buffer, handle, fixture, options))
+                if len(cached_calls) == 1:
+                    return object(), DroppedEvent(handle), object(), object()
+                return object(), object(), object(), object()
+
+            drop._cached_dispatch = cached_dispatch
+            drop._assert_tensor = lambda *_args: None
+
+            drop_measurements = \
+                module.AsyncOverlapWorker._run_drop_event(drop)
+            self.assertTrue(drop_measurements["event_dropped_without_wait"])
+            self.assertTrue(drop_measurements["buffer_reused"])
+            self.assertEqual(len(cached_calls), 2)
+            self.assertIs(cached_calls[0][0], drop_buffer)
+            self.assertIs(cached_calls[1][0], drop_buffer)
+            self.assertIsNot(cached_calls[0][1], cached_calls[1][1])
+        finally:
+            os.environ.pop(fault_name, None)
+            if original_fault is not None:
+                os.environ[fault_name] = original_fault
+
     def test_async_overlap_bounded_timeout_terminates_descendants(self):
         spec = importlib.util.spec_from_file_location(
             "run_async_overlap_descendant_timeout", ASYNC_OVERLAP)
