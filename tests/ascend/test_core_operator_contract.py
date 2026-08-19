@@ -647,17 +647,34 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_hybrid_buffer_slots_have_single_writer_ownership(self):
         with tempfile.TemporaryDirectory() as directory:
-            binary = pathlib.Path(directory) / "hybrid_buffer_ownership_probe"
-            compile_result = subprocess.run(
-                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                 f"-I{ROOT}", str(HYBRID_BUFFER_OWNERSHIP_PROBE),
-                 "-o", str(binary)], capture_output=True, text=True,
-                check=False)
-            self.assertEqual(compile_result.returncode, 0,
-                             compile_result.stderr)
-            run_result = subprocess.run(
-                [str(binary)], capture_output=True, text=True, check=False)
-            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+            variants = (
+                ("production", [], True),
+                ("dual_owned_source",
+                 ["-DDEEP_EP_TEST_MUTATE_INGRESS_SOURCE=1"], False),
+                ("stale_cached_payload",
+                 ["-DDEEP_EP_TEST_MUTATE_CACHED_STALE=1"], False),
+            )
+            for name, definitions, should_pass in variants:
+                with self.subTest(name=name):
+                    binary = pathlib.Path(directory) / name
+                    compile_result = subprocess.run(
+                        ["c++", "-std=c++17", "-Wall", "-Wextra",
+                         "-Werror", *definitions, f"-I{ROOT}",
+                         str(HYBRID_BUFFER_OWNERSHIP_PROBE), "-o",
+                         str(binary)], capture_output=True, text=True,
+                        check=False)
+                    self.assertEqual(compile_result.returncode, 0,
+                                     compile_result.stderr)
+                    run_result = subprocess.run(
+                        [str(binary)], capture_output=True, text=True,
+                        check=False)
+                    if should_pass:
+                        self.assertEqual(run_result.returncode, 0,
+                                         run_result.stderr)
+                    else:
+                        self.assertNotEqual(
+                            run_result.returncode, 0,
+                            f"mutation {name} escaped behavioral coverage")
 
     def test_production_combine_state_and_layout(self):
         with tempfile.TemporaryDirectory() as directory:
