@@ -9,7 +9,7 @@ namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kAscendElasticAlignment = 32;
 inline constexpr std::uint64_t kPublicElasticBufferAlignment = 2ULL << 20U;
-inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 5;
+inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 6;
 inline constexpr std::uint64_t kHybridRouteRecordBytes = 64;
 inline constexpr std::uint64_t kCombineControlSlotBytes =
     2 * sizeof(std::uint64_t);
@@ -277,6 +277,10 @@ struct SymmetricWindowLayout {
     std::uint64_t hybrid_combine_return_shard_bytes = 0;
     std::uint64_t hybrid_combine_return_shard_count = 0;
     std::uint64_t hybrid_combine_return_bytes = 0;
+    std::uint64_t hybrid_dispatch_ingress_staging_offset = 0;
+    std::uint64_t hybrid_dispatch_ingress_staging_shard_bytes = 0;
+    std::uint64_t hybrid_dispatch_ingress_staging_shard_count = 0;
+    std::uint64_t hybrid_dispatch_ingress_staging_bytes = 0;
 };
 
 class LayoutBuilder {
@@ -508,6 +512,15 @@ inline LayoutStatus build_symmetric_window_layout(
                 &layout.hybrid_combine_return_shard_bytes,
                 &layout.hybrid_combine_return_bytes))
             return LayoutStatus::overflow("hybrid stage region size overflow");
+        layout.hybrid_dispatch_ingress_staging_shard_count = input.world_size;
+        layout.hybrid_dispatch_ingress_staging_shard_bytes =
+            layout.hybrid_dispatch_ingress_shard_bytes;
+        if (!checked_multiply(
+                layout.hybrid_dispatch_ingress_staging_shard_bytes,
+                layout.hybrid_dispatch_ingress_staging_shard_count,
+                &layout.hybrid_dispatch_ingress_staging_bytes))
+            return LayoutStatus::overflow(
+                "hybrid ingress staging region size overflow");
     }
     LayoutBuilder window;
     if (!window.append(layout.control_bytes, &layout.control_offset) ||
@@ -532,7 +545,9 @@ inline LayoutStatus build_symmetric_window_layout(
           !window.append(layout.hybrid_combine_return_control_bytes,
                          &layout.hybrid_combine_return_control_offset) ||
           !window.append(layout.hybrid_combine_return_bytes,
-                         &layout.hybrid_combine_return_shard_offset))) ||
+                         &layout.hybrid_combine_return_shard_offset) ||
+          !window.append(layout.hybrid_dispatch_ingress_staging_bytes,
+                         &layout.hybrid_dispatch_ingress_staging_offset))) ||
         !window.finish(&layout.total_bytes, kPublicElasticBufferAlignment))
         return LayoutStatus::overflow("symmetric window size overflow");
     if (!checked_add(layout.control_offset, layout.barrier_generation_offset,

@@ -15,7 +15,7 @@ int main() {
     static_assert(std::is_standard_layout_v<SymmetricControlHeader>);
     static_assert(std::is_trivially_copyable_v<SymmetricControlHeader>);
     static_assert(sizeof(SymmetricControlHeader) == 32);
-    static_assert(kSymmetricWindowAbiVersion == 5);
+    static_assert(kSymmetricWindowAbiVersion == 6);
     static_assert(offsetof(SymmetricWindowLayout, abi_version) == 0);
     static_assert(offsetof(SymmetricWindowLayout, struct_size) == 4);
     static_assert(offsetof(SymmetricWindowLayout, control_offset) == 8);
@@ -221,6 +221,10 @@ int main() {
     CHECK(direct_layout.hybrid_combine_return_shard_bytes == 0);
     CHECK(direct_layout.hybrid_combine_return_shard_count == 0);
     CHECK(direct_layout.hybrid_combine_return_bytes == 0);
+    CHECK(direct_layout.hybrid_dispatch_ingress_staging_offset == 0);
+    CHECK(direct_layout.hybrid_dispatch_ingress_staging_shard_bytes == 0);
+    CHECK(direct_layout.hybrid_dispatch_ingress_staging_shard_count == 0);
+    CHECK(direct_layout.hybrid_dispatch_ingress_staging_bytes == 0);
 
     auto hybrid_input = direct_input;
     hybrid_input.hybrid = true;
@@ -267,6 +271,10 @@ int main() {
     CHECK(hybrid_layout.hybrid_combine_return_shard_count == 4);
     CHECK(hybrid_layout.hybrid_combine_return_shard_bytes == 2560);
     CHECK(hybrid_layout.hybrid_combine_return_bytes == 10240);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_staging_offset == 89088);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_staging_shard_count == 4);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_staging_shard_bytes == 2816);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_staging_bytes == 11264);
     CHECK(hybrid_layout.hybrid_route_record_offset >=
           hybrid_layout.reserve_offset + hybrid_layout.reserve_bytes);
     CHECK(hybrid_layout.hybrid_route_record_offset +
@@ -295,6 +303,9 @@ int main() {
           hybrid_layout.hybrid_combine_return_shard_offset);
     CHECK(hybrid_layout.hybrid_combine_return_shard_offset +
               hybrid_layout.hybrid_combine_return_bytes <=
+          hybrid_layout.hybrid_dispatch_ingress_staging_offset);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_staging_offset +
+              hybrid_layout.hybrid_dispatch_ingress_staging_bytes <=
           hybrid_layout.total_bytes);
 
     auto larger = input;
