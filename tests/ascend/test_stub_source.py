@@ -575,6 +575,20 @@ int main() {
 
 
 class AscendStubSourceTest(unittest.TestCase):
+    def test_fp8_dispatch_forwards_strides_and_zeros_scale_padding(self):
+        source = (ROOT / "csrc/backends/ascend/elastic/dispatch.asc").read_text()
+        for marker in (
+                "arguments.scale_factor_token_stride",
+                "arguments.scale_factor_pack_stride",
+                "arguments.recv_scale_factor_token_stride",
+                "arguments.recv_scale_factor_pack_stride"):
+            self.assertIn(marker, source)
+        self.assertGreaterEqual(source.count("scale_factor_byte_offset("), 4)
+        zero_padding = source[
+            source.index("if (expanded && zero_padding)"):
+            source.index("std::uint64_t compact_slot")]
+        self.assertIn("recv_scale_factors", zero_padding)
+
     def test_mapped_memory_owner_lifecycle_probe(self):
         """Catches a missing lifetime edge or any out-of-order mapped teardown."""
         with tempfile.TemporaryDirectory() as directory:

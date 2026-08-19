@@ -840,11 +840,23 @@ int main() {
     auto fp8_dispatch = dispatch;
     fp8_dispatch.scale_factors = bytes;
     fp8_dispatch.recv_scale_factors = bytes;
+    fp8_dispatch.scale_factor_token_stride = 2;
+    fp8_dispatch.scale_factor_pack_stride = 1;
+    fp8_dispatch.recv_scale_factor_token_stride = 2;
+    fp8_dispatch.recv_scale_factor_pack_stride = 1;
     reset_launches();
     if (!launch_internal_dispatch(
              fp8_dispatch, fp8_tiling, fp8_storage, nullptr).ok() ||
         !trace_is(kDispatchLaunch))
         return 81;
+    fp8_dispatch.scale_factor_token_stride = 0;
+    reset_launches();
+    if (launch_internal_dispatch(
+            fp8_dispatch, fp8_tiling, fp8_storage, nullptr).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 84;
+    fp8_dispatch.scale_factor_token_stride = 2;
     fp8_dispatch.scale_factors = nullptr;
     reset_launches();
     if (launch_internal_dispatch(

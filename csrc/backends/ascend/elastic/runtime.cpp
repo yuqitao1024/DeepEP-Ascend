@@ -452,9 +452,17 @@ CoreRuntimeStatus launch_internal_dispatch(
     const bool fp8 = tiling.element_kind == ElementKind::kFloat8E4M3;
     if ((fp8 &&
          ((tiling.num_tokens != 0 && arguments.scale_factors == nullptr) ||
-          arguments.recv_scale_factors == nullptr)) ||
+          arguments.recv_scale_factors == nullptr ||
+          arguments.scale_factor_token_stride == 0 ||
+          arguments.scale_factor_pack_stride == 0 ||
+          arguments.recv_scale_factor_token_stride == 0 ||
+          arguments.recv_scale_factor_pack_stride == 0)) ||
         (!fp8 && (arguments.scale_factors != nullptr ||
-                  arguments.recv_scale_factors != nullptr)))
+                  arguments.recv_scale_factors != nullptr ||
+                  arguments.scale_factor_token_stride != 0 ||
+                  arguments.scale_factor_pack_stride != 0 ||
+                  arguments.recv_scale_factor_token_stride != 0 ||
+                  arguments.recv_scale_factor_pack_stride != 0)))
         return invalid("dispatch scale factors do not match element kind");
     if (!is_aligned(arguments.communication_buffer) ||
         !is_aligned(arguments.workspace))

@@ -14,6 +14,13 @@
 
 namespace deep_ep::ascend::elastic {
 
+constexpr std::uint64_t scale_factor_byte_offset(
+    std::uint64_t token, std::uint64_t pack,
+    std::uint64_t token_stride, std::uint64_t pack_stride,
+    std::uint64_t pack_bytes) {
+    return (token * token_stride + pack * pack_stride) * pack_bytes;
+}
+
 inline constexpr std::uint32_t kDispatchHandleDescriptorAbiVersion = 4;
 inline constexpr std::uint32_t kHybridRouteLayoutVersion = 1;
 inline constexpr std::uint64_t kInvalidHybridRouteSlot =

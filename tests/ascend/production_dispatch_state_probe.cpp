@@ -12,6 +12,7 @@ using namespace deep_ep::ascend::elastic;
 #define CHECK(condition) do { if (!(condition)) return __LINE__; } while (false)
 
 int main() {
+    CHECK(scale_factor_byte_offset(2, 3, 5, 1, 4) == 52);
     static_assert(std::is_standard_layout_v<DispatchControlSlot>);
     static_assert(std::is_trivially_copyable_v<DispatchControlSlot>);
     static_assert(sizeof(DispatchControlSlot) == 16);
