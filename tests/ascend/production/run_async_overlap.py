@@ -28,6 +28,16 @@ OVERLAP_REPETITIONS = 7
 OVERLAP_COMPUTE_SHAPE = (4096, 4096)
 OVERLAP_COMPUTE_ITERATIONS = 8
 OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT = 0.05
+OVERLAP_DIAGNOSTIC_TIMEOUT_SECONDS = 180
+OVERLAP_DIAGNOSTIC_GRACE_SECONDS = 10.0
+OVERLAP_DIAGNOSTIC_IDLE_SECONDS = 6.0
+OVERLAP_DIAGNOSTIC_VARIANTS = (
+    "pure-communication",
+    "pure-compute",
+    "combined-light",
+    "post-dispatch-idle",
+    "combined-heavy",
+)
 
 CASE_NAMES = (
     "capture-current-stream",
@@ -63,6 +73,7 @@ EVENT_CASES = (
 
 CASE_START_PREFIX = "PHASE3E_CASE_START"
 CASE_RESULT_PREFIX = "PHASE3E_CASE_RESULT"
+OVERLAP_DIAGNOSTIC_RESULT_PREFIX = "PHASE3E_OVERLAP_DIAGNOSTIC_RESULT"
 
 HOST_CONTRACT_CASES = {
     "record-failure": (
@@ -369,6 +380,174 @@ def _distributed_batch_command(cases, trace_dir):
               "--trace-dir", str(trace_dir), "--batch-worker", *cases]
     return [sys.executable, "-m", "torch.distributed.run", "--standalone",
             f"--nproc-per-node={WORLD_SIZE}", *worker]
+
+
+def _overlap_diagnostic_command(output, trace_dir):
+    worker = [
+        str(pathlib.Path(__file__).resolve()),
+        "--overlap-diagnostic-worker",
+        "--output", str(output),
+        "--trace-dir", str(trace_dir),
+    ]
+    return [sys.executable, "-m", "torch.distributed.run", "--standalone",
+            f"--nproc-per-node={WORLD_SIZE}", *worker]
+
+
+def _marker_payload(stdout, prefix):
+    marker = prefix + " "
+    for line in reversed(stdout.splitlines()):
+        if line.startswith(marker):
+            return json.loads(line[len(marker):])
+    return None
+
+
+def _classify_overlap_diagnostic(variants):
+    by_name = {row.get("variant"): row for row in variants}
+    if tuple(by_name) != OVERLAP_DIAGNOSTIC_VARIANTS:
+        return "incomplete"
+
+    def rank_rows(variant):
+        return by_name[variant].get("ranks") or []
+
+    def all_wait(variant, outcome):
+        rows = rank_rows(variant)
+        return len(rows) == WORLD_SIZE and all(
+            row.get("event_wait", {}).get("outcome") == outcome
+            for row in rows)
+
+    controls_pass = (
+        all_wait("pure-communication", "completed") and
+        all_wait("combined-light", "completed") and
+        all_wait("post-dispatch-idle", "completed")
+    )
+    heavy_timed_out = all_wait("combined-heavy", "timeout")
+    heavy_eventually_completed = all(
+        row.get("queries", {}).get("comm_tail_after_grace") and
+        (row.get("queries", {}).get("comm_tail_first_complete_seconds") or 0) >
+        row.get("event_wait", {}).get("bound_seconds", 0)
+        for row in rank_rows("combined-heavy")
+    )
+    pure_compute_exceeded = all(
+        row.get("event_wait", {}).get("outcome") == "timeout" and
+        row.get("queries", {}).get("compute_tail_after_grace")
+        for row in rank_rows("pure-compute")
+    )
+    if (controls_pass and heavy_timed_out and
+            (heavy_eventually_completed or pure_compute_exceeded)):
+        return "workload-exceeds-event-deadline"
+
+    pure_comm_stalled = any(
+        row.get("event_wait", {}).get("outcome") == "timeout" and
+        not row.get("queries", {}).get("comm_tail_after_grace")
+        for row in rank_rows("pure-communication"))
+    idle_event_stalled = any(
+        row.get("queries", {}).get("comm_tail_after_grace") and
+        row.get("event_wait", {}).get("outcome") == "timeout"
+        for row in rank_rows("post-dispatch-idle"))
+    if pure_comm_stalled or idle_event_stalled:
+        return "completion-event-stalled"
+
+    if (all_wait("pure-communication", "completed") and
+            all_wait("post-dispatch-idle", "completed") and
+            not all_wait("combined-light", "completed")):
+        return "stream-dependency-order"
+    return "inconclusive"
+
+
+def _validate_overlap_diagnostic(variants):
+    _check(tuple(row.get("variant") for row in variants) ==
+           OVERLAP_DIAGNOSTIC_VARIANTS,
+           "overlap diagnostic variants are missing or out of order")
+    buffer_instances = []
+    required_stages = {
+        "setup", "dispatch_return", "compute_enqueue", "event_wait"}
+    required_queries = {
+        "comm_tail_immediate", "comm_tail_before_wait",
+        "comm_tail_after_wait", "comm_tail_after_grace",
+        "comm_tail_first_complete_seconds", "compute_tail_after_grace",
+        "compute_tail_first_complete_seconds"}
+    expected_order = [
+        "dispatch-return", "compute-enqueued", "event-wait-start",
+        "event-wait-end", "query-grace-end"]
+    for variant in variants:
+        ranks = variant.get("ranks") or []
+        _check([row.get("rank") for row in ranks] == list(range(WORLD_SIZE)),
+               f"{variant.get('variant')} omitted a rank diagnostic")
+        for row in ranks:
+            buffer_instances.append(row.get("buffer_instance"))
+            _check(row.get("compute_stream_id") !=
+                   row.get("communication_stream_id"),
+                   "diagnostic compute and communication streams alias")
+            _check(set(row.get("stage_seconds", {})) == required_stages,
+                   "diagnostic stage timings are incomplete")
+            _check(set(row.get("queries", {})) == required_queries,
+                   "diagnostic event query boundaries are incomplete")
+            wait = row.get("event_wait") or {}
+            _check(wait.get("outcome") in ("completed", "timeout", "error"),
+                   "diagnostic event wait outcome is invalid")
+            _check(wait.get("bound_seconds") == 5.0,
+                   "diagnostic event wait bound changed")
+            _check(row.get("order") == expected_order,
+                   "diagnostic stream-order evidence is incomplete")
+    _check(None not in buffer_instances and
+           len(set(buffer_instances)) == len(buffer_instances),
+           "diagnostic variants did not use fresh per-rank buffers")
+
+
+def _overlap_diagnostic_report(variants, *, duration_seconds=None,
+                               launcher_failure=None):
+    classification = _classify_overlap_diagnostic(variants)
+    return {
+        "schema_version": 1,
+        "diagnostic": "overlap-vs-serialized",
+        "diagnostic_timeout_seconds": OVERLAP_DIAGNOSTIC_TIMEOUT_SECONDS,
+        "event_wait_bound_seconds": 5.0,
+        "query_grace_seconds": OVERLAP_DIAGNOSTIC_GRACE_SECONDS,
+        "classification": classification,
+        "duration_seconds": duration_seconds,
+        "launcher_failure": launcher_failure,
+        "variants": variants,
+    }
+
+
+def _run_overlap_diagnostic(output, trace_dir):
+    pathlib.Path(trace_dir).mkdir(parents=True, exist_ok=True)
+    result = _run_bounded(
+        _overlap_diagnostic_command(output, trace_dir),
+        timeout_seconds=OVERLAP_DIAGNOSTIC_TIMEOUT_SECONDS)
+    payload = _marker_payload(
+        result.get("stdout", ""), OVERLAP_DIAGNOSTIC_RESULT_PREFIX)
+    if payload is None:
+        variants = []
+        if pathlib.Path(output).exists():
+            variants = json.loads(pathlib.Path(output).read_text()).get(
+                "variants", [])
+        report = _overlap_diagnostic_report(
+            variants, duration_seconds=result.get("duration_seconds"),
+            launcher_failure=result.get("failure") or
+            "diagnostic worker omitted its result marker")
+        _write_suite_report(output, report)
+        print(OVERLAP_DIAGNOSTIC_RESULT_PREFIX + " " +
+              json.dumps(report, sort_keys=True), flush=True)
+        return 1
+    variants = payload.get("variants") or []
+    try:
+        _validate_overlap_diagnostic(variants)
+    except AssertionError as error:
+        report = _overlap_diagnostic_report(
+            variants, duration_seconds=result.get("duration_seconds"),
+            launcher_failure=str(error))
+        _write_suite_report(output, report)
+        print(OVERLAP_DIAGNOSTIC_RESULT_PREFIX + " " +
+              json.dumps(report, sort_keys=True), flush=True)
+        return 1
+    report = _overlap_diagnostic_report(
+        variants, duration_seconds=result.get("duration_seconds"),
+        launcher_failure=result.get("failure"))
+    _write_suite_report(output, report)
+    print(OVERLAP_DIAGNOSTIC_RESULT_PREFIX + " " +
+          json.dumps(report, sort_keys=True), flush=True)
+    return 0 if result.get("status") == "passed" else 1
 
 
 def _suite_report(suite, selected, results):
@@ -1070,6 +1249,148 @@ class AsyncOverlapWorker:
             value = self.torch.matmul(value, right).mul_(0.001)
         return value
 
+    def _light_compute(self, left, right):
+        extent = 512
+        return self.torch.matmul(
+            left[:extent, :extent], right[:extent, :extent]).mul_(0.001)
+
+    def _record_tail_event(self, stream=None):
+        event = self.torch.npu.Event()
+        if stream is None:
+            event.record()
+        else:
+            with self.torch.npu.stream(stream):
+                event.record()
+        return event
+
+    @staticmethod
+    def _query_tail(event):
+        return bool(event.query())
+
+    def _run_overlap_diagnostic_variant(
+            self, variant, x, routes, left, right, hint):
+        variant_started = time.monotonic()
+        setup_started = time.monotonic()
+        buffer = self.new_buffer(num_bytes=hint)
+        compute_stream = self.torch.npu.current_stream()
+        comm_stream = buffer.get_comm_stream()
+        _check(compute_stream.stream_id != comm_stream.stream_id,
+               "diagnostic compute and communication streams alias")
+
+        handle = None
+        changed_x = None
+        if variant != "pure-compute":
+            seed = buffer.dispatch(
+                x,
+                topk_idx=routes,
+                num_experts=NUM_EXPERTS,
+                num_max_tokens_per_rank=x.shape[0],
+                expert_alignment=1,
+                num_sms=1,
+                num_qps=0,
+                do_handle_copy=True,
+                do_cpu_sync=True,
+            )
+            handle = seed[3]
+            changed_x = x.add(1)
+        setup_seconds = time.monotonic() - setup_started
+
+        dispatch_seconds = 0.0
+        operation_event = None
+        dispatch_started = time.monotonic()
+        if variant != "pure-compute":
+            _, _, _, _, operation_event = buffer.dispatch(
+                changed_x,
+                handle=handle,
+                num_sms=1,
+                num_qps=0,
+                async_with_compute_stream=True,
+                allocate_on_comm_stream=True,
+            )
+            _check(operation_event.event is not None,
+                   "diagnostic dispatch omitted its native event")
+            dispatch_seconds = time.monotonic() - dispatch_started
+        comm_tail = self._record_tail_event(comm_stream)
+        comm_tail_immediate = self._query_tail(comm_tail)
+
+        compute_started = time.monotonic()
+        value = left
+        if variant in ("pure-compute", "combined-heavy"):
+            value = self._compute(left, right)
+        elif variant == "combined-light":
+            value = self._light_compute(left, right)
+        compute_seconds = time.monotonic() - compute_started
+        compute_tail = self._record_tail_event()
+        if variant == "pure-compute":
+            operation_event = self.deep_ep.ElasticBuffer.capture()
+        if variant == "post-dispatch-idle":
+            time.sleep(OVERLAP_DIAGNOSTIC_IDLE_SECONDS)
+
+        comm_tail_before_wait = self._query_tail(comm_tail)
+        order = ["dispatch-return", "compute-enqueued", "event-wait-start"]
+        wait_started = time.monotonic()
+        wait_failure = None
+        try:
+            operation_event.current_stream_wait()
+            wait_outcome = "completed"
+        except RuntimeError as error:
+            wait_failure = str(error)
+            wait_outcome = "timeout" if (
+                "synchronize_event" in wait_failure and
+                "backend error -1" in wait_failure) else "error"
+        wait_seconds = time.monotonic() - wait_started
+        order.append("event-wait-end")
+
+        comm_tail_after_wait = self._query_tail(comm_tail)
+        comm_first_complete = (
+            time.monotonic() - variant_started
+            if comm_tail_after_wait or comm_tail_immediate else None)
+        compute_complete = self._query_tail(compute_tail)
+        compute_first_complete = (
+            time.monotonic() - variant_started if compute_complete else None)
+        grace_deadline = time.monotonic() + OVERLAP_DIAGNOSTIC_GRACE_SECONDS
+        while time.monotonic() < grace_deadline and not (
+                comm_tail_after_wait and compute_complete):
+            if not comm_tail_after_wait:
+                comm_tail_after_wait = self._query_tail(comm_tail)
+                if comm_tail_after_wait and comm_first_complete is None:
+                    comm_first_complete = time.monotonic() - variant_started
+            if not compute_complete:
+                compute_complete = self._query_tail(compute_tail)
+                if compute_complete and compute_first_complete is None:
+                    compute_first_complete = time.monotonic() - variant_started
+            if not (comm_tail_after_wait and compute_complete):
+                time.sleep(0.01)
+        order.append("query-grace-end")
+        _check(value.device.type == "npu", "diagnostic compute left the NPU")
+        return {
+            "rank": self.rank,
+            "buffer_instance": f"rank-{self.rank}:{variant}:{id(buffer)}",
+            "compute_stream_id": compute_stream.stream_id,
+            "communication_stream_id": comm_stream.stream_id,
+            "stage_seconds": {
+                "setup": setup_seconds,
+                "dispatch_return": dispatch_seconds,
+                "compute_enqueue": compute_seconds,
+                "event_wait": wait_seconds,
+            },
+            "event_wait": {
+                "outcome": wait_outcome,
+                "bound_seconds": 5.0,
+                "failure": wait_failure,
+            },
+            "queries": {
+                "comm_tail_immediate": comm_tail_immediate,
+                "comm_tail_before_wait": comm_tail_before_wait,
+                "comm_tail_after_wait": comm_tail_after_wait,
+                "comm_tail_after_grace": comm_tail_after_wait,
+                "comm_tail_first_complete_seconds": comm_first_complete,
+                "compute_tail_after_grace": compute_complete,
+                "compute_tail_first_complete_seconds": compute_first_complete,
+            },
+            "order": order,
+        }
+
     def _overlap_iteration(self, buffer, handle, x, left, right, overlap):
         started = time.monotonic()
         _, _, _, _, event = buffer.dispatch(
@@ -1278,6 +1599,93 @@ def _run_distributed_worker(case, trace_dir):
         (case,), trace_dir, batch_protocol=False)
 
 
+def _run_overlap_diagnostic_worker(output, trace_dir):
+    import torch
+    import torch.distributed as dist
+    import torch_npu
+    import deep_ep
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.npu.set_device(local_rank)
+    initialized = False
+    try:
+        dist.init_process_group(
+            backend="hccl", timeout=timedelta(seconds=25))
+        initialized = True
+        group = dist.group.WORLD
+        _check(dist.get_world_size(group) == WORLD_SIZE,
+               f"overlap diagnostic requires {WORLD_SIZE} ranks")
+        rank = dist.get_rank(group)
+        input_worker = AsyncOverlapWorker(
+            torch, torch_npu, dist, deep_ep, group,
+            torch.device("npu", local_rank), trace_dir)
+        with _forbid_global_sync(torch):
+            x, routes, left, right = input_worker._make_overlap_inputs()
+            hint = deep_ep.ElasticBuffer.get_buffer_size_hint(
+                group,
+                num_max_tokens_per_rank=x.shape[0],
+                hidden=x.shape[1],
+                num_topk=1,
+                use_fp8_dispatch=False,
+                allow_hybrid_mode=False,
+                allow_multiple_reduction=True,
+            )
+
+        variants = []
+        for variant in OVERLAP_DIAGNOSTIC_VARIANTS:
+            dist.barrier(group=group)
+            worker = AsyncOverlapWorker(
+                torch, torch_npu, dist, deep_ep, group,
+                torch.device("npu", local_rank), trace_dir)
+            local_measurement = None
+            local_failure = None
+            with _forbid_global_sync(torch):
+                try:
+                    local_measurement = worker._run_overlap_diagnostic_variant(
+                        variant, x, routes, left, right, hint)
+                except BaseException as error:
+                    local_failure = f"{type(error).__name__}: {error}"
+                try:
+                    worker.destroy_buffers()
+                except BaseException as error:
+                    cleanup = f"{type(error).__name__}: {error}"
+                    if local_measurement is not None:
+                        local_measurement["cleanup_failure"] = cleanup
+                    else:
+                        local_failure = "; ".join(
+                            value for value in (local_failure, cleanup) if value)
+            if local_measurement is None:
+                local_measurement = {
+                    "rank": rank,
+                    "diagnostic_failure": local_failure or
+                    "diagnostic variant produced no measurement",
+                }
+            elif local_failure:
+                local_measurement["diagnostic_failure"] = local_failure
+
+            reports = [None] * WORLD_SIZE
+            dist.all_gather_object(reports, local_measurement, group=group)
+            if rank == 0:
+                row = {
+                    "variant": variant,
+                    "ranks": sorted(reports, key=lambda value: value["rank"]),
+                }
+                variants.append(row)
+                checkpoint = _overlap_diagnostic_report(variants)
+                _write_suite_report(output, checkpoint)
+                print("PHASE3E_OVERLAP_DIAGNOSTIC_VARIANT " +
+                      json.dumps(row, sort_keys=True), flush=True)
+
+        if rank == 0:
+            payload = {"variants": variants}
+            print(OVERLAP_DIAGNOSTIC_RESULT_PREFIX + " " +
+                  json.dumps(payload, sort_keys=True), flush=True)
+        return 0
+    finally:
+        if initialized:
+            dist.destroy_process_group()
+
+
 def _run_worker(case, trace_dir):
     if case == "capture-current-stream":
         measurements = _run_capture_worker()
@@ -1297,6 +1705,8 @@ def main():
     parser.add_argument(
         "--batch-worker", nargs="+", choices=DISTRIBUTED_CASES,
         metavar="CASE")
+    parser.add_argument("--overlap-diagnostic", action="store_true")
+    parser.add_argument("--overlap-diagnostic-worker", action="store_true")
     parser.add_argument("--output", default="/tmp/phase3e-async-overlap.json")
     parser.add_argument("--trace-dir", default="/tmp/phase3e-async-traces")
     args = parser.parse_args()
@@ -1307,10 +1717,15 @@ def main():
         return _run_worker(args.worker, args.trace_dir)
     if args.batch_worker:
         return _run_distributed_batch_worker(args.batch_worker, args.trace_dir)
+    if args.overlap_diagnostic_worker:
+        return _run_overlap_diagnostic_worker(args.output, args.trace_dir)
+    if args.overlap_diagnostic:
+        return _run_overlap_diagnostic(args.output, args.trace_dir)
     if args.suite:
         return _run_suite(args.suite, args.output, args.trace_dir)
     parser.error(
-        "one of --contract, --suite, --worker, or --batch-worker is required")
+        "one of --contract, --suite, --worker, --batch-worker, "
+        "--overlap-diagnostic, or --overlap-diagnostic-worker is required")
 
 
 if __name__ == "__main__":

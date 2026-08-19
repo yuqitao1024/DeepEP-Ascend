@@ -2083,6 +2083,106 @@ int main() {
         self.assertEqual(overlap["compute_event"], "matmul")
         self.assertEqual(overlap["communication_event"], "dispatch")
 
+    def test_async_overlap_diagnostic_is_bounded_and_classifies_long_workload(
+            self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_diagnostic_contract", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        variants = (
+            "pure-communication",
+            "pure-compute",
+            "combined-light",
+            "post-dispatch-idle",
+            "combined-heavy",
+        )
+        observations = []
+        for variant_index, variant in enumerate(variants):
+            ranks = []
+            for rank in range(2):
+                timed_out = variant in ("pure-compute", "combined-heavy")
+                ranks.append({
+                    "rank": rank,
+                    "buffer_instance": f"rank-{rank}-buffer-{variant_index}",
+                    "compute_stream_id": 7 + rank,
+                    "communication_stream_id": 17 + rank,
+                    "stage_seconds": {
+                        "setup": 0.25,
+                        "dispatch_return": 0.10 if variant != "pure-compute" else 0.0,
+                        "compute_enqueue": 0.20 if variant != "pure-communication" else 0.0,
+                        "event_wait": 5.01 if timed_out else 0.15,
+                    },
+                    "event_wait": {
+                        "outcome": "timeout" if timed_out else "completed",
+                        "bound_seconds": 5.0,
+                    },
+                    "queries": {
+                        "comm_tail_immediate": False,
+                        "comm_tail_before_wait": False,
+                        "comm_tail_after_wait": not timed_out,
+                        "comm_tail_after_grace": variant != "pure-compute",
+                        "comm_tail_first_complete_seconds": (
+                            6.4 if variant == "combined-heavy" else
+                            0.2 if variant != "pure-compute" else None),
+                        "compute_tail_after_grace": variant != "pure-communication",
+                        "compute_tail_first_complete_seconds": (
+                            6.2 if timed_out else
+                            0.2 if variant != "pure-communication" else None),
+                    },
+                    "order": [
+                        "dispatch-return",
+                        "compute-enqueued",
+                        "event-wait-start",
+                        "event-wait-end",
+                        "query-grace-end",
+                    ],
+                })
+            observations.append({"variant": variant, "ranks": ranks})
+
+        worker_payload = {"variants": observations}
+        bounded_calls = []
+
+        def run_bounded(command, timeout_seconds, env=None):
+            bounded_calls.append((command, timeout_seconds, env))
+            return {
+                "status": "passed",
+                "failure": None,
+                "duration_seconds": 12.5,
+                "exit_code": 0,
+                "stdout": "PHASE3E_OVERLAP_DIAGNOSTIC_RESULT " +
+                json.dumps(worker_payload) + "\n",
+                "stderr": "",
+            }
+
+        run_diagnostic = getattr(module, "_run_overlap_diagnostic", None)
+        self.assertIsNotNone(run_diagnostic)
+        if run_diagnostic is None:
+            return
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "diagnostic.json"
+            trace_dir = pathlib.Path(directory) / "traces"
+            with mock.patch.object(module, "_run_bounded", run_bounded):
+                exit_code = run_diagnostic(output, trace_dir)
+            report = json.loads(output.read_text())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(bounded_calls), 1)
+        command, timeout_seconds, environment = bounded_calls[0]
+        self.assertEqual(timeout_seconds, 180)
+        self.assertIsNone(environment)
+        self.assertIn("--overlap-diagnostic-worker", command)
+        self.assertEqual(report["diagnostic"], "overlap-vs-serialized")
+        self.assertEqual(report["diagnostic_timeout_seconds"], 180)
+        self.assertEqual(report["classification"],
+                         "workload-exceeds-event-deadline")
+        self.assertEqual(
+            tuple(row["variant"] for row in report["variants"]), variants)
+        self.assertEqual(
+            len({rank_row["buffer_instance"]
+                 for row in report["variants"] for rank_row in row["ranks"]}),
+            10)
+
     def test_async_overlap_suite_checkpoints_each_completed_case(self):
         spec = importlib.util.spec_from_file_location(
             "run_async_overlap_checkpoint", ASYNC_OVERLAP)
