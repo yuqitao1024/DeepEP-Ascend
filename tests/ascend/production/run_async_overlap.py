@@ -36,6 +36,14 @@ OVERLAP_SWEEP_TIMEOUT_SECONDS = 150
 OVERLAP_SWEEP_TOKENS = (1024,)
 OVERLAP_SWEEP_WARMUPS = 0
 OVERLAP_SWEEP_REPETITIONS = 1
+OVERLAP_COMPONENT_TIMEOUT_SECONDS = 120
+OVERLAP_COMPONENT_WARMUPS = 0
+OVERLAP_COMPONENT_REPETITIONS = 1
+OVERLAP_COMPONENT_CLASSIFICATIONS = (
+    "unserialized-baseline",
+    "resource-contention",
+    "effective-overlap",
+)
 OVERLAP_DIAGNOSTIC_VARIANTS = (
     "pure-communication",
     "pure-compute",
@@ -80,6 +88,7 @@ CASE_START_PREFIX = "PHASE3E_CASE_START"
 CASE_RESULT_PREFIX = "PHASE3E_CASE_RESULT"
 OVERLAP_DIAGNOSTIC_RESULT_PREFIX = "PHASE3E_OVERLAP_DIAGNOSTIC_RESULT"
 OVERLAP_SWEEP_RESULT_PREFIX = "PHASE3E_OVERLAP_SWEEP_RESULT"
+OVERLAP_COMPONENT_RESULT_PREFIX = "PHASE3E_OVERLAP_COMPONENT_RESULT"
 
 HOST_CONTRACT_CASES = {
     "record-failure": (
@@ -232,6 +241,15 @@ def _contract():
         "full_cases": list(CASE_NAMES),
         "matrix_groups": list(MATRIX_GROUPS),
         "overlap": {
+            "component_diagnostic": {
+                "classifications": list(OVERLAP_COMPONENT_CLASSIFICATIONS),
+                "communication_tokens": OVERLAP_COMMUNICATION_TOKENS,
+                "compute_iterations": OVERLAP_COMPUTE_ITERATIONS,
+                "compute_shape": list(OVERLAP_COMPUTE_SHAPE),
+                "repetitions": OVERLAP_COMPONENT_REPETITIONS,
+                "timeout_seconds": OVERLAP_COMPONENT_TIMEOUT_SECONDS,
+                "warmups": OVERLAP_COMPONENT_WARMUPS,
+            },
             "communication_tokens": OVERLAP_COMMUNICATION_TOKENS,
             "compute_iterations": OVERLAP_COMPUTE_ITERATIONS,
             "compute_shape": list(OVERLAP_COMPUTE_SHAPE),
@@ -471,6 +489,17 @@ def _overlap_sweep_command(output, trace_dir):
     worker = [
         str(pathlib.Path(__file__).resolve()),
         "--overlap-sweep-worker",
+        "--output", str(output),
+        "--trace-dir", str(trace_dir),
+    ]
+    return [sys.executable, "-m", "torch.distributed.run", "--standalone",
+            f"--nproc-per-node={WORLD_SIZE}", *worker]
+
+
+def _overlap_component_command(output, trace_dir):
+    worker = [
+        str(pathlib.Path(__file__).resolve()),
+        "--overlap-component-diagnostic-worker",
         "--output", str(output),
         "--trace-dir", str(trace_dir),
     ]
@@ -820,6 +849,208 @@ def _run_overlap_sweep(output, trace_dir):
         launcher_failure=result.get("failure"))
     _write_suite_report(output, report)
     print(OVERLAP_SWEEP_RESULT_PREFIX + " " +
+          json.dumps(report, sort_keys=True), flush=True)
+    return 0 if result.get("status") == "passed" else 1
+
+
+def _overlap_component_tolerances(row):
+    component_sum = (
+        float(row["communication_only_seconds"]) +
+        float(row["compute_only_seconds"])
+    )
+    serialized = float(row["serialized_seconds"])
+    return {
+        "component_sum": (
+            component_sum * OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT),
+        "serialized": serialized * OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT,
+    }
+
+
+def _classify_overlap_component_rank(row):
+    if row.get("diagnostic_failure"):
+        return "operation-failure"
+    required = (
+        "communication_only_seconds",
+        "compute_only_seconds",
+        "serialized_seconds",
+        "overlapped_seconds",
+    )
+    if any(not isinstance(row.get(name), (int, float)) for name in required):
+        return "incomplete"
+
+    communication = float(row["communication_only_seconds"])
+    compute = float(row["compute_only_seconds"])
+    serialized = float(row["serialized_seconds"])
+    overlapped = float(row["overlapped_seconds"])
+    component_sum = communication + compute
+    tolerance = _overlap_component_tolerances(row)
+
+    if serialized < component_sum - tolerance["component_sum"]:
+        return "unserialized-baseline"
+    if overlapped < serialized - tolerance["serialized"]:
+        return "effective-overlap"
+    if row.get("profiler_overlap", {}).get("overlap_us", 0) <= 0:
+        return "profiler-overlap-missing"
+    if (abs(serialized - component_sum) <= tolerance["component_sum"] and
+            abs(overlapped - serialized) <= tolerance["serialized"]):
+        return "resource-contention"
+    return "inconclusive"
+
+
+def _overlap_component_report(ranks, *, duration_seconds=None,
+                              launcher_failure=None):
+    classified = []
+    for measurement in sorted(
+            ranks, key=lambda value: value.get("rank", WORLD_SIZE)):
+        row = dict(measurement)
+        row["classification"] = _classify_overlap_component_rank(row)
+        if all(isinstance(row.get(name), (int, float)) for name in (
+                "communication_only_seconds", "compute_only_seconds",
+                "serialized_seconds", "overlapped_seconds")):
+            row["component_sum_seconds"] = (
+                row["communication_only_seconds"] +
+                row["compute_only_seconds"])
+            row["serialized_component_gap_seconds"] = (
+                row["component_sum_seconds"] - row["serialized_seconds"])
+            row["overlap_gain_seconds"] = (
+                row["serialized_seconds"] - row["overlapped_seconds"])
+            row["measured_tolerance_seconds"] = \
+                _overlap_component_tolerances(row)
+        classified.append(row)
+
+    classifications = {row["classification"] for row in classified}
+    classification = classifications.pop() \
+        if len(classifications) == 1 else "mixed"
+    return {
+        "schema_version": 1,
+        "diagnostic": "overlap-component-timing",
+        "diagnostic_timeout_seconds": OVERLAP_COMPONENT_TIMEOUT_SECONDS,
+        "acceptance_eligible": False,
+        "acceptance_ineligible_reason": "single-sample-diagnostic",
+        "classification": classification,
+        "classification_materiality_ratio":
+            OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT,
+        "communication_tokens": OVERLAP_COMMUNICATION_TOKENS,
+        "compute_shape": list(OVERLAP_COMPUTE_SHAPE),
+        "compute_iterations": OVERLAP_COMPUTE_ITERATIONS,
+        "warmups": OVERLAP_COMPONENT_WARMUPS,
+        "repetitions": OVERLAP_COMPONENT_REPETITIONS,
+        "duration_seconds": duration_seconds,
+        "launcher_failure": launcher_failure,
+        "ranks": classified,
+    }
+
+
+def _validate_overlap_component(ranks):
+    _check([row.get("rank") for row in ranks] == list(range(WORLD_SIZE)),
+           "overlap component diagnostic omitted a rank")
+    required_durations = (
+        "communication_only_seconds",
+        "compute_only_seconds",
+        "serialized_seconds",
+        "overlapped_seconds",
+        "serialized_dispatch_return_duration_seconds",
+        "async_dispatch_return_duration_seconds",
+        "event_wait_duration_seconds",
+        "compute_completion_duration_seconds",
+    )
+    required_stages = {
+        "communication-only": {"async_dispatch_return", "event_wait"},
+        "compute-only": {"compute_enqueue", "compute_completion"},
+        "serialized": {
+            "serialized_dispatch_return", "compute_enqueue",
+            "compute_completion",
+        },
+        "overlapped": {
+            "async_dispatch_return", "compute_enqueue", "event_wait",
+            "compute_completion",
+        },
+    }
+    buffer_instances = []
+    for row in ranks:
+        _check(row.get("communication_tokens") ==
+               OVERLAP_COMMUNICATION_TOKENS,
+               "overlap component communication tokens changed")
+        _check(row.get("compute_iterations") == OVERLAP_COMPUTE_ITERATIONS,
+               "overlap component compute iterations changed")
+        _check(all(isinstance(row.get(name), (int, float)) and
+                   row[name] >= 0 for name in required_durations),
+               "overlap component durations are incomplete")
+        stages = row.get("stage_seconds") or {}
+        _check(set(stages) == set(required_stages),
+               "overlap component phase timings are incomplete")
+        for phase, names in required_stages.items():
+            _check(set(stages.get(phase, {})) == names,
+                   f"overlap component {phase} stage timings are incomplete")
+        profiler = row.get("profiler_overlap") or {}
+        _check(profiler.get("overlap_us", 0) > 0,
+               "overlap component profiler interval is missing")
+        _check(profiler.get("physical_compute_stream_id") is not None and
+               profiler.get("physical_communication_stream_id") is not None,
+               "overlap component physical stream IDs are missing")
+        _check(str(profiler["physical_compute_stream_id"]) !=
+               str(profiler["physical_communication_stream_id"]),
+               "overlap component physical streams alias")
+        buffer_instances.append(row.get("buffer_instance"))
+    _check(None not in buffer_instances and
+           len(set(buffer_instances)) == WORLD_SIZE,
+           "overlap component diagnostic did not use fresh rank buffers")
+
+
+def _load_overlap_component_phase_checkpoint(trace_dir):
+    measurements = {}
+    for path in pathlib.Path(trace_dir).glob("phase-rank*.json"):
+        try:
+            checkpoint = json.loads(path.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        measurement = checkpoint.get("measurement")
+        if not isinstance(measurement, dict):
+            continue
+        rank = measurement.get("rank")
+        if isinstance(rank, int):
+            measurements[rank] = measurement
+    return [measurements[rank] for rank in sorted(measurements)]
+
+
+def _run_overlap_component_diagnostic(output, trace_dir):
+    pathlib.Path(trace_dir).mkdir(parents=True, exist_ok=True)
+    result = _run_bounded(
+        _overlap_component_command(output, trace_dir),
+        timeout_seconds=OVERLAP_COMPONENT_TIMEOUT_SECONDS)
+    payload = _marker_payload(
+        result.get("stdout", ""), OVERLAP_COMPONENT_RESULT_PREFIX)
+    if payload is None:
+        ranks = []
+        if pathlib.Path(output).exists():
+            ranks = json.loads(pathlib.Path(output).read_text()).get("ranks", [])
+        if not ranks:
+            ranks = _load_overlap_component_phase_checkpoint(trace_dir)
+        report = _overlap_component_report(
+            ranks, duration_seconds=result.get("duration_seconds"),
+            launcher_failure=result.get("failure") or
+            "overlap component worker omitted its result marker")
+        _write_suite_report(output, report)
+        print(OVERLAP_COMPONENT_RESULT_PREFIX + " " +
+              json.dumps(report, sort_keys=True), flush=True)
+        return 1
+
+    ranks = payload.get("ranks") or []
+    try:
+        _validate_overlap_component(ranks)
+    except AssertionError as error:
+        report = _overlap_component_report(
+            ranks, duration_seconds=result.get("duration_seconds"),
+            launcher_failure=str(error))
+        _write_suite_report(output, report)
+        print(OVERLAP_COMPONENT_RESULT_PREFIX + " " +
+              json.dumps(report, sort_keys=True), flush=True)
+        return 1
+    report = _overlap_component_report(
+        ranks, duration_seconds=result.get("duration_seconds"),
+        launcher_failure=result.get("failure"))
+    _write_suite_report(output, report)
+    print(OVERLAP_COMPONENT_RESULT_PREFIX + " " +
           json.dumps(report, sort_keys=True), flush=True)
     return 0 if result.get("status") == "passed" else 1
 
@@ -1705,6 +1936,89 @@ class AsyncOverlapWorker:
         _check(value.device.type == "npu", "compute result left the NPU")
         return time.monotonic() - started
 
+    def _component_communication_iteration(self, buffer, handle, x):
+        started = time.monotonic()
+        dispatch_started = time.monotonic()
+        _, _, _, _, event = buffer.dispatch(
+            x,
+            handle=handle,
+            num_sms=1,
+            num_qps=0,
+            async_with_compute_stream=True,
+            allocate_on_comm_stream=True,
+        )
+        dispatch_seconds = time.monotonic() - dispatch_started
+        _check(event.event is not None,
+               "component async dispatch omitted its native event")
+        wait_started = time.monotonic()
+        event.current_stream_wait()
+        wait_seconds = time.monotonic() - wait_started
+        return {
+            "duration_seconds": time.monotonic() - started,
+            "stage_seconds": {
+                "async_dispatch_return": dispatch_seconds,
+                "event_wait": wait_seconds,
+            },
+        }
+
+    def _component_compute_iteration(self, left, right):
+        started = time.monotonic()
+        enqueue_started = time.monotonic()
+        value = self._compute(left, right)
+        enqueue_seconds = time.monotonic() - enqueue_started
+        completion_started = time.monotonic()
+        self._wait_current_stream()
+        completion_seconds = time.monotonic() - completion_started
+        _check(value.device.type == "npu", "compute result left the NPU")
+        return {
+            "duration_seconds": time.monotonic() - started,
+            "stage_seconds": {
+                "compute_enqueue": enqueue_seconds,
+                "compute_completion": completion_seconds,
+            },
+        }
+
+    def _component_combined_iteration(
+            self, buffer, handle, x, left, right, *, overlap):
+        started = time.monotonic()
+        dispatch_started = time.monotonic()
+        _, _, _, _, event = buffer.dispatch(
+            x,
+            handle=handle,
+            num_sms=1,
+            num_qps=0,
+            async_with_compute_stream=overlap,
+            allocate_on_comm_stream=True,
+        )
+        dispatch_seconds = time.monotonic() - dispatch_started
+        stages = {
+            "async_dispatch_return" if overlap else
+            "serialized_dispatch_return": dispatch_seconds,
+        }
+        if overlap:
+            _check(event.event is not None,
+                   "component async dispatch omitted its native event")
+        else:
+            _check(event.event is None,
+                   "component serialized dispatch returned a native event")
+
+        enqueue_started = time.monotonic()
+        value = self._compute(left, right)
+        stages["compute_enqueue"] = time.monotonic() - enqueue_started
+        if overlap:
+            wait_started = time.monotonic()
+            event.current_stream_wait()
+            stages["event_wait"] = time.monotonic() - wait_started
+        completion_started = time.monotonic()
+        self._wait_current_stream()
+        stages["compute_completion"] = \
+            time.monotonic() - completion_started
+        _check(value.device.type == "npu", "compute result left the NPU")
+        return {
+            "duration_seconds": time.monotonic() - started,
+            "stage_seconds": stages,
+        }
+
     def _profile_overlap(self, buffer, handle, x, left, right):
         profiler = self.torch_npu.profiler
         activity = profiler.ProfilerActivity.NPU
@@ -1913,6 +2227,111 @@ class AsyncOverlapWorker:
             if key in profiler:
                 measurement[key] = profiler[key]
         measurement["profiler_overlap"] = profiler
+        checkpoint_phase("profiler", "completed")
+        return measurement
+
+    def _run_overlap_component_diagnostic(self, record_phase=None):
+        _check(OVERLAP_COMPONENT_WARMUPS == 0,
+               "overlap component diagnostic warmups changed")
+        _check(OVERLAP_COMPONENT_REPETITIONS == 1,
+               "overlap component diagnostic repetitions changed")
+        x, routes, left, right = self._make_overlap_inputs(
+            OVERLAP_COMMUNICATION_TOKENS)
+        hint = self.deep_ep.ElasticBuffer.get_buffer_size_hint(
+            self.group,
+            num_max_tokens_per_rank=x.shape[0],
+            hidden=x.shape[1],
+            num_topk=1,
+            use_fp8_dispatch=False,
+            allow_hybrid_mode=False,
+            allow_multiple_reduction=True,
+        )
+        buffer = self.new_buffer(num_bytes=hint)
+        seed = buffer.dispatch(
+            x,
+            topk_idx=routes,
+            num_experts=NUM_EXPERTS,
+            num_max_tokens_per_rank=x.shape[0],
+            expert_alignment=1,
+            num_sms=1,
+            num_qps=0,
+            do_handle_copy=True,
+            do_cpu_sync=True,
+        )
+        handle = seed[3]
+        changed_x = x.add(1)
+        measurement = {
+            "rank": self.rank,
+            "communication_tokens": OVERLAP_COMMUNICATION_TOKENS,
+            "compute_shape": list(OVERLAP_COMPUTE_SHAPE),
+            "compute_iterations": OVERLAP_COMPUTE_ITERATIONS,
+            "warmups": OVERLAP_COMPONENT_WARMUPS,
+            "repetitions": OVERLAP_COMPONENT_REPETITIONS,
+            "buffer_instance":
+                f"rank-{self.rank}:component:{id(buffer)}",
+            "stage_seconds": {},
+        }
+
+        def checkpoint_phase(phase, status):
+            measurement["active_phase"] = \
+                phase if status == "started" else None
+            measurement["phase_status"] = status
+            if status == "completed":
+                measurement["completed_phase"] = phase
+            if record_phase is not None:
+                record_phase(phase, measurement)
+
+        checkpoint_phase("communication-only", "started")
+        communication = self._component_communication_iteration(
+            buffer, handle, changed_x)
+        measurement["communication_only_seconds"] = \
+            communication["duration_seconds"]
+        measurement["stage_seconds"]["communication-only"] = \
+            communication["stage_seconds"]
+        checkpoint_phase("communication-only", "completed")
+
+        checkpoint_phase("compute-only", "started")
+        compute = self._component_compute_iteration(left, right)
+        measurement["compute_only_seconds"] = compute["duration_seconds"]
+        measurement["stage_seconds"]["compute-only"] = \
+            compute["stage_seconds"]
+        checkpoint_phase("compute-only", "completed")
+
+        checkpoint_phase("serialized", "started")
+        serialized = self._component_combined_iteration(
+            buffer, handle, changed_x, left, right, overlap=False)
+        measurement["serialized_seconds"] = serialized["duration_seconds"]
+        measurement["stage_seconds"]["serialized"] = \
+            serialized["stage_seconds"]
+        measurement["serialized_dispatch_return_duration_seconds"] = \
+            serialized["stage_seconds"]["serialized_dispatch_return"]
+        checkpoint_phase("serialized", "completed")
+
+        checkpoint_phase("overlapped", "started")
+        overlapped = self._component_combined_iteration(
+            buffer, handle, changed_x, left, right, overlap=True)
+        measurement["overlapped_seconds"] = overlapped["duration_seconds"]
+        measurement["stage_seconds"]["overlapped"] = \
+            overlapped["stage_seconds"]
+        measurement["async_dispatch_return_duration_seconds"] = \
+            overlapped["stage_seconds"]["async_dispatch_return"]
+        measurement["event_wait_duration_seconds"] = \
+            overlapped["stage_seconds"]["event_wait"]
+        measurement["compute_completion_duration_seconds"] = \
+            overlapped["stage_seconds"]["compute_completion"]
+        checkpoint_phase("overlapped", "completed")
+
+        checkpoint_phase("profiler", "started")
+        profiler = self._profile_overlap(
+            buffer, handle, changed_x, left, right)
+        measurement["profiler_overlap"] = profiler
+        for key in (
+                "logical_compute_stream_id",
+                "logical_communication_stream_id",
+                "physical_compute_stream_id",
+                "physical_communication_stream_id"):
+            if key in profiler:
+                measurement[key] = profiler[key]
         checkpoint_phase("profiler", "completed")
         return measurement
 
@@ -2202,6 +2621,81 @@ def _run_overlap_sweep_worker(output, trace_dir):
             dist.destroy_process_group()
 
 
+def _run_overlap_component_diagnostic_worker(output, trace_dir):
+    import torch
+    import torch.distributed as dist
+    import torch_npu
+    import deep_ep
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.npu.set_device(local_rank)
+    initialized = False
+    try:
+        dist.init_process_group(
+            backend="hccl", timeout=timedelta(seconds=25))
+        initialized = True
+        group = dist.group.WORLD
+        _check(dist.get_world_size(group) == WORLD_SIZE,
+               f"overlap component diagnostic requires {WORLD_SIZE} ranks")
+        rank = dist.get_rank(group)
+        dist.barrier(group=group)
+        worker = AsyncOverlapWorker(
+            torch, torch_npu, dist, deep_ep, group,
+            torch.device("npu", local_rank), trace_dir)
+        local_measurement = None
+        local_failure = None
+
+        def record_phase(phase, measurement):
+            nonlocal local_measurement
+            local_measurement = copy.deepcopy(measurement)
+            checkpoint = {
+                "schema_version": 1,
+                "active_phase": local_measurement.get("active_phase"),
+                "completed_phase": local_measurement.get("completed_phase"),
+                "phase_status": local_measurement["phase_status"],
+                "measurement": local_measurement,
+            }
+            phase_path = pathlib.Path(trace_dir) / f"phase-rank{rank}.json"
+            _write_suite_report(phase_path, checkpoint)
+            print("PHASE3E_OVERLAP_COMPONENT_PHASE " +
+                  json.dumps(checkpoint, sort_keys=True), flush=True)
+
+        with _forbid_global_sync(torch):
+            try:
+                local_measurement = worker._run_overlap_component_diagnostic(
+                    record_phase=record_phase)
+            except BaseException as error:
+                local_failure = f"{type(error).__name__}: {error}"
+            try:
+                worker.destroy_buffers()
+            except BaseException as error:
+                cleanup = f"cleanup {type(error).__name__}: {error}"
+                local_failure = "; ".join(
+                    value for value in (local_failure, cleanup) if value)
+        if local_measurement is None:
+            local_measurement = {
+                "rank": rank,
+                "diagnostic_failure": local_failure or
+                "overlap component diagnostic produced no measurement",
+            }
+        elif local_failure:
+            local_measurement["diagnostic_failure"] = local_failure
+
+        reports = [None] * WORLD_SIZE
+        dist.all_gather_object(reports, local_measurement, group=group)
+        ranks = sorted(reports, key=lambda value: value["rank"])
+        if rank == 0:
+            checkpoint = _overlap_component_report(ranks)
+            _write_suite_report(output, checkpoint)
+            print(OVERLAP_COMPONENT_RESULT_PREFIX + " " + json.dumps({
+                "ranks": ranks,
+            }, sort_keys=True), flush=True)
+        return 0
+    finally:
+        if initialized:
+            dist.destroy_process_group()
+
+
 def _run_worker(case, trace_dir):
     if case == "capture-current-stream":
         measurements = _run_capture_worker()
@@ -2225,6 +2719,10 @@ def main():
     parser.add_argument("--overlap-diagnostic-worker", action="store_true")
     parser.add_argument("--overlap-sweep", action="store_true")
     parser.add_argument("--overlap-sweep-worker", action="store_true")
+    parser.add_argument(
+        "--overlap-component-diagnostic", action="store_true")
+    parser.add_argument(
+        "--overlap-component-diagnostic-worker", action="store_true")
     parser.add_argument("--output", default="/tmp/phase3e-async-overlap.json")
     parser.add_argument("--trace-dir", default="/tmp/phase3e-async-traces")
     args = parser.parse_args()
@@ -2243,12 +2741,19 @@ def main():
         return _run_overlap_sweep_worker(args.output, args.trace_dir)
     if args.overlap_sweep:
         return _run_overlap_sweep(args.output, args.trace_dir)
+    if args.overlap_component_diagnostic_worker:
+        return _run_overlap_component_diagnostic_worker(
+            args.output, args.trace_dir)
+    if args.overlap_component_diagnostic:
+        return _run_overlap_component_diagnostic(args.output, args.trace_dir)
     if args.suite:
         return _run_suite(args.suite, args.output, args.trace_dir)
     parser.error(
         "one of --contract, --suite, --worker, --batch-worker, "
         "--overlap-diagnostic, --overlap-diagnostic-worker, "
-        "--overlap-sweep, or --overlap-sweep-worker is required")
+        "--overlap-sweep, --overlap-sweep-worker, "
+        "--overlap-component-diagnostic, or "
+        "--overlap-component-diagnostic-worker is required")
 
 
 if __name__ == "__main__":

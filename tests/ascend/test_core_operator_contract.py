@@ -2017,6 +2017,19 @@ int main() {
                     "overlap-vs-serialized",
                 ],
                 "overlap": {
+                    "component_diagnostic": {
+                        "classifications": [
+                            "unserialized-baseline",
+                            "resource-contention",
+                            "effective-overlap",
+                        ],
+                        "communication_tokens": 256,
+                        "compute_iterations": 256,
+                        "compute_shape": [4096, 4096],
+                        "repetitions": 1,
+                        "timeout_seconds": 120,
+                        "warmups": 0,
+                    },
                     "communication_tokens": 256,
                     "compute_iterations": 256,
                     "compute_shape": [4096, 4096],
@@ -2870,6 +2883,290 @@ int main() {
         self.assertEqual(report["active_point"], active_point)
         self.assertEqual(report["launcher_failure"],
                          "process timeout after 150s")
+
+    def test_async_overlap_component_diagnostic_classifies_measured_gaps(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_component_classification", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        def rank_row(rank, serialized, overlapped):
+            return {
+                "rank": rank,
+                "communication_tokens": 256,
+                "compute_iterations": 256,
+                "buffer_instance": f"rank-{rank}-component-buffer",
+                "communication_only_seconds": 0.20,
+                "compute_only_seconds": 0.30,
+                "serialized_seconds": serialized,
+                "overlapped_seconds": overlapped,
+                "serialized_dispatch_return_duration_seconds": 0.20,
+                "async_dispatch_return_duration_seconds": 0.01,
+                "event_wait_duration_seconds": 0.19,
+                "compute_completion_duration_seconds": 0.10,
+                "stage_seconds": {
+                    "communication-only": {
+                        "async_dispatch_return": 0.01,
+                        "event_wait": 0.19,
+                    },
+                    "compute-only": {
+                        "compute_enqueue": 0.20,
+                        "compute_completion": 0.10,
+                    },
+                    "serialized": {
+                        "serialized_dispatch_return": 0.20,
+                        "compute_enqueue": 0.20,
+                        "compute_completion": 0.10,
+                    },
+                    "overlapped": {
+                        "async_dispatch_return": 0.01,
+                        "compute_enqueue": 0.20,
+                        "event_wait": 0.19,
+                        "compute_completion": 0.10,
+                    },
+                },
+                "profiler_overlap": {
+                    "overlap_us": 100000.0,
+                    "logical_compute_stream_id": 0,
+                    "logical_communication_stream_id": 143,
+                    "physical_compute_stream_id": 61,
+                    "physical_communication_stream_id": 11,
+                },
+            }
+
+        scenarios = (
+            ("unserialized-baseline", 0.40, 0.38),
+            ("resource-contention", 0.51, 0.50),
+            ("effective-overlap", 0.50, 0.40),
+        )
+        for expected, serialized, overlapped in scenarios:
+            with self.subTest(expected=expected):
+                report = module._overlap_component_report([
+                    rank_row(rank, serialized, overlapped)
+                    for rank in range(2)
+                ])
+                self.assertEqual(report["classification"], expected)
+                self.assertEqual(
+                    [row["classification"] for row in report["ranks"]],
+                    [expected, expected],
+                )
+                for row in report["ranks"]:
+                    self.assertAlmostEqual(
+                        row["measured_tolerance_seconds"]
+                        ["component_sum"],
+                        0.025,
+                    )
+                    self.assertAlmostEqual(
+                        row["measured_tolerance_seconds"]
+                        ["serialized"],
+                        serialized * 0.05,
+                    )
+
+    def test_async_overlap_component_diagnostic_is_bounded_and_preserves_stages(
+            self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_component_contract", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        stage_seconds = {
+            "communication-only": {
+                "async_dispatch_return": 0.01,
+                "event_wait": 0.19,
+            },
+            "compute-only": {
+                "compute_enqueue": 0.20,
+                "compute_completion": 0.10,
+            },
+            "serialized": {
+                "serialized_dispatch_return": 0.20,
+                "compute_enqueue": 0.20,
+                "compute_completion": 0.10,
+            },
+            "overlapped": {
+                "async_dispatch_return": 0.01,
+                "compute_enqueue": 0.20,
+                "event_wait": 0.19,
+                "compute_completion": 0.10,
+            },
+        }
+        ranks = []
+        for rank in range(2):
+            ranks.append({
+                "rank": rank,
+                "communication_tokens": 256,
+                "compute_iterations": 256,
+                "buffer_instance": f"rank-{rank}-component-buffer",
+                "communication_only_seconds": 0.20,
+                "compute_only_seconds": 0.30,
+                "serialized_seconds": 0.50,
+                "overlapped_seconds": 0.49,
+                "serialized_dispatch_return_duration_seconds": 0.20,
+                "async_dispatch_return_duration_seconds": 0.01,
+                "event_wait_duration_seconds": 0.19,
+                "compute_completion_duration_seconds": 0.10,
+                "stage_seconds": stage_seconds,
+                "profiler_overlap": {
+                    "overlap_us": 100000.0 + rank,
+                    "logical_compute_stream_id": 0,
+                    "logical_communication_stream_id": 143,
+                    "physical_compute_stream_id": 61,
+                    "physical_communication_stream_id": 11,
+                },
+                "completed_phase": "profiler",
+                "active_phase": None,
+                "phase_status": "completed",
+            })
+
+        bounded_calls = []
+
+        def run_bounded(command, timeout_seconds, env=None):
+            bounded_calls.append((command, timeout_seconds, env))
+            return {
+                "status": "passed",
+                "failure": None,
+                "duration_seconds": 17.0,
+                "exit_code": 0,
+                "stdout": "PHASE3E_OVERLAP_COMPONENT_RESULT " +
+                json.dumps({"ranks": ranks}) + "\n",
+                "stderr": "",
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "components.json"
+            trace_dir = pathlib.Path(directory) / "traces"
+            with mock.patch.object(module, "_run_bounded", run_bounded):
+                exit_code = module._run_overlap_component_diagnostic(
+                    output, trace_dir)
+            report = json.loads(output.read_text())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(bounded_calls), 1)
+        command, timeout_seconds, environment = bounded_calls[0]
+        self.assertEqual(timeout_seconds, 120)
+        self.assertIsNone(environment)
+        self.assertIn("--overlap-component-diagnostic-worker", command)
+        self.assertEqual(report["classification"], "resource-contention")
+        self.assertFalse(report["acceptance_eligible"])
+        self.assertEqual(report["warmups"], 0)
+        self.assertEqual(report["repetitions"], 1)
+        self.assertEqual(report["ranks"][0]["stage_seconds"], stage_seconds)
+
+    def test_async_overlap_component_diagnostic_checkpoints_each_phase(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_component_phases", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class FakeTensor:
+            shape = (256, 4096)
+
+            def add(self, _value):
+                return self
+
+        class FakeBuffer:
+            def dispatch(self, *_args, **kwargs):
+                if kwargs.get("do_cpu_sync"):
+                    return None, None, None, "handle", None
+                raise AssertionError("timed dispatch should use component helper")
+
+        class FakeElasticBuffer:
+            @staticmethod
+            def get_buffer_size_hint(*_args, **_kwargs):
+                return 4096
+
+        class FakeDeepEp:
+            ElasticBuffer = FakeElasticBuffer
+
+        class FakeDist:
+            @staticmethod
+            def get_rank(_group):
+                return 0
+
+        tensor = FakeTensor()
+        worker = module.AsyncOverlapWorker(
+            None, None, FakeDist, FakeDeepEp, object(), object(), "/tmp")
+        worker.new_buffer = mock.Mock(return_value=FakeBuffer())
+        worker._make_overlap_inputs = mock.Mock(
+            return_value=(tensor, tensor, tensor, tensor))
+        worker._component_communication_iteration = mock.Mock(return_value={
+            "duration_seconds": 0.20,
+            "stage_seconds": {
+                "async_dispatch_return": 0.01,
+                "event_wait": 0.19,
+            },
+        })
+        worker._component_compute_iteration = mock.Mock(return_value={
+            "duration_seconds": 0.30,
+            "stage_seconds": {
+                "compute_enqueue": 0.20,
+                "compute_completion": 0.10,
+            },
+        })
+        worker._component_combined_iteration = mock.Mock(side_effect=[
+            {
+                "duration_seconds": 0.50,
+                "stage_seconds": {
+                    "serialized_dispatch_return": 0.20,
+                    "compute_enqueue": 0.20,
+                    "compute_completion": 0.10,
+                },
+            },
+            {
+                "duration_seconds": 0.49,
+                "stage_seconds": {
+                    "async_dispatch_return": 0.01,
+                    "compute_enqueue": 0.20,
+                    "event_wait": 0.19,
+                    "compute_completion": 0.10,
+                },
+            },
+        ])
+        worker._profile_overlap = mock.Mock(return_value={
+            "overlap_us": 100000.0,
+            "logical_compute_stream_id": 0,
+            "logical_communication_stream_id": 143,
+            "physical_compute_stream_id": 61,
+            "physical_communication_stream_id": 11,
+        })
+        checkpoints = []
+
+        measurement = worker._run_overlap_component_diagnostic(
+            record_phase=lambda phase, row: checkpoints.append(
+                (phase, json.loads(json.dumps(row)))),
+        )
+
+        self.assertEqual(
+            [(phase, row["phase_status"]) for phase, row in checkpoints],
+            [
+                ("communication-only", "started"),
+                ("communication-only", "completed"),
+                ("compute-only", "started"),
+                ("compute-only", "completed"),
+                ("serialized", "started"),
+                ("serialized", "completed"),
+                ("overlapped", "started"),
+                ("overlapped", "completed"),
+                ("profiler", "started"),
+                ("profiler", "completed"),
+            ],
+        )
+        self.assertEqual(measurement["communication_only_seconds"], 0.20)
+        self.assertEqual(measurement["compute_only_seconds"], 0.30)
+        self.assertEqual(measurement["serialized_seconds"], 0.50)
+        self.assertEqual(measurement["overlapped_seconds"], 0.49)
+        self.assertEqual(
+            measurement["serialized_dispatch_return_duration_seconds"],
+            0.20,
+        )
+        self.assertEqual(
+            measurement["async_dispatch_return_duration_seconds"], 0.01)
+        self.assertEqual(measurement["event_wait_duration_seconds"], 0.19)
+        self.assertEqual(measurement["compute_completion_duration_seconds"],
+                         0.10)
+        self.assertEqual(measurement["profiler_overlap"]["overlap_us"],
+                         100000.0)
+        self.assertEqual(measurement, checkpoints[-1][1])
 
     def test_async_overlap_suite_checkpoints_each_completed_case(self):
         spec = importlib.util.spec_from_file_location(
