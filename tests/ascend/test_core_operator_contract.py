@@ -1226,6 +1226,14 @@ int main() {
         self.assertIn("decode_dispatch_protocol_scratch(", forward)
         self.assertIn("DispatchProtocolStage::kProducer", forward)
         self.assertIn("record_dispatch_protocol_error(", forward)
+        self.assertIn(
+            "const bool valid_producer_failure =\n"
+            "            producer_failure.valid &&\n"
+            "            producer_failure.world_rank >= 0 &&\n"
+            "            producer_failure.world_rank < transport_world_size;",
+            forward)
+        self.assertEqual(forward.count("valid_producer_failure ?"), 2)
+        self.assertNotIn("producer_failure.valid ?", forward)
         self.assertNotIn(
             "if (transport.load_acquire(status_address) != 0)\n"
             "        return;", forward)
