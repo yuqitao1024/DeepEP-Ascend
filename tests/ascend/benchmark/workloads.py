@@ -10,12 +10,20 @@ class Capability:
     reason: str = ""
 
 
+def phase_3e1_acceptance_operations():
+    return (
+        "cached-bf16-dispatch-sync",
+        "cached-bf16-dispatch-async",
+        "bf16-combine-sync",
+        "bf16-combine-async",
+        "previous-event-with-comm-allocation",
+        "comm-stream-allocation",
+    )
+
+
 def classify_ascend_case(case: EPModeCase) -> Capability:
     suite = case_suite(case)
     if suite == "functional":
-        if case.with_previous_event:
-            return Capability(suite, False, "event_chaining_deferred")
-        if case.async_with_compute_stream:
-            return Capability(suite, False, "async_overlap_deferred")
-        return Capability(suite, False, "comm_stream_allocation_deferred")
+        return Capability(
+            suite, False, "full_row_noncached_dispatch_deferred_3e2")
     return Capability(suite, True)

@@ -252,6 +252,39 @@ fail before resource publication.
 
 ## Phase 3E: Async Events, Streams, And Overlap
 
+### Current decision
+
+Phase 3E lands as separate runtime-accepted slices. Phase 3E.1 is limited to
+native event/stream ownership, cached BF16 pure-scale-up dispatch, BF16
+combine, previous-event ordering, communication-stream allocation, and one
+operation per buffer. Its coverage is recorded in the dedicated acceptance
+runner and does not promote the 120 full functional benchmark rows that also
+require normal and expanded non-cached dispatch.
+
+Phase 3E.2 is the next planned slice for BF16 normal/expanded non-cached
+dispatch event return, communication-stream allocation, and asynchronous
+publication. Phase 3E.3 (a real pre-epilogue dependency boundary) and Phase
+3E.4 (same-buffer multiflight resource slots) remain deferred design
+directions. FP8 remains Phase 3F and is not credited to any Phase 3E slice.
+
+Phase 3E.1 is not accepted as of 2026-08-19. The exact-archive build/import
+task `task_20260819_203518_127255030913` passed, and one-NPU event/lifecycle
+task `task_20260819_203858_128526415799` passed its five cases. Two-NPU matrix
+task `task_20260819_204026_128929210009` passed only
+`capture-current-stream`; cached dispatch sync/async with allocation
+false/true, previous-event allocation, combine sync/async with allocation
+false/true, empty-route, and asymmetric-route then exited 1. The job reached
+its 300-second hard limit before `100-generations`, `two-independent-buffers`,
+`record-failure`, `event-timeout`, `diagnostic-failure`,
+`completion-mismatch`, `drop-event`, `destroy-pending-retry`, or
+`overlap-vs-serialized` ran. It produced no overlap median/p95 or NPU profiler
+interval. Captured child diagnostics were lost at outer timeout and the
+targeted TorchElastic directories were empty, so the distributed root cause
+remains unresolved. The runner's subsequent host-only checkpoint, diagnostic,
+and fail-fast hardening has not been rerun on NPU8P. Phase 3E.2 remains the
+next planned development slice, but it does not waive the incomplete 3E.1
+acceptance gate.
+
 ### Deliverables
 
 - implement native Ascend event ownership behind `EventOverlap`;

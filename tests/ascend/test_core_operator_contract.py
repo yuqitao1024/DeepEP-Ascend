@@ -1,10 +1,15 @@
 import json
+import importlib.util
+import contextlib
+import io
 import os
 import pathlib
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from tests.ascend.test_stub_source import PYBIND11_HEADER, TORCH_HEADER
 
@@ -44,6 +49,8 @@ TWO_RANK_COMBINE = \
     ROOT / "tests/ascend/production/run_two_rank_combine.py"
 SCALE_UP_SMOKE = \
     ROOT / "tests/ascend/production/run_scale_up_smoke.py"
+ASYNC_OVERLAP = \
+    ROOT / "tests/ascend/production/run_async_overlap.py"
 STREAM_EVENT_CAPABILITY_PROBE = \
     ROOT / "tests/ascend/stream_event/capability_probe.cpp"
 STREAM_EVENT_CAPABILITY_RUNNER = \
@@ -1939,6 +1946,247 @@ int main() {
             run_result = subprocess.run(
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_async_overlap_harness_contract(self):
+        expected_cases = [
+            "capture-current-stream",
+            "cached-dispatch-sync-allocate-false",
+            "cached-dispatch-sync-allocate-true",
+            "cached-dispatch-async-allocate-false",
+            "cached-dispatch-async-allocate-true",
+            "previous-event-allocate-true",
+            "combine-sync-allocate-false",
+            "combine-sync-allocate-true",
+            "combine-async-allocate-false",
+            "combine-async-allocate-true",
+            "empty-route",
+            "asymmetric-route",
+            "100-generations",
+            "two-independent-buffers",
+            "record-failure",
+            "event-timeout",
+            "diagnostic-failure",
+            "completion-mismatch",
+            "drop-event",
+            "destroy-pending-retry",
+            "overlap-vs-serialized",
+        ]
+        result = subprocess.run(
+            ["python3", str(ASYNC_OVERLAP), "--contract"],
+            cwd=ROOT, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "case_names": expected_cases,
+                "case_timeout_seconds": 30,
+                "contract_checks": [
+                    "literal-bf16-torch-reference",
+                    "rank-qualified-failure-aggregation",
+                    "per-case-process-timeout",
+                    "finally-buffer-before-process-group-teardown",
+                    "zero-global-synchronization",
+                    "npu-profiler-overlap-interval",
+                ],
+                "event_cases": [
+                    "capture-current-stream",
+                    "record-failure",
+                    "event-timeout",
+                    "drop-event",
+                    "destroy-pending-retry",
+                ],
+                "full_cases": expected_cases,
+                "matrix_groups": [
+                    "capture-current-stream",
+                    "cached-dispatch sync/async x allocation false/true",
+                    "previous-event + allocation true",
+                    "combine sync/async x allocation false/true",
+                    "empty-route",
+                    "asymmetric-route",
+                    "100-generations",
+                    "two-independent-buffers",
+                    "record-failure",
+                    "event-timeout",
+                    "diagnostic-failure",
+                    "completion-mismatch",
+                    "drop-event",
+                    "destroy-pending-retry",
+                    "overlap-vs-serialized",
+                ],
+                "overlap": {
+                    "compute_iterations": 8,
+                    "compute_shape": [4096, 4096],
+                    "minimum_median_improvement": 0.05,
+                    "profiler_interval_required": True,
+                    "repetitions": 7,
+                    "report_percentiles": [50, 95],
+                    "warmups": 3,
+                },
+                "reference": "rank-gathered-literal-inputs-and-torch-ops",
+                "world_size": 2,
+            })
+
+    def test_async_overlap_helpers_enforce_timeout_rank_and_profiler_contract(
+            self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        self.assertEqual(
+            module._case_command(
+                "cached-dispatch-sync-allocate-false", "/tmp/traces"),
+            [
+                sys.executable,
+                "-m",
+                "torch.distributed.run",
+                "--standalone",
+                "--nproc-per-node=2",
+                str(ASYNC_OVERLAP),
+                "--worker",
+                "cached-dispatch-sync-allocate-false",
+                "--trace-dir",
+                "/tmp/traces",
+            ],
+        )
+
+        bounded = module._run_bounded(
+            ["python3", "-c", "import time; time.sleep(1)"],
+            timeout_seconds=0.01)
+        self.assertEqual(bounded["status"], "failed")
+        self.assertEqual(bounded["failure"], "process timeout after 0.01s")
+        self.assertEqual(
+            module._aggregate_rank_failures([
+                {"rank": 0, "failure": "dispatch backend 17"},
+                {"rank": 1, "failure": None},
+            ]),
+            "rank 0: dispatch backend 17",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            trace = pathlib.Path(directory) / "trace.json"
+            trace.write_text(json.dumps({"traceEvents": [
+                {"ph": "X", "cat": "NPU", "name": "matmul",
+                 "ts": 100.0, "dur": 40.0,
+                 "args": {"Stream Id": 7}},
+                {"ph": "X", "cat": "NPU", "name": "dispatch",
+                 "ts": 120.0, "dur": 50.0,
+                 "args": {"Stream Id": 11}},
+            ]}))
+            overlap = module._find_npu_overlap_interval(
+                (trace,), compute_stream_id=7, comm_stream_id=11)
+        self.assertEqual(overlap["overlap_us"], 20.0)
+        self.assertEqual(overlap["compute_event"], "matmul")
+        self.assertEqual(overlap["communication_event"], "dispatch")
+
+    def test_async_overlap_suite_checkpoints_each_completed_case(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_checkpoint", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        selected = module.EVENT_CASES[:2]
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "report.json"
+            observed_checkpoint = []
+
+            def run_bounded(_command):
+                if output.exists():
+                    observed_checkpoint.append(json.loads(output.read_text()))
+                return {
+                    "status": "passed",
+                    "failure": None,
+                    "duration_seconds": 0.25,
+                    "exit_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                }
+
+            with mock.patch.object(module, "EVENT_CASES", selected), \
+                    mock.patch.object(module, "_run_bounded", run_bounded), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                exit_code = module._run_suite(
+                    "event", output, pathlib.Path(directory) / "traces")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(observed_checkpoint), 1)
+        self.assertEqual(
+            [row["case"] for row in observed_checkpoint[0]["results"]],
+            [selected[0]],
+        )
+
+    def test_async_overlap_suite_stops_after_first_failure(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_fail_fast", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        selected = module.EVENT_CASES[:3]
+        calls = []
+
+        def run_bounded(_command):
+            calls.append(len(calls))
+            failed = len(calls) == 2
+            return {
+                "status": "failed" if failed else "passed",
+                "failure": "process exited 17" if failed else None,
+                "duration_seconds": 0.25,
+                "exit_code": 17 if failed else 0,
+                "stdout": "",
+                "stderr": "rank 0 traceback" if failed else "",
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "report.json"
+            with mock.patch.object(module, "EVENT_CASES", selected), \
+                    mock.patch.object(module, "_run_bounded", run_bounded), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                exit_code = module._run_suite(
+                    "event", output, pathlib.Path(directory) / "traces")
+            report = json.loads(output.read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(report["summary"], {
+            "total": 2,
+            "selected": 3,
+            "executed": 2,
+            "passed": 1,
+            "failed": 1,
+            "not_run": 1,
+        })
+
+    def test_async_overlap_suite_streams_failed_child_diagnostic(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_diagnostic", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        failure = {
+            "status": "failed",
+            "failure": "process exited 17",
+            "duration_seconds": 0.25,
+            "exit_code": 17,
+            "stdout": "",
+            "stderr": "rank 0 traceback",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "report.json"
+            stdout = io.StringIO()
+            with mock.patch.object(
+                    module, "EVENT_CASES", module.EVENT_CASES[:1]), \
+                    mock.patch.object(
+                        module, "_run_bounded", return_value=failure), \
+                    contextlib.redirect_stdout(stdout):
+                module._run_suite(
+                    "event", output, pathlib.Path(directory) / "traces")
+
+        live_output, _separator, _final_report = stdout.getvalue().partition(
+            "PHASE3E_SUITE_RESULT ")
+        self.assertIn(
+            "DIAGNOSTIC capture-current-stream:\nrank 0 traceback\n",
+            live_output,
+        )
 
     def test_two_rank_dispatch_harness_contract(self):
         expected_cases = [

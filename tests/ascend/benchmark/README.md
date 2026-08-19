@@ -15,9 +15,7 @@ The exhaustive case table and the statistical definitions are in
 | --- | ---: | --- | --- |
 | Current BF16 performance | 12 | Correctness preflight and timing | |
 | Current FP8 performance | 12 | Correctness preflight and timing | |
-| Functional previous event | 48 | Listed, not executed | `event_chaining_deferred` |
-| Functional async without previous event | 48 | Listed, not executed | `async_overlap_deferred` |
-| Functional comm allocation only | 24 | Listed, not executed | `comm_stream_allocation_deferred` |
+| Deferred full functional rows | 120 | Listed, not executed | `full_row_noncached_dispatch_deferred_3e2` |
 | Total inventory | 144 | 24 current performance, 120 deferred | |
 
 Each supported case checks normal dispatch, expanded dispatch, cached dispatch,
@@ -25,6 +23,14 @@ cached expanded dispatch with zero padding, combine, and reduced/expanded
 combine. The correctness work is a preflight gate for each performance case,
 not a separate functional case. The five operations other than cached expanded
 padding are timed, producing 120 performance records per complete run.
+
+Phase 3E.1 coverage is recorded separately by
+`tests/ascend/production/run_async_overlap.py`. Its intended matrix covers
+cached BF16 dispatch and BF16 combine in synchronous and asynchronous modes,
+previous-event ordering, and communication-stream allocation. It does not
+promote any of the 120 full functional rows: every such row also runs normal
+and expanded non-cached dispatch, whose event, communication-stream, and
+asynchronous publication behavior remains assigned to Phase 3E.2.
 
 List cases without importing torch or torch_npu:
 
@@ -46,10 +52,9 @@ The HCOMM headers and `libhcomm.so` must come from the same package. On the
 NPU8P host, use the validated symlink rather than selecting a weekly package:
 
 ```bash
-source /home/pyptouser/yuqitao/venvs/deepep-ascend-py310/bin/activate
 source /usr/local/Ascend/cann-9.2.0/set_env.sh
 export HCOMM_ROOT=/home/pyptouser/yuqitao/Ascend/hcomm-deepep-current/cann
-export PATH="/home/pyptouser/yuqitao/tools/cmake-3.28.4/bin:$HCOMM_ROOT/bin${PATH:+:$PATH}"
+export PATH="$HCOMM_ROOT/bin:/home/pyptouser/yuqitao/tools/cmake-3.28.4/bin${PATH:+:$PATH}"
 export LD_LIBRARY_PATH="$HCOMM_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export LIBRARY_PATH="$HCOMM_ROOT/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export CPLUS_INCLUDE_PATH="$HCOMM_ROOT/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
@@ -57,6 +62,7 @@ export CPATH="$HCOMM_ROOT/include${CPATH:+:$CPATH}"
 export CMAKE_INCLUDE_PATH="$HCOMM_ROOT/include${CMAKE_INCLUDE_PATH:+:$CMAKE_INCLUDE_PATH}"
 export CMAKE_LIBRARY_PATH="$HCOMM_ROOT/lib64${CMAKE_LIBRARY_PATH:+:$CMAKE_LIBRARY_PATH}"
 export PYTHONPATH="$HCOMM_ROOT/python/site-packages${PYTHONPATH:+:$PYTHONPATH}"
+source /home/pyptouser/yuqitao/venvs/deepep-ascend-py310/bin/activate
 test -n "$ASCEND_HOME_PATH"
 DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace
 ```
@@ -77,12 +83,11 @@ A short two-rank build, correctness, and timing run is:
 
 ```bash
 task-submit --list
-task-submit --device 0,1 --max-time 1800 --run '
+task-submit --device 0,1 --max-time 300 --run '
 cd /home/pyptouser/yuqitao/DeepEP-Ascend &&
-source /home/pyptouser/yuqitao/venvs/deepep-ascend-py310/bin/activate &&
 source /usr/local/Ascend/cann-9.2.0/set_env.sh &&
 export HCOMM_ROOT=/home/pyptouser/yuqitao/Ascend/hcomm-deepep-current/cann &&
-export PATH="/home/pyptouser/yuqitao/tools/cmake-3.28.4/bin:$HCOMM_ROOT/bin${PATH:+:$PATH}" &&
+export PATH="$HCOMM_ROOT/bin:/home/pyptouser/yuqitao/tools/cmake-3.28.4/bin${PATH:+:$PATH}" &&
 export LD_LIBRARY_PATH="$HCOMM_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" &&
 export LIBRARY_PATH="$HCOMM_ROOT/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}" &&
 export CPLUS_INCLUDE_PATH="$HCOMM_ROOT/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}" &&
@@ -90,6 +95,7 @@ export CPATH="$HCOMM_ROOT/include${CPATH:+:$CPATH}" &&
 export CMAKE_INCLUDE_PATH="$HCOMM_ROOT/include${CMAKE_INCLUDE_PATH:+:$CMAKE_INCLUDE_PATH}" &&
 export CMAKE_LIBRARY_PATH="$HCOMM_ROOT/lib64${CMAKE_LIBRARY_PATH:+:$CMAKE_LIBRARY_PATH}" &&
 export PYTHONPATH="$HCOMM_ROOT/python/site-packages${PYTHONPATH:+:$PYTHONPATH}" &&
+source /home/pyptouser/yuqitao/venvs/deepep-ascend-py310/bin/activate &&
 DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace &&
 python -m torch.distributed.run --standalone --nproc-per-node=2 \
   tests/ascend/benchmark/bench_ep.py \
@@ -98,6 +104,24 @@ python -m torch.distributed.run --standalone --nproc-per-node=2 \
   --output /tmp/ascend-ep2-performance-smoke.json
 '
 ```
+
+Phase 3E.1 acceptance uses the same serialized policy and exact archive, then
+runs the bounded event and full matrices separately:
+
+```bash
+python3 tests/ascend/production/run_async_overlap.py \
+  --suite event --output /tmp/phase3e-event.json
+python3 tests/ascend/production/run_async_overlap.py \
+  --suite full --output /tmp/phase3e-full.json \
+  --trace-dir /tmp/phase3e-traces
+```
+
+Every runner case has a 30-second child-process bound. The complete TaskQueue
+job remains bounded by `--max-time 300`. The runner atomically rewrites the
+JSON report after every completed case, streams captured diagnostics for a
+failed child, and stops at the first failure. The report summary distinguishes
+selected, executed, failed, and not-run cases so an outer TaskQueue timeout
+cannot be mistaken for a completed matrix.
 
 Retain the returned task ID and use `task-submit --wait ID`,
 `task-submit --status ID`, and `task-submit --log ID`. Resolve a failed or

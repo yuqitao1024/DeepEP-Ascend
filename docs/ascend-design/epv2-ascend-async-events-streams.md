@@ -13,6 +13,53 @@ communication/computation overlap for cached BF16 pure-scale-up dispatch and
 combine. Later slices extend the same ownership model to dynamic-shape and
 hybrid paths; an interface or compile probe alone is not runtime support.
 
+The 3E.1 production gate is
+`tests/ascend/production/run_async_overlap.py`. It reports cached BF16
+sub-operation coverage independently from the 144-row parity benchmark; no
+full functional benchmark row is credited by partial sub-operation coverage.
+
+### Acceptance status (2026-08-19)
+
+Phase 3E.1 is not accepted. Exact-archive build/import task
+`task_20260819_203518_127255030913` passed, and one-NPU event/lifecycle task
+`task_20260819_203858_128526415799` passed all five selected cases with two
+repeated waits and zero global synchronizations. The required two-NPU matrix
+task `task_20260819_204026_128929210009` did not pass: only
+`capture-current-stream` passed before the following cases exited 1:
+
+- `cached-dispatch-sync-allocate-false`;
+- `cached-dispatch-sync-allocate-true`;
+- `cached-dispatch-async-allocate-false`;
+- `cached-dispatch-async-allocate-true`;
+- `previous-event-allocate-true`;
+- `combine-sync-allocate-false`;
+- `combine-sync-allocate-true`;
+- `combine-async-allocate-false`;
+- `combine-async-allocate-true`;
+- `empty-route`; and
+- `asymmetric-route`.
+
+The 300-second hard limit interrupted the task before these rows ran:
+
+- `100-generations`;
+- `two-independent-buffers`;
+- `record-failure`;
+- `event-timeout`;
+- `diagnostic-failure`;
+- `completion-mismatch`;
+- `drop-event`;
+- `destroy-pending-retry`; and
+- `overlap-vs-serialized`.
+
+The failed runner captured child stderr but did not persist it before suite
+completion; the corresponding targeted TorchElastic directories contain no
+rank log or error JSON. The common distributed failure therefore remains
+unresolved. No serialized/overlapped median or p95 measurement and no NPU
+profiler overlap interval were produced. The runner now writes an atomic
+checkpoint after every case, streams a failed child's diagnostic, and stops at
+the first failure, but that host-verified observability fix has not been rerun
+on NPU8P and is not acceptance evidence.
+
 ## Decisions
 
 ### Native resource model
@@ -242,12 +289,17 @@ GPU tests and DeepEP V1 tests are not part of any acceptance layer.
 
 ## Later Phase 3E Slices
 
-- 3E.2 splits or redesigns dynamic-shape dispatch so non-cached async output and
-  descriptor publication remain honest.
-- 3E.3 introduces a real pre-epilogue dependency boundary and then enables
+- 3E.2 is the next planned slice. It splits or redesigns dynamic-shape BF16
+  normal and expanded non-cached dispatch so event return, communication-stream
+  allocation, asynchronous output extents, handle construction, and descriptor
+  publication remain honest. This direction does not waive the unfinished
+  3E.1 production gate above.
+- 3E.3 remains a deferred design direction for introducing a real
+  pre-epilogue dependency boundary and then enabling
   `previous_event_before_epilogue`.
-- 3E.4 adds per-flight queue, workspace, diagnostic, completion, and generation
-  slots before permitting same-buffer multiflight.
+- 3E.4 remains a deferred design direction for adding per-flight queue,
+  workspace, diagnostic, completion, and generation slots before permitting
+  same-buffer multiflight.
 - Hybrid/physical scale-out async is enabled only after its route attestation
   and mapped-memory lifetime move into the generation-bound finalizer.
 

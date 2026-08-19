@@ -18,6 +18,7 @@ from tests.ascend.benchmark.bench_ep import build_parser, _selected_case_ids
 from tests.ascend.benchmark.runtime import AscendRuntime, PreparedCase
 from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
 from tests.ascend.benchmark.timing import NpuEventTimer
+from tests.ascend.benchmark import workloads
 from tests.ascend.benchmark.workloads import classify_ascend_case
 from tests.utils.ep_benchmark_manifest import EPModeCase, enumerate_ep_mode_cases
 
@@ -55,10 +56,28 @@ def test_case_suite_counts_are_exhaustive():
         for classification in classified
         if classification.suite == "functional"
     ) == {
-        "event_chaining_deferred": 48,
-        "async_overlap_deferred": 48,
-        "comm_stream_allocation_deferred": 24,
+        "full_row_noncached_dispatch_deferred_3e2": 120,
     }
+
+
+def test_phase_3e1_cached_bf16_coverage_is_separate_from_full_rows():
+    assert workloads.phase_3e1_acceptance_operations() == (
+        "cached-bf16-dispatch-sync",
+        "cached-bf16-dispatch-async",
+        "bf16-combine-sync",
+        "bf16-combine-async",
+        "previous-event-with-comm-allocation",
+        "comm-stream-allocation",
+    )
+    full_functional_rows = [
+        case for case in enumerate_ep_mode_cases()
+        if classify_ascend_case(case).suite == "functional"
+    ]
+    assert len(full_functional_rows) == 120
+    assert all(
+        not classify_ascend_case(case).supported
+        for case in full_functional_rows
+    )
 
 
 def test_supported_ascend_cases_are_the_synchronous_intersection():
@@ -406,7 +425,7 @@ def test_cli_rejects_unknown_case_before_runtime_import():
         (
             "ep-bf16-align128-bias0-hcopy1-prev1-async0-alloc1",
             "functional",
-            "event_chaining_deferred",
+            "full_row_noncached_dispatch_deferred_3e2",
         ),
     ),
 )
