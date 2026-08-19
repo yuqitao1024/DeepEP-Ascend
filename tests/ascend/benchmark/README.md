@@ -1,6 +1,6 @@
 # Ascend EPv2 benchmark
 
-This suite compares the synchronous BF16 intersection of
+This suite compares the synchronous BF16 and FP8 performance intersection of
 `tests/elastic/test_ep.py` on CUDA and Ascend 950. Both profiles use the same
 144-case enumeration, deterministic routing manifest, operation preparation,
 correctness references, warmup/sample counts, rank aggregation, and logical
@@ -14,18 +14,17 @@ The exhaustive case table and the statistical definitions are in
 | Classification | Cases | Ascend behavior | Reason |
 | --- | ---: | --- | --- |
 | Current BF16 performance | 12 | Correctness preflight and timing | |
-| Deferred FP8 performance | 12 | Listed, not executed | `fp8_runtime_deferred` |
+| Current FP8 performance | 12 | Correctness preflight and timing | |
 | Functional previous event | 48 | Listed, not executed | `event_chaining_deferred` |
 | Functional async without previous event | 48 | Listed, not executed | `async_overlap_deferred` |
 | Functional comm allocation only | 24 | Listed, not executed | `comm_stream_allocation_deferred` |
-| Total inventory | 144 | 12 current performance, 132 deferred | |
+| Total inventory | 144 | 24 current performance, 120 deferred | |
 
 Each supported case checks normal dispatch, expanded dispatch, cached dispatch,
 cached expanded dispatch with zero padding, combine, and reduced/expanded
 combine. The correctness work is a preflight gate for each performance case,
 not a separate functional case. The five operations other than cached expanded
-padding are timed, producing 60 performance records per complete run. FP8
-remains deferred while its separate implementation is in progress.
+padding are timed, producing 120 performance records per complete run.
 
 List cases without importing torch or torch_npu:
 
@@ -37,7 +36,7 @@ python3 tests/ascend/benchmark/bench_ep.py \
   --list-cases --suite functional --format json
 ```
 
-The inventory has 24 performance rows: 12 current BF16 and 12 deferred FP8.
+The inventory has 24 current performance rows: 12 BF16 and 12 FP8.
 The 120 functional rows never appear in a performance report.
 
 ## Ascend environment
@@ -176,7 +175,7 @@ to differ and are not a rejection condition.
 
 ## JSON interpretation
 
-The default report contains exactly 12 current BF16 performance cases and 60
+The default report contains exactly 24 current performance cases and 120
 operation records; the 144-row inventory is available separately through
 `--list-cases`. Top-level identity and provenance fields include
 `schema_version`, `formula_version`, `git_commit`, `platform`, `world_size`,

@@ -275,6 +275,11 @@ fail before resource publication.
 
 ## Phase 3F: FP8 Runtime
 
+Status: synchronous E4M3 dispatch with FP32 or packed UE8M0x4 scale-factor
+transport is implemented; BF16 combine remains the selected upstream-compatible
+combine path. Multi-rank NPU qualification is pending, so this phase is not yet
+complete.
+
 ### Deliverables
 
 - implement the upstream EPv2 FP8 payload and scale-factor contracts for

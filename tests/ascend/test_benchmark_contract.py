@@ -46,8 +46,7 @@ def test_case_suite_counts_are_exhaustive():
         (classification.suite, classification.supported)
         for classification in classified
     ) == {
-        ("performance", True): 12,
-        ("performance", False): 12,
+        ("performance", True): 24,
         ("functional", False): 120,
     }
     assert Counter(
@@ -61,15 +60,15 @@ def test_case_suite_counts_are_exhaustive():
     }
 
 
-def test_supported_ascend_cases_are_the_sync_bf16_intersection():
+def test_supported_ascend_cases_are_the_synchronous_intersection():
     supported = [
         case
         for case in enumerate_ep_mode_cases()
         if classify_ascend_case(case).supported
     ]
 
-    assert len(supported) == 12
-    assert all(not case.use_fp8_dispatch for case in supported)
+    assert len(supported) == 24
+    assert {case.use_fp8_dispatch for case in supported} == {False, True}
     assert all(not case.with_previous_event for case in supported)
     assert all(not case.async_with_compute_stream for case in supported)
     assert all(not case.allocate_on_comm_stream for case in supported)
@@ -256,10 +255,10 @@ def test_performance_report_contains_only_current_cases(tmp_path):
         capture_output=True,
         text=True,
     ).stdout.strip()
-    assert len(payload["cases"]) == 12
+    assert len(payload["cases"]) == 24
     assert payload["case_summary"] == {
-        "total": 12,
-        "pending": 12,
+        "total": 24,
+        "pending": 24,
         "passed": 0,
         "failed": 0,
     }
@@ -322,8 +321,9 @@ def test_benchmark_parser_preserves_production_size_defaults():
 def test_default_selection_contains_only_current_performance_cases():
     selected = _selected_case_ids(build_parser(), None)
 
-    assert len(selected) == 12
-    assert all("-bf16-" in case_id for case_id in selected)
+    assert len(selected) == 24
+    assert any("-fp8-" in case_id for case_id in selected)
+    assert any("-bf16-" in case_id for case_id in selected)
     assert all("-prev0-async0-alloc0" in case_id for case_id in selected)
 
 
@@ -375,11 +375,6 @@ def test_cli_rejects_unknown_case_before_runtime_import():
 @pytest.mark.parametrize(
     ("case_id", "suite", "reason"),
     (
-        (
-            "ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0",
-            "performance",
-            "fp8_runtime_deferred",
-        ),
         (
             "ep-bf16-align128-bias0-hcopy1-prev1-async0-alloc1",
             "functional",

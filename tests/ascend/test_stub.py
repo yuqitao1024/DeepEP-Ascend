@@ -67,11 +67,6 @@ class AscendStubTest(unittest.TestCase):
         self.assert_transport_error(
             "calculate_elastic_buffer_size",
             lambda: _C.calculate_elastic_buffer_size(
-                7, 128, 7168, 8, True, False, True),
-            "does not support FP8")
-        self.assert_transport_error(
-            "calculate_elastic_buffer_size",
-            lambda: _C.calculate_elastic_buffer_size(
                 7, 128, 7168, 8, False, True, True),
             "does not support hybrid mode")
 

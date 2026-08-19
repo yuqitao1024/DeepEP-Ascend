@@ -15,6 +15,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 ELASTIC_SOURCE = ROOT / "deep_ep/buffers/elastic.py"
 ENVS_SOURCE = ROOT / "deep_ep/utils/envs.py"
 API_SURFACE_PROBE = ROOT / "tests/ascend/production/api_surface.py"
+FP8_RUNTIME_MATRIX = \
+    ROOT / "tests/ascend/production/run_fp8_dispatch_combine.py"
 
 API_SURFACE_SPEC = importlib.util.spec_from_file_location(
     "ascend_api_surface", API_SURFACE_PROBE)
@@ -1714,6 +1716,36 @@ SCENARIOS = {
 
 
 class PythonApiIsolationTest(unittest.TestCase):
+    def test_fp8_runtime_matrix_has_independent_public_contract(self):
+        self.assertTrue(FP8_RUNTIME_MATRIX.is_file())
+        source = FP8_RUNTIME_MATRIX.read_text()
+        tree = ast.parse(source)
+        case_names = set(ast.literal_eval(next(
+            node.value for node in tree.body
+            if isinstance(node, ast.Assign) and
+            any(isinstance(target, ast.Name) and target.id == "CASE_NAMES"
+                for target in node.targets))))
+        self.assertTrue({
+            "normal-fp32", "packed-int32", "expanded", "zero-padded",
+            "cached-representation-change", "weighted", "empty-input",
+            "asymmetric-routing", "negative-one-route", "bf16-combine",
+            "sequential-100-generations", "malformed-inputs",
+        }.issubset(case_names))
+        for marker in (
+                "buffer.dispatch(", "buffer.combine(", "dist.all_gather(",
+                "torch.equal(", "view(torch.uint8)", "view(torch.int32)",
+                "dist.all_reduce(", "finally:", "buffer.destroy()"):
+            self.assertIn(marker, source)
+        result = subprocess.run(
+            [sys.executable, str(FP8_RUNTIME_MATRIX), "--contract"],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        contract = json.loads(result.stdout)
+        self.assertEqual(contract["reference"], "gathered-fp8-bytes-and-sf-packs")
+        self.assertEqual(contract["supported_world_sizes"], [2, 4, 8])
+        self.assertIn("exact-payload-bytes", contract["contract_checks"])
+        self.assertIn("exact-scale-factor-packs", contract["contract_checks"])
+
     def run_scenario(self, scenario, optimize=False):
         command = [sys.executable]
         if optimize:

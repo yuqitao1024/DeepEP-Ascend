@@ -18,6 +18,4 @@ def classify_ascend_case(case: EPModeCase) -> Capability:
         if case.async_with_compute_stream:
             return Capability(suite, False, "async_overlap_deferred")
         return Capability(suite, False, "comm_stream_allocation_deferred")
-    if case.use_fp8_dispatch:
-        return Capability(suite, False, "fp8_runtime_deferred")
     return Capability(suite, True)

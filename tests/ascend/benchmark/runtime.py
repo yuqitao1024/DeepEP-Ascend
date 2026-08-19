@@ -169,12 +169,20 @@ class AscendRuntime:
 
     def construct_buffer(self) -> None:
         spec = self.manifest.spec
+        Buffer = self.deep_ep.ElasticBuffer
+        bf16_bytes = Buffer.get_buffer_size_hint(
+            self.group, spec.num_tokens, spec.hidden, spec.num_topk,
+            use_fp8_dispatch=False, allow_hybrid_mode=False,
+            allow_multiple_reduction=bool(self.args.allow_multiple_reduction),
+        )
+        fp8_bytes = Buffer.get_buffer_size_hint(
+            self.group, spec.num_tokens, spec.hidden, spec.num_topk,
+            use_fp8_dispatch=True, allow_hybrid_mode=False,
+            allow_multiple_reduction=bool(self.args.allow_multiple_reduction),
+        )
         self.buffer = self.deep_ep.ElasticBuffer(
             self.group,
-            num_max_tokens_per_rank=spec.num_tokens,
-            hidden=spec.hidden,
-            num_topk=spec.num_topk,
-            use_fp8_dispatch=False,
+            num_bytes=max(bf16_bytes, fp8_bytes),
             deterministic=False,
             allow_hybrid_mode=False,
             allow_multiple_reduction=bool(
@@ -195,11 +203,22 @@ class AscendRuntime:
     def _materialize(self, case: EPModeCase) -> tuple[Any, Any, Any, Any]:
         rank_workload = self.manifest.ranks[self.rank]
         spec = self.manifest.spec
-        x = self.torch.randn(
+        bf16_x = self.torch.randn(
             (rank_workload.num_tokens, spec.hidden),
             dtype=self.torch.bfloat16,
             device=self.device,
         )
+        x = bf16_x
+        if case.use_fp8_dispatch:
+            if spec.hidden % 128 != 0:
+                raise ValueError("FP8 benchmark hidden size must be divisible by 128")
+            grouped = bf16_x.float().reshape(
+                rank_workload.num_tokens, -1, 128)
+            scales = grouped.abs().amax(dim=2).clamp(min=1e-4) / 448.0
+            payload = (grouped / scales.unsqueeze(2)).to(
+                self.torch.float8_e4m3fn).reshape(
+                    rank_workload.num_tokens, spec.hidden).contiguous()
+            x = (payload, scales.contiguous())
         topk_idx = self.torch.tensor(
             rank_workload.topk_idx,
             dtype=self.torch.int64,
@@ -213,12 +232,12 @@ class AscendRuntime:
         bias = None
         if case.num_bias == 1:
             bias = self.torch.randn(
-                x.shape, dtype=self.torch.bfloat16, device=self.device
+                bf16_x.shape, dtype=self.torch.bfloat16, device=self.device
             )
         elif case.num_bias == 2:
             bias = tuple(
                 self.torch.randn(
-                    x.shape, dtype=self.torch.bfloat16, device=self.device
+                    bf16_x.shape, dtype=self.torch.bfloat16, device=self.device
                 )
                 for _ in range(2)
             )
@@ -230,8 +249,10 @@ class AscendRuntime:
         from deep_ep.utils.refs import generate_pre_combine_data
 
         spec = self.manifest.spec
+        reference_x = ((x[0].view(self.torch.uint8), x[1])
+                       if isinstance(x, tuple) else x)
         ref_dispatched = ref_dispatch(
-            x,
+            reference_x,
             topk_idx,
             topk_weights,
             spec.num_tokens,
@@ -240,7 +261,7 @@ class AscendRuntime:
         ref_y = generate_pre_combine_data(
             self.rank * spec.num_tokens
             + self.torch.arange(
-                x.shape[0], dtype=self.torch.int64, device=self.device
+                topk_idx.shape[0], dtype=self.torch.int64, device=self.device
             ),
             spec.num_tokens,
             spec.num_topk,
@@ -312,7 +333,9 @@ class AscendRuntime:
             src_global_idx, spec.num_tokens, spec.num_topk, spec.hidden
         )
         local_y[recv_topk_idx[:num_recv_tokens] == -1] = 0
-        input_for_combine = self.torch.empty_like(recv_x)
+        recv_payload = recv_x[0] if case.use_fp8_dispatch else recv_x
+        input_for_combine = self.torch.empty(
+            recv_payload.shape, dtype=self.torch.bfloat16, device=self.device)
         input_for_combine[:num_recv_tokens] = ordered_accumulate(local_y)
 
         expanded_src_global_idx = expanded_handle.recv_src_metadata[
@@ -325,7 +348,8 @@ class AscendRuntime:
             spec.hidden,
         )
         input_for_reduced = self.torch.empty(
-            (expanded_x.shape[0] + 1, spec.hidden),
+            ((expanded_x[0] if case.use_fp8_dispatch else expanded_x).shape[0] + 1,
+             spec.hidden),
             dtype=self.torch.bfloat16,
             device=self.device,
         )
@@ -437,14 +461,25 @@ class AscendRuntime:
         assert (topk_idx.data_ptr() != cached_handle.topk_idx.data_ptr()) == (
             case.do_handle_copy
         )
-        self.torch.testing.assert_close(
-            recv_x, cached_x, rtol=0, atol=0
-        )
+        def assert_payload_equal(actual, expected):
+            if case.use_fp8_dispatch:
+                assert self.torch.equal(
+                    actual[0].view(self.torch.uint8),
+                    expected[0].view(self.torch.uint8))
+                assert self.torch.equal(actual[1], expected[1])
+            else:
+                self.torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+        def index_payload(value, index):
+            return ((value[0][index], value[1][index])
+                    if case.use_fp8_dispatch else value[index])
+
+        assert_payload_equal(recv_x, cached_x)
         assert self.torch.equal(recv_idx, cached_idx)
 
         order = self.torch.argsort(handle.recv_src_metadata[:, 0])
         assert self.torch.equal(handle.recv_src_metadata[order, 0], ref_src_idx)
-        self.torch.testing.assert_close(recv_x[order], ref_x, rtol=0, atol=0)
+        assert_payload_equal(index_payload(recv_x, order), ref_x)
         assert self.torch.equal(recv_idx[order], ref_idx)
         ref_mask = ref_idx < 0
         assert self.torch.equal(
@@ -459,22 +494,26 @@ class AscendRuntime:
         row_indices = self.torch.arange(
             expanded_indices.shape[0], device=self.device
         )
-        folded_x = expanded_x[safe_indices][row_indices, first_valid]
+        if case.use_fp8_dispatch:
+            folded_x = (
+                expanded_x[0][safe_indices][row_indices, first_valid],
+                expanded_x[1][safe_indices][row_indices, first_valid],
+            )
+        else:
+            folded_x = expanded_x[safe_indices][row_indices, first_valid]
         folded_weights = expanded_weights[safe_indices]
         expanded_order = self.torch.argsort(
             expanded_handle.recv_src_metadata[:, 0]
         )
-        self.torch.testing.assert_close(
-            folded_x[expanded_order], ref_x, rtol=0, atol=0
-        )
+        assert_payload_equal(index_payload(folded_x, expanded_order), ref_x)
         assert self.torch.equal(
             folded_weights[expanded_order].masked_fill(ref_mask, 0),
             ref_weights.masked_fill(ref_mask, 0),
         )
         valid_slots = expanded_indices[expanded_mask]
-        self.torch.testing.assert_close(
-            expanded_x[valid_slots], cached_expanded_x[valid_slots], rtol=0, atol=0
-        )
+        assert_payload_equal(
+            index_payload(expanded_x, valid_slots),
+            index_payload(cached_expanded_x, valid_slots))
         assert self.torch.equal(
             expanded_weights[valid_slots], cached_expanded_weights[valid_slots]
         )
@@ -482,7 +521,11 @@ class AscendRuntime:
         for expert in range(local_experts):
             start = int(expanded_handle.psum_num_recv_tokens_per_expert[expert].item())
             end = ((start + case.expert_alignment - 1) // case.expert_alignment) * case.expert_alignment
-            assert bool((cached_expanded_x[start:end] == 0).all().item())
+            if case.use_fp8_dispatch:
+                assert bool((cached_expanded_x[0][start:end] == 0).all().item())
+                assert bool((cached_expanded_x[1][start:end] == 0).all().item())
+            else:
+                assert bool((cached_expanded_x[start:end] == 0).all().item())
             assert bool((cached_expanded_weights[start:end] == 0).all().item())
 
         combined_x, combined_weights, _ = combined
@@ -502,7 +545,8 @@ class AscendRuntime:
         assert self.torch.equal(combined_weights, topk_weights)
         if self.args.allow_multiple_reduction:
             assert self.torch.equal(reduced_weights, topk_weights)
-        assert recv_x.shape[0] == num_recv_tokens
+        assert (recv_x[0] if case.use_fp8_dispatch else recv_x).shape[0] == \
+            num_recv_tokens
 
     def _traffic(
         self,
@@ -528,8 +572,13 @@ class AscendRuntime:
             if num_scaleout_ranks > 1
             else 0
         )
+        recv_sf = recv_x[1] if isinstance(recv_x, tuple) else None
+        recv_x = recv_x[0] if isinstance(recv_x, tuple) else recv_x
+        payload_row_bytes = recv_x.shape[1] * recv_x.element_size()
+        if recv_sf is not None:
+            payload_row_bytes += recv_sf.shape[1] * recv_sf.element_size()
         dispatch_tensors = (
-            TensorBytes(recv_x.shape[0], recv_x.shape[1] * recv_x.element_size()),
+            TensorBytes(recv_x.shape[0], payload_row_bytes),
             TensorBytes(
                 recv_topk_idx.shape[0],
                 recv_topk_idx.shape[1] * recv_topk_idx.element_size(),
@@ -588,7 +637,7 @@ class AscendRuntime:
                 int((recv_topk_idx[:num_recv_tokens] != -1).sum().item()),
                 count_unique_destinations(routes),
             )
-        combine_row_bytes = recv_x.shape[1] * recv_x.element_size()
+        combine_row_bytes = spec.hidden * 2
         if recv_weights is not None:
             combine_row_bytes += recv_weights.shape[1] * recv_weights.element_size()
         bias_bytes = 0
