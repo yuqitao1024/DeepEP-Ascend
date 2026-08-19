@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import copy
 import subprocess
 import sys
 import tempfile
@@ -27,7 +28,6 @@ TRANSPORT_ERROR = (
     "DeepEP Ascend backend: {} is unavailable until the Ascend device "
     "transport is implemented")
 GATED_METHODS = {
-    "get_comm_stream": "get_comm_stream",
     "get_engram_storage_size_hint": "get_engram_storage_size_hint",
     "get_pp_buffer_size_hint": "get_pp_buffer_size_hint",
     "get_agrs_num_max_session_bytes": "get_agrs_num_max_session_bytes",
@@ -232,11 +232,20 @@ def _install_fake_torch(platform, events):
     torch.cuda = FakeCuda()
 
     class FakeNpu:
+        def __init__(self):
+            self.device_index = 2
+
         def current_device(self):
             if platform != "ascend":
                 raise AssertionError("CUDA import touched torch.npu.current_device")
             events.append("torch.npu.current_device")
-            return 0
+            return self.device_index
+
+        def Stream(self, **kwargs):
+            if platform != "ascend":
+                raise AssertionError("CUDA import touched torch.npu.Stream")
+            events.append(("torch.npu.Stream", (), kwargs))
+            return _FakeStream(**kwargs)
 
         def synchronize(self):
             if platform != "ascend":
@@ -275,10 +284,27 @@ def _install_fake_extension(platform, events):
     extension.size_calls = []
 
     class EventHandle:
+        def __init__(self, state=None):
+            if state is None:
+                state = types.SimpleNamespace(
+                    device_index=(sys.modules["torch"].npu.current_device()
+                                  if platform == "ascend" else 0),
+                    wait_count=0)
+                events.append(("event.capture", state.device_index))
+            self._state = state
+
+        def __copy__(self):
+            return EventHandle(self._state)
+
         def current_stream_wait(self):
-            if platform == "ascend":
-                raise _transport_error("current_stream_wait")
-            events.append("event.current_stream_wait")
+            if (platform == "ascend" and
+                    sys.modules["torch"].npu.current_device() !=
+                    self._state.device_index):
+                raise RuntimeError(
+                    "DeepEP Ascend backend: current_stream_wait current NPU "
+                    "device does not belong to the event device")
+            self._state.wait_count += 1
+            events.append(("event.current_stream_wait", self._state.wait_count))
 
     class ElasticRuntime:
         def __init__(self, *args):
@@ -528,7 +554,10 @@ def _scenario_ascend_import():
             "DeepEP Ascend backend: validate_device_type requires an NPU tensor")
     else:
         raise AssertionError("CPU tensor was accepted by Ascend validation")
-    _assert_transport_error("get_comm_stream", lambda: platform.wrap_stream(_Poison()))
+    stream = platform.wrap_stream(_FakeStream(17, 2, 1))
+    assert (stream.stream_id, stream.device_index, stream.device_type) == (17, 2, 1)
+    assert ("torch.npu.Stream", (), {
+        "stream_id": 17, "device_index": 2, "device_type": 1}) in events
 
     event = platform.capture_event()
     wrapped = types.SimpleNamespace(event=event)
@@ -536,7 +565,31 @@ def _scenario_ascend_import():
     assert platform.unwrap_event(event) is event
     assert platform.unwrap_event(wrapped) is event
     assert deep_ep.ElasticBuffer.capture().__class__ is extension.EventHandle
-    _assert_transport_error("current_stream_wait", event.current_stream_wait)
+    event.current_stream_wait()
+    copied_event = copy.copy(event)
+    copied_event.current_stream_wait()
+    assert event._state is copied_event._state
+    assert event._state.wait_count == 2
+
+    overlap = deep_ep.EventOverlap(platform.capture_event())
+    overlap.current_stream_wait(release_handle=True)
+    assert overlap.event is None
+    with deep_ep.EventOverlap(platform.capture_event()) as context_event:
+        assert context_event.event is not None
+    assert context_event.event is not None
+
+    torch = sys.modules["torch"]
+    wrong_device_event = platform.capture_event()
+    torch.npu.device_index = 3
+    try:
+        wrong_device_event.current_stream_wait()
+    except RuntimeError as error:
+        assert str(error) == (
+            "DeepEP Ascend backend: current_stream_wait current NPU device "
+            "does not belong to the event device")
+    else:
+        raise AssertionError("cross-device Ascend event wait was accepted")
+    torch.npu.device_index = 2
 
     for name in _ForbiddenImportFinder.FORBIDDEN:
         assert name not in sys.modules, name
@@ -1187,8 +1240,11 @@ def _scenario_ascend_method_gates():
             if isinstance(event, tuple) and event[0] == "runtime.barrier"] == \
         runtime_barriers
     poison = _Poison()
+    stream = buffer.get_comm_stream()
+    assert (stream.stream_id, stream.device_index, stream.device_type) == (17, 2, 1)
+    assert ("torch.npu.Stream", (), {
+        "stream_id": 17, "device_index": 2, "device_type": 1}) in events
     calls = {
-        "get_comm_stream": buffer.get_comm_stream,
         "get_engram_storage_size_hint": lambda: buffer.get_engram_storage_size_hint(
             poison, poison, poison),
         "get_pp_buffer_size_hint": lambda: buffer.get_pp_buffer_size_hint(

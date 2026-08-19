@@ -64,7 +64,10 @@ def synchronize() -> None:
 
 
 def wrap_stream(stream):
-    require_cuda("get_comm_stream")
-    return torch.cuda.Stream(stream_id=stream.stream_id,
-                             device_index=stream.device_index,
-                             device_type=stream.device_type)
+    if is_cuda():
+        return torch.cuda.Stream(stream_id=stream.stream_id,
+                                 device_index=stream.device_index,
+                                 device_type=stream.device_type)
+    return torch.npu.Stream(stream_id=stream.stream_id,
+                            device_index=stream.device_index,
+                            device_type=stream.device_type)

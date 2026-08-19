@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -19,6 +20,7 @@
 #include "elastic/barrier_state.hpp"
 #include "elastic/combine_state.hpp"
 #include "elastic/dispatch_state.hpp"
+#include "elastic/async_state.hpp"
 #include "elastic/operation_coordinator.hpp"
 #include "elastic/runtime.hpp"
 #include "runtime/cann_runtime.hpp"
@@ -47,11 +49,124 @@ namespace deep_ep::ascend {
                 " ", status.message);
 }
 
+[[noreturn]] inline void raise_event_status(
+    const transport::TransportStatus& status) {
+    if (status.code == transport::TransportStatusCode::kRuntimeFailure) {
+        TORCH_CHECK(false, "DeepEP Ascend backend: ", status.operation,
+                    " failed with backend error ", status.backend_code,
+                    ": ", status.message);
+    }
+    TORCH_CHECK(false, "DeepEP Ascend backend: ", status.operation,
+                " ", status.message);
+}
+
 struct EventHandle {
+private:
+    static constexpr std::uint64_t kEventWaitTimeoutMs = 5000;
+
+    struct SharedState {
+        explicit SharedState(
+            std::shared_ptr<runtime::NativeEventState> native_event,
+            std::shared_ptr<elastic::PendingOperation> pending = nullptr,
+            std::shared_ptr<elastic::AsyncBufferState> async = nullptr)
+            : event(std::move(native_event)),
+              pending_operation(std::move(pending)),
+              async_state(std::move(async)) {}
+
+        ~SharedState() {
+            try {
+                if (pending_operation != nullptr) {
+                    (void)pending_operation->finish(kEventWaitTimeoutMs);
+                } else if (event != nullptr) {
+                    (void)event->finish(kEventWaitTimeoutMs);
+                }
+            } catch (...) {
+            }
+        }
+
+        transport::TransportStatus finish_on_current_stream() {
+            const auto api = runtime::make_stream_event_api();
+            if (api.current_stream == nullptr)
+                return transport::TransportStatus::invalid(
+                    "current_stream_wait", "Torch NPU stream runtime is unavailable");
+            runtime::StreamIdentity stream;
+            const int result = api.current_stream(api.user_data, &stream);
+            if (result != 0)
+                return transport::TransportStatus::runtime_failure(
+                    "current_stream_wait", result,
+                    "Torch NPU current stream lookup failed");
+            if (event == nullptr || stream.raw == nullptr ||
+                stream.device_index != event->device_index())
+                return transport::TransportStatus::invalid(
+                    "current_stream_wait",
+                    "current NPU device does not belong to the event device");
+
+            std::lock_guard<std::mutex> lock(mutex);
+            return pending_operation != nullptr ?
+                pending_operation->finish(kEventWaitTimeoutMs) :
+                event->finish(kEventWaitTimeoutMs);
+        }
+
+        std::shared_ptr<runtime::NativeEventState> event;
+        std::shared_ptr<elastic::PendingOperation> pending_operation;
+        std::shared_ptr<elastic::AsyncBufferState> async_state;
+        std::mutex mutex;
+    };
+
+    static std::shared_ptr<SharedState> capture_current_event() {
+        const auto api = runtime::make_stream_event_api();
+        if (api.current_stream == nullptr)
+            raise_event_status(transport::TransportStatus::invalid(
+                "capture", "Torch NPU stream runtime is unavailable"));
+        runtime::StreamIdentity stream;
+        const int result = api.current_stream(api.user_data, &stream);
+        if (result != 0)
+            raise_event_status(transport::TransportStatus::runtime_failure(
+                "capture", result, "Torch NPU current stream lookup failed"));
+        if (stream.raw == nullptr || stream.device_index < 0)
+            raise_event_status(transport::TransportStatus::invalid(
+                "capture", "Torch NPU returned an invalid current stream"));
+        auto created = runtime::create_native_event(api, stream.device_index);
+        if (!created.status.ok())
+            raise_event_status(created.status);
+        const auto record_status = created.event->record(stream);
+        if (!record_status.ok())
+            raise_event_status(record_status);
+        return std::make_shared<SharedState>(std::move(created.event));
+    }
+
+    std::shared_ptr<SharedState> state_;
+
+public:
+    EventHandle() : state_(capture_current_event()) {}
+
+    EventHandle(
+        std::shared_ptr<runtime::NativeEventState> event,
+        std::shared_ptr<elastic::PendingOperation> pending_operation,
+        std::shared_ptr<elastic::AsyncBufferState> async_state)
+        : state_(std::make_shared<SharedState>(
+              std::move(event), std::move(pending_operation),
+              std::move(async_state))) {
+        TORCH_CHECK(state_->event != nullptr,
+                    "DeepEP Ascend backend: operation event is unavailable");
+        TORCH_CHECK(state_->pending_operation != nullptr &&
+                        state_->async_state != nullptr,
+                    "DeepEP Ascend backend: operation event state is unavailable");
+    }
+
+    EventHandle(const EventHandle&) = default;
+    EventHandle& operator=(const EventHandle&) = default;
+
     void current_stream_wait() const {
-        raise_unsupported(
-            "current_stream_wait",
-            "is unavailable until the Ascend device transport is implemented");
+        TORCH_CHECK(state_ != nullptr,
+                    "DeepEP Ascend backend: event state is unavailable");
+        transport::TransportStatus status;
+        {
+            [[maybe_unused]] pybind11::gil_scoped_release release;
+            status = state_->finish_on_current_stream();
+        }
+        if (!status.ok())
+            raise_event_status(status);
     }
 };
 
@@ -616,10 +731,17 @@ public:
         teardown.complete();
     }
 
-    pybind11::object get_comm_stream() const {
-        raise_unsupported(
-            "get_comm_stream",
-            "is unavailable until the Ascend device transport is implemented");
+    c10::Stream get_comm_stream() const {
+        TORCH_CHECK(resources_ != nullptr,
+                    "DeepEP Ascend backend: runtime is destroyed");
+        const auto& stream = resources_->comm_stream();
+        TORCH_CHECK(stream.raw != nullptr &&
+                        stream.device_index == resources_->owning_device(),
+                    "DeepEP Ascend backend: communication stream is unavailable");
+        return c10::Stream::unpack3(
+            static_cast<c10::StreamId>(stream.stream_id),
+            static_cast<c10::DeviceIndex>(stream.device_index),
+            static_cast<c10::DeviceType>(stream.device_type));
     }
 
     std::tuple<int, int> get_physical_domain_size() const {

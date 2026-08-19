@@ -993,7 +993,6 @@ class ElasticBuffer:
         Returns:
             stream: the communication stream.
         """
-        require_cuda("get_comm_stream")
         return wrap_stream(self.runtime.get_comm_stream())
 
     def get_physical_domain_size(self) -> Tuple[int, int]:

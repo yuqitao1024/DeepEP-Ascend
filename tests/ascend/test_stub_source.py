@@ -33,6 +33,7 @@ inline void PyErr_SetString(PyObject*, const char* message) { python_error = mes
 namespace pybind11 {
 class object {};
 class error_already_set : public std::exception {};
+class gil_scoped_release {};
 
 class module_ {
 public:
@@ -88,6 +89,12 @@ TORCH_HEADER = r"""
 
 namespace c10 {
 enum class DeviceType { PrivateUse1 };
+using DeviceIndex = int;
+using StreamId = std::int64_t;
+class Stream {
+public:
+    static Stream unpack3(StreamId, DeviceIndex, DeviceType) { return {}; }
+};
 }
 namespace torch {
 using ScalarType = int;
@@ -236,7 +243,7 @@ using Combine = CombineResult (Buffer::*)(
 static_assert(std::is_same_v<decltype(&Buffer::dispatch), Dispatch>);
 static_assert(std::is_same_v<decltype(&Buffer::combine), Combine>);
 static_assert(std::is_same_v<decltype(&Buffer::get_comm_stream),
-                             pybind11::object (Buffer::*)() const>);
+                             c10::Stream (Buffer::*)() const>);
 
 template <typename Call>
 bool raises_transport_error(const char* operation, const char* detail, Call call) {
@@ -479,7 +486,7 @@ using DispatchResult = std::tuple<
     std::optional<Event>>;
 
 static_assert(std::is_same_v<decltype(&Buffer::get_comm_stream),
-                             pybind11::object (Buffer::*)() const>);
+                             c10::Stream (Buffer::*)() const>);
 
 extern "C" int deep_ep_ascend_launch_barrier(
     deep_ep::ascend::elastic::BarrierArguments,

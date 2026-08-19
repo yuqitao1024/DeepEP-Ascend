@@ -1032,9 +1032,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             compile_result = subprocess.run(
                 ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                  "-pthread", "-DDEEP_EP_ASCEND_TESTING=1",
-                 f"-I{directory}", f"-I{ROOT}",
+                 "-DDEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR=1",
+                 f"-I{directory}", f"-I{ROOT}", "-include",
+                 str(directory / "torch/python.h"),
                  str(PRODUCTION_BUFFER_LIFECYCLE_PROBE),
                  str(ELASTIC / "runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/elastic/async_state.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"),
                  str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
@@ -1888,8 +1891,12 @@ int main() {
             binary = directory / "production_dispatch_probe"
             compile_result = subprocess.run(
                 ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                 "-DDEEP_EP_ASCEND_TESTING=1", f"-I{directory}", f"-I{ROOT}", str(probe),
+                 "-DDEEP_EP_ASCEND_TESTING=1",
+                 "-DDEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR=1",
+                 f"-I{directory}", f"-I{ROOT}", "-include",
+                 str(directory / "torch/python.h"), str(probe),
                  str(ELASTIC / "runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/elastic/async_state.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"),
                  str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
@@ -1911,8 +1918,12 @@ int main() {
             binary = directory / "production_combine_probe"
             compile_result = subprocess.run(
                 ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                 "-DDEEP_EP_ASCEND_TESTING=1", f"-I{directory}", f"-I{ROOT}",
+                 "-DDEEP_EP_ASCEND_TESTING=1",
+                 "-DDEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR=1",
+                 f"-I{directory}", f"-I{ROOT}", "-include",
+                 str(directory / "torch/python.h"),
                  str(probe), str(ELASTIC / "runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/elastic/async_state.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"),
                  str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),

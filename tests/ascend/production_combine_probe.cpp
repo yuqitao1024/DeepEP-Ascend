@@ -810,7 +810,6 @@ bool tensor_and_flag_validation() {
     if (!error_contains([&] { (void)call(*target, inputs); }, "buffer device"))
         return false;
     inputs.x = saved_x;
-    const std::optional<Event> event = Event{};
     const std::optional<Tensor> channel = Tensor{};
     if (!error_contains([&] { (void)call(*target, inputs, std::nullopt,
             std::nullopt, std::nullopt, channel); }, "channel") ||
@@ -818,9 +817,6 @@ bool tensor_and_flag_validation() {
             std::nullopt, std::nullopt, std::nullopt, 2); }, "num_sms=1") ||
         !error_contains([&] { (void)call(*target, inputs, std::nullopt,
             std::nullopt, std::nullopt, std::nullopt, 1, 1); }, "num_qps=0") ||
-        !error_contains([&] { (void)call(*target, inputs, std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt, 1, 0, event); },
-            "synchronous") ||
         !error_contains([&] { (void)call(*target, inputs, std::nullopt,
             std::nullopt, std::nullopt, std::nullopt, 1, 0, std::nullopt,
             true); }, "synchronous") ||

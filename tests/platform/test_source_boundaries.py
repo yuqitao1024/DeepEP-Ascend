@@ -34,6 +34,16 @@ class RegistrationBoundaryTest(unittest.TestCase):
                 "deep_ep/include/deep_ep/common/handle.cuh"):
             self.assertNotIn("backends/ascend/transport", self.read(cuda_source))
 
+    def test_ascend_events_and_comm_stream_use_runtime_owned_identity(self):
+        source = self.read("csrc/backends/ascend/elastic_buffer.hpp")
+        self.assertIn('#include "elastic/async_state.hpp"', source)
+        self.assertIn("runtime::make_stream_event_api()", source)
+        self.assertIn("create_native_event", source)
+        self.assertIn("pybind11::gil_scoped_release", source)
+        self.assertIn("std::shared_ptr<elastic::AsyncBufferState>", source)
+        self.assertIn("resources_->comm_stream()", source)
+        self.assertIn("c10::Stream::unpack3", source)
+
     def test_ascend_production_target_does_not_import_cuda_sources(self):
         source = self.read("CMakeLists.txt")
         marker = 'if(DEEP_EP_PLATFORM STREQUAL "ascend")'

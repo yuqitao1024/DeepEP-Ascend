@@ -10,7 +10,9 @@ template <typename EventHandle>
 void register_event(pybind11::module_& m) {
     pybind11::class_<EventHandle>(m, "EventHandle")
         .def(pybind11::init<>())
-        .def("current_stream_wait", &EventHandle::current_stream_wait);
+        .def("current_stream_wait", [](const EventHandle& event) {
+            event.current_stream_wait();
+        });
 }
 
 template <typename ElasticBuffer>

@@ -38,6 +38,8 @@ class ExtensionContractTest(unittest.TestCase):
             self.assertSetEqual(public_names(_C.EventHandle), CUDA_EVENT_HANDLE_METHODS)
             self.assertSetEqual(public_names(_C.Buffer), CUDA_BUFFER_METHODS)
             self.assertSetEqual(public_names(_C.Config), CUDA_CONFIG_METHODS)
+        else:
+            self.assertSetEqual(public_names(_C.EventHandle), CUDA_EVENT_HANDLE_METHODS)
 
 
 if __name__ == "__main__":
