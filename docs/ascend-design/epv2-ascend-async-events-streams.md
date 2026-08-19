@@ -341,9 +341,13 @@ one-NPU event suite contains exactly `capture-current-stream`,
 `destroy-pending-retry` execute inside the persistent two-rank production
 worker.
 
-Exact-source build task `task_20260820_062500_37256458511` compiled with
-`DEEP_EP_ASCEND_TESTING=1` against the pinned HCOMM package and imported the
-Ascend extension. The accepted production commit/tree are
+Exact-source build task `task_20260820_062500_37256458511` completed in
+`2m55s`, compiled with `DEEP_EP_ASCEND_TESTING=1` against the pinned HCOMM
+package, and imported the Ascend extension. The local and remote source
+archives both had SHA-256
+`573d6970812fe4f8cf6b60b06d2d4e0bb9547ddfc35cd8177d69d677922955de`;
+the build log printed the actual hash and matched the expected value. The
+accepted production commit/tree are
 `28f3deaed1b950e782ba57a0d0256cd2f35687f9`/
 `47ed60717b538b88436fa2602628f28b9a76f234`; the extension SHA-256 is
 `dd9e91a69b8526ba9b828387fdc1b655a46f4a4ae10ce4af3d36fec7fd41bb67`.
@@ -351,7 +355,7 @@ Runner commit `b185d95c28864c22faf99dc67f5492028e6383fb` has file SHA-256
 `e3154dd502d1f9986d16d7b131520d6ab3d292d191e4cb949ecb7a686491300f`.
 
 The corrected one-NPU event task `task_20260820_063113_375337613415`
-passed 3/3 on device 6. The first corrected full task,
+passed 3/3 on device 6 in `52s`. The first corrected full task,
 `task_20260820_063252_376006031537`, passed 16 rows before `drop-event`
 failed on a stale generation-bound dispatch handle and the remaining four rows
 did not run. A deterministic host RED reproduced that sequence: dropping the
@@ -363,13 +367,13 @@ skipped, and 48 subtests.
 
 Final two-NPU task
 `task_20260820_064309_380109210223` ran on devices `6,7` with
-`--max-time 300`, reached authoritative `completed (exit=0)`, and passed all
-21 selected and executed cases with zero failures and zero not-run rows. Both
-ranks passed `drop-event` with the same buffer reused after event drop and
-garbage collection. Both retained runtime ownership after the injected first
-destroy failure and released it after retry. Record failure, event timeout,
-qualified diagnostic failure, and post-bookkeeping completion mismatch also
-passed through production code.
+`--max-time 300`, reached authoritative `completed (exit=0)` in `1m49s`, and
+passed all 21 selected and executed cases with zero failures and zero not-run
+rows. Both ranks passed `drop-event` with the same buffer reused after event
+drop and garbage collection. Both retained runtime ownership after the
+injected first destroy failure and released it after retry. Record failure,
+event timeout, qualified diagnostic failure, and post-bookkeeping completion
+mismatch also passed through production code.
 
 | Rank | Serialized median/p95 | Overlapped median/p95 | Median gain |
 |---:|---:|---:|---:|
@@ -627,8 +631,8 @@ GPU tests and DeepEP V1 tests are not part of any acceptance layer.
 - 3E.2 is the next planned slice. It splits or redesigns dynamic-shape BF16
   normal and expanded non-cached dispatch so event return, communication-stream
   allocation, asynchronous output extents, handle construction, and descriptor
-  publication remain honest. This direction does not waive the unfinished
-  3E.1 production gate above.
+  publication remain honest. This direction does not expand the accepted 3E.1
+  production boundary above.
 - 3E.3 remains a deferred design direction for introducing a real
   pre-epilogue dependency boundary and then enabling
   `previous_event_before_epilogue`.

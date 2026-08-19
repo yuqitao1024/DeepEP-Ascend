@@ -470,8 +470,11 @@ the remaining lifecycle rows into the persistent two-rank worker, and added
 testing-only exact-value native failure controls. The earlier result remains
 diagnostic history and is superseded for the acceptance decision.
 
-Exact-source build task `task_20260820_062500_37256458511` produced extension
-SHA-256
+Exact-source build task `task_20260820_062500_37256458511` completed in
+`2m55s`. Its local and remote source archives both had SHA-256
+`573d6970812fe4f8cf6b60b06d2d4e0bb9547ddfc35cd8177d69d677922955de`;
+the build log printed the actual hash and matched the expected value. The task
+produced extension SHA-256
 `dd9e91a69b8526ba9b828387fdc1b655a46f4a4ae10ce4af3d36fec7fd41bb67`
 from production commit/tree
 `28f3deaed1b950e782ba57a0d0256cd2f35687f9`/
@@ -479,7 +482,7 @@ from production commit/tree
 `b185d95c28864c22faf99dc67f5492028e6383fb` has file SHA-256
 `e3154dd502d1f9986d16d7b131520d6ab3d292d191e4cb949ecb7a686491300f`.
 The corrected one-NPU event task `task_20260820_063113_375337613415` passed
-3/3 on device 6. The first corrected full task,
+3/3 on device 6 in `52s`. The first corrected full task,
 `task_20260820_063252_376006031537`, passed 16 rows before `drop-event`
 failed on a stale generation-bound dispatch handle, leaving four rows not run.
 A deterministic host RED reproduced the invalid reuse: event drop finalized
@@ -489,11 +492,11 @@ buffer before the second dispatch and passed the full host suite with 199
 passed, 7 skipped, and 48 subtests.
 
 Final task `task_20260820_064309_380109210223` ran on devices `6,7` with
-`--max-time 300`, reached authoritative `completed (exit=0)`, and passed
-21/21 selected and executed cases. Rank 0 serialized/overlapped medians were
-`0.304671370`/`0.277607860` seconds for an `8.8829%` gain; rank 1 measured
-`0.304223720`/`0.277838260` for `8.6730%`. Both cleared the unchanged 5%
-gate with three warmups, seven measured samples, and zero global
+`--max-time 300`, reached authoritative `completed (exit=0)` in `1m49s`, and
+passed 21/21 selected and executed cases. Rank 0 serialized/overlapped medians
+were `0.304671370`/`0.277607860` seconds for an `8.8829%` gain; rank 1
+measured `0.304223720`/`0.277838260` for `8.6730%`. Both cleared the unchanged
+5% gate with three warmups, seven measured samples, and zero global
 synchronizations.
 
 Profiler evidence identifies `Conv3DV2=KERNEL_AICORE` and
