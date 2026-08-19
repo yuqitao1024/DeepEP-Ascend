@@ -52,6 +52,12 @@ struct DispatchProtocolFailure {
     std::uint32_t backend_status = 0;
 };
 
+struct DecodedDispatchProtocolFailure {
+    int world_rank = -1;
+    DispatchProtocolError error = DispatchProtocolError::kNone;
+    bool valid = false;
+};
+
 DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr DispatchProtocolError
 validate_hybrid_route_control(
     std::uint64_t expected_generation, std::uint64_t observed_generation,
@@ -74,6 +80,25 @@ make_dispatch_protocol_failure(
         (static_cast<std::uint32_t>(stage) << 16U) |
             static_cast<std::uint32_t>(error),
     };
+}
+
+DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr
+DecodedDispatchProtocolFailure decode_dispatch_protocol_scratch(
+    std::uint64_t scratch_status) noexcept {
+    const std::uint64_t encoded_rank = scratch_status >> 32U;
+    const std::uint32_t encoded_error =
+        static_cast<std::uint32_t>(scratch_status);
+    if (encoded_rank == 0 ||
+        encoded_rank >
+            static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1U ||
+        encoded_error <=
+            static_cast<std::uint32_t>(DispatchProtocolError::kNone) ||
+        encoded_error >
+            static_cast<std::uint32_t>(DispatchProtocolError::kInvalidLayout))
+        return {};
+    return {
+        static_cast<int>(encoded_rank - 1U),
+        static_cast<DispatchProtocolError>(encoded_error), true};
 }
 
 using HybridRouteStageFlags = std::uint32_t;

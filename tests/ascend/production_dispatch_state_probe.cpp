@@ -53,6 +53,22 @@ int main() {
                 DispatchProtocolStage::kPrepareEpilogue) << 16U) |
            static_cast<std::uint32_t>(
                DispatchProtocolError::kInvalidControl)));
+    const auto masked_producer_failure = make_dispatch_protocol_failure(
+        2, DispatchProtocolStage::kProducer, 31,
+        DispatchProtocolError::kInvalidTopk);
+    const auto decoded_producer_failure = decode_dispatch_protocol_scratch(
+        masked_producer_failure.scratch_status);
+    CHECK(decoded_producer_failure.valid);
+    CHECK(decoded_producer_failure.world_rank == 2);
+    CHECK(decoded_producer_failure.error ==
+          DispatchProtocolError::kInvalidTopk);
+    CHECK(!decode_dispatch_protocol_scratch(0).valid);
+    CHECK(!decode_dispatch_protocol_scratch(
+        static_cast<std::uint32_t>(DispatchProtocolError::kInvalidTopk)).valid);
+    CHECK(!decode_dispatch_protocol_scratch(
+        (std::uint64_t{1} << 32U) |
+        (static_cast<std::uint32_t>(DispatchProtocolError::kInvalidLayout) +
+         1U)).valid);
 
     DispatchSequence sequence;
     {

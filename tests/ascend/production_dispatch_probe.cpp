@@ -29,7 +29,9 @@ struct Trace {
     bool fail_launch = false;
     bool fail_stream = false;
     bool corrupt_fresh_route = false;
+    bool masked_producer_failure = false;
     bool pending_diagnostic = false;
+    std::uint64_t preserved_scratch_status = 0;
     int world_size = 2;
 } trace;
 
@@ -55,7 +57,27 @@ int d2h(void*, void* d, const void* s, std::uint64_t n) {
         *diagnostic = {};
         diagnostic->abi_version = transport::kTransportCommandAbiVersion;
         diagnostic->generation = trace.generation;
-        if (trace.bad_diagnostic) {
+        if (trace.masked_producer_failure) {
+            const auto decoded = elastic::decode_dispatch_protocol_scratch(
+                trace.preserved_scratch_status);
+            if (decoded.valid) {
+                const auto restored = elastic::make_dispatch_protocol_failure(
+                    decoded.world_rank,
+                    elastic::DispatchProtocolStage::kProducer,
+                    trace.generation, decoded.error);
+                diagnostic->error =
+                    transport::DeviceTransportError::kInvalidProtocol;
+                diagnostic->command_index = 0;
+                diagnostic->opcode =
+                    transport::TransportCommandOpcode::kNone;
+                diagnostic->peer =
+                    static_cast<std::uint32_t>(decoded.world_rank);
+                diagnostic->world_peer = decoded.world_rank;
+                diagnostic->team = transport::TransportTeam::kWorld;
+                diagnostic->channel = 0;
+                diagnostic->backend_status = restored.backend_status;
+            }
+        } else if (trace.bad_diagnostic) {
             diagnostic->error =
                 transport::DeviceTransportError::kCompletionFailure;
             diagnostic->world_peer = 1;
@@ -113,6 +135,15 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
     const bool expanded = elastic::has_mode(t.mode_flags, elastic::CoreMode::kExpanded);
     const bool hybrid = elastic::has_mode(t.mode_flags, elastic::CoreMode::kHybrid);
     if (hybrid) {
+        if (trace.masked_producer_failure) {
+            trace.preserved_scratch_status =
+                elastic::make_dispatch_protocol_failure(
+                    t.topology.world_rank,
+                    elastic::DispatchProtocolStage::kProducer, a.generation,
+                    elastic::DispatchProtocolError::kInvalidTopk)
+                    .scratch_status;
+            return 0;
+        }
         if (a.route_records == nullptr || a.route_record_capacity < 1)
             return 74;
         const std::array<std::uint16_t, 8> payload{
@@ -705,6 +736,51 @@ bool diagnostic_order_probe() {
     }
 }
 
+bool masked_hybrid_producer_failure_probe() {
+    trace = {};
+    trace.world_size = 4;
+    trace.masked_producer_failure = true;
+    auto runtime_resources = resources(4, true);
+    if (!runtime_resources) return false;
+    std::unique_ptr<Buffer> buffer;
+    try {
+        buffer = Buffer::make_testing_buffer(
+            0, std::move(runtime_resources), 2 * 1024 * 1024, 1,
+            true, 7, 4, 0, true);
+    } catch (const std::runtime_error&) {
+        return false;
+    }
+    Inputs inputs;
+    inputs.idx.data_ptr<std::int64_t>()[0] = 8;
+    const std::optional<Tensor> weights = inputs.weights;
+    try {
+        (void)uncached_hybrid_dispatch(*buffer, inputs, weights);
+        return false;
+    } catch (const std::runtime_error& error) {
+        const std::string message(error.what());
+        return message.find(
+                   "dispatch failed on rank 0 with backend error 65537") !=
+                std::string::npos &&
+            message.find(
+                "device diagnostic reported failure error=invalid_protocol") !=
+                std::string::npos &&
+            message.find("command_index=0") != std::string::npos &&
+            message.find("opcode=0") != std::string::npos &&
+            message.find("peer=0") != std::string::npos &&
+            message.find("world_peer=0") != std::string::npos &&
+            message.find("team=0") != std::string::npos &&
+            message.find("channel=0") != std::string::npos &&
+            message.find("backend_status=65537") != std::string::npos &&
+            message.find("generation=1") != std::string::npos &&
+            message.find("dispatch returned invalid expert counts") ==
+                std::string::npos &&
+            trace.launches == 1 && trace.preserved_scratch_status ==
+                ((std::uint64_t{1} << 32U) |
+                 static_cast<std::uint32_t>(
+                     elastic::DispatchProtocolError::kInvalidTopk));
+    }
+}
+
 bool empty_probe() {
     trace = {};
     auto runtime_resources = resources();
@@ -755,6 +831,8 @@ int main() {
     check(stream_retry_probe(), "stream acquisition retry");
     check(launch_poison_probe(), "launch failure poisoning");
     check(diagnostic_order_probe(), "diagnostic ordering");
+    check(masked_hybrid_producer_failure_probe(),
+          "masked hybrid producer failure diagnostic");
     check(empty_probe(), "empty dispatch");
     check(testing_topology_mismatch_probe(), "testing topology mismatch");
     return failures == 0 ? 0 : 1;

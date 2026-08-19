@@ -1216,6 +1216,20 @@ int main() {
         self.assertLess(stage1.index("hybrid_dispatch_ingress_shard_offset"),
                         stage1.index("hybrid_dispatch_ingress_staging_offset"))
 
+    def test_hybrid_dispatch_republishes_masked_producer_failure(self):
+        """Catches a second service reset followed by a silent scratch return."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        forward = source[
+            source.index("__simt_vf__ inline void hybrid_dispatch_forward_vf"):
+            source.index(
+                "__simt_vf__ inline void hybrid_dispatch_prepare_epilogue_vf")]
+        self.assertIn("decode_dispatch_protocol_scratch(", forward)
+        self.assertIn("DispatchProtocolStage::kProducer", forward)
+        self.assertIn("record_dispatch_protocol_error(", forward)
+        self.assertNotIn(
+            "if (transport.load_acquire(status_address) != 0)\n"
+            "        return;", forward)
+
     def test_pure_cpp_runtime_contract(self):
         runtime = ELASTIC / "runtime.cpp"
         self.assertTrue(runtime.is_file(), str(runtime))
