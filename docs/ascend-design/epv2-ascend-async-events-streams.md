@@ -1,0 +1,251 @@
+# EPv2 Ascend Async Events, Streams, And Overlap
+
+## Status And Scope
+
+This document defines Phase 3E for the Ascend 950 EPv2 `ElasticBuffer` path.
+It builds on the rank-parameterized, one-operation-per-buffer contract from
+Phase 3B and the synchronous BF16 dispatch/combine implementation. DeepEP V1,
+GPU execution, FP8, and performance parity with CUDA are outside this phase.
+
+Phase 3E is split into independently accepted vertical slices. The active
+slice is 3E.1: native event and communication-stream ownership plus real
+communication/computation overlap for cached BF16 pure-scale-up dispatch and
+combine. Later slices extend the same ownership model to dynamic-shape and
+hybrid paths; an interface or compile probe alone is not runtime support.
+
+## Decisions
+
+### Native resource model
+
+- Each `ElasticBuffer` owns one Torch-NPU pool stream for communication. The
+  stream is retained as a `c10_npu::NPUStream` value and is never destroyed by
+  DeepEP.
+- DeepEP owns raw CANN events through a small RAII adapter. Raw events are used
+  instead of `c10_npu::NPUEvent` because Phase 3E needs explicit timeout,
+  backend-code, and retryable destruction behavior.
+- The CANN/Torch-NPU calls are behind an injectable runtime seam. Host tests
+  exercise every ownership transition without importing Torch NPU.
+- The selected pool-stream, event, timeout, Python stream-wrapper, and allocator
+  APIs must pass a targeted NPU8P capability probe before production code is
+  enabled. A declared header without a link and runtime probe is insufficient.
+
+### Initial wait semantics
+
+Ascend `EventHandle.current_stream_wait()` performs a bounded, event-specific
+host completion wait and terminal DeepEP validation. It does not synchronize
+the whole device and does not call `torch.npu.synchronize()`.
+
+This is intentionally stronger than CUDA's enqueue-only wait. CANN requires an
+event to outlive all stream-wait tasks, while `EventOverlap` permits
+`release_handle=True`. A host-completed event can be released safely without a
+background reaper. A later enqueue-only slice requires a reaper or callback
+protocol that owns the event until every dependent stream task retires and has
+a defined path for delayed DeepEP errors.
+
+### Operation and failure model
+
+One buffer continues to admit exactly one barrier, dispatch, or combine at a
+time. An async operation remains active until its returned event finalizes it.
+A second same-buffer entry is a deterministic busy error and follows the
+existing deferred-poison rule. Independent buffers own independent streams,
+coordinators, windows, workspaces, diagnostics, and events and may run
+concurrently.
+
+The operation lease moves into a shared pending operation after launch. It is
+not completed when the C++ method returns. Finalization is exactly once and
+includes event completion, diagnostic validation, generation/completion
+validation, lease retirement, stable error storage, and release of retained
+tensors and predecessor events.
+
+Pre-launch failures cancel the reservation without consuming a generation.
+Every post-activation launch, record, timeout, diagnostic, completion, or
+finalizer failure poisons the buffer. Repeated waits return the same terminal
+result and never re-read a diagnostic slot that a later operation could have
+overwritten.
+
+Destroy drains the one pending operation with the same finite timeout. If
+completion and event lifetime cannot be proven, destroy returns a retryable
+error and retains the stream, event, workspace, window, transport, and device
+allocations. Phase 3E does not use `aclrtStreamAbort`, force stream destruction,
+or fabricated collective cancellation.
+
+### Stream and tensor lifetime
+
+The communication stream waits on the caller's `previous_event`, or on an
+event captured from the current compute stream when no predecessor is supplied.
+The predecessor remains strongly retained through communication completion.
+`previous_event` requires `allocate_on_comm_stream=True`, matching the shared
+EPv2 contract.
+
+When `allocate_on_comm_stream=True`, a Torch-NPU stream guard selects the
+buffer's communication stream before the first output or handle allocation and
+restores the compute stream before returning. Every input, output, metadata,
+handle tensor, and predecessor needed by a pending operation is strongly
+retained. The selected generic Torch-NPU allocator record-stream API is also
+used after the capability probe, but strong retention remains the correctness
+fallback for custom allocators.
+
+The synchronous and asynchronous paths use the same communication stream,
+completion event, and terminal validator:
+
+- synchronous calls finalize before returning and return no underlying event;
+- asynchronous calls return a real event immediately after the operation and
+  completion event are enqueued;
+- no accepted asynchronous path contains a hidden device-global synchronize.
+
+## 3E.1 Supported Matrix
+
+The first production slice supports:
+
+- `ElasticBuffer.capture()` recording a real event on the current NPU stream;
+- `ElasticBuffer.get_comm_stream()` returning the owning Torch-NPU stream;
+- synchronous `barrier(use_comm_stream=True)` with compute-to-communication
+  ordering; barrier remains return-void and host-synchronous;
+- synchronous and asynchronous cached BF16 pure-scale-up dispatch;
+- synchronous and asynchronous BF16 pure-scale-up combine;
+- `previous_event` absent or present, with the allocation precondition;
+- `allocate_on_comm_stream` false or true;
+- exact event-specific waits, repeated waits, event drop, and retryable destroy;
+- empty and asymmetric routes, cached-handle reuse, repeated generations, and
+  independent buffers.
+
+The first slice explicitly rejects before launch:
+
+- non-cached async dispatch, because exact output extents and handle
+  attestation currently require post-kernel host work;
+- `previous_event_before_epilogue`, because dispatch and combine each expose one
+  whole-kernel launch and no safe host-visible epilogue boundary;
+- logical-hybrid and physical scale-out async, because Phase 3D route-table and
+  binding attestation are post-launch host work;
+- more than one in-flight operation per buffer, because the command queue,
+  workspace, symmetric controls, diagnostic, and completion records are
+  single-slot;
+- async barrier, graph capture, mapped CPU communication, FP8, pipeline,
+  Engram, AGRS, and device-transport async request flags.
+
+`TransportCapability::kAsyncCompletion` and `CoreMode::kAsyncEvent` remain
+disabled in 3E.1. A host stream returning before a whole AICore kernel completes
+does not implement the device request lifecycle represented by those flags.
+
+## Components
+
+### Stream and event runtime seam
+
+`csrc/backends/ascend/runtime/stream_event.hpp/.cpp` owns the injectable
+stream/event API and native RAII event state. It provides:
+
+- current and pool stream acquisition with device identity;
+- event create, record, query, bounded synchronize, stream wait, and destroy;
+- generic allocator stream recording;
+- `TransportStatus` errors with the exact operation and backend code; and
+- retryable state transitions that never clear ownership after a failed
+  destroy.
+
+`CannRuntimeResources` owns the pool-stream handle and exposes checked access.
+The resource teardown order is pending operation, event, transport, workspace,
+and window. Torch-NPU retains ownership of the pool stream.
+
+### Shared async state
+
+`AsyncBufferState` is shared by the Python-visible buffer and every event that
+can outlive it. It owns runtime resources, the operation coordinator, the
+pending-operation slot, timeout configuration, and the first stable terminal
+failure. No event stores a raw pointer to `ElasticBuffer`.
+
+`PendingOperation` owns its moved operation lease, generation, completion
+event, retained tensors, predecessor events, and operation-specific terminal
+validator. A mutex and terminal state implement:
+
+```text
+Launched -> Finalizing -> Succeeded
+                      \-> Failed
+```
+
+All callers observe the same terminal state. Only the first finalizer performs
+native waits and diagnostic reads.
+
+`EventHandle` is copyable through shared event state. A captured event contains
+only native event/device state; an operation event also references its pending
+operation. `current_stream_wait()` validates current device identity and invokes
+bounded finalization.
+
+## Data Flow
+
+```text
+compute stream
+    |
+    | record dependency event or use previous_event
+    v
+buffer comm stream -> wait dependency -> allocate/record tensors -> EP kernel
+                                                                  |
+                                                                  v
+                                                         completion event
+                                                          /             \
+                                                sync finalize       async return
+                                                validate/retire       EventOverlap
+                                                                        |
+                                                             independent compute
+                                                                        |
+                                                             current_stream_wait
+                                                             validate/retire
+```
+
+All collective preflight that can fail locally remains before lease activation.
+All post-launch checks remain generation-qualified and finite.
+
+## Capability Gate
+
+Before implementation is enabled, a serialized NPU8P probe must prove against
+the pinned CANN, Torch-NPU, and HCOMM environment:
+
+1. `c10_npu::getStreamFromPool`, current-stream lookup, and an NPU stream guard;
+2. reconstruction of the retained stream as a usable Python `torch.npu.Stream`;
+3. event create, record, query, bounded synchronize, stream wait, and destroy;
+4. predecessor-event lifetime across a stream wait;
+5. the selected generic allocator record-stream call; and
+6. ordering and completion without a device-global synchronize.
+
+If the pinned runtime lacks bounded event synchronization, Phase 3E.1 remains
+gated until an event-query loop with a monotonic deadline and documented CANN
+status codes passes the same test. If Python stream reconstruction is not
+supported, the extension returns a Torch-NPU stream object directly; it must not
+expose a raw integer pointer as the public stream.
+
+## Verification
+
+Host and contract tests cover ownership rollback, exactly-once finalization,
+copied event handles, same-device checks, predecessor retention, allocator
+recording, pending destroy/retry, stored poisoning, timeout, and proof that no
+global synchronize callback is used.
+
+Production acceptance is serialized through TaskQueue and uses the pinned
+`hcomm-deepep-current` package:
+
+- one-NPU event/stream ordering, repeated wait/drop, timeout, allocator
+  lifetime, and pending-destroy tests;
+- two-NPU synchronous BF16 regression plus async cached dispatch/combine against
+  an independent reference for empty and asymmetric routes and at least 100
+  generations;
+- bounded record, launch, diagnostic, completion, and timeout failures with
+  rank-set retirement and retryable teardown;
+- an overlap workload whose NPU timeline shows compute and EP communication
+  intervals overlapping and whose warmed median wall time is lower than the
+  serialized sum by a threshold fixed in the runner; and
+- four-rank and eight-rank pure-scale-up async smoke only when the authorized
+  device policy permits those topologies.
+
+GPU tests and DeepEP V1 tests are not part of any acceptance layer.
+
+## Later Phase 3E Slices
+
+- 3E.2 splits or redesigns dynamic-shape dispatch so non-cached async output and
+  descriptor publication remain honest.
+- 3E.3 introduces a real pre-epilogue dependency boundary and then enables
+  `previous_event_before_epilogue`.
+- 3E.4 adds per-flight queue, workspace, diagnostic, completion, and generation
+  slots before permitting same-buffer multiflight.
+- Hybrid/physical scale-out async is enabled only after its route attestation
+  and mapped-memory lifetime move into the generation-bound finalizer.
+
+Each later slice requires its own design update, TDD plan, production build,
+multi-NPU reference run, bounded failure tests, and teardown acceptance.
