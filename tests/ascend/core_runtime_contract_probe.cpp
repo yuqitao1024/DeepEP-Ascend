@@ -745,13 +745,9 @@ int main() {
         CoreRuntimeStatusCode::kUnsupportedMode)
         return 8;
     if (validate_internal_launch(
-            valid_tiling(OperationKind::kDispatch,
-                         ElementKind::kFloat8E4M3),
-            storage).code != CoreRuntimeStatusCode::kUnsupportedMode ||
-        validate_internal_launch(
             valid_tiling(OperationKind::kCombine,
                          ElementKind::kFloat8E4M3),
-            storage).code != CoreRuntimeStatusCode::kUnsupportedTopology)
+            storage).code != CoreRuntimeStatusCode::kUnsupportedMode)
         return 9;
 
     auto malformed = dispatch_tiling;
@@ -838,6 +834,31 @@ int main() {
         !trace_is(kDispatchLaunch) || dispatch_generation != 11 ||
         dispatch_timeout_cycles != 101)
         return 16;
+    auto fp8_tiling = valid_tiling(
+        OperationKind::kDispatch, ElementKind::kFloat8E4M3);
+    const auto fp8_storage = required_core_launch_storage(fp8_tiling);
+    auto fp8_dispatch = dispatch;
+    fp8_dispatch.scale_factors = bytes;
+    fp8_dispatch.recv_scale_factors = bytes;
+    reset_launches();
+    if (!launch_internal_dispatch(
+             fp8_dispatch, fp8_tiling, fp8_storage, nullptr).ok() ||
+        !trace_is(kDispatchLaunch))
+        return 81;
+    fp8_dispatch.scale_factors = nullptr;
+    reset_launches();
+    if (launch_internal_dispatch(
+            fp8_dispatch, fp8_tiling, fp8_storage, nullptr).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 82;
+    fp8_dispatch.scale_factors = bytes;
+    fp8_dispatch.recv_scale_factors = nullptr;
+    if (launch_internal_dispatch(
+            fp8_dispatch, fp8_tiling, fp8_storage, nullptr).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 83;
     reset_launches(kDispatchLaunch, 5);
     auto status = launch_internal_dispatch(
         dispatch, dispatch_tiling, storage, nullptr);

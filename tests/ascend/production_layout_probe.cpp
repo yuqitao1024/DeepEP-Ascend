@@ -226,6 +226,35 @@ int main() {
     CHECK(direct_layout.hybrid_dispatch_ingress_staging_shard_count == 0);
     CHECK(direct_layout.hybrid_dispatch_ingress_staging_bytes == 0);
 
+    auto fp8_input = direct_input;
+    fp8_input.element_bytes = 1;
+    fp8_input.scale_factor_bytes = 8;
+    SymmetricWindowLayout fp8_layout{};
+    CHECK(build_symmetric_window_layout(fp8_input, &fp8_layout).ok());
+    CHECK(fp8_layout.dispatch_record_bytes == 256);
+    CHECK(fp8_layout.dispatch_record_bytes <
+          direct_layout.dispatch_record_bytes);
+    CHECK(fp8_layout.combine_record_bytes ==
+          direct_layout.combine_record_bytes);
+    CHECK(fp8_layout.combine_weight_offset ==
+          direct_layout.combine_weight_offset);
+
+    auto invalid_precision = direct_input;
+    invalid_precision.scale_factor_bytes = 4;
+    CHECK(build_symmetric_window_layout(
+              invalid_precision, &fp8_layout).code ==
+          LayoutStatusCode::kInvalidArgument);
+    invalid_precision.element_bytes = 1;
+    invalid_precision.scale_factor_bytes = 0;
+    CHECK(build_symmetric_window_layout(
+              invalid_precision, &fp8_layout).code ==
+          LayoutStatusCode::kInvalidArgument);
+    invalid_precision.element_bytes = 3;
+    invalid_precision.scale_factor_bytes = 4;
+    CHECK(build_symmetric_window_layout(
+              invalid_precision, &fp8_layout).code ==
+          LayoutStatusCode::kInvalidArgument);
+
     auto small_direct_input = direct_input;
     small_direct_input.world_size = 2;
     small_direct_input.num_max_tokens_per_rank = 1;

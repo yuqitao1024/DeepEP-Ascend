@@ -200,6 +200,7 @@ struct SymmetricWindowInput {
     std::uint64_t hidden = 0;
     std::uint64_t num_topk = 0;
     std::uint64_t element_bytes = 2;
+    std::uint64_t scale_factor_bytes = 0;
     bool expanded = false;
     bool allow_multiple_reduction = false;
     bool hybrid = false;
@@ -326,10 +327,14 @@ inline LayoutStatus build_symmetric_window_layout(
 
     const bool barrier_only = input.num_max_tokens_per_rank == 0 &&
                               input.hidden == 0 && input.num_topk == 0;
+    const bool bf16 = input.element_bytes == 2 &&
+        input.scale_factor_bytes == 0;
+    const bool fp8 = input.element_bytes == 1 &&
+        input.scale_factor_bytes > 0;
     if (!barrier_only &&
         (input.num_max_tokens_per_rank == 0 || input.hidden == 0 ||
-         input.element_bytes != 2))
-        return LayoutStatus::invalid("invalid BF16 production layout shape");
+         (!bf16 && !fp8)))
+        return LayoutStatus::invalid("invalid production layout shape");
 
     SymmetricWindowLayout layout{};
     layout.struct_size = sizeof(SymmetricWindowLayout);
@@ -365,13 +370,16 @@ inline LayoutStatus build_symmetric_window_layout(
     if (!barrier_only) {
         const std::uint64_t effective_topk =
             input.num_topk == 0 ? input.world_size : input.num_topk;
-        std::uint64_t hidden_bytes = 0;
+        std::uint64_t dispatch_hidden_bytes = 0;
+        std::uint64_t combine_hidden_bytes = 0;
         std::uint64_t topk_index_bytes = 0;
         std::uint64_t topk_weight_bytes = 0;
         std::uint64_t metadata_fields = 0;
         std::uint64_t metadata_bytes = 0;
         if (!checked_multiply(input.hidden, input.element_bytes,
-                              &hidden_bytes) ||
+                              &dispatch_hidden_bytes) ||
+            !checked_multiply(input.hidden, sizeof(std::uint16_t),
+                              &combine_hidden_bytes) ||
             !checked_multiply(effective_topk, sizeof(std::int64_t),
                               &topk_index_bytes) ||
             !checked_multiply(effective_topk, sizeof(float),
@@ -383,7 +391,8 @@ inline LayoutStatus build_symmetric_window_layout(
 
         LayoutBuilder dispatch_record;
         std::uint64_t ignored = 0;
-        if (!dispatch_record.append(hidden_bytes, &ignored) ||
+        if (!dispatch_record.append(dispatch_hidden_bytes, &ignored) ||
+            !dispatch_record.append(input.scale_factor_bytes, &ignored) ||
             !dispatch_record.append(topk_index_bytes, &ignored) ||
             !dispatch_record.append(topk_weight_bytes, &ignored) ||
             !dispatch_record.append(metadata_bytes, &ignored) ||
@@ -418,7 +427,7 @@ inline LayoutStatus build_symmetric_window_layout(
             layout.dispatch_staging_shard_bytes;
 
         LayoutBuilder combine_record;
-        if (!combine_record.append(hidden_bytes, &ignored) ||
+        if (!combine_record.append(combine_hidden_bytes, &ignored) ||
             !combine_record.append(topk_weight_bytes,
                                    &layout.combine_weight_offset) ||
             !combine_record.append(

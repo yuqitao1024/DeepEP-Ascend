@@ -296,14 +296,16 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
         return invalid("invalid core tiling ABI");
     if (!detail::valid_topology(tiling.topology))
         return invalid("invalid topology");
+    if (tiling.element_kind != ElementKind::kBFloat16 &&
+        tiling.element_kind != ElementKind::kFloat8E4M3)
+        return invalid("invalid element kind");
+    if (tiling.element_kind == ElementKind::kFloat8E4M3 &&
+        tiling.operation != OperationKind::kDispatch)
+        return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
+                "FP8 is supported only for dispatch"};
     const auto topology_status = validate_operation_topology(tiling);
     if (!topology_status.ok())
         return topology_status;
-    if (tiling.element_kind == ElementKind::kFloat8E4M3)
-        return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
-                "FP8 runtime execution is deferred"};
-    if (tiling.element_kind != ElementKind::kBFloat16)
-        return invalid("invalid element kind");
     if (has_deferred_mode(tiling.mode_flags))
         return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
                 "requested mode is deferred until a real transport exists"};
@@ -447,6 +449,13 @@ CoreRuntimeStatus launch_internal_dispatch(
            arguments.route_record_capacity <
                tiling.hybrid_route_capacity))))
         return invalid("dispatch required argument is null");
+    const bool fp8 = tiling.element_kind == ElementKind::kFloat8E4M3;
+    if ((fp8 &&
+         ((tiling.num_tokens != 0 && arguments.scale_factors == nullptr) ||
+          arguments.recv_scale_factors == nullptr)) ||
+        (!fp8 && (arguments.scale_factors != nullptr ||
+                  arguments.recv_scale_factors != nullptr)))
+        return invalid("dispatch scale factors do not match element kind");
     if (!is_aligned(arguments.communication_buffer) ||
         !is_aligned(arguments.workspace))
         return invalid("dispatch storage is misaligned");

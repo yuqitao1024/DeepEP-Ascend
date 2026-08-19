@@ -370,6 +370,8 @@ inline TilingStatus build_core_tiling(
         window_input.hidden = input.hidden;
         window_input.num_topk = input.num_topk;
         window_input.element_bytes = element_bytes;
+        window_input.scale_factor_bytes =
+            tiling.token_layout.scale_factor_bytes;
         window_input.expanded =
             has_mode(input.mode_flags, CoreMode::kExpanded);
         window_input.allow_multiple_reduction = has_mode(
