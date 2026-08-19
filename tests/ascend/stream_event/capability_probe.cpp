@@ -1,13 +1,16 @@
+#include <chrono>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #include <torch/extension.h>
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 #include <torch_npu/csrc/core/npu/NPUFunctions.h>
+#include <torch_npu/csrc/core/npu/NPUGuard.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 
-#include <acl/acl.h>
+#include <acl/acl_rt.h>
 
 namespace {
 
@@ -17,6 +20,27 @@ void check_acl(aclError result, const char* operation) {
     if (result != ACL_SUCCESS) {
         throw std::runtime_error(std::string(operation) + " failed with ACL " +
                                  std::to_string(result));
+    }
+}
+
+void wait_for_event(aclrtEvent event, std::uint32_t timeout_ms) {
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(timeout_ms);
+    aclrtEventRecordedStatus status = ACL_EVENT_RECORDED_STATUS_NOT_READY;
+    while (true) {
+        check_acl(aclrtQueryEventStatus(event, &status),
+                  "aclrtQueryEventStatus");
+        if (status == ACL_EVENT_RECORDED_STATUS_COMPLETE) {
+            return;
+        }
+        if (status != ACL_EVENT_RECORDED_STATUS_NOT_READY) {
+            throw std::runtime_error("aclrtQueryEventStatus returned an "
+                                     "unknown recorded status");
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw std::runtime_error("event did not complete within timeout");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
@@ -53,16 +77,9 @@ pybind11::tuple probe_stream_event_capability() {
                   "aclrtRecordEvent completion");
     }
 
-    aclrtEventRecordedStatus status = ACL_EVENT_STATUS_NOT_READY;
-    check_acl(aclrtQueryEventStatus(event, &status),
-              "aclrtQueryEventStatus dependency");
     const auto timeout_ms = kTimeoutMs;
-    check_acl(aclrtSynchronizeEventWithTimeout(event, timeout_ms),
-              "aclrtSynchronizeEventWithTimeout dependency");
-    check_acl(aclrtQueryEventStatus(completion_event, &status),
-              "aclrtQueryEventStatus");
-    check_acl(aclrtSynchronizeEventWithTimeout(completion_event, timeout_ms),
-              "aclrtSynchronizeEventWithTimeout");
+    wait_for_event(event, timeout_ms);
+    wait_for_event(completion_event, timeout_ms);
     check_acl(aclrtDestroyEvent(completion_event), "aclrtDestroyEvent completion");
     check_acl(aclrtDestroyEvent(event), "aclrtDestroyEvent dependency");
 

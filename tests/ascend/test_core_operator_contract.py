@@ -51,6 +51,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         probe = STREAM_EVENT_CAPABILITY_PROBE.read_text()
         runner = STREAM_EVENT_CAPABILITY_RUNNER.read_text()
 
+        self.assertIn("#include <acl/acl_rt.h>", probe)
+        self.assertIn(
+            "#include <torch_npu/csrc/core/npu/NPUGuard.h>", probe)
         for call in (
                 "c10_npu::getStreamFromPool(true, device_index)",
                 "c10_npu::getCurrentNPUStream(device_index)",
@@ -59,16 +62,23 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "aclrtRecordEvent(event, compute_stream.stream(false))",
                 "aclrtStreamWaitEvent(comm_stream.stream(false), event)",
                 "aclrtQueryEventStatus(event, &status)",
-                "aclrtSynchronizeEventWithTimeout(event, timeout_ms)",
+                "wait_for_event(event, timeout_ms)",
                 "aclrtDestroyEvent(event)",
                 "c10_npu::NPUCachingAllocator::recordStream("):
             self.assertIn(call, probe)
+
+        self.assertIn("ACL_EVENT_RECORDED_STATUS_NOT_READY", probe)
+        self.assertIn("std::chrono::steady_clock", probe)
 
         self.assertIn(
             "torch.npu.Stream(stream_id=stream_id, device_index=device_index, "
             "device_type=device_type)", runner)
         self.assertIn("with torch.npu.stream(stream):", runner)
+        self.assertIn('os.environ["ASCEND_HOME_PATH"]', runner)
+        self.assertIn('cann_root / "aarch64-linux" / "include"', runner)
+        self.assertIn('cann_root / "aarch64-linux" / "lib64"', runner)
         self.assertNotIn("aclrtSynchronizeDevice", probe)
+        self.assertNotIn("aclrtSynchronizeEventWithTimeout", probe)
         self.assertNotIn("torch.npu.synchronize", runner)
 
     def test_route_aware_kernels_receive_complete_topology_and_timeout(self):

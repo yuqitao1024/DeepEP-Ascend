@@ -135,7 +135,7 @@ does not implement the device request lifecycle represented by those flags.
 stream/event API and native RAII event state. It provides:
 
 - current and pool stream acquisition with device identity;
-- event create, record, query, bounded synchronize, stream wait, and destroy;
+- event create, record, query-poll bounded wait, stream wait, and destroy;
 - generic allocator stream recording;
 - `TransportStatus` errors with the exact operation and backend code; and
 - retryable state transitions that never clear ownership after a failed
@@ -200,16 +200,20 @@ the pinned CANN, Torch-NPU, and HCOMM environment:
 
 1. `c10_npu::getStreamFromPool`, current-stream lookup, and an NPU stream guard;
 2. reconstruction of the retained stream as a usable Python `torch.npu.Stream`;
-3. event create, record, query, bounded synchronize, stream wait, and destroy;
+3. event create, record, query-poll bounded wait, stream wait, and destroy;
 4. predecessor-event lifetime across a stream wait;
 5. the selected generic allocator record-stream call; and
 6. ordering and completion without a device-global synchronize.
 
-If the pinned runtime lacks bounded event synchronization, Phase 3E.1 remains
-gated until an event-query loop with a monotonic deadline and documented CANN
-status codes passes the same test. If Python stream reconstruction is not
-supported, the extension returns a Torch-NPU stream object directly; it must not
-expose a raw integer pointer as the public stream.
+NPU8P CANN 9.2 exports `aclrtSynchronizeEventWithTimeout` from
+`libascendcl.so`, but the pinned public CANN and Torch-NPU headers do not
+declare it or expose recoverable signature metadata. Phase 3E.1 therefore uses
+the supported fallback: `aclrtQueryEventStatus` polling with a
+`std::chrono::steady_clock` five-second deadline. The exact non-ready result is
+`aclrtEventRecordedStatus` value `ACL_EVENT_RECORDED_STATUS_NOT_READY`; only
+`ACL_EVENT_RECORDED_STATUS_COMPLETE` completes the wait. If Python stream
+reconstruction is not supported, the extension returns a Torch-NPU stream
+object directly; it must not expose a raw integer pointer as the public stream.
 
 ## Verification
 

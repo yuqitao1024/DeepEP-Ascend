@@ -1,3 +1,4 @@
+import os
 import pathlib
 import tempfile
 
@@ -10,15 +11,20 @@ SOURCE = pathlib.Path(__file__).with_name("capability_probe.cpp")
 
 
 def main():
+    cann_root = pathlib.Path(os.environ["ASCEND_HOME_PATH"])
     torch_npu_root = pathlib.Path(torch_npu.__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="deepep-stream-event-") as build_dir:
         module = load(
             name="deepep_stream_event_capability",
             sources=[str(SOURCE)],
-            extra_include_paths=[str(torch_npu_root / "include")],
+            extra_include_paths=[
+                str(torch_npu_root / "include"),
+                str(cann_root / "aarch64-linux" / "include"),
+            ],
             extra_ldflags=[
                 f"-L{torch_npu_root / 'lib'}",
                 "-ltorch_npu",
+                f'-L{cann_root / "aarch64-linux" / "lib64"}',
                 "-lascendcl",
             ],
             build_directory=build_dir,
