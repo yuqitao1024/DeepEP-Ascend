@@ -38,11 +38,39 @@ TWO_RANK_COMBINE = \
     ROOT / "tests/ascend/production/run_two_rank_combine.py"
 SCALE_UP_SMOKE = \
     ROOT / "tests/ascend/production/run_scale_up_smoke.py"
+STREAM_EVENT_CAPABILITY_PROBE = \
+    ROOT / "tests/ascend/stream_event/capability_probe.cpp"
+STREAM_EVENT_CAPABILITY_RUNNER = \
+    ROOT / "tests/ascend/stream_event/run_capability_probe.py"
 ELASTIC = ROOT / "csrc/backends/ascend/elastic"
 CORE_OPS = ROOT / "tests/ascend/core_ops"
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
+    def test_stream_event_capability_probe_contract(self):
+        probe = STREAM_EVENT_CAPABILITY_PROBE.read_text()
+        runner = STREAM_EVENT_CAPABILITY_RUNNER.read_text()
+
+        for call in (
+                "c10_npu::getStreamFromPool(true, device_index)",
+                "c10_npu::getCurrentNPUStream(device_index)",
+                "c10_npu::NPUStreamGuard guard(comm_stream)",
+                "aclrtCreateEventWithFlag(&event, ACL_EVENT_SYNC)",
+                "aclrtRecordEvent(event, compute_stream.stream(false))",
+                "aclrtStreamWaitEvent(comm_stream.stream(false), event)",
+                "aclrtQueryEventStatus(event, &status)",
+                "aclrtSynchronizeEventWithTimeout(event, timeout_ms)",
+                "aclrtDestroyEvent(event)",
+                "c10_npu::NPUCachingAllocator::recordStream("):
+            self.assertIn(call, probe)
+
+        self.assertIn(
+            "torch.npu.Stream(stream_id=stream_id, device_index=device_index, "
+            "device_type=device_type)", runner)
+        self.assertIn("with torch.npu.stream(stream):", runner)
+        self.assertNotIn("aclrtSynchronizeDevice", probe)
+        self.assertNotIn("torch.npu.synchronize", runner)
+
     def test_route_aware_kernels_receive_complete_topology_and_timeout(self):
         required_parameters = (
             "transport_topology_abi_version",
