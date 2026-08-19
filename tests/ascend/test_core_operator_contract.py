@@ -2020,8 +2020,10 @@ int main() {
                     "communication_tokens": 256,
                     "compute_iterations": 8,
                     "compute_shape": [4096, 4096],
-                    "diagnostic_timeout_seconds": 180,
-                    "diagnostic_tokens": [256, 512, 1024],
+                    "diagnostic_repetitions": 1,
+                    "diagnostic_timeout_seconds": 150,
+                    "diagnostic_tokens": [1024],
+                    "diagnostic_warmups": 0,
                     "minimum_median_improvement": 0.05,
                     "profiler_interval_required": True,
                     "repetitions": 7,
@@ -2509,6 +2511,91 @@ int main() {
         self.assertEqual(measurement["profiler_overlap"]["overlap_us"], 0.0)
         self.assertIn("ValueError", measurement["profiler_overlap"]["failure"])
 
+    def test_async_overlap_sweep_checkpoints_each_measurement_phase(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_sweep_phases", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class FakeTensor:
+            shape = (1024, 7168)
+
+            def add(self, _value):
+                return self
+
+        class FakeBuffer:
+            def dispatch(self, *_args, **_kwargs):
+                return None, None, None, "handle", None
+
+        class FakeElasticBuffer:
+            @staticmethod
+            def get_buffer_size_hint(*_args, **_kwargs):
+                return 4096
+
+        class FakeDeepEp:
+            ElasticBuffer = FakeElasticBuffer
+
+        class FakeDist:
+            @staticmethod
+            def get_rank(_group):
+                return 0
+
+        tensor = FakeTensor()
+        worker = module.AsyncOverlapWorker(
+            None, None, FakeDist, FakeDeepEp, object(), object(), "/tmp")
+        worker.new_buffer = mock.Mock(return_value=FakeBuffer())
+        worker._make_overlap_inputs = mock.Mock(
+            return_value=(tensor, tensor, tensor, tensor))
+        worker._communication_iteration = mock.Mock(return_value=0.10)
+        worker._compute_iteration = mock.Mock(return_value=0.20)
+        worker._overlap_iteration = mock.Mock(
+            side_effect=lambda *_args, overlap: 0.27 if overlap else 0.30)
+        worker._profile_overlap = mock.Mock(return_value={
+            "overlap_us": 17.0,
+            "compute_stream_id": 7,
+            "communication_stream_id": 11,
+        })
+        checkpoints = []
+
+        def record_phase(phase, measurement):
+            checkpoints.append((phase, json.loads(json.dumps(measurement))))
+
+        with mock.patch.object(module, "OVERLAP_SWEEP_WARMUPS", 0), \
+                mock.patch.object(module, "OVERLAP_SWEEP_REPETITIONS", 1):
+            measurement = worker._run_overlap_sweep_point(
+                1024, record_phase=record_phase)
+
+        self.assertEqual(
+            [(phase, measurement["phase_status"])
+             for phase, measurement in checkpoints],
+            [
+                ("communication-only", "started"),
+                ("communication-only", "completed"),
+                ("compute-only", "started"),
+                ("compute-only", "completed"),
+                ("serialized", "started"),
+                ("serialized", "completed"),
+                ("overlapped", "started"),
+                ("overlapped", "completed"),
+                ("profiler", "started"),
+                ("profiler", "completed"),
+            ],
+        )
+        completed = {
+            phase: checkpoint
+            for phase, checkpoint in checkpoints
+            if checkpoint["phase_status"] == "completed"
+        }
+        self.assertIn("communication", completed["communication-only"])
+        self.assertNotIn("compute", completed["communication-only"])
+        self.assertIn(
+            "theoretical_maximum_improvement", completed["compute-only"])
+        self.assertIn("serialized", completed["serialized"])
+        self.assertIn("median_improvement", completed["overlapped"])
+        self.assertEqual(completed["profiler"]["profiler_overlap"]["overlap_us"],
+                         17.0)
+        self.assertEqual(measurement, checkpoints[-1][1])
+
     def test_async_overlap_failed_result_keeps_both_rank_measurements(self):
         spec = importlib.util.spec_from_file_location(
             "run_async_overlap_rank_evidence", ASYNC_OVERLAP)
@@ -2571,11 +2658,7 @@ int main() {
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        point_inputs = (
-            (256, 0.03, 0.014, 12.0),
-            (512, 0.08, 0.020, 0.0),
-            (1024, 0.12, 0.060, 18.0),
-        )
+        point_inputs = ((1024, 0.12, 0.060, 18.0),)
         points = []
         for point_index, (tokens, theoretical, observed, overlap_us) in \
                 enumerate(point_inputs):
@@ -2596,23 +2679,23 @@ int main() {
                     "event_wait_completed": True,
                     "communication": {
                         "median_seconds": 0.10,
-                        "p95_seconds": 0.11,
-                        "samples_seconds": [0.09, 0.10, 0.11],
+                        "p95_seconds": 0.10,
+                        "samples_seconds": [0.10],
                     },
                     "compute": {
                         "median_seconds": 0.20,
-                        "p95_seconds": 0.21,
-                        "samples_seconds": [0.19, 0.20, 0.21],
+                        "p95_seconds": 0.20,
+                        "samples_seconds": [0.20],
                     },
                     "serialized": {
                         "median_seconds": 0.30,
-                        "p95_seconds": 0.31,
-                        "samples_seconds": [0.29, 0.30, 0.31],
+                        "p95_seconds": 0.30,
+                        "samples_seconds": [0.30],
                     },
                     "overlapped": {
                         "median_seconds": 0.30 * (1.0 - observed),
-                        "p95_seconds": 0.30,
-                        "samples_seconds": [0.28, 0.29, 0.30],
+                        "p95_seconds": 0.30 * (1.0 - observed),
+                        "samples_seconds": [0.30 * (1.0 - observed)],
                     },
                     "theoretical_maximum_improvement": theoretical,
                     "median_improvement": observed,
@@ -2648,24 +2731,88 @@ int main() {
         self.assertEqual(exit_code, 0)
         self.assertEqual(len(bounded_calls), 1)
         command, timeout_seconds, environment = bounded_calls[0]
-        self.assertEqual(timeout_seconds, 180)
+        self.assertEqual(timeout_seconds, 150)
         self.assertIsNone(environment)
         self.assertIn("--overlap-sweep-worker", command)
         self.assertEqual(
             [point["classification"] for point in report["points"]],
-            [
-                "workload-ratio-cannot-meet-threshold",
-                "profiler-overlap-missing",
-                "candidate",
-            ],
+            ["candidate"],
         )
+        self.assertFalse(report["acceptance_eligible"])
+        self.assertEqual(report["acceptance_ineligible_reason"],
+                         "single-sample-diagnostic")
         self.assertEqual(report["recommended_tokens"], 1024)
         self.assertEqual(
             len({rank_row["buffer_instance"]
                  for point in report["points"]
                  for rank_row in point["ranks"]}),
-            6,
+            2,
         )
+
+    def test_async_overlap_sweep_timeout_preserves_last_phase_checkpoint(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_sweep_timeout_checkpoint", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        active_point = {
+            "tokens": 1024,
+            "completed_phase": "compute-only",
+            "active_phase": "serialized",
+            "phase_status": "started",
+            "ranks": [
+                {
+                    "rank": rank,
+                    "tokens": 1024,
+                    "buffer_instance": f"rank-{rank}-buffer",
+                    "event_wait_completed": True,
+                    "completed_phase": "compute-only",
+                    "active_phase": "serialized",
+                    "phase_status": "started",
+                    "communication": {"median_seconds": 1.0},
+                    "compute": {"median_seconds": 2.0},
+                }
+                for rank in range(2)
+            ],
+        }
+        failure = {
+            "status": "failed",
+            "failure": "process timeout after 150s",
+            "duration_seconds": 150.0,
+            "exit_code": None,
+            "stdout": "PHASE3E_OVERLAP_SWEEP_PHASE {}\n",
+            "stderr": "",
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "sweep.json"
+            trace_dir = pathlib.Path(directory) / "traces"
+            point_trace_dir = trace_dir / "tokens-1024"
+            point_trace_dir.mkdir(parents=True)
+            for row in active_point["ranks"]:
+                (point_trace_dir / f"phase-rank{row['rank']}.json").write_text(
+                    json.dumps({
+                        "schema_version": 1,
+                        "tokens": 1024,
+                        "completed_phase": "compute-only",
+                        "active_phase": "serialized",
+                        "phase_status": "started",
+                        "measurement": row,
+                    }))
+            output.write_text(json.dumps({
+                "schema_version": 1,
+                "points": [],
+            }))
+            with mock.patch.object(
+                    module, "_run_bounded", return_value=failure):
+                exit_code = module._run_overlap_sweep(
+                    output, trace_dir)
+            report = json.loads(output.read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(report["active_point"], active_point)
+        self.assertEqual(report["launcher_failure"],
+                         "process timeout after 150s")
 
     def test_async_overlap_suite_checkpoints_each_completed_case(self):
         spec = importlib.util.spec_from_file_location(
