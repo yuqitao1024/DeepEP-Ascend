@@ -839,11 +839,12 @@ class DispatchMatrix:
             message = str(error)
             for expected in (
                     f"dispatch failed on rank {self.rank}",
-                    "backend error 1",
+                    "backend error 65537",
                     "error=invalid_protocol",
                     "command_index=0",
                     "opcode=0",
-                    "channel=0"):
+                    "channel=0",
+                    "backend_status=65537"):
                 _check(expected in message,
                        f"invalid expert diagnostic omitted {expected!r}: "
                        f"{message}")
