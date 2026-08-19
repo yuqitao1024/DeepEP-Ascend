@@ -49,6 +49,7 @@ struct Trace {
     std::atomic<int> current_stream_calls{0};
     std::atomic<int> pool_stream_calls{0};
     std::atomic<int> destroy_event_calls{0};
+    std::atomic<int> create_event_calls{0};
     std::atomic<int> synchronize_stream_calls{0};
     std::atomic<int> runtime_copy_to_host_calls{0};
     std::atomic<int> transport_copy_from_device_calls{0};
@@ -56,6 +57,11 @@ struct Trace {
     std::atomic<int> host_free_calls{0};
     std::atomic<int> deregister_calls{0};
     std::atomic<int> destroy_team_calls{0};
+    int fail_create_event_on = 0;
+    bool fail_completion_record = false;
+    bool fail_barrier_diagnostic = false;
+    bool current_stream_completion_record = false;
+    bool event_ready = true;
     std::vector<void*> runtime_allocations;
     std::vector<void*> transport_allocations;
     void* diagnostic = nullptr;
@@ -113,19 +119,40 @@ int stream_pool_stream(
 }
 
 int stream_create_event(void* data, void** event) {
+    auto& trace = self(data);
+    const int call = ++trace.create_event_calls;
+    if (call == trace.fail_create_event_on)
+        return 22;
     *event = new int(1);
-    self(data).order.emplace_back("create event");
+    trace.order.emplace_back("create event");
     return 0;
 }
 int stream_record_event(void* data, void*, void* stream) {
     const auto* token = static_cast<StreamToken*>(stream);
-    self(data).order.emplace_back(token->communication ?
+    auto& trace = self(data);
+    trace.order.emplace_back(
+        token->communication || trace.current_stream_completion_record ?
         "record completion event" : "record compute dependency");
+    if (token->communication && trace.fail_completion_record)
+        return 23;
     return 0;
 }
 int stream_query_event(void* data, void*, bool* complete) {
-    *complete = true;
-    self(data).order.emplace_back("finish completion event");
+    auto& trace = self(data);
+    {
+        std::unique_lock<std::mutex> lock(trace.mutex);
+        if (trace.block_sync) {
+            trace.sync_entered = true;
+            trace.cv.notify_all();
+            trace.cv.wait(lock, [&] { return trace.release_sync; });
+            trace.block_sync = false;
+            trace.sync_entered = false;
+            trace.release_sync = false;
+        }
+    }
+    *complete = trace.event_ready;
+    trace.order.emplace_back(trace.event_ready ?
+        "finish completion event" : "completion event pending");
     return 0;
 }
 int stream_wait_event(void* data, void* stream, void*) {
@@ -315,13 +342,15 @@ ResourceIdentity identity(
 using Buffer = deep_ep::ascend::ElasticBuffer;
 
 std::unique_ptr<Buffer> make_buffer(
-    Trace& trace, ResourceIdentity* resource_identity) {
+    Trace& trace, ResourceIdentity* resource_identity,
+    std::uint64_t completion_timeout_ms = 5000) {
     auto resources = make_resources(trace);
     if (resources == nullptr)
         return nullptr;
     *resource_identity = identity(*resources, trace);
     return Buffer::make_testing_buffer(
-        0, std::move(resources), 2 * 1024 * 1024, 1);
+        0, std::move(resources), 2 * 1024 * 1024, 1,
+        true, 7, 2, 0, false, completion_timeout_ms);
 }
 
 bool error_contains(
@@ -380,17 +409,19 @@ void check_two_live_buffer_resource_and_failure_isolation() {
 
     first->barrier(false, false, true);
     second->barrier(false, false, true);
-    first_trace.sync_failures = 1;
+    first_trace.fail_barrier_diagnostic = true;
     CHECK(error_contains(
-        [&] { first->barrier(false, false, true); }, "synchronize_stream"));
+        [&] { first->barrier(false, false, true); },
+        "device diagnostic reported failure"));
     CHECK(error_contains(
         [&] { first->barrier(false, false, true); }, "poisoned"));
     second->barrier(false, false, true);
     CHECK(first_trace.barrier_launches == 3);
     CHECK(second_trace.barrier_launches == 2);
 
-    first->destroy();
-    CHECK(first_trace.destroy_event_calls == 0);
+    CHECK(error_contains(
+        [&] { first->destroy(); }, "device diagnostic reported failure"));
+    CHECK(first_trace.destroy_event_calls == 3);
     CHECK(first_trace.runtime_free_calls > 0);
     CHECK(first_trace.deregister_calls == 1);
     CHECK(second_trace.runtime_free_calls == 0);
@@ -400,7 +431,7 @@ void check_two_live_buffer_resource_and_failure_isolation() {
     second->barrier(false, false, true);
     CHECK(second_trace.barrier_launches == 3);
     second->destroy();
-    CHECK(second_trace.destroy_event_calls == 0);
+    CHECK(second_trace.destroy_event_calls == 3);
 }
 
 void check_destroy_is_busy_while_real_operation_uses_resources() {
@@ -542,8 +573,8 @@ void check_comm_stream_barrier_order() {
         "create event",
         "record compute dependency",
         "comm waits dependency/previous event",
-        "activate lease and launch barrier on comm",
         "create event",
+        "activate lease and launch barrier on comm",
         "record completion event",
         "finish completion event",
         "finish completion event",
@@ -554,6 +585,85 @@ void check_comm_stream_barrier_order() {
     buffer->destroy();
 }
 
+void check_barrier_completion_create_failure_precedes_launch() {
+    Trace trace;
+    ResourceIdentity resource_identity;
+    auto buffer = make_buffer(trace, &resource_identity);
+    CHECK(buffer != nullptr);
+    if (buffer == nullptr)
+        return;
+    trace.fail_create_event_on = 2;
+    CHECK(error_contains(
+        [&] { buffer->barrier(true, false, true); }, "backend error 22"));
+    CHECK(trace.barrier_launches == 0);
+    CHECK(buffer->testing_operation_generation() == 0);
+    buffer->destroy();
+    CHECK(trace.runtime_free_calls > 0);
+}
+
+void check_barrier_completion_record_failure_retains_launch() {
+    Trace trace;
+    ResourceIdentity resource_identity;
+    auto buffer = make_buffer(trace, &resource_identity);
+    CHECK(buffer != nullptr);
+    if (buffer == nullptr)
+        return;
+    trace.fail_completion_record = true;
+    CHECK(error_contains(
+        [&] { buffer->barrier(true, false, true); }, "backend error 23"));
+    CHECK(trace.barrier_launches == 1);
+    CHECK(error_contains([&] { buffer->destroy(); }, "synchronize_event"));
+    CHECK(error_contains([&] { buffer->destroy(); }, "synchronize_event"));
+    CHECK(trace.runtime_free_calls == 0);
+    CHECK(trace.host_free_calls == 0);
+    buffer.reset();
+    CHECK(trace.runtime_free_calls == 0);
+    CHECK(trace.host_free_calls == 0);
+}
+
+void check_failed_operation_destroy_invalidates_public_access() {
+    Trace trace;
+    ResourceIdentity resource_identity;
+    auto buffer = make_buffer(trace, &resource_identity);
+    CHECK(buffer != nullptr);
+    if (buffer == nullptr)
+        return;
+    trace.fail_barrier_diagnostic = true;
+    CHECK(error_contains(
+        [&] { buffer->barrier(true, false, true); },
+        "device diagnostic reported failure"));
+    CHECK(error_contains(
+        [&] { buffer->destroy(); }, "device diagnostic reported failure"));
+    CHECK(trace.runtime_free_calls > 0);
+    CHECK(trace.host_free_calls > 0);
+    CHECK(error_contains(
+        [&] { (void)buffer->get_comm_stream(); }, "runtime is destroyed"));
+}
+
+void check_current_stream_barrier_has_bounded_event_timeout() {
+    Trace trace;
+    ResourceIdentity resource_identity;
+    auto buffer = make_buffer(trace, &resource_identity, 0);
+    CHECK(buffer != nullptr);
+    if (buffer == nullptr)
+        return;
+    trace.order.clear();
+    trace.current_stream_completion_record = true;
+    trace.event_ready = false;
+    CHECK(error_contains(
+        [&] { buffer->barrier(false, false, true); },
+        "synchronize_event failed"));
+    const std::vector<std::string> expected{
+        "capture compute dependency",
+        "create event",
+        "activate lease and launch barrier on current",
+        "record completion event",
+        "completion event pending",
+    };
+    CHECK(trace.order == expected);
+    CHECK(trace.synchronize_stream_calls == 0);
+}
+
 }  // namespace
 
 extern "C" int deep_ep_ascend_launch_barrier(
@@ -561,12 +671,19 @@ extern "C" int deep_ep_ascend_launch_barrier(
     void* stream) {
     auto& trace = *static_cast<StreamToken*>(stream)->trace;
     ++trace.barrier_launches;
-    trace.order.emplace_back("activate lease and launch barrier on comm");
-    auto* diagnostic = static_cast<transport::DeviceTransportDiagnostic*>(
-        trace.diagnostic);
-    *diagnostic = {};
-    diagnostic->abi_version = transport::kTransportCommandAbiVersion;
-    diagnostic->generation = arguments.generation;
+    trace.order.emplace_back(
+        static_cast<StreamToken*>(stream)->communication ?
+            "activate lease and launch barrier on comm" :
+            "activate lease and launch barrier on current");
+    transport::DeviceTransportDiagnostic diagnostic{};
+    diagnostic.abi_version = transport::kTransportCommandAbiVersion;
+    diagnostic.generation = arguments.generation;
+    if (trace.fail_barrier_diagnostic) {
+        diagnostic.error =
+            transport::DeviceTransportError::kCompletionFailure;
+        diagnostic.backend_status = 24;
+    }
+    std::memcpy(trace.diagnostic, &diagnostic, sizeof(diagnostic));
     std::uint64_t completion_offset = 0;
     if (!elastic::checked_rank_slot_offset(
             tiling.symmetric_window_layout.barrier_completion_offset,
@@ -593,5 +710,9 @@ int main() {
     check_destroy_is_busy_while_real_operation_uses_resources();
     check_cross_operation_busy_and_deferred_poison();
     check_comm_stream_barrier_order();
+    check_barrier_completion_create_failure_precedes_launch();
+    check_barrier_completion_record_failure_retains_launch();
+    check_failed_operation_destroy_invalidates_public_access();
+    check_current_stream_barrier_has_bounded_event_timeout();
     return failures == 0 ? 0 : 1;
 }

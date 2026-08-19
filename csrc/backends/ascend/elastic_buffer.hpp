@@ -186,9 +186,11 @@ public:
     ElasticAsyncCompletionResources(
         std::unique_ptr<runtime::CannRuntimeResources> resources,
         std::uint64_t dispatch_family,
-        std::uint64_t last_dispatch_generation)
+        std::uint64_t last_dispatch_generation,
+        int rank_idx)
         : resources_(std::move(resources)), dispatch_family_(dispatch_family),
-          last_dispatch_generation_(last_dispatch_generation) {}
+          last_dispatch_generation_(last_dispatch_generation),
+          rank_idx_(rank_idx) {}
 
     runtime::CannRuntimeResources* runtime() const noexcept {
         return resources_.get();
@@ -218,13 +220,27 @@ public:
     }
 
     transport::TransportStatus read_diagnostic(
-        elastic::BufferOperationKind, std::uint64_t,
+        elastic::BufferOperationKind kind, std::uint64_t,
         transport::DeviceTransportDiagnostic* output) override {
         if (resources_ == nullptr || resources_->transport() == nullptr ||
             output == nullptr)
             return transport::TransportStatus::invalid(
                 "read_diagnostic", "completion resources are unavailable");
-        return resources_->transport()->read_diagnostic(output);
+        auto status = resources_->transport()->read_diagnostic(output);
+#if DEEP_EP_ASCEND_TESTING
+        if (status.ok() && kind == elastic::BufferOperationKind::kBarrier &&
+            std::getenv("DEEP_EP_ASCEND_TEST_DIAGNOSTIC") != nullptr) {
+            auto& diagnostic = *output;
+            diagnostic.abi_version = transport::kTransportCommandAbiVersion;
+            diagnostic.error = transport::DeviceTransportError::kCompletionTimeout;
+            diagnostic.command_index = 0;
+            diagnostic.opcode = transport::TransportCommandOpcode::kBarrier;
+            diagnostic.peer = static_cast<std::uint32_t>(rank_idx_);
+            diagnostic.channel = 0;
+            diagnostic.backend_status = 0;
+        }
+#endif
+        return status;
     }
 
     transport::TransportStatus read_completion(
@@ -276,6 +292,7 @@ private:
     mutable std::mutex mutex_;
     std::uint64_t dispatch_family_ = 0;
     std::uint64_t last_dispatch_generation_ = 0;
+    int rank_idx_ = -1;
     std::optional<StagedDispatch> staged_dispatch_;
 };
 
@@ -700,7 +717,8 @@ class ElasticBuffer {
                   bool allow_multiple_reduction,
                   std::uint64_t dispatch_family,
                   std::uint64_t last_dispatch_generation,
-                  bool allow_hybrid_mode)
+                  bool allow_hybrid_mode,
+                  std::uint64_t completion_timeout_ms)
         : rank_idx_(rank), num_ranks_(num_ranks),
           num_buffer_bytes_(buffer_bytes),
           allow_hybrid_mode_(allow_hybrid_mode),
@@ -709,10 +727,10 @@ class ElasticBuffer {
         completion_resources_ =
             std::make_shared<ElasticAsyncCompletionResources>(
                 std::move(resources), dispatch_family,
-                last_dispatch_generation);
+                last_dispatch_generation, rank);
         resources_ = completion_resources_->runtime();
         async_state_ = std::make_shared<elastic::AsyncBufferState>(
-            completion_resources_, 5000);
+            completion_resources_, completion_timeout_ms);
     }
 #endif
 
@@ -775,7 +793,7 @@ public:
             raise_transport_status(status, rank_idx_);
         completion_resources_ =
             std::make_shared<ElasticAsyncCompletionResources>(
-                std::move(resources), dispatch_family, 0);
+                std::move(resources), dispatch_family, 0, rank_idx_);
         resources_ = completion_resources_->runtime();
         async_state_ = std::make_shared<elastic::AsyncBufferState>(
             completion_resources_, 5000);
@@ -796,7 +814,8 @@ public:
         std::uint64_t dispatch_family = 7,
         int num_ranks = 2,
         std::uint64_t last_dispatch_generation = 0,
-        bool allow_hybrid_mode = false) {
+        bool allow_hybrid_mode = false,
+        std::uint64_t completion_timeout_ms = 5000) {
         TORCH_CHECK(num_ranks >= 2 && rank >= 0 && rank < num_ranks,
                     "DeepEP Ascend backend: invalid testing topology");
         const auto topology_matches = [&] {
@@ -821,7 +840,8 @@ public:
         return std::unique_ptr<ElasticBuffer>(new ElasticBuffer(
             TestingTag{}, rank, num_ranks, std::move(resources), buffer_bytes,
             timeout_cycles, allow_multiple_reduction, dispatch_family,
-            last_dispatch_generation, allow_hybrid_mode));
+            last_dispatch_generation, allow_hybrid_mode,
+            completion_timeout_ms));
     }
 
     std::size_t testing_dispatch_validation_state_bytes() const noexcept {
@@ -837,16 +857,21 @@ public:
     void destroy() {
         if (async_state_ == nullptr)
             return;
+        TORCH_CHECK(!async_state_->finalization_in_progress(),
+                    "DeepEP Ascend backend: destroy is busy on this buffer");
         const auto status = async_state_->destroy();
+        if (completion_resources_ == nullptr ||
+            completion_resources_->runtime() == nullptr) {
+            resources_ = nullptr;
+            completion_resources_.reset();
+            async_state_.reset();
+        }
         if (!status.ok() && status.operation == "destroy_async_state" &&
             status.message == "operation coordinator is busy")
             TORCH_CHECK(false,
                         "DeepEP Ascend backend: destroy is busy on this buffer");
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
-        resources_ = nullptr;
-        completion_resources_.reset();
-        async_state_.reset();
     }
 
     c10::Stream get_comm_stream() const {
@@ -928,6 +953,20 @@ public:
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
         }
+        runtime::NativeEventCreateResult completion{};
+        std::vector<elastic::EventDependency> predecessors;
+        std::uint64_t completion_offset = 0;
+        TORCH_CHECK(
+            elastic::checked_rank_slot_offset(
+                tiling.symmetric_window_layout.barrier_completion_offset,
+                tiling.symmetric_window_layout.barrier_completion_count,
+                rank_idx_, &completion_offset),
+            "Invalid Ascend barrier completion slot for rank ", rank_idx_);
+        completion = resources_->create_event();
+        if (!completion.status.ok())
+            raise_transport_status(completion.status, rank_idx_);
+        if (dependency.event != nullptr)
+            predecessors.emplace_back(std::move(dependency));
         const auto generation = activate_operation(lease, "barrier");
         const elastic::BarrierArguments arguments{
             resources_->workspace(), generation, barrier_timeout_cycles_};
@@ -944,74 +983,20 @@ public:
             raise_transport_status(status, rank_idx_);
         }
 
-        if (use_comm_stream) {
-            std::uint64_t completion_offset = 0;
-            TORCH_CHECK(
-                elastic::checked_rank_slot_offset(
-                    tiling.symmetric_window_layout.barrier_completion_offset,
-                    tiling.symmetric_window_layout.barrier_completion_count,
-                    rank_idx_, &completion_offset),
-                "Invalid Ascend barrier completion slot for rank ", rank_idx_);
-            auto completion = resources_->create_event();
-            if (!completion.status.ok())
-                raise_transport_status(completion.status, rank_idx_);
-            status = completion.event->record(stream);
-            if (!status.ok())
-                raise_transport_status(status, rank_idx_);
-            std::vector<elastic::EventDependency> predecessors;
-            predecessors.emplace_back(std::move(dependency));
-            auto published = async_state_->publish(
-                std::move(lease), completion.event,
-                {elastic::BufferOperationKind::kBarrier, generation,
-                 completion_offset,
-                 tiling.workspace_layout.scratch_status_offset},
-                {}, std::move(predecessors));
-            if (!published.status.ok())
-                raise_transport_status(published.status, rank_idx_);
-            status = published.operation->finish(5000);
-            if (!status.ok())
-                raise_transport_status(status, rank_idx_);
-            if (with_cpu_sync) {
-                status = resources_->synchronize_device();
-                if (!status.ok())
-                    raise_transport_status(status, rank_idx_);
-            }
-            return;
-        }
-
-        status = resources_->synchronize_stream(stream.raw);
-        if (!status.ok())
+        auto published = async_state_->publish(
+            std::move(lease), completion.event,
+            {elastic::BufferOperationKind::kBarrier, generation,
+             completion_offset,
+             tiling.workspace_layout.scratch_status_offset},
+            {}, std::move(predecessors));
+        if (!published.status.ok())
+            raise_transport_status(published.status, rank_idx_);
+        status = completion.event->record(stream);
+        if (!status.ok()) {
+            (void)published.operation->finish(0);
             raise_transport_status(status, rank_idx_);
-        transport::DeviceTransportDiagnostic diagnostic{};
-        status = host_transport()->read_diagnostic(&diagnostic);
-        if (!status.ok())
-            raise_transport_status(status, rank_idx_);
-#if DEEP_EP_ASCEND_TESTING
-        if (std::getenv("DEEP_EP_ASCEND_TEST_DIAGNOSTIC") != nullptr) {
-            diagnostic.abi_version = transport::kTransportCommandAbiVersion;
-            diagnostic.error = transport::DeviceTransportError::kCompletionTimeout;
-            diagnostic.command_index = 0;
-            diagnostic.opcode = transport::TransportCommandOpcode::kBarrier;
-            diagnostic.peer = static_cast<std::uint32_t>(rank_idx_);
-            diagnostic.channel = 0;
-            diagnostic.backend_status = 0;
-            diagnostic.generation = generation;
         }
-#endif
-
-        std::uint64_t completion = 0;
-        std::uint64_t completion_offset = 0;
-        TORCH_CHECK(
-            elastic::checked_rank_slot_offset(
-                tiling.symmetric_window_layout.barrier_completion_offset,
-                tiling.symmetric_window_layout.barrier_completion_count,
-                rank_idx_, &completion_offset),
-            "Invalid Ascend barrier completion slot for rank ", rank_idx_);
-        const auto* completion_address = reinterpret_cast<const void*>(
-            reinterpret_cast<std::uintptr_t>(resources_->window_base()) +
-            completion_offset);
-        status = resources_->copy_to_host(
-            &completion, completion_address, sizeof(completion));
+        status = async_state_->finish_pending();
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         if (with_cpu_sync) {
@@ -1019,16 +1004,6 @@ public:
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
         }
-
-        if (diagnostic.abi_version !=
-                transport::kTransportCommandAbiVersion ||
-            diagnostic.error != transport::DeviceTransportError::kNone)
-            raise_barrier_diagnostic(diagnostic, "reported failure");
-        if (diagnostic.generation != generation)
-            raise_barrier_diagnostic(diagnostic, "generation mismatch");
-        if (completion != generation)
-            raise_barrier_diagnostic(diagnostic, "completion mismatch");
-        lease.complete();
     }
 
     static int64_t calculate_buffer_size(
@@ -1714,19 +1689,17 @@ public:
         }
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_), resources_->workspace_bytes()};
-        const auto generation = activate_operation(lease, "dispatch");
-        arguments.generation = generation;
-        const auto launch_status = elastic::launch_internal_dispatch(
-            arguments, tiling, storage, stream.raw);
-        if (!launch_status.ok())
-            raise_launch_status(launch_status, rank_idx_);
+        runtime::NativeEventCreateResult completion{};
+        std::vector<elastic::EventDependency> predecessors;
         if (cached_mode) {
-            auto completion = resources_->create_event();
+            completion = resources_->create_event();
             if (!completion.status.ok())
                 raise_transport_status(completion.status, rank_idx_);
-            status = completion.event->record(stream);
-            if (!status.ok())
-                raise_transport_status(status, rank_idx_);
+            predecessors.emplace_back(std::move(predecessor));
+        }
+        const auto generation = activate_operation(lease, "dispatch");
+        arguments.generation = generation;
+        if (cached_mode) {
             const auto committed_descriptor =
                 elastic::make_attested_dispatch_handle_descriptor(
                     completion_resources_->dispatch_family(), tiling.topology,
@@ -1734,11 +1707,15 @@ public:
                     alignment, capacity, descriptor_mode_flags);
             completion_resources_->stage_dispatch_descriptor(
                 generation, descriptor_tensor, committed_descriptor);
+        }
+        const auto launch_status = elastic::launch_internal_dispatch(
+            arguments, tiling, storage, stream.raw);
+        if (!launch_status.ok())
+            raise_launch_status(launch_status, rank_idx_);
+        if (cached_mode) {
             const auto completion_offset =
                 tiling.symmetric_window_layout.control_offset +
                 offsetof(elastic::SymmetricControlHeader, dispatch_generation);
-            std::vector<elastic::EventDependency> predecessors;
-            predecessors.emplace_back(std::move(predecessor));
             auto published = async_state_->publish(
                 std::move(lease), completion.event,
                 {elastic::BufferOperationKind::kDispatch, generation,
@@ -1747,6 +1724,11 @@ public:
                 std::move(retained_tensors), std::move(predecessors));
             if (!published.status.ok())
                 raise_transport_status(published.status, rank_idx_);
+            status = completion.event->record(stream);
+            if (!status.ok()) {
+                (void)published.operation->finish(0);
+                raise_transport_status(status, rank_idx_);
+            }
 
             std::optional<EventHandle> event;
             if (async_with_compute_stream) {

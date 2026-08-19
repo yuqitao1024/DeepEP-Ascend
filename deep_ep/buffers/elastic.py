@@ -12,6 +12,7 @@ import deep_ep._C as _C
 from deep_ep._C import EventHandle
 
 from ..platform import (
+    ascend_current_stream_is_capturing,
     capture_event,
     comm_handle_value,
     get_comm_handle,
@@ -650,6 +651,9 @@ class ElasticBuffer:
             scalar_error = "invalid_capacity"
         elif not isinstance(alignment, int) or alignment <= 0:
             scalar_error = "invalid_expert_alignment"
+        elif (cached and async_with_compute_stream and
+              ascend_current_stream_is_capturing()):
+            scalar_error = "unsupported_graph_capture"
         elif previous_event_before_epilogue is not None:
             scalar_error = "unsupported_dispatch_mode"
         elif previous_event is not None and not allocate_on_comm_stream:

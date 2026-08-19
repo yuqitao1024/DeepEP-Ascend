@@ -117,6 +117,7 @@ public:
         std::vector<EventDependency> predecessors);
     transport::TransportStatus finish_pending();
     transport::TransportStatus destroy();
+    bool finalization_in_progress() const;
     std::optional<transport::TransportStatus> terminal_failure() const;
 
 private:

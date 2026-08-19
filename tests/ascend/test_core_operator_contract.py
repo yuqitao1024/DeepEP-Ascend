@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -9,6 +10,9 @@ from tests.ascend.test_stub_source import PYBIND11_HEADER, TORCH_HEADER
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+HOST_SANITIZER_FLAGS = (
+    ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
+    if os.environ.get("DEEP_EP_ASCEND_HOST_SANITIZERS") == "1" else [])
 PROBE = ROOT / "tests/ascend/core_operator_contract_probe.cpp"
 RUNTIME_PROBE = ROOT / "tests/ascend/core_runtime_contract_probe.cpp"
 PRODUCTION_LAYOUT_PROBE = ROOT / "tests/ascend/production_layout_probe.cpp"
@@ -1033,6 +1037,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                  "-pthread", "-DDEEP_EP_ASCEND_TESTING=1",
                  "-DDEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR=1",
+                 *HOST_SANITIZER_FLAGS,
                  f"-I{directory}", f"-I{ROOT}", "-include",
                  str(directory / "torch/python.h"),
                  str(PRODUCTION_BUFFER_LIFECYCLE_PROBE),
@@ -1893,6 +1898,7 @@ int main() {
                 ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                  "-DDEEP_EP_ASCEND_TESTING=1",
                  "-DDEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR=1",
+                 *HOST_SANITIZER_FLAGS,
                  f"-I{directory}", f"-I{ROOT}", "-include",
                  str(directory / "torch/python.h"), str(probe),
                  str(ELASTIC / "runtime.cpp"),

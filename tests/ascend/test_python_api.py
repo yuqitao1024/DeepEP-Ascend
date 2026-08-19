@@ -234,6 +234,7 @@ def _install_fake_torch(platform, events):
     class FakeNpu:
         def __init__(self):
             self.device_index = 2
+            self.capturing = False
 
         def current_device(self):
             if platform != "ascend":
@@ -251,6 +252,13 @@ def _install_fake_torch(platform, events):
             if platform != "ascend":
                 raise AssertionError("CUDA import touched torch.npu.synchronize")
             events.append("torch.npu.synchronize")
+
+        def is_current_stream_capturing(self):
+            if platform != "ascend":
+                raise AssertionError(
+                    "CUDA import touched torch.npu.is_current_stream_capturing")
+            events.append("torch.npu.is_current_stream_capturing")
+            return self.capturing
 
     torch.npu = FakeNpu()
 
@@ -1401,6 +1409,27 @@ def _scenario_ascend_dispatch():
         assert "unsupported_dispatch_mode" in str(error), error
     else:
         raise AssertionError("Ascend dispatch accepted scale factors")
+    assert len(runtime.dispatch_calls) == rejected_calls
+
+    torch.npu.capturing = True
+    try:
+        buffer.dispatch(
+            x, topk_weights=cached_topk_weights, handle=handle,
+            async_with_compute_stream=True)
+    except RuntimeError as error:
+        assert "unsupported_graph_capture" in str(error), error
+    else:
+        raise AssertionError("Ascend async dispatch accepted graph capture")
+    try:
+        buffer.dispatch(
+            x, topk_idx=topk_idx, num_experts=2,
+            num_max_tokens_per_rank=1, async_with_compute_stream=True)
+    except RuntimeError as error:
+        assert "unsupported_dispatch_mode" in str(error), error
+    else:
+        raise AssertionError("Ascend dispatch accepted uncached async mode")
+    finally:
+        torch.npu.capturing = False
     assert len(runtime.dispatch_calls) == rejected_calls
 
     buffer.allow_hybrid_mode = True

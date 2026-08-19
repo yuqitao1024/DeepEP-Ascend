@@ -42,6 +42,13 @@ def capture_event():
     return _C.EventHandle()
 
 
+def ascend_current_stream_is_capturing() -> bool:
+    if is_cuda():
+        return False
+    query = getattr(torch.npu, "is_current_stream_capturing", None)
+    return bool(query()) if callable(query) else False
+
+
 def unwrap_event(event):
     return None if event is None else getattr(event, "event", event)
 

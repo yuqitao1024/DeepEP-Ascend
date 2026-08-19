@@ -342,7 +342,26 @@ AsyncBufferState::AsyncBufferState(
 
 AsyncBufferState::~AsyncBufferState() {
     try {
-        (void)destroy();
+        const auto status = destroy();
+        if (status.ok())
+            return;
+
+        bool unresolved_launch = false;
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            unresolved_launch = impl_->pending != nullptr &&
+                !impl_->pending->lifetime_safe();
+        }
+        if (!unresolved_launch)
+            return;
+
+        struct Quarantine {
+            std::mutex mutex;
+            std::vector<std::shared_ptr<Impl>> states;
+        };
+        static auto* quarantine = new Quarantine;
+        std::lock_guard<std::mutex> lock(quarantine->mutex);
+        quarantine->states.emplace_back(std::move(impl_));
     } catch (...) {
     }
 }
@@ -411,6 +430,12 @@ TransportStatus AsyncBufferState::finish_pending() {
     }
     return pending == nullptr ? TransportStatus::success() :
         pending->finish(impl_->owned_timeout_ms);
+}
+
+bool AsyncBufferState::finalization_in_progress() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->pending != nullptr &&
+        impl_->pending->state() == PendingState::kFinalizing;
 }
 
 TransportStatus AsyncBufferState::destroy() {

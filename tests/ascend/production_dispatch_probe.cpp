@@ -36,6 +36,9 @@ struct Trace {
     int world_size = 2;
     int event_creates = 0;
     int event_destroys = 0;
+    int frees = 0;
+    int fail_event_create_on = 0;
+    bool fail_completion_record = false;
     std::vector<std::string> order;
 } trace;
 
@@ -44,7 +47,7 @@ int comm_stream_token = 0;
 
 int alloc(void*, std::uint64_t n, void** p) { *p = std::malloc(n); return *p ? 0 : 1; }
 int zero(void*, void* p, std::uint64_t n) { std::memset(p, 0, n); return 0; }
-int free_(void*, void* p) { std::free(p); return 0; }
+int free_(void*, void* p) { ++trace.frees; std::free(p); return 0; }
 int current_device(void*, int* device) { *device = trace.device; return 0; }
 int stream(void*, runtime::StreamIdentity* value) {
     trace.order.emplace_back("capture compute dependency");
@@ -61,6 +64,8 @@ int pool_stream(
 }
 int create_event(void*, void** event) {
     ++trace.event_creates;
+    if (trace.event_creates == trace.fail_event_create_on)
+        return 95;
     *event = new int(trace.event_creates);
     trace.order.emplace_back("create event");
     return 0;
@@ -68,6 +73,8 @@ int create_event(void*, void** event) {
 int record_event(void*, void*, void* stream_value) {
     trace.order.emplace_back(stream_value == &comm_stream_token ?
         "record completion event" : "record compute dependency");
+    if (stream_value == &comm_stream_token && trace.fail_completion_record)
+        return 96;
     return 0;
 }
 int query_event(void*, void*, bool* completed) {
@@ -910,8 +917,8 @@ bool cached_async_order_and_commit_probe() {
         "create event",
         "record compute dependency",
         "comm waits dependency/previous event",
-        "activate lease and launch cached dispatch on comm",
         "create event",
+        "activate lease and launch cached dispatch on comm",
         "record completion event",
     };
     if (trace.order != expected_order || !std::get<15>(pending).has_value() ||
@@ -933,6 +940,74 @@ bool cached_async_order_and_commit_probe() {
     std::get<15>(pending)->current_stream_wait();
     return descriptor->generation == 2 && trace.event_destroys == 2 &&
         buffer->testing_operation_generation() == 2;
+}
+
+bool completion_create_failure_precedes_cached_launch_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources)
+        return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> weights = inputs.weights;
+    auto initial = uncached_dispatch(*buffer, inputs, weights);
+    const int launches_before = trace.launches;
+    const auto generation_before = buffer->testing_operation_generation();
+    trace.fail_event_create_on = trace.event_creates + 2;
+    try {
+        (void)cached_dispatch(
+            *buffer, inputs, initial, std::get<8>(initial), false,
+            std::nullopt, true, false);
+        return false;
+    } catch (const std::runtime_error& error) {
+        return std::string(error.what()).find("backend error 95") !=
+                std::string::npos &&
+            trace.launches == launches_before &&
+            buffer->testing_operation_generation() == generation_before;
+    }
+}
+
+bool completion_record_failure_retains_launched_dispatch_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources)
+        return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> weights = inputs.weights;
+    auto initial = uncached_dispatch(*buffer, inputs, weights);
+    const int launches_before = trace.launches;
+    trace.fail_completion_record = true;
+    try {
+        (void)cached_dispatch(
+            *buffer, inputs, initial, std::get<8>(initial), false,
+            std::nullopt, true, false);
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("backend error 96") ==
+                std::string::npos ||
+            trace.launches != launches_before + 1)
+            return false;
+    }
+
+    bool first_destroy_failed = false;
+    bool second_destroy_failed = false;
+    try {
+        buffer->destroy();
+    } catch (const std::runtime_error&) {
+        first_destroy_failed = true;
+    }
+    try {
+        buffer->destroy();
+    } catch (const std::runtime_error&) {
+        second_destroy_failed = true;
+    }
+    if (!first_destroy_failed || !second_destroy_failed || trace.frees != 0)
+        return false;
+    buffer.reset();
+    return trace.frees == 0;
 }
 
 int main() {
@@ -962,5 +1037,9 @@ int main() {
     check(testing_topology_mismatch_probe(), "testing topology mismatch");
     check(cached_async_order_and_commit_probe(),
           "cached async order and deferred descriptor commit");
+    check(completion_create_failure_precedes_cached_launch_probe(),
+          "completion create failure precedes cached launch");
+    check(completion_record_failure_retains_launched_dispatch_probe(),
+          "completion record failure retains launched dispatch");
     return failures == 0 ? 0 : 1;
 }
