@@ -321,10 +321,22 @@ def _install_fake_extension(platform, events):
             self.world_size = args[1]
             self.dispatch_calls = []
             self.combine_calls = []
+            self.destroyed = False
+            self.destroy_error = None
+            self.destroy_error_destroys_runtime = False
             events.append(("runtime.construct", args))
 
         def destroy(self):
             events.append("runtime.destroy")
+            if self.destroy_error is not None:
+                if self.destroy_error_destroys_runtime:
+                    self.destroyed = True
+                raise RuntimeError(self.destroy_error)
+            self.destroyed = True
+
+        def is_destroyed(self):
+            events.append("runtime.is_destroyed")
+            return self.destroyed
 
         def get_comm_stream(self):
             events.append("runtime.get_comm_stream")
@@ -679,6 +691,49 @@ def _scenario_ascend_topology_preflight():
     assert (buffer.num_rdma_ranks, buffer.num_nvlink_ranks) == (1, 4)
     assert len(extension.runtime_args) == 1
     buffer.destroy()
+
+
+def _scenario_ascend_destroy_state_publication():
+    deep_ep, extension, events = _load_package("ascend", True)
+    group = _FakeGroup(events, rank=0, size=2)
+
+    destroyed_buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+        explicitly_destroy=True)
+    destroyed_runtime = destroyed_buffer.runtime
+    destroyed_runtime.destroy_error = "terminal operation failure"
+    destroyed_runtime.destroy_error_destroys_runtime = True
+    try:
+        destroyed_buffer.destroy()
+    except RuntimeError as error:
+        assert "terminal operation failure" in str(error), error
+    else:
+        raise AssertionError("terminal destroy failure was not propagated")
+    assert destroyed_buffer.runtime is None
+    assert destroyed_buffer.comm_handle is None
+    destroy_calls = events.count("runtime.destroy")
+    destroyed_buffer.destroy()
+    assert events.count("runtime.destroy") == destroy_calls
+
+    retryable_buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+        explicitly_destroy=True)
+    retryable_runtime = retryable_buffer.runtime
+    retryable_runtime.destroy_error = "retryable completion timeout"
+    try:
+        retryable_buffer.destroy()
+    except RuntimeError as error:
+        assert "retryable completion timeout" in str(error), error
+    else:
+        raise AssertionError("retryable destroy failure was not propagated")
+    assert retryable_buffer.runtime is retryable_runtime
+    assert retryable_buffer.comm_handle == 4242
+    assert not retryable_runtime.is_destroyed()
+
+    retryable_runtime.destroy_error = None
+    retryable_buffer.destroy()
+    assert retryable_buffer.runtime is None
+    assert retryable_buffer.comm_handle is None
 
 
 def _scenario_ascend_topology_preflight_mismatch():
@@ -1935,6 +1990,8 @@ SCENARIOS = {
     "ascend_import": _scenario_ascend_import,
     "invalid_platform": _scenario_invalid_platform,
     "ascend_construction": _scenario_ascend_construction,
+    "ascend_destroy_state_publication":
+        _scenario_ascend_destroy_state_publication,
     "ascend_topology_preflight": _scenario_ascend_topology_preflight,
     "ascend_topology_preflight_mismatch":
         _scenario_ascend_topology_preflight_mismatch,
@@ -2015,6 +2072,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_explicit_size_constructs_without_cuda_or_topology(self):
         self.run_scenario("ascend_construction")
+
+    def test_failed_destroy_publishes_only_confirmed_destroyed_state(self):
+        self.run_scenario("ascend_destroy_state_publication")
 
     def test_ascend_collective_contract_preflight_precedes_runtime_work(self):
         self.run_scenario("ascend_collective_contract_preflight")

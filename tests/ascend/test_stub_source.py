@@ -532,7 +532,8 @@ int main() {
         return 2;
     if (module.class_methods["ElasticBuffer"] != std::set<std::string>{
             "destroy", "get_comm_stream", "get_physical_domain_size",
-            "get_logical_domain_size", "barrier", "dispatch", "combine"})
+            "get_logical_domain_size", "barrier", "dispatch", "combine",
+            "is_destroyed"})
         return 3;
 
     deep_ep::ascend::transport::CannHostApi host_api{};
@@ -687,7 +688,8 @@ class AscendStubSourceTest(unittest.TestCase):
             "get_physical_domain_size", "get_logical_domain_size",
         })
         self.assertEqual(contract.ASCEND_ELASTIC_BUFFER_METHODS,
-                         contract.COMMON_BUFFER_METHODS)
+                         contract.COMMON_BUFFER_METHODS |
+                         contract.ASCEND_ONLY_BUFFER_METHODS)
         self.assertEqual(contract.CUDA_ELASTIC_BUFFER_METHODS,
                          contract.COMMON_BUFFER_METHODS |
                          contract.CUDA_ONLY_BUFFER_METHODS)

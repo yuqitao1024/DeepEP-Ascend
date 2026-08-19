@@ -343,14 +343,16 @@ using Buffer = deep_ep::ascend::ElasticBuffer;
 
 std::unique_ptr<Buffer> make_buffer(
     Trace& trace, ResourceIdentity* resource_identity,
-    std::uint64_t completion_timeout_ms = 5000) {
+    std::uint64_t completion_timeout_ms = 5000,
+    std::shared_ptr<Buffer::TestingLifecycleControl> lifecycle_control = nullptr) {
     auto resources = make_resources(trace);
     if (resources == nullptr)
         return nullptr;
     *resource_identity = identity(*resources, trace);
     return Buffer::make_testing_buffer(
         0, std::move(resources), 2 * 1024 * 1024, 1,
-        true, 7, 2, 0, false, completion_timeout_ms);
+        true, 7, 2, 0, false, completion_timeout_ms,
+        std::move(lifecycle_control));
 }
 
 bool error_contains(
@@ -614,6 +616,7 @@ void check_barrier_completion_record_failure_retains_launch() {
     CHECK(trace.barrier_launches == 1);
     CHECK(error_contains([&] { buffer->destroy(); }, "synchronize_event"));
     CHECK(error_contains([&] { buffer->destroy(); }, "synchronize_event"));
+    CHECK(!buffer->is_destroyed());
     CHECK(trace.runtime_free_calls == 0);
     CHECK(trace.host_free_calls == 0);
     buffer.reset();
@@ -636,6 +639,7 @@ void check_failed_operation_destroy_invalidates_public_access() {
         [&] { buffer->destroy(); }, "device diagnostic reported failure"));
     CHECK(trace.runtime_free_calls > 0);
     CHECK(trace.host_free_calls > 0);
+    CHECK(buffer->is_destroyed());
     CHECK(error_contains(
         [&] { (void)buffer->get_comm_stream(); }, "runtime is destroyed"));
 }
@@ -662,6 +666,86 @@ void check_current_stream_barrier_has_bounded_event_timeout() {
     };
     CHECK(trace.order == expected);
     CHECK(trace.synchronize_stream_calls == 0);
+}
+
+void check_concurrent_destroy_serializes_wrapper_ownership() {
+    Trace trace;
+    ResourceIdentity resource_identity;
+    auto control = std::make_shared<Buffer::TestingLifecycleControl>();
+    control->destroy_attempts_required = 2;
+    auto buffer = make_buffer(trace, &resource_identity, 5000, control);
+    CHECK(buffer != nullptr);
+    if (buffer == nullptr)
+        return;
+
+    std::atomic<int> destroy_successes{0};
+    const auto destroy = [&] {
+        try {
+            buffer->destroy();
+            ++destroy_successes;
+        } catch (...) {
+        }
+    };
+    std::thread first(destroy);
+    std::thread second(destroy);
+    first.join();
+    second.join();
+
+    CHECK(destroy_successes == 2);
+    CHECK(control->destroy_attempts() == 2);
+    CHECK(control->maximum_active_owners() == 1);
+    CHECK(buffer->is_destroyed());
+    CHECK(trace.deregister_calls == 1);
+    CHECK(trace.destroy_team_calls == 1);
+    buffer->destroy();
+}
+
+void check_comm_stream_access_serializes_with_destroy() {
+    Trace trace;
+    ResourceIdentity resource_identity;
+    auto control = std::make_shared<Buffer::TestingLifecycleControl>();
+    control->getter_waits_for_destroy_attempt = true;
+    auto buffer = make_buffer(trace, &resource_identity, 5000, control);
+    CHECK(buffer != nullptr);
+    if (buffer == nullptr)
+        return;
+
+    std::atomic<bool> getter_ok{false};
+    std::atomic<bool> destroy_ok{false};
+    std::thread getter([&] {
+        try {
+            (void)buffer->get_comm_stream();
+            getter_ok = true;
+        } catch (...) {
+        }
+    });
+    control->wait_for_active_owner();
+    std::thread destroyer([&] {
+        try {
+            buffer->destroy();
+            destroy_ok = true;
+        } catch (...) {
+        }
+    });
+    getter.join();
+    destroyer.join();
+
+    CHECK(getter_ok);
+    CHECK(destroy_ok);
+    CHECK(control->destroy_attempts() == 1);
+    CHECK(control->maximum_active_owners() == 1);
+    CHECK(buffer->is_destroyed());
+    CHECK(trace.deregister_calls == 1);
+    CHECK(trace.destroy_team_calls == 1);
+}
+
+int wrapper_lifecycle_stress_iterations() {
+    const auto* value = std::getenv("DEEP_EP_ASCEND_WRAPPER_LIFECYCLE_STRESS");
+    if (value == nullptr)
+        return 1;
+    const auto iterations = std::strtol(value, nullptr, 10);
+    return iterations > 0 && iterations <= 1000 ?
+        static_cast<int>(iterations) : 1;
 }
 
 }  // namespace
@@ -714,5 +798,10 @@ int main() {
     check_barrier_completion_record_failure_retains_launch();
     check_failed_operation_destroy_invalidates_public_access();
     check_current_stream_barrier_has_bounded_event_timeout();
+    for (int iteration = 0;
+         iteration < wrapper_lifecycle_stress_iterations(); ++iteration) {
+        check_concurrent_destroy_serializes_wrapper_ownership();
+        check_comm_stream_access_serializes_with_destroy();
+    }
     return failures == 0 ? 0 : 1;
 }

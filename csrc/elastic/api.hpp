@@ -19,7 +19,8 @@ inline void register_apis(pybind11::module_& m) {
     register_cuda_only_apis(m, cls);
 #else
     binding::register_event<deep_ep::ascend::EventHandle>(m);
-    binding::register_common_apis<deep_ep::ascend::ElasticBuffer>(m);
+    auto cls = binding::register_common_apis<deep_ep::ascend::ElasticBuffer>(m);
+    cls.def("is_destroyed", &deep_ep::ascend::ElasticBuffer::is_destroyed);
 #endif
 }
 

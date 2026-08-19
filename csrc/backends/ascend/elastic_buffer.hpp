@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstddef>
 #include <limits>
@@ -296,16 +297,94 @@ private:
     std::optional<StagedDispatch> staged_dispatch_;
 };
 
+#if DEEP_EP_ASCEND_TESTING
+struct ElasticBufferTestingLifecycleControl {
+    std::mutex mutex;
+    std::condition_variable cv;
+    int destroy_attempt_count = 0;
+    int active_owner_count = 0;
+    int maximum_active_owner_count = 0;
+    int destroy_attempts_required = 0;
+    bool getter_waits_for_destroy_attempt = false;
+
+    void note_destroy_attempt() {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++destroy_attempt_count;
+        cv.notify_all();
+    }
+
+    void enter_owner(bool getter) {
+        std::unique_lock<std::mutex> lock(mutex);
+        ++active_owner_count;
+        if (active_owner_count > maximum_active_owner_count)
+            maximum_active_owner_count = active_owner_count;
+        cv.notify_all();
+        if (getter && getter_waits_for_destroy_attempt) {
+            cv.wait(lock, [&] { return destroy_attempt_count >= 1; });
+        } else if (!getter && destroy_attempts_required > 0) {
+            cv.wait(lock, [&] {
+                return destroy_attempt_count >= destroy_attempts_required;
+            });
+        }
+    }
+
+    void leave_owner() {
+        std::lock_guard<std::mutex> lock(mutex);
+        --active_owner_count;
+        cv.notify_all();
+    }
+
+    void wait_for_active_owner() {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [&] { return active_owner_count > 0; });
+    }
+
+    int destroy_attempts() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return destroy_attempt_count;
+    }
+
+    int maximum_active_owners() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return maximum_active_owner_count;
+    }
+};
+
+class ElasticBufferTestingLifecycleOwner {
+public:
+    ElasticBufferTestingLifecycleOwner(
+        std::shared_ptr<ElasticBufferTestingLifecycleControl> control,
+        bool getter)
+        : control_(std::move(control)) {
+        if (control_ != nullptr)
+            control_->enter_owner(getter);
+    }
+
+    ~ElasticBufferTestingLifecycleOwner() {
+        if (control_ != nullptr)
+            control_->leave_owner();
+    }
+
+private:
+    std::shared_ptr<ElasticBufferTestingLifecycleControl> control_;
+};
+#endif
+
 class ElasticBuffer {
     int rank_idx_;
     int num_ranks_;
     int64_t num_buffer_bytes_;
     bool allow_hybrid_mode_;
     bool allow_multiple_reduction_;
+    mutable std::mutex lifecycle_mutex_;
     runtime::CannRuntimeResources* resources_ = nullptr;
     std::shared_ptr<ElasticAsyncCompletionResources> completion_resources_;
     std::shared_ptr<elastic::AsyncBufferState> async_state_;
     std::uint64_t barrier_timeout_cycles_ = 0;
+#if DEEP_EP_ASCEND_TESTING
+    std::shared_ptr<ElasticBufferTestingLifecycleControl>
+        testing_lifecycle_control_;
+#endif
 
     inline static std::atomic_uint64_t next_dispatch_family_{0};
 
@@ -327,6 +406,7 @@ class ElasticBuffer {
 
     elastic::BufferOperationCoordinator::OperationLease reserve_operation(
         elastic::BufferOperationKind kind, const char* operation) const {
+        std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
         TORCH_CHECK(async_state_ != nullptr,
                     "DeepEP Ascend backend: runtime is destroyed");
         auto lease = async_state_->coordinator().reserve(kind);
@@ -718,12 +798,15 @@ class ElasticBuffer {
                   std::uint64_t dispatch_family,
                   std::uint64_t last_dispatch_generation,
                   bool allow_hybrid_mode,
-                  std::uint64_t completion_timeout_ms)
+                  std::uint64_t completion_timeout_ms,
+                  std::shared_ptr<ElasticBufferTestingLifecycleControl>
+                      lifecycle_control)
         : rank_idx_(rank), num_ranks_(num_ranks),
           num_buffer_bytes_(buffer_bytes),
           allow_hybrid_mode_(allow_hybrid_mode),
           allow_multiple_reduction_(allow_multiple_reduction),
-          barrier_timeout_cycles_(timeout_cycles) {
+          barrier_timeout_cycles_(timeout_cycles),
+          testing_lifecycle_control_(std::move(lifecycle_control)) {
         completion_resources_ =
             std::make_shared<ElasticAsyncCompletionResources>(
                 std::move(resources), dispatch_family,
@@ -736,6 +819,9 @@ class ElasticBuffer {
 
 public:
     using cpu_comm_t = std::vector<std::pair<int, int>>;
+#if DEEP_EP_ASCEND_TESTING
+    using TestingLifecycleControl = ElasticBufferTestingLifecycleControl;
+#endif
 
     ElasticBuffer(const int& rank_idx, const int& num_ranks,
                   const int64_t& comm_handle, const cpu_comm_t& cpu_comm,
@@ -815,7 +901,9 @@ public:
         int num_ranks = 2,
         std::uint64_t last_dispatch_generation = 0,
         bool allow_hybrid_mode = false,
-        std::uint64_t completion_timeout_ms = 5000) {
+        std::uint64_t completion_timeout_ms = 5000,
+        std::shared_ptr<ElasticBufferTestingLifecycleControl>
+            lifecycle_control = nullptr) {
         TORCH_CHECK(num_ranks >= 2 && rank >= 0 && rank < num_ranks,
                     "DeepEP Ascend backend: invalid testing topology");
         const auto topology_matches = [&] {
@@ -841,7 +929,7 @@ public:
             TestingTag{}, rank, num_ranks, std::move(resources), buffer_bytes,
             timeout_cycles, allow_multiple_reduction, dispatch_family,
             last_dispatch_generation, allow_hybrid_mode,
-            completion_timeout_ms));
+            completion_timeout_ms, std::move(lifecycle_control)));
     }
 
     std::size_t testing_dispatch_validation_state_bytes() const noexcept {
@@ -855,8 +943,17 @@ public:
 #endif
 
     void destroy() {
+#if DEEP_EP_ASCEND_TESTING
+        if (testing_lifecycle_control_ != nullptr)
+            testing_lifecycle_control_->note_destroy_attempt();
+#endif
+        std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
         if (async_state_ == nullptr)
             return;
+#if DEEP_EP_ASCEND_TESTING
+        ElasticBufferTestingLifecycleOwner testing_owner(
+            testing_lifecycle_control_, false);
+#endif
         TORCH_CHECK(!async_state_->finalization_in_progress(),
                     "DeepEP Ascend backend: destroy is busy on this buffer");
         const auto status = async_state_->destroy();
@@ -874,7 +971,17 @@ public:
             raise_transport_status(status, rank_idx_);
     }
 
+    bool is_destroyed() const {
+        std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+        return async_state_ == nullptr;
+    }
+
     c10::Stream get_comm_stream() const {
+        std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+#if DEEP_EP_ASCEND_TESTING
+        ElasticBufferTestingLifecycleOwner testing_owner(
+            testing_lifecycle_control_, true);
+#endif
         TORCH_CHECK(resources_ != nullptr,
                     "DeepEP Ascend backend: runtime is destroyed");
         const auto& stream = resources_->comm_stream();
@@ -1201,6 +1308,10 @@ public:
                         "DeepEP Ascend backend: dispatch scale factor packs "
                         "exceed the supported hidden-width bound");
         }
+        auto lease = reserve_operation(
+            elastic::BufferOperationKind::kDispatch, "dispatch");
+        require_transport("dispatch",
+                          operation_capabilities(kDispatchCapabilities));
         int current_device = -1;
         auto device_status = resources_->current_device(&current_device);
         if (!device_status.ok())
@@ -1209,14 +1320,6 @@ public:
                         current_device == resources_->owning_device(),
                     "DeepEP Ascend backend: dispatch tensors and current NPU "
                     "must match the buffer device");
-        if (allow_hybrid_mode_)
-            require_transport("dispatch",
-                              operation_capabilities(kDispatchCapabilities));
-        auto lease = reserve_operation(
-            elastic::BufferOperationKind::kDispatch, "dispatch");
-        if (!allow_hybrid_mode_)
-            require_transport("dispatch",
-                              operation_capabilities(kDispatchCapabilities));
         const bool any_cached_tensor = cached_num_expanded_tokens.has_value() ||
             cached_num_recv_tokens_per_expert_list.has_value() ||
             cached_psum_num_recv_tokens_per_scaleup_rank.has_value() ||
@@ -2006,6 +2109,11 @@ public:
                     "rank-partitioned expert capacity");
         TORCH_CHECK(token_metadata_at_forward.has_value(),
                     "DeepEP Ascend backend: combine requires a dispatch handle");
+        auto lease = reserve_operation(
+            elastic::BufferOperationKind::kCombine, "combine");
+        require_transport("combine",
+                          operation_capabilities(kCombineCapabilities));
+
         const auto device = x.device();
         int current_device = -1;
         auto status = resources_->current_device(&current_device);
@@ -2015,14 +2123,6 @@ public:
                         current_device == resources_->owning_device(),
                     "DeepEP Ascend backend: combine tensors and current NPU "
                     "must match the buffer device");
-        if (allow_hybrid_mode_)
-            require_transport("combine",
-                              operation_capabilities(kCombineCapabilities));
-        auto lease = reserve_operation(
-            elastic::BufferOperationKind::kCombine, "combine");
-        if (!allow_hybrid_mode_)
-            require_transport("combine",
-                              operation_capabilities(kCombineCapabilities));
         const auto validate = [&](const torch::Tensor& tensor,
                                   int64_t dimensions,
                                   torch::ScalarType type,

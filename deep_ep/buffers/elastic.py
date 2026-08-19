@@ -822,7 +822,14 @@ class ElasticBuffer:
         assert self.explicitly_destroy
 
         if self.runtime is not None:
-            self.runtime.destroy()
+            runtime = self.runtime
+            try:
+                runtime.destroy()
+            except Exception:
+                if not is_cuda() and runtime.is_destroyed():
+                    self.runtime = None
+                    self.comm_handle = None
+                raise
             self.runtime = None  # Cannot use anymore
             self.comm_handle = None
             if is_cuda():
