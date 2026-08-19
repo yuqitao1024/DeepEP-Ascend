@@ -63,6 +63,17 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
+    def test_async_runtime_uses_an_explicit_current_stream_device(self):
+        runtime = (
+            ROOT / "csrc/backends/ascend/runtime/stream_event.cpp").read_text()
+        self.assertIn("c10_npu::getCurrentNPUStream(device_index)", runtime)
+        self.assertNotIn("c10_npu::getCurrentNPUStream()", runtime)
+        self.assertIn(
+            "runtime_current_device(nullptr, &device_index)", runtime)
+        self.assertLess(
+            runtime.index("#include <torch_npu/csrc/core/npu/NPUStream.h>"),
+            runtime.index("#include <acl/acl_rt.h>"))
+
     def test_stream_event_capability_probe_contract(self):
         probe = STREAM_EVENT_CAPABILITY_PROBE.read_text()
         runner = STREAM_EVENT_CAPABILITY_RUNNER.read_text()

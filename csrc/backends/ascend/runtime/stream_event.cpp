@@ -4,11 +4,11 @@
 #include <thread>
 #include <utility>
 
-#if __has_include(<acl/acl_rt.h>) && \
-    __has_include(<torch_npu/csrc/core/npu/NPUStream.h>)
+#if __has_include(<torch_npu/csrc/core/npu/NPUStream.h>) && \
+    __has_include(<acl/acl_rt.h>)
 #define DEEP_EP_ASCEND_HAS_STREAM_EVENT_RUNTIME 1
-#include <acl/acl_rt.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
+#include <acl/acl_rt.h>
 #else
 #define DEEP_EP_ASCEND_HAS_STREAM_EVENT_RUNTIME 0
 #endif
@@ -17,6 +17,8 @@ namespace deep_ep::ascend::runtime {
 namespace {
 
 using transport::TransportStatus;
+
+constexpr int kEventTimeoutBackendCode = -1;
 
 bool valid_api(const StreamEventApi& api) {
     return api.current_device != nullptr && api.current_stream != nullptr &&
@@ -48,9 +50,13 @@ int runtime_current_device(void*, int* device_index) {
 
 int runtime_current_stream(void*, StreamIdentity* stream) {
     if (stream == nullptr)
-        return -1;
-    *stream = stream_identity(c10_npu::getCurrentNPUStream());
-    return stream->raw == nullptr ? -1 : 0;
+        return kEventTimeoutBackendCode;
+    int device_index = -1;
+    const int result = runtime_current_device(nullptr, &device_index);
+    if (result != ACL_SUCCESS || device_index < 0)
+        return result == ACL_SUCCESS ? kEventTimeoutBackendCode : result;
+    *stream = stream_identity(c10_npu::getCurrentNPUStream(device_index));
+    return stream->raw == nullptr ? kEventTimeoutBackendCode : ACL_SUCCESS;
 }
 
 int runtime_pool_stream(
@@ -106,7 +112,7 @@ int runtime_synchronize_event(void* user_data, void* event,
         if (result != ACL_SUCCESS || completed)
             return result;
         if (std::chrono::steady_clock::now() >= deadline)
-            return -1;
+            return kEventTimeoutBackendCode;
         std::this_thread::yield();
     }
 }
@@ -169,12 +175,24 @@ TransportStatus NativeEventState::finish(std::uint64_t timeout_ms) {
     if (state_ != State::Recorded)
         return TransportStatus::invalid(
             "synchronize_event", "native event has not been recorded");
-    const int result = api_.synchronize_event(
-        api_.user_data, native_event_, timeout_ms);
-    if (result != 0)
-        return backend_failure("synchronize_event", result);
-    state_ = State::Completed;
-    return TransportStatus::success();
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(timeout_ms);
+    while (true) {
+        bool completed = false;
+        const int result = api_.query_event(
+            api_.user_data, native_event_, &completed);
+        if (result != 0)
+            return backend_failure("query_event", result);
+        if (completed) {
+            state_ = State::Completed;
+            return TransportStatus::success();
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return backend_failure(
+                "synchronize_event", kEventTimeoutBackendCode);
+        }
+        std::this_thread::yield();
+    }
 }
 
 TransportStatus NativeEventState::destroy() {
@@ -197,6 +215,16 @@ NativeEventCreateResult create_native_event(
     if (device_index < 0 || !valid_api(api)) {
         return {TransportStatus::invalid(
                     "create_native_event", "invalid stream event runtime API"),
+                nullptr};
+    }
+    int current_device = -1;
+    const int current_device_result = api.current_device(
+        api.user_data, &current_device);
+    if (current_device_result != 0)
+        return {backend_failure("current_device", current_device_result), nullptr};
+    if (current_device != device_index) {
+        return {TransportStatus::invalid(
+                    "current_device", "requested event device is not current"),
                 nullptr};
     }
     void* native_event = nullptr;

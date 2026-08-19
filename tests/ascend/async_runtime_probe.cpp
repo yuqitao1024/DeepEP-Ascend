@@ -34,18 +34,26 @@ static_assert(!has_synchronize_device<runtime::StreamEventApi>::value);
 constexpr int kCreateFailure = 11;
 constexpr int kRecordFailure = 12;
 constexpr int kWaitFailure = 13;
-constexpr int kTimeoutFailure = 14;
+constexpr int kTimeoutFailure = -1;
 constexpr int kDestroyFailure = 15;
+constexpr int kCurrentDeviceFailure = 16;
+constexpr int kQueryFailure = 17;
 
 struct FakeApi {
+    int current_device_result = 0;
+    int current_device_index = 2;
     int create_result = 0;
     int record_result = 0;
+    int query_result = 0;
     int wait_result = 0;
     int synchronize_result = 0;
     int destroy_result = 0;
     bool destroy_throws = false;
+    bool query_completed = true;
+    int current_device_calls = 0;
     int create_calls = 0;
     int record_calls = 0;
+    int query_calls = 0;
     int wait_calls = 0;
     int synchronize_calls = 0;
     int destroy_calls = 0;
@@ -53,9 +61,11 @@ struct FakeApi {
     void* native_event = reinterpret_cast<void*>(0x1000);
 };
 
-int current_device(void*, int* device) {
-    *device = 2;
-    return 0;
+int current_device(void* user_data, int* device) {
+    auto* fake = static_cast<FakeApi*>(user_data);
+    ++fake->current_device_calls;
+    *device = fake->current_device_index;
+    return fake->current_device_result;
 }
 
 int current_stream(void*, runtime::StreamIdentity* stream) {
@@ -81,9 +91,11 @@ int record_event(void* user_data, void*, void*) {
     return fake->record_result;
 }
 
-int query_event(void*, void*, bool* completed) {
-    *completed = true;
-    return 0;
+int query_event(void* user_data, void*, bool* completed) {
+    auto* fake = static_cast<FakeApi*>(user_data);
+    ++fake->query_calls;
+    *completed = fake->query_completed;
+    return fake->query_result;
 }
 
 int wait_event(void* user_data, void*, void*) {
@@ -180,6 +192,33 @@ bool create_failures_are_reported() {
                       "create_event") && created.event == nullptr;
 }
 
+bool create_checks_the_current_device_before_allocating_an_event() {
+    FakeApi fake;
+    fake.current_device_result = kCurrentDeviceFailure;
+    auto created = runtime::create_native_event(api_for(&fake), 2);
+    if (!is_failure(created.status, transport::TransportStatusCode::kRuntimeFailure,
+                    "current_device", kCurrentDeviceFailure) ||
+        fake.current_device_calls != 1 || fake.create_calls != 0)
+        return false;
+
+    fake.current_device_result = 0;
+    fake.current_device_index = 3;
+    fake.current_device_calls = 0;
+    created = runtime::create_native_event(api_for(&fake), 2);
+    if (!is_failure(created.status, transport::TransportStatusCode::kInvalidArgument,
+                    "current_device") || fake.current_device_calls != 1 ||
+        fake.create_calls != 0)
+        return false;
+
+    fake.current_device_index = 2;
+    fake.current_device_calls = 0;
+    created = runtime::create_native_event(api_for(&fake), 2);
+    if (!created.status.ok() || fake.current_device_calls != 1 ||
+        fake.create_calls != 1)
+        return false;
+    return created.event->destroy().ok();
+}
+
 bool record_and_wait_enforce_device_identity() {
     FakeApi fake;
     auto created = runtime::create_native_event(api_for(&fake), 2);
@@ -217,16 +256,26 @@ bool finish_is_bounded_and_idempotent() {
     auto created = runtime::create_native_event(api_for(&fake), 2);
     if (!created.event->record(stream_for(2)).ok())
         return false;
-    fake.synchronize_result = kTimeoutFailure;
+
+    fake.query_result = kQueryFailure;
     auto status = created.event->finish(7);
     if (!is_failure(status, transport::TransportStatusCode::kRuntimeFailure,
+                    "query_event", kQueryFailure) || fake.query_calls != 1)
+        return false;
+
+    fake.query_result = 0;
+    fake.query_completed = false;
+    status = created.event->finish(0);
+    if (!is_failure(status, transport::TransportStatusCode::kRuntimeFailure,
                     "synchronize_event", kTimeoutFailure) ||
-        fake.last_timeout_ms != 7)
+        fake.query_calls != 2)
         return false;
-    fake.synchronize_result = 0;
-    if (!created.event->finish(9).ok() || fake.last_timeout_ms != 9)
+
+    fake.query_completed = true;
+    if (!created.event->finish(9).ok() || fake.query_calls != 3)
         return false;
-    return created.event->finish(11).ok() && fake.synchronize_calls == 2;
+    return created.event->finish(11).ok() && fake.query_calls == 3 &&
+        fake.synchronize_calls == 0;
 }
 
 bool destroy_failure_retains_native_ownership_for_retry() {
@@ -260,6 +309,7 @@ int main() {
     const bool passed = invalid_callback_tables_are_rejected() &&
         default_api_is_complete_or_unavailable() &&
         create_failures_are_reported() && record_and_wait_enforce_device_identity() &&
+        create_checks_the_current_device_before_allocating_an_event() &&
         finish_is_bounded_and_idempotent() &&
         destroy_failure_retains_native_ownership_for_retry() &&
         destructor_attempts_nonthrowing_cleanup();
