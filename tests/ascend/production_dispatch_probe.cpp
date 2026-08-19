@@ -40,7 +40,17 @@ int alloc(void*, std::uint64_t n, void** p) { *p = std::malloc(n); return *p ? 0
 int zero(void*, void* p, std::uint64_t n) { std::memset(p, 0, n); return 0; }
 int free_(void*, void* p) { std::free(p); return 0; }
 int current_device(void*, int* device) { *device = trace.device; return 0; }
-void* stream(void*) { return trace.fail_stream ? nullptr : &trace; }
+int stream(void*, runtime::StreamIdentity* value) {
+    *value = {trace.fail_stream ? nullptr : &trace, 7, trace.device, 20};
+    return 0;
+}
+int pool_stream(
+    void*, int device, bool high_priority, runtime::StreamIdentity* value) {
+    if (!high_priority)
+        return 93;
+    *value = {&trace, 11, device, 20};
+    return 0;
+}
 int sync(void*, void*) { return 0; }
 int sync_device(void*) { return 0; }
 int h2d(void*, void* d, const void* s, std::uint64_t n) {
@@ -114,7 +124,8 @@ int noop1(void*, std::uintptr_t) { return 0; }
 std::unique_ptr<runtime::CannRuntimeResources> resources(
     int world_size = 2, bool hybrid = false) {
     auto result = std::make_unique<runtime::CannRuntimeResources>();
-    runtime::CannRuntimeApi r{nullptr,alloc,zero,free_,current_device,stream,sync,sync_device,h2d,d2h};
+    runtime::CannRuntimeApi r{nullptr,alloc,zero,free_,sync,sync_device,h2d,d2h};
+    runtime::StreamEventApi s{nullptr,current_device,stream,pool_stream};
     transport::CannHostApi h{nullptr,rank_,size_,team,window,channels,ha,hz,hd,dh,hf,noop2,noop1};
     transport::TransportConfig c{}; c.rank=0; c.world_size=world_size; c.communicator_handle=1;
     c.device_buffer_bytes=2*1024*1024; c.requested_channels=1;
@@ -123,7 +134,7 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
         c.topology_kind =
             transport::TransportTopologyKind::kLogicalSimulation;
     }
-    if (!result->initialize(c, 4096, r, h).ok()) return {};
+    if (!result->initialize(c, 4096, r, h, s).ok()) return {};
     return result;
 }
 

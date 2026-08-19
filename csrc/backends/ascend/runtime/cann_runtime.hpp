@@ -5,6 +5,15 @@
 
 #include "../elastic/layout.hpp"
 #include "../transport/cann_transport.hpp"
+#include "stream_event.hpp"
+
+#if __has_include(<torch/extension.h>)
+#include <torch/extension.h>
+#else
+namespace torch {
+class Tensor;
+}
+#endif
 
 namespace deep_ep::ascend::runtime {
 
@@ -13,8 +22,6 @@ struct CannRuntimeApi {
     int (*allocate_device)(void*, std::uint64_t, void**) = nullptr;
     int (*zero_device)(void*, void*, std::uint64_t) = nullptr;
     int (*free_device)(void*, void*) = nullptr;
-    int (*current_device)(void*, int*) = nullptr;
-    void* (*current_stream)(void*) = nullptr;
     int (*synchronize_stream)(void*, void*) = nullptr;
     int (*synchronize_device)(void*) = nullptr;
     int (*copy_from_host)(void*, void*, const void*, std::uint64_t) = nullptr;
@@ -44,7 +51,8 @@ public:
     transport::TransportStatus initialize(
         const transport::TransportConfig& config,
         std::uint64_t workspace_bytes, const CannRuntimeApi& runtime_api,
-        const transport::CannHostApi& host_api);
+        const transport::CannHostApi& host_api,
+        const StreamEventApi& stream_event_api);
     transport::TransportStatus destroy();
 
     bool initialized() const noexcept { return initialized_; }
@@ -58,9 +66,12 @@ public:
         return device_context_;
     }
     int owning_device() const noexcept { return owning_device_; }
+    const StreamIdentity& comm_stream() const noexcept { return comm_stream_; }
 
     transport::TransportStatus current_device(int* device);
-    transport::TransportStatus current_stream(void** stream);
+    transport::TransportStatus current_stream(StreamIdentity* stream);
+    transport::TransportStatus record_tensor_stream(
+        const torch::Tensor& tensor, const StreamIdentity& stream);
     transport::TransportStatus synchronize_stream(void* stream);
     transport::TransportStatus synchronize_device();
     transport::TransportStatus copy_from_host(
@@ -72,7 +83,8 @@ private:
     transport::TransportStatus initialize_impl(
         const transport::TransportConfig& config,
         std::uint64_t workspace_bytes, const CannRuntimeApi& runtime_api,
-        const transport::CannHostApi* host_api);
+        const transport::CannHostApi* host_api,
+        const StreamEventApi& stream_event_api);
     transport::TransportStatus allocate(
         std::uint64_t bytes, std::uint64_t alignment,
         CannRuntimeAllocation* allocation, const char* operation);
@@ -81,6 +93,8 @@ private:
         transport::TransportStatus& first_error);
 
     CannRuntimeApi runtime_api_{};
+    StreamEventApi stream_event_api_{};
+    StreamIdentity comm_stream_{};
     CannRuntimeAllocation window_{};
     CannRuntimeAllocation workspace_{};
     std::unique_ptr<transport::HostTransport> transport_;

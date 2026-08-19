@@ -1,13 +1,33 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <type_traits>
 
+#include "csrc/backends/ascend/runtime/cann_runtime.hpp"
 #include "csrc/backends/ascend/elastic/combine_state.hpp"
 #include "csrc/backends/ascend/elastic/dispatch_state.hpp"
 #include "csrc/backends/ascend/elastic/runtime.hpp"
 
 using namespace deep_ep::ascend::elastic;
 namespace transport = deep_ep::ascend::transport;
+namespace runtime = deep_ep::ascend::runtime;
+
+using CurrentStreamMethod = transport::TransportStatus (
+    runtime::CannRuntimeResources::*)(runtime::StreamIdentity*);
+using RecordTensorStreamMethod = transport::TransportStatus (
+    runtime::CannRuntimeResources::*)(
+        const torch::Tensor&, const runtime::StreamIdentity&);
+
+static_assert(std::is_same_v<
+              decltype(&runtime::CannRuntimeResources::comm_stream),
+              const runtime::StreamIdentity& (
+                  runtime::CannRuntimeResources::*)() const noexcept>);
+static_assert(std::is_same_v<
+              decltype(&runtime::CannRuntimeResources::current_stream),
+              CurrentStreamMethod>);
+static_assert(std::is_same_v<
+              decltype(&runtime::CannRuntimeResources::record_tensor_stream),
+              RecordTensorStreamMethod>);
 
 namespace {
 

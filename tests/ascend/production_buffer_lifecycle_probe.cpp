@@ -41,6 +41,8 @@ struct Trace {
     std::atomic<int> barrier_launches{0};
     std::atomic<int> current_device_calls{0};
     std::atomic<int> current_stream_calls{0};
+    std::atomic<int> pool_stream_calls{0};
+    std::atomic<int> destroy_event_calls{0};
     std::atomic<int> synchronize_stream_calls{0};
     std::atomic<int> runtime_copy_to_host_calls{0};
     std::atomic<int> transport_copy_from_device_calls{0};
@@ -76,15 +78,37 @@ int runtime_free(void* data, void* pointer) {
     return 0;
 }
 
-int runtime_current_device(void* data, int* device) {
+int stream_current_device(void* data, int* device) {
     ++self(data).current_device_calls;
     *device = 0;
     return 0;
 }
 
-void* runtime_current_stream(void* data) {
+int stream_current_stream(void* data, runtime::StreamIdentity* stream) {
     ++self(data).current_stream_calls;
-    return data;
+    *stream = {data, 7, 0, 20};
+    return 0;
+}
+
+int stream_pool_stream(
+    void* data, int device, bool high_priority,
+    runtime::StreamIdentity* stream) {
+    auto& trace = self(data);
+    ++trace.pool_stream_calls;
+    if (device != 0 || !high_priority)
+        return 18;
+    *stream = {data, 11, device, 20};
+    return 0;
+}
+
+int stream_create_event(void*, void**) { return 0; }
+int stream_record_event(void*, void*, void*) { return 0; }
+int stream_query_event(void*, void*, bool*) { return 0; }
+int stream_wait_event(void*, void*, void*) { return 0; }
+int stream_synchronize_event(void*, void*, std::uint64_t) { return 0; }
+int stream_destroy_event(void* data, void*) {
+    ++self(data).destroy_event_calls;
+    return 0;
 }
 
 int runtime_synchronize_stream(void* data, void*) {
@@ -124,9 +148,15 @@ int runtime_copy_to_host(
 
 runtime::CannRuntimeApi runtime_api(Trace& trace) {
     return {&trace, runtime_allocate, runtime_zero, runtime_free,
-            runtime_current_device, runtime_current_stream,
             runtime_synchronize_stream, runtime_synchronize_device,
             runtime_copy_from_host, runtime_copy_to_host};
+}
+
+runtime::StreamEventApi stream_api(Trace& trace) {
+    return {&trace, stream_current_device, stream_current_stream,
+            stream_pool_stream, stream_create_event, stream_record_event,
+            stream_query_event, stream_wait_event, stream_synchronize_event,
+            stream_destroy_event};
 }
 
 int get_rank(void*, std::int64_t, std::uint32_t* rank) {
@@ -222,7 +252,15 @@ std::unique_ptr<runtime::CannRuntimeResources> make_resources(Trace& trace) {
     config.device_buffer_bytes = 2 * 1024 * 1024;
     config.requested_channels = 1;
     const auto status = resources->initialize(
-        config, 4096, runtime_api(trace), host_api(trace));
+        config, 4096, runtime_api(trace), host_api(trace), stream_api(trace));
+    CHECK(trace.current_device_calls == 1);
+    CHECK(trace.pool_stream_calls == 1);
+    CHECK(trace.destroy_event_calls == 0);
+    if (status.ok()) {
+        CHECK(resources->comm_stream().raw == &trace);
+        CHECK(resources->comm_stream().stream_id == 11);
+        CHECK(resources->comm_stream().device_index == 0);
+    }
     return status.ok() ? std::move(resources) : nullptr;
 }
 
@@ -319,6 +357,7 @@ void check_two_live_buffer_resource_and_failure_isolation() {
     CHECK(second_trace.barrier_launches == 2);
 
     first->destroy();
+    CHECK(first_trace.destroy_event_calls == 0);
     CHECK(first_trace.runtime_free_calls > 0);
     CHECK(first_trace.deregister_calls == 1);
     CHECK(second_trace.runtime_free_calls == 0);
@@ -328,6 +367,7 @@ void check_two_live_buffer_resource_and_failure_isolation() {
     second->barrier(false, false, true);
     CHECK(second_trace.barrier_launches == 3);
     second->destroy();
+    CHECK(second_trace.destroy_event_calls == 0);
 }
 
 void check_destroy_is_busy_while_real_operation_uses_resources() {

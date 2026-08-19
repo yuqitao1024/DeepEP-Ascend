@@ -671,7 +671,7 @@ public:
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_),
             resources_->workspace_bytes()};
-        void* stream = nullptr;
+        runtime::StreamIdentity stream;
         auto status = resources_->current_stream(&stream);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
@@ -679,7 +679,7 @@ public:
         const elastic::BarrierArguments arguments{
             resources_->workspace(), generation, barrier_timeout_cycles_};
         const auto launch_status = elastic::launch_internal_barrier(
-            arguments, tiling, storage, stream);
+            arguments, tiling, storage, stream.raw);
         if (!launch_status.ok()) {
             const auto status = launch_status.code ==
                     elastic::CoreRuntimeStatusCode::kLaunchFailure ?
@@ -691,7 +691,7 @@ public:
             raise_transport_status(status, rank_idx_);
         }
 
-        status = resources_->synchronize_stream(stream);
+        status = resources_->synchronize_stream(stream.raw);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         transport::DeviceTransportDiagnostic diagnostic{};
@@ -1339,7 +1339,7 @@ public:
                 cached_route_count : tiling.hybrid_route_capacity;
         }
         arguments.timeout_cycles = barrier_timeout_cycles_;
-        void* stream = nullptr;
+        runtime::StreamIdentity stream;
         status = resources_->current_stream(&stream);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
@@ -1348,10 +1348,10 @@ public:
         const auto generation = activate_operation(lease, "dispatch");
         arguments.generation = generation;
         const auto launch_status = elastic::launch_internal_dispatch(
-            arguments, tiling, storage, stream);
+            arguments, tiling, storage, stream.raw);
         if (!launch_status.ok())
             raise_launch_status(launch_status, rank_idx_);
-        status = resources_->synchronize_stream(stream);
+        status = resources_->synchronize_stream(stream.raw);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         transport::DeviceTransportDiagnostic diagnostic{};
@@ -1864,7 +1864,7 @@ public:
                 {combined_topk_idx.size(0), combined_topk_idx.size(1)},
                 topk_weights->options());
 
-        void* stream = nullptr;
+        runtime::StreamIdentity stream;
         status = resources_->current_stream(&stream);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
@@ -1903,10 +1903,10 @@ public:
             static_cast<std::uint64_t>(num_buffer_bytes_),
             resources_->workspace_bytes()};
         const auto launch_status = elastic::launch_internal_combine(
-            arguments, tiling, storage, stream);
+            arguments, tiling, storage, stream.raw);
         if (!launch_status.ok())
             raise_combine_launch_status(launch_status, rank_idx_);
-        status = resources_->synchronize_stream(stream);
+        status = resources_->synchronize_stream(stream.raw);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         transport::DeviceTransportDiagnostic diagnostic{};

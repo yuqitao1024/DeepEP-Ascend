@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <utility>
 
@@ -16,6 +17,15 @@
 #define DEEP_EP_ASCEND_HAS_CANN_RUNTIME 0
 #endif
 
+#if __has_include(<torch/extension.h>) && \
+    __has_include(<torch_npu/csrc/core/npu/NPUCachingAllocator.h>) && \
+    __has_include(<torch_npu/csrc/core/npu/NPUStream.h>)
+#define DEEP_EP_ASCEND_HAS_TENSOR_STREAM_RECORDING 1
+#include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
+#else
+#define DEEP_EP_ASCEND_HAS_TENSOR_STREAM_RECORDING 0
+#endif
+
 namespace deep_ep::ascend::runtime {
 namespace {
 
@@ -23,16 +33,25 @@ using transport::TransportStatus;
 
 bool valid_api(const CannRuntimeApi& api) {
     return api.allocate_device != nullptr && api.zero_device != nullptr &&
-           api.free_device != nullptr && api.current_device != nullptr &&
-           api.current_stream != nullptr &&
-           api.synchronize_stream != nullptr &&
+           api.free_device != nullptr && api.synchronize_stream != nullptr &&
            api.synchronize_device != nullptr && api.copy_from_host != nullptr &&
            api.copy_to_host != nullptr;
+}
+
+bool valid_stream_api(const StreamEventApi& api) {
+    return api.current_device != nullptr && api.current_stream != nullptr &&
+           api.pool_stream != nullptr;
 }
 
 TransportStatus backend_failure(const char* operation, int backend_code) {
     return TransportStatus::runtime_failure(
         operation, backend_code, "CANN runtime call failed");
+}
+
+TransportStatus stream_backend_failure(
+    const char* operation, int backend_code) {
+    return TransportStatus::runtime_failure(
+        operation, backend_code, "Torch NPU stream runtime call failed");
 }
 
 void retain_first(
@@ -56,14 +75,6 @@ int runtime_zero(void*, void* pointer, std::uint64_t bytes) {
 
 int runtime_free(void*, void* pointer) {
     return aclrtFree(pointer);
-}
-
-int runtime_current_device(void*, int* device) {
-    return aclrtGetDevice(device);
-}
-
-void* runtime_current_stream(void*) {
-    return c10_npu::getCurrentNPUStream().stream(false);
 }
 
 int runtime_synchronize_stream(void*, void* stream) {
@@ -95,9 +106,8 @@ int runtime_copy_to_host(
 CannRuntimeApi make_cann_runtime_api() {
 #if DEEP_EP_ASCEND_HAS_CANN_RUNTIME
     return {nullptr, runtime_allocate, runtime_zero, runtime_free,
-            runtime_current_device, runtime_current_stream, runtime_synchronize_stream,
-            runtime_synchronize_device, runtime_copy_from_host,
-            runtime_copy_to_host};
+            runtime_synchronize_stream, runtime_synchronize_device,
+            runtime_copy_from_host, runtime_copy_to_host};
 #else
     return {};
 #endif
@@ -111,25 +121,28 @@ TransportStatus CannRuntimeResources::initialize(
     const transport::TransportConfig& config,
     std::uint64_t workspace_bytes) {
     return initialize_impl(
-        config, workspace_bytes, make_cann_runtime_api(), nullptr);
+        config, workspace_bytes, make_cann_runtime_api(), nullptr,
+        make_stream_event_api());
 }
 
 TransportStatus CannRuntimeResources::initialize(
     const transport::TransportConfig& config,
     std::uint64_t workspace_bytes, const CannRuntimeApi& runtime_api,
-    const transport::CannHostApi& host_api) {
+    const transport::CannHostApi& host_api,
+    const StreamEventApi& stream_event_api) {
     return initialize_impl(
-        config, workspace_bytes, runtime_api, &host_api);
+        config, workspace_bytes, runtime_api, &host_api, stream_event_api);
 }
 
 TransportStatus CannRuntimeResources::initialize_impl(
     const transport::TransportConfig& config,
     std::uint64_t workspace_bytes, const CannRuntimeApi& runtime_api,
-    const transport::CannHostApi* host_api) {
+    const transport::CannHostApi* host_api,
+    const StreamEventApi& stream_event_api) {
     if (owns_resources_)
         return TransportStatus::invalid(
             "initialize_runtime", "runtime resources are already initialized");
-    if (!valid_api(runtime_api))
+    if (!valid_api(runtime_api) || !valid_stream_api(stream_event_api))
         return TransportStatus::runtime_failure(
             "initialize_runtime", 0,
             "CANN and Torch NPU runtime APIs are unavailable at build time");
@@ -146,18 +159,41 @@ TransportStatus CannRuntimeResources::initialize_impl(
             "initialize_runtime", "invalid scale-up production configuration");
 
     runtime_api_ = runtime_api;
+    stream_event_api_ = stream_event_api;
     owns_resources_ = true;
     TransportStatus status = TransportStatus::success();
     int device = -1;
-    int result = runtime_api_.current_device(runtime_api_.user_data, &device);
+    int result = stream_event_api_.current_device(
+        stream_event_api_.user_data, &device);
     if (result != 0 || device < 0) {
         status = result == 0 ? TransportStatus::runtime_failure(
             "current_device", 0, "Torch NPU returned an invalid current device") :
-            backend_failure("current_device", result);
+            stream_backend_failure("current_device", result);
         (void)destroy();
         return status;
     }
     owning_device_ = device;
+    StreamIdentity comm_stream;
+    result = stream_event_api_.pool_stream(
+        stream_event_api_.user_data, owning_device_, true, &comm_stream);
+    if (result != 0) {
+        status = stream_backend_failure("pool_stream", result);
+        (void)destroy();
+        return status;
+    }
+    if (comm_stream.raw == nullptr) {
+        status = TransportStatus::runtime_failure(
+            "pool_stream", 0, "Torch NPU returned a null pool stream");
+        (void)destroy();
+        return status;
+    }
+    if (comm_stream.device_index != owning_device_) {
+        status = TransportStatus::invalid(
+            "pool_stream", "pool stream does not belong to the current device");
+        (void)destroy();
+        return status;
+    }
+    comm_stream_ = comm_stream;
     status = allocate(
         static_cast<std::uint64_t>(config.device_buffer_bytes),
         elastic::kPublicElasticBufferAlignment, &window_, "allocate_window");
@@ -197,13 +233,6 @@ TransportStatus CannRuntimeResources::initialize_impl(
         workspace_bytes, elastic::kAscendElasticAlignment, &workspace_,
         "allocate_workspace");
     if (!status.ok()) {
-        (void)destroy();
-        return status;
-    }
-    void* initial_stream = runtime_api_.current_stream(runtime_api_.user_data);
-    if (initial_stream == nullptr) {
-        status = TransportStatus::runtime_failure(
-            "current_stream", 0, "Torch NPU returned a null current stream");
         (void)destroy();
         return status;
     }
@@ -260,7 +289,6 @@ TransportStatus CannRuntimeResources::destroy() {
 
     initialized_ = false;
     device_context_ = {};
-    owning_device_ = -1;
     TransportStatus first_error = TransportStatus::success();
     free_allocation(workspace_, "free_workspace", first_error);
     if (transport_ != nullptr) {
@@ -274,29 +302,68 @@ TransportStatus CannRuntimeResources::destroy() {
     if (first_error.ok()) {
         owns_resources_ = false;
         runtime_api_ = {};
+        stream_event_api_ = {};
+        comm_stream_ = {};
+        owning_device_ = -1;
     }
     return first_error;
 }
 
-TransportStatus CannRuntimeResources::current_stream(void** stream) {
+TransportStatus CannRuntimeResources::current_stream(StreamIdentity* stream) {
     if (!initialized_ || stream == nullptr)
         return TransportStatus::invalid(
             "current_stream", "invalid runtime stream request");
-    *stream = runtime_api_.current_stream(runtime_api_.user_data);
-    return *stream != nullptr ? TransportStatus::success() :
-        TransportStatus::runtime_failure(
+    const int result = stream_event_api_.current_stream(
+        stream_event_api_.user_data, stream);
+    if (result != 0)
+        return stream_backend_failure("current_stream", result);
+    if (stream->raw == nullptr)
+        return TransportStatus::runtime_failure(
             "current_stream", 0, "Torch NPU returned a null current stream");
+    if (stream->device_index != owning_device_)
+        return TransportStatus::invalid(
+            "current_stream",
+            "current stream does not belong to the runtime device");
+    return TransportStatus::success();
 }
 
 TransportStatus CannRuntimeResources::current_device(int* device) {
     if (!initialized_ || device == nullptr)
         return TransportStatus::invalid(
             "current_device", "invalid runtime device request");
-    const int result = runtime_api_.current_device(runtime_api_.user_data, device);
+    const int result = stream_event_api_.current_device(
+        stream_event_api_.user_data, device);
     return result == 0 && *device >= 0 ? TransportStatus::success() :
         result == 0 ? TransportStatus::runtime_failure(
             "current_device", 0, "Torch NPU returned an invalid current device") :
-        backend_failure("current_device", result);
+        stream_backend_failure("current_device", result);
+}
+
+TransportStatus CannRuntimeResources::record_tensor_stream(
+    const torch::Tensor& tensor, const StreamIdentity& stream) {
+    if (!initialized_ || stream.raw == nullptr ||
+        stream.device_index != owning_device_)
+        return TransportStatus::invalid(
+            "record_tensor_stream", "invalid tensor stream request");
+#if DEEP_EP_ASCEND_HAS_TENSOR_STREAM_RECORDING
+    try {
+        const auto npu_stream = c10_npu::NPUStream::unpack3(
+            static_cast<c10::StreamId>(stream.stream_id),
+            static_cast<c10::DeviceIndex>(stream.device_index),
+            static_cast<c10::DeviceType>(stream.device_type));
+        c10_npu::NPUCachingAllocator::recordStream(
+            tensor.storage().data_ptr(), npu_stream);
+        return TransportStatus::success();
+    } catch (const std::exception& error) {
+        return TransportStatus::runtime_failure(
+            "record_tensor_stream", 0, error.what());
+    }
+#else
+    (void)tensor;
+    return TransportStatus::runtime_failure(
+        "record_tensor_stream", 0,
+        "Torch NPU allocator API is unavailable at build time");
+#endif
 }
 
 TransportStatus CannRuntimeResources::synchronize_stream(void* stream) {

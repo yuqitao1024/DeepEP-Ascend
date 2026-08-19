@@ -223,6 +223,7 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
                     "-I", str(ROOT),
                     str(ROOT / "tests/ascend/production_lifecycle_probe.cpp"),
                     str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
+                    str(ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"),
                     str(TRANSPORT / "cann_transport.cpp"),
                     "-o", str(executable),
                 ],

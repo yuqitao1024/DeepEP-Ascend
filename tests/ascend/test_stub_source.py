@@ -622,6 +622,7 @@ class AscendStubSourceTest(unittest.TestCase):
                  str(probe),
                  str(ROOT / "csrc/backends/ascend/elastic/runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"),
                  str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
                  "-o", str(binary)],
                 capture_output=True, text=True, check=False)

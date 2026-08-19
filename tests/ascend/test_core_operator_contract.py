@@ -32,6 +32,8 @@ PRODUCTION_OPERATION_COORDINATOR_PROBE = \
     ROOT / "tests/ascend/production_operation_coordinator_probe.cpp"
 PRODUCTION_BUFFER_LIFECYCLE_PROBE = \
     ROOT / "tests/ascend/production_buffer_lifecycle_probe.cpp"
+PRODUCTION_RUNTIME_LIFECYCLE_PROBE = \
+    ROOT / "tests/ascend/production_lifecycle_probe.cpp"
 TWO_RANK_DISPATCH = \
     ROOT / "tests/ascend/production/run_two_rank_dispatch.py"
 TWO_RANK_COMBINE = \
@@ -1019,7 +1021,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
-    def test_elastic_buffer_resource_lifecycle_concurrency(self):
+    def test_buffer_lifecycle_resource_concurrency(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)
             (directory / "pybind11").mkdir()
@@ -1034,6 +1036,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                  str(PRODUCTION_BUFFER_LIFECYCLE_PROBE),
                  str(ELASTIC / "runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"),
                  str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
                  "-o", str(binary)], capture_output=True, text=True,
                 check=False)
@@ -1042,6 +1045,42 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             run_result = subprocess.run(
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_runtime_resource_lifecycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "production_lifecycle_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(PRODUCTION_RUNTIME_LIFECYCLE_PROBE),
+                 str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"),
+                 str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
+                 "-o", str(binary)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_runtime_resource_lifecycle_torch_npu_source_contract(self):
+        header = (
+            ROOT / "csrc/backends/ascend/runtime/cann_runtime.hpp").read_text()
+        source = (
+            ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp").read_text()
+        runtime_api = header[
+            header.index("struct CannRuntimeApi"):
+            header.index("CannRuntimeApi make_cann_runtime_api")]
+
+        self.assertNotIn("current_device", runtime_api)
+        self.assertNotIn("current_stream", runtime_api)
+        self.assertIn("c10_npu::NPUStream::unpack3(", source)
+        self.assertIn(
+            "c10_npu::NPUCachingAllocator::recordStream(\n"
+            "            tensor.storage().data_ptr(), npu_stream);", source)
+        self.assertNotIn("destroy_stream", header.lower())
+        self.assertNotIn("destroy_stream", source.lower())
+        self.assertNotIn("aclrtDestroyStream", source)
 
     def test_pure_cpp_layout_and_tiling_contract(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1852,6 +1891,7 @@ int main() {
                  "-DDEEP_EP_ASCEND_TESTING=1", f"-I{directory}", f"-I{ROOT}", str(probe),
                  str(ELASTIC / "runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"),
                  str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
                  "-o", str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
@@ -1874,6 +1914,7 @@ int main() {
                  "-DDEEP_EP_ASCEND_TESTING=1", f"-I{directory}", f"-I{ROOT}",
                  str(probe), str(ELASTIC / "runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"),
                  str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
                  "-o", str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(compile_result.returncode, 0, compile_result.stderr)

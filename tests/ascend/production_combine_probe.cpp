@@ -63,7 +63,17 @@ int zero(void*, void* pointer, std::uint64_t bytes) {
 }
 int free_(void*, void* pointer) { std::free(pointer); return 0; }
 int current_device(void*, int* device) { *device = trace.device; return 0; }
-void* stream(void*) { return trace.fail_stream ? nullptr : &trace; }
+int stream(void*, runtime::StreamIdentity* value) {
+    *value = {trace.fail_stream ? nullptr : &trace, 7, trace.device, 20};
+    return 0;
+}
+int pool_stream(
+    void*, int device, bool high_priority, runtime::StreamIdentity* value) {
+    if (!high_priority)
+        return 86;
+    *value = {&trace, 11, device, 20};
+    return 0;
+}
 int sync(void*, void*) { return trace.fail_sync ? 83 : 0; }
 int sync_device(void*) { return 0; }
 int h2d(void*, void* destination, const void* source, std::uint64_t bytes) {
@@ -134,8 +144,9 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
     trace.communicator_size = static_cast<std::uint32_t>(world_size);
     auto result = std::make_unique<runtime::CannRuntimeResources>();
     runtime::CannRuntimeApi runtime_api{
-        nullptr, alloc, zero, free_, current_device, stream, sync, sync_device,
-        h2d, d2h};
+        nullptr, alloc, zero, free_, sync, sync_device, h2d, d2h};
+    runtime::StreamEventApi stream_api{
+        nullptr, current_device, stream, pool_stream};
     transport::CannHostApi host_api{
         nullptr, rank_, size_, team, window, channels, ha, hz, hd, dh, hf,
         noop2, noop1};
@@ -145,7 +156,8 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
     config.communicator_handle = 1;
     config.device_buffer_bytes = 2 * 1024 * 1024;
     config.requested_channels = 1;
-    if (!result->initialize(config, 4096, runtime_api, host_api).ok())
+    if (!result->initialize(
+            config, 4096, runtime_api, host_api, stream_api).ok())
         return {};
     return result;
 }
