@@ -387,6 +387,33 @@ contention. No production change or unchanged full-matrix retry follows from
 this result; Phase 3E.1 remains unaccepted under its fixed 5% gate while the
 specific contention source is investigated separately.
 
+Static investigation also rules out two immediate tuning assumptions. In the
+qualified Torch-NPU revision, `getStreamFromPool(true)` selects logical
+priority `-1`, but both logical high and normal pools create CANN streams at
+physical priority `0` with the same fast-launch/fast-sync flags; changing the
+pool selector would not change physical stream priority. The qualified
+dispatch has `num_blocks=1`, `num_threads=512`, a public `num_sms=1` contract,
+an outer `__global__ __vector__` kernel launch by `num_blocks`, and matching
+AIV/vector symbols in the compiled object. This establishes one outer AIV
+block, but available vendor documentation does not establish its exact
+physical-core mapping.
+
+Component-only commit `8e812bd` then replaced its mixed compute chain with
+exactly 256 independent matmuls and no `mul`/`mul_`, without changing the
+formal acceptance workload. The only authorized pure-matmul diagnostic,
+`task_20260820_040533_315212229000`, completed on devices `6,7` and again
+classified both ranks as `resource-contention`. Communication-only was
+`0.278048730`/`0.278018550` seconds, pure-matmul compute-only was
+`0.087509200`/`0.086884680`, serialized was
+`0.353972660`/`0.354368630`, and overlapped was
+`0.353502300`/`0.353292460`. The gains were only `0.1329%` and `0.3037%`,
+while event waits remained stretched to `0.341599990`/`0.340491320` seconds
+despite `268224.5us`/`269994.5us` of physical overlap on streams `61/26`.
+Removing the elementwise chain reduced compute-only time but did not remove
+the communication stretch, so the `mul_` contention hypothesis is rejected.
+The formal mixed workload and fixed 5% gate remain unchanged, no further full
+matrix is justified, and Phase 3E.1 remains unaccepted.
+
 ### Deliverables
 
 - implement native Ascend event ownership behind `EventOverlap`;

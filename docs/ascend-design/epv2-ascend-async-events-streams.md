@@ -214,6 +214,57 @@ This evidence supports resource contention, not a synchronous baseline defect;
 production remains unchanged and rerunning the same full matrix is not
 justified. Phase 3E.1 remains unaccepted under the fixed 5% wall-time gate.
 
+Static investigation does not support changing the Torch-NPU pool selector as
+a contention fix. The qualified `torch_npu 2.10.0.post2` wheel records revision
+`8751b36d5d6959e499e6bf6530c1928060ced030`. In that source,
+`getStreamFromPool(true)` selects the logical high-priority pool with priority
+`-1`, while `false` selects logical priority `0`; both pools are created by
+`AclrtCreateStreamWithConfig` with physical priority `0` and flags
+`ACL_STREAM_FAST_LAUNCH | ACL_STREAM_FAST_SYNC`. Changing the boolean would
+therefore change logical pool identity but not CANN stream priority in this
+qualified revision.
+
+The dispatch launch is already constrained to one outer AIV/vector block:
+`CoreLaunchShape` is `num_blocks=1`, `num_threads=512`, the public dispatch
+contract requires `num_sms=1`, `dispatch_kernel` is declared
+`__global__ __vector__`, and its outer launch uses `tiling.launch.num_blocks`.
+The 512-thread value is passed to the nested `asc_vf_call` stages. Inspection
+of the exact qualified object also found the embedded device ELF
+`.AIV_Kernel_Type` dispatch symbol and vector-SIMT entries. This proves one
+outer AIV/vector block, but the available public CANN headers do not establish
+how that block maps to a physical vector core; that mapping remains a vendor
+documentation gap rather than evidence for a launch-shape change.
+
+A final component-only diagnostic isolated the remaining elementwise-work
+hypothesis. Commit `8e812bd` makes the component path submit exactly 256
+independent `torch.matmul(left, right)` calls and no `mul` or `mul_`; the
+formal `overlap-vs-serialized` case retains the mixed MatMulV3-plus-`mul_`
+workload and its fixed acceptance gate. Task
+`task_20260820_040533_315212229000` ran only this `pure-matmul` diagnostic on
+devices `6,7` with the 120-second controller and 300-second outer bounds. It
+reached terminal `completed (exit=0)` after 52 seconds, with a runner duration
+of `50.108964270` seconds, and classified both ranks as
+`resource-contention`.
+
+Rank 0 measured communication-only/compute-only/component-sum/serialized/
+overlapped walls of `0.278048730`/`0.087509200`/`0.365557930`/
+`0.353972660`/`0.353502300` seconds. Rank 1 measured
+`0.278018550`/`0.086884680`/`0.364903230`/`0.354368630`/
+`0.353292460`. The overlap gains were only `0.000470360` and `0.001076170`
+seconds, or `0.1329%` and `0.3037%`, far below 5%. Synchronous dispatch
+returns remained `0.278711710`/`0.279201640` seconds and overlapped event waits
+remained stretched at `0.341599990`/`0.340491320` seconds. The profiler still
+proved `268224.5us`/`269994.5us` of positive overlap on physical streams
+`61/26` (logical `0/128`). Report SHA-256 is
+`4eef5df836b6dcfc09def67cd5bf58b6fd517e70faa93ca1d2b6e5accc247369`.
+
+Removing `mul_` reduced compute-only time from approximately 95ms to 87ms but
+did not remove the communication stretch or produce material wall-time gain.
+The elementwise-chain contention hypothesis is therefore rejected. No
+production change, formal-workload substitution, full-matrix retry, or
+additional NPU task follows from this result; the mixed formal acceptance case
+remains unchanged and Phase 3E.1 remains unaccepted.
+
 ## Decisions
 
 ### Native resource model
