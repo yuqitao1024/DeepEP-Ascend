@@ -166,9 +166,9 @@ all-gather reference. It covers normal, expanded, padded, cached, weighted,
 empty, asymmetric, and `-1` routing, exact payload/SF comparison, BF16 combine
 after FP8 dispatch, repeated generations, and bounded malformed input. The
 focused matrix runs first on two NPUs; supported four-rank and eight-rank smoke
-tests then verify rank-parameterized behavior. One final serialized TaskQueue
-run performs a clean production build, dependency audit, host tests, BF16
-regressions, and the complete selected FP8 runtime matrix.
+tests then verify rank-parameterized behavior. The serialized TaskQueue
+acceptance sequence combines a clean production build, dependency audit, host
+tests, BF16 regressions, and the complete selected FP8 runtime matrix.
 
 ### Qualification Record
 
