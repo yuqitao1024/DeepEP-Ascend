@@ -40,6 +40,7 @@ public:
 
     transport::TransportStatus record(StreamIdentity);
     transport::TransportStatus wait(StreamIdentity) const;
+    transport::TransportStatus current_stream(StreamIdentity*) const;
     transport::TransportStatus finish(std::uint64_t timeout_ms);
     transport::TransportStatus destroy();
     int device_index() const noexcept;

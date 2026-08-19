@@ -22,6 +22,12 @@ namespace {
 
 int failures = 0;
 
+struct Trace;
+struct StreamToken {
+    Trace* trace = nullptr;
+    bool communication = false;
+};
+
 #define CHECK(expression)                                                     \
     do {                                                                      \
         if (!(expression)) {                                                  \
@@ -54,6 +60,9 @@ struct Trace {
     std::vector<void*> transport_allocations;
     void* diagnostic = nullptr;
     void* registered_window = nullptr;
+    std::vector<std::string> order;
+    StreamToken compute_stream;
+    StreamToken comm_stream;
 };
 
 Trace& self(void* data) { return *static_cast<Trace*>(data); }
@@ -85,8 +94,10 @@ int stream_current_device(void* data, int* device) {
 }
 
 int stream_current_stream(void* data, runtime::StreamIdentity* stream) {
-    ++self(data).current_stream_calls;
-    *stream = {data, 7, 0, 20};
+    auto& trace = self(data);
+    ++trace.current_stream_calls;
+    trace.order.emplace_back("capture compute dependency");
+    *stream = {&trace.compute_stream, 7, 0, 20};
     return 0;
 }
 
@@ -97,17 +108,37 @@ int stream_pool_stream(
     ++trace.pool_stream_calls;
     if (device != 0 || !high_priority)
         return 18;
-    *stream = {data, 11, device, 20};
+    *stream = {&trace.comm_stream, 11, device, 20};
     return 0;
 }
 
-int stream_create_event(void*, void**) { return 0; }
-int stream_record_event(void*, void*, void*) { return 0; }
-int stream_query_event(void*, void*, bool*) { return 0; }
-int stream_wait_event(void*, void*, void*) { return 0; }
+int stream_create_event(void* data, void** event) {
+    *event = new int(1);
+    self(data).order.emplace_back("create event");
+    return 0;
+}
+int stream_record_event(void* data, void*, void* stream) {
+    const auto* token = static_cast<StreamToken*>(stream);
+    self(data).order.emplace_back(token->communication ?
+        "record completion event" : "record compute dependency");
+    return 0;
+}
+int stream_query_event(void* data, void*, bool* complete) {
+    *complete = true;
+    self(data).order.emplace_back("finish completion event");
+    return 0;
+}
+int stream_wait_event(void* data, void* stream, void*) {
+    const auto* token = static_cast<StreamToken*>(stream);
+    if (!token->communication)
+        return 19;
+    self(data).order.emplace_back("comm waits dependency/previous event");
+    return 0;
+}
 int stream_synchronize_event(void*, void*, std::uint64_t) { return 0; }
-int stream_destroy_event(void* data, void*) {
+int stream_destroy_event(void* data, void* event) {
     ++self(data).destroy_event_calls;
+    delete static_cast<int*>(event);
     return 0;
 }
 
@@ -243,6 +274,8 @@ transport::CannHostApi host_api(Trace& trace) {
 }
 
 std::unique_ptr<runtime::CannRuntimeResources> make_resources(Trace& trace) {
+    trace.compute_stream = {&trace, false};
+    trace.comm_stream = {&trace, true};
     auto resources = std::make_unique<runtime::CannRuntimeResources>();
     transport::TransportConfig config{};
     config.rank = 0;
@@ -257,7 +290,7 @@ std::unique_ptr<runtime::CannRuntimeResources> make_resources(Trace& trace) {
     CHECK(trace.pool_stream_calls == 1);
     CHECK(trace.destroy_event_calls == 0);
     if (status.ok()) {
-        CHECK(resources->comm_stream().raw == &trace);
+        CHECK(resources->comm_stream().raw == &trace.comm_stream);
         CHECK(resources->comm_stream().stream_id == 11);
         CHECK(resources->comm_stream().device_index == 0);
     }
@@ -495,13 +528,40 @@ void check_cross_operation_busy_and_deferred_poison() {
     CHECK(trace.destroy_team_calls == 1);
 }
 
+void check_comm_stream_barrier_order() {
+    Trace trace;
+    ResourceIdentity resource_identity;
+    auto buffer = make_buffer(trace, &resource_identity);
+    CHECK(buffer != nullptr);
+    if (buffer == nullptr)
+        return;
+    trace.order.clear();
+    buffer->barrier(true, false, true);
+    const std::vector<std::string> expected{
+        "capture compute dependency",
+        "create event",
+        "record compute dependency",
+        "comm waits dependency/previous event",
+        "activate lease and launch barrier on comm",
+        "create event",
+        "record completion event",
+        "finish completion event",
+        "finish completion event",
+    };
+    CHECK(trace.order == expected);
+    CHECK(trace.synchronize_stream_calls == 0);
+    CHECK(trace.destroy_event_calls == 2);
+    buffer->destroy();
+}
+
 }  // namespace
 
 extern "C" int deep_ep_ascend_launch_barrier(
     elastic::BarrierArguments arguments, elastic::CoreTiling tiling,
     void* stream) {
-    auto& trace = *static_cast<Trace*>(stream);
+    auto& trace = *static_cast<StreamToken*>(stream)->trace;
     ++trace.barrier_launches;
+    trace.order.emplace_back("activate lease and launch barrier on comm");
     auto* diagnostic = static_cast<transport::DeviceTransportDiagnostic*>(
         trace.diagnostic);
     *diagnostic = {};
@@ -532,5 +592,6 @@ int main() {
     check_two_live_buffer_resource_and_failure_isolation();
     check_destroy_is_busy_while_real_operation_uses_resources();
     check_cross_operation_busy_and_deferred_poison();
+    check_comm_stream_barrier_order();
     return failures == 0 ? 0 : 1;
 }

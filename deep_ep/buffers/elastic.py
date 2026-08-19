@@ -650,9 +650,14 @@ class ElasticBuffer:
             scalar_error = "invalid_capacity"
         elif not isinstance(alignment, int) or alignment <= 0:
             scalar_error = "invalid_expert_alignment"
-        elif (previous_event is not None or
-              previous_event_before_epilogue is not None or
-              async_with_compute_stream or allocate_on_comm_stream):
+        elif previous_event_before_epilogue is not None:
+            scalar_error = "unsupported_dispatch_mode"
+        elif previous_event is not None and not allocate_on_comm_stream:
+            scalar_error = "unsupported_dispatch_mode"
+        elif ((previous_event is not None or async_with_compute_stream or
+               allocate_on_comm_stream) and
+              (not cached or fp8_dispatch or self.allow_hybrid_mode or
+               self.num_scaleout_ranks > 1)):
             scalar_error = "unsupported_dispatch_mode"
         elif use_tma_aligned_col_major_sf and not fp8_dispatch:
             scalar_error = "invalid_column_major_sf_mode"
@@ -1500,16 +1505,22 @@ class ElasticBuffer:
                               dst_buffer_slot_idx,
                               token_metadata_at_forward,
                               channel_linked_list)
-        if not is_cuda():
-            self._ascend_handle_generation += 1
-            handle._ascend_owner = self
-            handle._ascend_generation = self._ascend_handle_generation
-            handle._ascend_descriptor_fingerprint = (
-                _ascend_descriptor_fingerprint(
-                    handle.token_metadata_at_forward))
-
         # Create event
         event_overlap = EventOverlap(event)
+        hooks_after_wait = []
+        if not is_cuda():
+            def commit_ascend_handle():
+                self._ascend_handle_generation += 1
+                handle._ascend_owner = self
+                handle._ascend_generation = self._ascend_handle_generation
+                handle._ascend_descriptor_fingerprint = (
+                    _ascend_descriptor_fingerprint(
+                        handle.token_metadata_at_forward))
+
+            if async_with_compute_stream:
+                hooks_after_wait.append(commit_ascend_handle)
+            else:
+                commit_ascend_handle()
 
         # Deterministic epilogue
         # NOTES: when we change the metadata layout, the epilogue should also be changed
@@ -1519,7 +1530,13 @@ class ElasticBuffer:
                 do_cpu_sync, is_cached_dispatch,
                 recv_x, recv_sf, recv_topk_idx, recv_topk_weights, channel_linked_list
             )
-            event_overlap.register_hook_after_wait(epilogue) if async_with_compute_stream else epilogue()
+            hooks_after_wait.append(epilogue) if async_with_compute_stream else epilogue()
+        if hooks_after_wait:
+            def run_hooks_after_wait():
+                for hook in hooks_after_wait:
+                    hook()
+
+            event_overlap.register_hook_after_wait(run_hooks_after_wait)
 
         # Repack SF
         recv_x = (recv_x, recv_sf) if recv_sf is not None else recv_x

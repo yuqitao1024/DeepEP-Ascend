@@ -171,6 +171,20 @@ TransportStatus NativeEventState::wait(StreamIdentity stream) const {
         backend_failure("wait_event", result);
 }
 
+TransportStatus NativeEventState::current_stream(StreamIdentity* stream) const {
+    if (stream == nullptr || api_.current_stream == nullptr)
+        return TransportStatus::invalid(
+            "current_stream_wait", "invalid current stream request");
+    const int result = api_.current_stream(api_.user_data, stream);
+    if (result != 0)
+        return backend_failure("current_stream_wait", result);
+    if (!same_device(*stream, device_index_))
+        return TransportStatus::invalid(
+            "current_stream_wait",
+            "current NPU device does not belong to the event device");
+    return TransportStatus::success();
+}
+
 TransportStatus NativeEventState::finish(std::uint64_t timeout_ms) {
     if (state_ == State::Completed)
         return TransportStatus::success();

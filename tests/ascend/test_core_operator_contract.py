@@ -1021,7 +1021,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
-    def test_buffer_lifecycle_resource_concurrency(self):
+    def test_barrier_buffer_lifecycle_resource_concurrency(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)
             (directory / "pybind11").mkdir()

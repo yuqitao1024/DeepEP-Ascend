@@ -67,6 +67,7 @@ public:
     }
     int owning_device() const noexcept { return owning_device_; }
     const StreamIdentity& comm_stream() const noexcept { return comm_stream_; }
+    NativeEventCreateResult create_event();
 
     transport::TransportStatus current_device(int* device);
     transport::TransportStatus current_stream(StreamIdentity* stream);

@@ -74,6 +74,21 @@ int pool_stream(
     *value = {&trace, 11, device, 20};
     return 0;
 }
+int create_event(void*, void** event) {
+    *event = new int(1);
+    return 0;
+}
+int record_event(void*, void*, void*) { return 0; }
+int query_event(void*, void*, bool* complete) {
+    *complete = true;
+    return 0;
+}
+int wait_event(void*, void*, void*) { return 0; }
+int synchronize_event(void*, void*, std::uint64_t) { return 0; }
+int destroy_event(void*, void* event) {
+    delete static_cast<int*>(event);
+    return 0;
+}
 int sync(void*, void*) { return trace.fail_sync ? 83 : 0; }
 int sync_device(void*) { return 0; }
 int h2d(void*, void* destination, const void* source, std::uint64_t bytes) {
@@ -146,7 +161,8 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
     runtime::CannRuntimeApi runtime_api{
         nullptr, alloc, zero, free_, sync, sync_device, h2d, d2h};
     runtime::StreamEventApi stream_api{
-        nullptr, current_device, stream, pool_stream};
+        nullptr, current_device, stream, pool_stream, create_event, record_event,
+        query_event, wait_event, synchronize_event, destroy_event};
     transport::CannHostApi host_api{
         nullptr, rank_, size_, team, window, channels, ha, hz, hd, dh, hf,
         noop2, noop1};
@@ -167,6 +183,10 @@ extern "C" int deep_ep_ascend_launch_barrier(
 extern "C" int deep_ep_ascend_launch_dispatch(
     elastic::DispatchArguments arguments, elastic::CoreTiling tiling, void*) {
     trace.generation = arguments.generation;
+    auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(
+        tiling.transport_context.local_window_base +
+        tiling.symmetric_window_layout.control_offset);
+    control->dispatch_generation = arguments.generation;
     arguments.prefix_per_rank[0] = 1;
     arguments.prefix_per_rank[1] = 2;
     const auto aligned = static_cast<std::int32_t>(

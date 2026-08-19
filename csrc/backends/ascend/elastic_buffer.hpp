@@ -13,6 +13,14 @@
 #include <utility>
 #include <vector>
 
+#if __has_include(<c10/core/StreamGuard.h>) && \
+    !defined(DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR)
+#include <c10/core/StreamGuard.h>
+#define DEEP_EP_ASCEND_HAS_GENERIC_STREAM_GUARD 1
+#else
+#define DEEP_EP_ASCEND_HAS_GENERIC_STREAM_GUARD 0
+#endif
+
 #include <pybind11/pybind11.h>
 #include <torch/python.h>
 
@@ -85,21 +93,14 @@ private:
         }
 
         transport::TransportStatus finish_on_current_stream() {
-            const auto api = runtime::make_stream_event_api();
-            if (api.current_stream == nullptr)
-                return transport::TransportStatus::invalid(
-                    "current_stream_wait", "Torch NPU stream runtime is unavailable");
             runtime::StreamIdentity stream;
-            const int result = api.current_stream(api.user_data, &stream);
-            if (result != 0)
-                return transport::TransportStatus::runtime_failure(
-                    "current_stream_wait", result,
-                    "Torch NPU current stream lookup failed");
-            if (event == nullptr || stream.raw == nullptr ||
-                stream.device_index != event->device_index())
+            if (event == nullptr)
                 return transport::TransportStatus::invalid(
                     "current_stream_wait",
-                    "current NPU device does not belong to the event device");
+                    "operation event is unavailable");
+            const auto stream_status = event->current_stream(&stream);
+            if (!stream_status.ok())
+                return stream_status;
 
             std::lock_guard<std::mutex> lock(mutex);
             return pending_operation != nullptr ?
@@ -168,6 +169,114 @@ public:
         if (!status.ok())
             raise_event_status(status);
     }
+
+private:
+    elastic::EventDependency dependency() const {
+        TORCH_CHECK(state_ != nullptr && state_->event != nullptr,
+                    "DeepEP Ascend backend: predecessor event is unavailable");
+        return {state_->event, state_->pending_operation};
+    }
+
+    friend class ElasticBuffer;
+};
+
+class ElasticAsyncCompletionResources final
+    : public elastic::AsyncCompletionResources {
+public:
+    ElasticAsyncCompletionResources(
+        std::unique_ptr<runtime::CannRuntimeResources> resources,
+        std::uint64_t dispatch_family,
+        std::uint64_t last_dispatch_generation)
+        : resources_(std::move(resources)), dispatch_family_(dispatch_family),
+          last_dispatch_generation_(last_dispatch_generation) {}
+
+    runtime::CannRuntimeResources* runtime() const noexcept {
+        return resources_.get();
+    }
+
+    std::uint64_t dispatch_family() const noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return dispatch_family_;
+    }
+
+    std::uint64_t last_dispatch_generation() const noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_dispatch_generation_;
+    }
+
+    void stage_dispatch_descriptor(
+        std::uint64_t generation, torch::Tensor tensor,
+        elastic::DispatchHandleDescriptor descriptor) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        staged_dispatch_ = StagedDispatch{
+            generation, std::move(tensor), descriptor};
+    }
+
+    void commit_dispatch_generation(std::uint64_t generation) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_dispatch_generation_ = generation;
+    }
+
+    transport::TransportStatus read_diagnostic(
+        elastic::BufferOperationKind, std::uint64_t,
+        transport::DeviceTransportDiagnostic* output) override {
+        if (resources_ == nullptr || resources_->transport() == nullptr ||
+            output == nullptr)
+            return transport::TransportStatus::invalid(
+                "read_diagnostic", "completion resources are unavailable");
+        return resources_->transport()->read_diagnostic(output);
+    }
+
+    transport::TransportStatus read_completion(
+        elastic::BufferOperationKind kind, std::uint64_t completion_offset,
+        std::uint64_t* output) override {
+        if (resources_ == nullptr || output == nullptr)
+            return transport::TransportStatus::invalid(
+                "read_completion", "completion resources are unavailable");
+        const auto* address = reinterpret_cast<const void*>(
+            reinterpret_cast<std::uintptr_t>(resources_->window_base()) +
+            completion_offset);
+        auto status = resources_->copy_to_host(
+            output, address, sizeof(*output));
+        if (!status.ok() || kind != elastic::BufferOperationKind::kDispatch)
+            return status;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!staged_dispatch_.has_value() ||
+            staged_dispatch_->generation != *output)
+            return transport::TransportStatus::invalid(
+                "dispatch", "generation-bound descriptor commit is unavailable");
+        status = resources_->copy_from_host(
+            staged_dispatch_->tensor.data_ptr(), &staged_dispatch_->descriptor,
+            sizeof(staged_dispatch_->descriptor));
+        if (!status.ok())
+            return status;
+        last_dispatch_generation_ = staged_dispatch_->generation;
+        staged_dispatch_.reset();
+        return transport::TransportStatus::success();
+    }
+
+    transport::TransportStatus destroy() override {
+        if (resources_ == nullptr)
+            return transport::TransportStatus::success();
+        const auto status = resources_->destroy();
+        if (status.ok())
+            resources_.reset();
+        return status;
+    }
+
+private:
+    struct StagedDispatch {
+        std::uint64_t generation = 0;
+        torch::Tensor tensor;
+        elastic::DispatchHandleDescriptor descriptor{};
+    };
+
+    std::unique_ptr<runtime::CannRuntimeResources> resources_;
+    mutable std::mutex mutex_;
+    std::uint64_t dispatch_family_ = 0;
+    std::uint64_t last_dispatch_generation_ = 0;
+    std::optional<StagedDispatch> staged_dispatch_;
 };
 
 class ElasticBuffer {
@@ -176,10 +285,9 @@ class ElasticBuffer {
     int64_t num_buffer_bytes_;
     bool allow_hybrid_mode_;
     bool allow_multiple_reduction_;
-    std::unique_ptr<runtime::CannRuntimeResources> resources_;
-    mutable elastic::BufferOperationCoordinator coordinator_;
-    std::uint64_t dispatch_family_ = 0;
-    mutable std::uint64_t last_dispatch_generation_ = 0;
+    runtime::CannRuntimeResources* resources_ = nullptr;
+    std::shared_ptr<ElasticAsyncCompletionResources> completion_resources_;
+    std::shared_ptr<elastic::AsyncBufferState> async_state_;
     std::uint64_t barrier_timeout_cycles_ = 0;
 
     inline static std::atomic_uint64_t next_dispatch_family_{0};
@@ -202,7 +310,9 @@ class ElasticBuffer {
 
     elastic::BufferOperationCoordinator::OperationLease reserve_operation(
         elastic::BufferOperationKind kind, const char* operation) const {
-        auto lease = coordinator_.reserve(kind);
+        TORCH_CHECK(async_state_ != nullptr,
+                    "DeepEP Ascend backend: runtime is destroyed");
+        auto lease = async_state_->coordinator().reserve(kind);
         if (lease.valid())
             return lease;
         switch (lease.status()) {
@@ -595,10 +705,14 @@ class ElasticBuffer {
           num_buffer_bytes_(buffer_bytes),
           allow_hybrid_mode_(allow_hybrid_mode),
           allow_multiple_reduction_(allow_multiple_reduction),
-          resources_(std::move(resources)),
-          last_dispatch_generation_(last_dispatch_generation),
           barrier_timeout_cycles_(timeout_cycles) {
-        dispatch_family_ = dispatch_family;
+        completion_resources_ =
+            std::make_shared<ElasticAsyncCompletionResources>(
+                std::move(resources), dispatch_family,
+                last_dispatch_generation);
+        resources_ = completion_resources_->runtime();
+        async_state_ = std::make_shared<elastic::AsyncBufferState>(
+            completion_resources_, 5000);
     }
 #endif
 
@@ -645,7 +759,7 @@ public:
             1, std::memory_order_relaxed);
         TORCH_CHECK(previous_family != std::numeric_limits<std::uint64_t>::max(),
                     "DeepEP Ascend backend: dispatch family space is exhausted");
-        dispatch_family_ = previous_family + 1;
+        const auto dispatch_family = previous_family + 1;
 
         transport::TransportConfig config{
             rank_idx, num_ranks, comm_handle, cpu_comm.empty(), num_buffer_bytes,
@@ -659,7 +773,12 @@ public:
             config, 2 * elastic::kPublicElasticBufferAlignment);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
-        resources_ = std::move(resources);
+        completion_resources_ =
+            std::make_shared<ElasticAsyncCompletionResources>(
+                std::move(resources), dispatch_family, 0);
+        resources_ = completion_resources_->runtime();
+        async_state_ = std::make_shared<elastic::AsyncBufferState>(
+            completion_resources_, 5000);
         if (allow_hybrid_mode_) {
             const auto& topology = resources_->device_context().topology;
             TORCH_CHECK(topology.scale_up_size == 2 &&
@@ -706,29 +825,28 @@ public:
     }
 
     std::size_t testing_dispatch_validation_state_bytes() const noexcept {
-        return sizeof(dispatch_family_) + sizeof(last_dispatch_generation_);
+        return 2 * sizeof(std::uint64_t);
     }
 
     std::uint64_t testing_operation_generation() const noexcept {
-        return coordinator_.last_generation();
+        return async_state_ == nullptr ? 0 :
+            async_state_->coordinator().last_generation();
     }
 #endif
 
     void destroy() {
-        auto teardown = coordinator_.reserve_destroy();
-        if (teardown.status() == elastic::LeaseStatus::kDestroyed)
+        if (async_state_ == nullptr)
             return;
-        TORCH_CHECK(teardown.valid(),
-                    "DeepEP Ascend backend: destroy is busy on this buffer");
-        TORCH_CHECK(resources_ != nullptr,
-                    "DeepEP Ascend backend: runtime resources are unavailable");
-        const auto status = resources_->destroy();
-        if (!status.ok()) {
-            teardown.fail();
+        const auto status = async_state_->destroy();
+        if (!status.ok() && status.operation == "destroy_async_state" &&
+            status.message == "operation coordinator is busy")
+            TORCH_CHECK(false,
+                        "DeepEP Ascend backend: destroy is busy on this buffer");
+        if (!status.ok())
             raise_transport_status(status, rank_idx_);
-        }
-        resources_.reset();
-        teardown.complete();
+        resources_ = nullptr;
+        completion_resources_.reset();
+        async_state_.reset();
     }
 
     c10::Stream get_comm_stream() const {
@@ -778,7 +896,6 @@ public:
                  const bool& sequential) {
         TORCH_CHECK(sequential,
                     "DeepEP Ascend backend: barrier requires sequential=True");
-        (void)use_comm_stream;
         auto lease = reserve_operation(
             elastic::BufferOperationKind::kBarrier, "barrier");
         require_transport("barrier", elastic::kBarrierTransportCapabilities);
@@ -797,6 +914,20 @@ public:
         auto status = resources_->current_stream(&stream);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
+        elastic::EventDependency dependency;
+        if (use_comm_stream) {
+            auto created = resources_->create_event();
+            if (!created.status.ok())
+                raise_transport_status(created.status, rank_idx_);
+            status = created.event->record(stream);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            dependency.event = std::move(created.event);
+            stream = resources_->comm_stream();
+            status = dependency.event->wait(stream);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+        }
         const auto generation = activate_operation(lease, "barrier");
         const elastic::BarrierArguments arguments{
             resources_->workspace(), generation, barrier_timeout_cycles_};
@@ -811,6 +942,41 @@ public:
                 transport::TransportStatus::invalid(
                     "barrier", launch_status.message);
             raise_transport_status(status, rank_idx_);
+        }
+
+        if (use_comm_stream) {
+            std::uint64_t completion_offset = 0;
+            TORCH_CHECK(
+                elastic::checked_rank_slot_offset(
+                    tiling.symmetric_window_layout.barrier_completion_offset,
+                    tiling.symmetric_window_layout.barrier_completion_count,
+                    rank_idx_, &completion_offset),
+                "Invalid Ascend barrier completion slot for rank ", rank_idx_);
+            auto completion = resources_->create_event();
+            if (!completion.status.ok())
+                raise_transport_status(completion.status, rank_idx_);
+            status = completion.event->record(stream);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            std::vector<elastic::EventDependency> predecessors;
+            predecessors.emplace_back(std::move(dependency));
+            auto published = async_state_->publish(
+                std::move(lease), completion.event,
+                {elastic::BufferOperationKind::kBarrier, generation,
+                 completion_offset,
+                 tiling.workspace_layout.scratch_status_offset},
+                {}, std::move(predecessors));
+            if (!published.status.ok())
+                raise_transport_status(published.status, rank_idx_);
+            status = published.operation->finish(5000);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            if (with_cpu_sync) {
+                status = resources_->synchronize_device();
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
+            }
+            return;
         }
 
         status = resources_->synchronize_stream(stream.raw);
@@ -990,11 +1156,19 @@ public:
         TORCH_CHECK(!cumulative_local_expert_recv_stats.has_value(),
                     "DeepEP Ascend backend: dispatch does not support "
                     "cumulative expert stats");
-        TORCH_CHECK(!previous_event.has_value() &&
-                        !previous_event_before_epilogue.has_value() &&
-                        !async_with_compute_stream && !allocate_on_comm_stream,
-                    "DeepEP Ascend backend: dispatch is synchronous");
         const bool cached_mode = cached_num_recv_tokens.has_value();
+        TORCH_CHECK(!previous_event_before_epilogue.has_value(),
+                    "DeepEP Ascend backend: dispatch does not support "
+                    "previous_event_before_epilogue");
+        TORCH_CHECK(!previous_event.has_value() || allocate_on_comm_stream,
+                    "DeepEP Ascend backend: dispatch previous_event requires "
+                    "allocate_on_comm_stream=True");
+        const bool stream_mode = previous_event.has_value() ||
+            async_with_compute_stream || allocate_on_comm_stream;
+        TORCH_CHECK(!stream_mode ||
+                        (cached_mode && !sf.has_value() && !allow_hybrid_mode_),
+                    "DeepEP Ascend backend: dispatch stream overlap requires "
+                    "cached BF16 pure-scale-up mode");
         TORCH_CHECK(do_cpu_sync || cached_mode,
                     "DeepEP Ascend backend: dispatch requires do_cpu_sync unless cached");
         TORCH_CHECK(num_sms == 1 && num_qps == 0,
@@ -1127,6 +1301,34 @@ public:
                             std::numeric_limits<int>::max()),
                     "DeepEP Ascend backend: dispatch output count overflow");
 
+        runtime::StreamIdentity dispatch_stream;
+        elastic::EventDependency predecessor;
+        if (cached_mode) {
+            auto status = resources_->current_stream(&dispatch_stream);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            if (previous_event.has_value()) {
+                predecessor = previous_event->dependency();
+            } else {
+                auto created = resources_->create_event();
+                if (!created.status.ok())
+                    raise_transport_status(created.status, rank_idx_);
+                status = created.event->record(dispatch_stream);
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
+                predecessor.event = std::move(created.event);
+            }
+            dispatch_stream = resources_->comm_stream();
+            status = predecessor.event->wait(dispatch_stream);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+        }
+#if DEEP_EP_ASCEND_HAS_GENERIC_STREAM_GUARD
+        std::optional<c10::StreamGuard> allocation_guard;
+        if (allocate_on_comm_stream)
+            allocation_guard.emplace(get_comm_stream());
+#endif
+
         torch::Tensor rank_prefix;
         torch::Tensor expert_prefix;
         torch::Tensor unaligned;
@@ -1213,8 +1415,9 @@ public:
                 }
                 const auto expected_descriptor =
                     elastic::make_attested_hybrid_dispatch_handle_descriptor(
-                        dispatch_family_, tiling.topology,
-                        last_dispatch_generation_, num_tokens, hidden, experts,
+                        completion_resources_->dispatch_family(), tiling.topology,
+                        completion_resources_->last_dispatch_generation(),
+                        num_tokens, hidden, experts,
                         num_topk, alignment, capacity, descriptor_mode_flags,
                         elastic::kHybridRouteLayoutVersion, cached_route_count,
                         sizeof(elastic::HybridRouteRecord),
@@ -1279,8 +1482,9 @@ public:
             } else {
                 const auto expected_descriptor =
                     elastic::make_attested_dispatch_handle_descriptor(
-                        dispatch_family_, tiling.topology,
-                        last_dispatch_generation_, num_tokens, hidden, experts,
+                        completion_resources_->dispatch_family(), tiling.topology,
+                        completion_resources_->last_dispatch_generation(),
+                        num_tokens, hidden, experts,
                         num_topk, alignment, capacity, descriptor_mode_flags);
                 const auto descriptor_status =
                     elastic::validate_dispatch_handle(
@@ -1421,6 +1625,47 @@ public:
                          max_recv_tokens * sizeof(elastic::HybridRouteRecord) :
                          0))},
                 metadata_options);
+        std::vector<std::optional<torch::Tensor>> retained_tensors;
+        if (cached_mode) {
+            const auto retain = [&retained_tensors](
+                                    const std::optional<torch::Tensor>& tensor) {
+                retained_tensors.emplace_back(tensor);
+            };
+            retain(x);
+            retain(sf);
+            retain(topk_idx);
+            retain(topk_weights);
+            retain(cumulative_local_expert_recv_stats);
+            retain(cached_psum_num_recv_tokens_per_scaleup_rank);
+            retain(cached_psum_num_recv_tokens_per_expert);
+            retain(cached_num_unaligned_recv_tokens_per_expert);
+            retain(cached_dst_buffer_slot_idx);
+            retain(cached_token_metadata_at_forward);
+            retain(cached_recv_src_metadata);
+            retain(cached_channel_linked_list);
+            retain(kernel_expert_prefix);
+            retain(kernel_unaligned);
+            retain(rank_prefix);
+            retain(expert_prefix);
+            retain(unaligned);
+            retain(destination_slots);
+            retain(source_metadata);
+            retain(recv_x);
+            retain(recv_topk_indices);
+            retain(recv_topk_weights);
+            retain(copied_topk_idx);
+            retain(descriptor_tensor);
+#ifndef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+            for (const auto& tensor : retained_tensors) {
+                if (!tensor.has_value())
+                    continue;
+                const auto record_status = resources_->record_tensor_stream(
+                    *tensor, dispatch_stream);
+                if (!record_status.ok())
+                    raise_transport_status(record_status, rank_idx_);
+            }
+#endif
+        }
         auto status = transport::TransportStatus{};
 
         elastic::DispatchArguments arguments{};
@@ -1461,10 +1706,12 @@ public:
                 cached_route_count : tiling.hybrid_route_capacity;
         }
         arguments.timeout_cycles = barrier_timeout_cycles_;
-        runtime::StreamIdentity stream;
-        status = resources_->current_stream(&stream);
-        if (!status.ok())
-            raise_transport_status(status, rank_idx_);
+        runtime::StreamIdentity stream = dispatch_stream;
+        if (!cached_mode) {
+            status = resources_->current_stream(&stream);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+        }
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_), resources_->workspace_bytes()};
         const auto generation = activate_operation(lease, "dispatch");
@@ -1473,6 +1720,64 @@ public:
             arguments, tiling, storage, stream.raw);
         if (!launch_status.ok())
             raise_launch_status(launch_status, rank_idx_);
+        if (cached_mode) {
+            auto completion = resources_->create_event();
+            if (!completion.status.ok())
+                raise_transport_status(completion.status, rank_idx_);
+            status = completion.event->record(stream);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            const auto committed_descriptor =
+                elastic::make_attested_dispatch_handle_descriptor(
+                    completion_resources_->dispatch_family(), tiling.topology,
+                    generation, num_tokens, hidden, experts, num_topk,
+                    alignment, capacity, descriptor_mode_flags);
+            completion_resources_->stage_dispatch_descriptor(
+                generation, descriptor_tensor, committed_descriptor);
+            const auto completion_offset =
+                tiling.symmetric_window_layout.control_offset +
+                offsetof(elastic::SymmetricControlHeader, dispatch_generation);
+            std::vector<elastic::EventDependency> predecessors;
+            predecessors.emplace_back(std::move(predecessor));
+            auto published = async_state_->publish(
+                std::move(lease), completion.event,
+                {elastic::BufferOperationKind::kDispatch, generation,
+                 completion_offset,
+                 tiling.workspace_layout.scratch_status_offset},
+                std::move(retained_tensors), std::move(predecessors));
+            if (!published.status.ok())
+                raise_transport_status(published.status, rank_idx_);
+
+            std::optional<EventHandle> event;
+            if (async_with_compute_stream) {
+                event.emplace(
+                    completion.event, published.operation, async_state_);
+            } else {
+                status = published.operation->finish(5000);
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
+            }
+            const int num_recv_tokens = *cached_num_recv_tokens;
+            const int output_tokens = do_expand ?
+                *cached_num_expanded_tokens : num_recv_tokens;
+            auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
+            auto narrowed_topk_idx = do_expand ?
+                std::optional<torch::Tensor>() :
+                std::optional<torch::Tensor>(
+                    recv_topk_indices.narrow(0, 0, output_tokens));
+            auto narrowed_topk_weights = recv_topk_weights.has_value() ?
+                std::optional<torch::Tensor>(
+                    recv_topk_weights->narrow(0, 0, output_tokens)) :
+                std::optional<torch::Tensor>();
+            auto narrowed_metadata = source_metadata.narrow(
+                0, 0, num_recv_tokens);
+            return {narrowed_x, std::nullopt, narrowed_topk_idx,
+                    narrowed_topk_weights, copied_topk_idx, num_recv_tokens,
+                    *cached_num_expanded_tokens, per_expert_list, rank_prefix,
+                    expert_prefix, unaligned, narrowed_metadata,
+                    destination_slots, descriptor_tensor, std::nullopt,
+                    std::move(event)};
+        }
         status = resources_->synchronize_stream(stream.raw);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
@@ -1618,7 +1923,8 @@ public:
                         binding_status.message);
             committed_descriptor =
                 elastic::make_attested_hybrid_dispatch_handle_descriptor(
-                    dispatch_family_, tiling.topology, generation, num_tokens,
+                    completion_resources_->dispatch_family(), tiling.topology,
+                    generation, num_tokens,
                     hidden, experts, num_topk, alignment, capacity,
                     descriptor_mode_flags, elastic::kHybridRouteLayoutVersion,
                     static_cast<std::uint64_t>(num_recv_tokens),
@@ -1628,7 +1934,8 @@ public:
         } else {
             committed_descriptor =
                 elastic::make_attested_dispatch_handle_descriptor(
-                    dispatch_family_, tiling.topology, generation, num_tokens,
+                    completion_resources_->dispatch_family(), tiling.topology,
+                    generation, num_tokens,
                     hidden, experts, num_topk, alignment, capacity,
                     descriptor_mode_flags);
         }
@@ -1637,7 +1944,7 @@ public:
             sizeof(committed_descriptor));
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
-        last_dispatch_generation_ = generation;
+        completion_resources_->commit_dispatch_generation(generation);
         lease.complete();
         const int output_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
         auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
@@ -1860,9 +2167,9 @@ public:
         }
         const auto expected_descriptor = allow_hybrid_mode_ ?
             elastic::make_attested_hybrid_dispatch_handle_descriptor(
-                dispatch_family_,
+                completion_resources_->dispatch_family(),
                 elastic::core_topology_from_transport(context.topology),
-                last_dispatch_generation_,
+                completion_resources_->last_dispatch_generation(),
                 static_cast<std::uint64_t>(combined_topk_idx.size(0)),
                 static_cast<std::uint64_t>(x.size(1)),
                 static_cast<std::uint64_t>(num_experts), num_topk,
@@ -1872,9 +2179,9 @@ public:
                 elastic::kHybridRouteCompleteStageFlags,
                 {host_route_records.data(), host_route_records.size()}) :
             elastic::make_attested_dispatch_handle_descriptor(
-                dispatch_family_,
+                completion_resources_->dispatch_family(),
                 elastic::core_topology_from_transport(context.topology),
-                last_dispatch_generation_,
+                completion_resources_->last_dispatch_generation(),
                 static_cast<std::uint64_t>(combined_topk_idx.size(0)),
                 static_cast<std::uint64_t>(x.size(1)),
                 static_cast<std::uint64_t>(num_experts), num_topk,

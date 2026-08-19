@@ -628,9 +628,12 @@ class AscendStubSourceTest(unittest.TestCase):
                 ["c++", "-std=c++17", "-Werror=return-type",
                  "-DDEEP_EP_PLATFORM_ASCEND=1",
                  "-DDEEP_EP_ASCEND_TESTING=1",
+                 "-DDEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR=1",
                  f"-I{include}", f"-I{ROOT}",
+                 "-include", str(include / "torch/python.h"),
                  str(probe),
                  str(ROOT / "csrc/backends/ascend/elastic/runtime.cpp"),
+                 str(ROOT / "csrc/backends/ascend/elastic/async_state.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/cann_runtime.cpp"),
                  str(ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"),
                  str(ROOT / "csrc/backends/ascend/transport/cann_transport.cpp"),
@@ -653,7 +656,9 @@ class AscendStubSourceTest(unittest.TestCase):
     def test_elastic_buffer_uses_one_operation_coordinator(self):
         source = HEADER.read_text()
         self.assertIn('"elastic/operation_coordinator.hpp"', source)
-        self.assertIn("elastic::BufferOperationCoordinator coordinator_", source)
+        self.assertIn("std::shared_ptr<elastic::AsyncBufferState> async_state_", source)
+        self.assertIn("async_state_->coordinator().reserve(kind)", source)
+        self.assertNotIn("elastic::BufferOperationCoordinator coordinator_", source)
         for legacy_state in (
                 "barrier_sequence_", "dispatch_sequence_", "combine_sequence_",
                 "destroyed_"):
@@ -662,8 +667,8 @@ class AscendStubSourceTest(unittest.TestCase):
                 "kTopologyQuery", "kBarrier", "kDispatch", "kCombine"):
             self.assertIn(
                 f"elastic::BufferOperationKind::{operation_kind}", source)
-        self.assertIn("coordinator_.reserve(kind)", source)
-        self.assertIn("coordinator_.reserve_destroy()", source)
+        self.assertIn("async_state_->coordinator().reserve(kind)", source)
+        self.assertIn("async_state_->destroy()", source)
 
     def test_contract_defines_exact_public_allowlists(self):
         spec = importlib.util.spec_from_file_location("api_contract", API_CONTRACT)

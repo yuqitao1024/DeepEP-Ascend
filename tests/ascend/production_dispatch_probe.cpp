@@ -34,21 +34,57 @@ struct Trace {
     bool pending_diagnostic = false;
     std::uint64_t preserved_scratch_status = 0;
     int world_size = 2;
+    int event_creates = 0;
+    int event_destroys = 0;
+    std::vector<std::string> order;
 } trace;
+
+int compute_stream_token = 0;
+int comm_stream_token = 0;
 
 int alloc(void*, std::uint64_t n, void** p) { *p = std::malloc(n); return *p ? 0 : 1; }
 int zero(void*, void* p, std::uint64_t n) { std::memset(p, 0, n); return 0; }
 int free_(void*, void* p) { std::free(p); return 0; }
 int current_device(void*, int* device) { *device = trace.device; return 0; }
 int stream(void*, runtime::StreamIdentity* value) {
-    *value = {trace.fail_stream ? nullptr : &trace, 7, trace.device, 20};
+    trace.order.emplace_back("capture compute dependency");
+    *value = {trace.fail_stream ? nullptr : &compute_stream_token,
+              7, trace.device, 20};
     return 0;
 }
 int pool_stream(
     void*, int device, bool high_priority, runtime::StreamIdentity* value) {
     if (!high_priority)
         return 93;
-    *value = {&trace, 11, device, 20};
+    *value = {&comm_stream_token, 11, device, 20};
+    return 0;
+}
+int create_event(void*, void** event) {
+    ++trace.event_creates;
+    *event = new int(trace.event_creates);
+    trace.order.emplace_back("create event");
+    return 0;
+}
+int record_event(void*, void*, void* stream_value) {
+    trace.order.emplace_back(stream_value == &comm_stream_token ?
+        "record completion event" : "record compute dependency");
+    return 0;
+}
+int query_event(void*, void*, bool* completed) {
+    *completed = true;
+    trace.order.emplace_back("finish completion event");
+    return 0;
+}
+int wait_event(void*, void* stream_value, void*) {
+    if (stream_value != &comm_stream_token)
+        return 94;
+    trace.order.emplace_back("comm waits dependency/previous event");
+    return 0;
+}
+int synchronize_event(void*, void*, std::uint64_t) { return 0; }
+int destroy_event(void*, void* event) {
+    ++trace.event_destroys;
+    delete static_cast<int*>(event);
     return 0;
 }
 int sync(void*, void*) { return 0; }
@@ -125,7 +161,9 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
     int world_size = 2, bool hybrid = false) {
     auto result = std::make_unique<runtime::CannRuntimeResources>();
     runtime::CannRuntimeApi r{nullptr,alloc,zero,free_,sync,sync_device,h2d,d2h};
-    runtime::StreamEventApi s{nullptr,current_device,stream,pool_stream};
+    runtime::StreamEventApi s{
+        nullptr, current_device, stream, pool_stream, create_event, record_event,
+        query_event, wait_event, synchronize_event, destroy_event};
     transport::CannHostApi h{nullptr,rank_,size_,team,window,channels,ha,hz,hd,dh,hf,noop2,noop1};
     transport::TransportConfig c{}; c.rank=0; c.world_size=world_size; c.communicator_handle=1;
     c.device_buffer_bytes=2*1024*1024; c.requested_channels=1;
@@ -147,6 +185,11 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
     trace.kernel_unaligned_counts.push_back(a.unaligned_per_expert);
     if (trace.fail_launch) return 73;
     trace.pending_diagnostic = true;
+    trace.order.emplace_back("activate lease and launch cached dispatch on comm");
+    auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(
+        t.transport_context.local_window_base +
+        t.symmetric_window_layout.control_offset);
+    control->dispatch_generation = a.generation;
     const bool cached = elastic::has_mode(t.mode_flags, elastic::CoreMode::kCached);
     const bool expanded = elastic::has_mode(t.mode_flags, elastic::CoreMode::kExpanded);
     const bool hybrid = elastic::has_mode(t.mode_flags, elastic::CoreMode::kHybrid);
@@ -315,17 +358,21 @@ template <typename Result>
 auto cached_dispatch(
     Buffer& buffer, const Inputs& inputs, const Result& handle,
     const Tensor& rank_prefix, bool expanded = false,
-    const std::optional<std::vector<int>>& per_expert = std::nullopt) {
+    const std::optional<std::vector<int>>& per_expert = std::nullopt,
+    bool async = false, bool allocate_on_comm_stream = false,
+    const std::optional<deep_ep::ascend::EventHandle>& previous_event =
+        std::nullopt,
+    const std::optional<deep_ep::ascend::EventHandle>&
+        previous_event_before_epilogue = std::nullopt) {
     const std::optional<Tensor> none;
-    const std::optional<deep_ep::ascend::EventHandle> no_event;
     return buffer.dispatch(
         inputs.x, none, inputs.idx, inputs.weights, none,
         std::get<5>(handle), std::get<6>(handle),
         per_expert.has_value() ? *per_expert : std::get<7>(handle),
         rank_prefix, std::get<9>(handle), std::get<10>(handle),
         std::get<12>(handle), std::get<13>(handle), std::get<11>(handle), none,
-        4, 2, 4, 1, 0, no_event, no_event,
-        false, false, false, false, expanded, false, false);
+        4, 2, 4, 1, 0, previous_event, previous_event_before_epilogue,
+        async, allocate_on_comm_stream, false, false, expanded, false, false);
 }
 
 bool has_shape(const Tensor& tensor, std::initializer_list<std::int64_t> shape) {
@@ -833,6 +880,61 @@ bool testing_topology_mismatch_probe() {
     return false;
 }
 
+bool cached_async_order_and_commit_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources)
+        return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> weights = inputs.weights;
+    auto initial = uncached_dispatch(*buffer, inputs, weights);
+    auto* descriptor = reinterpret_cast<elastic::DispatchHandleDescriptor*>(
+        std::get<13>(initial)->data_ptr());
+    if (descriptor->generation != 1)
+        return false;
+
+    trace.order.clear();
+    decltype(cached_dispatch(
+        *buffer, inputs, initial, std::get<8>(initial))) pending;
+    try {
+        pending = cached_dispatch(
+            *buffer, inputs, initial, std::get<8>(initial), false,
+            std::nullopt, true, false);
+    } catch (const std::exception&) {
+        return false;
+    }
+    const std::vector<std::string> expected_order{
+        "capture compute dependency",
+        "create event",
+        "record compute dependency",
+        "comm waits dependency/previous event",
+        "activate lease and launch cached dispatch on comm",
+        "create event",
+        "record completion event",
+    };
+    if (trace.order != expected_order || !std::get<15>(pending).has_value() ||
+        descriptor->generation != 1 || trace.generations.back() != 2)
+        return false;
+
+    try {
+        (void)cached_dispatch(
+            *buffer, inputs, initial, std::get<8>(initial), false,
+            std::nullopt, true, false);
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("busy") == std::string::npos ||
+            trace.launches != 2)
+            return false;
+    }
+
+    std::get<15>(pending)->current_stream_wait();
+    std::get<15>(pending)->current_stream_wait();
+    return descriptor->generation == 2 && trace.event_destroys == 2 &&
+        buffer->testing_operation_generation() == 2;
+}
+
 int main() {
     int failures = 0;
     const auto check = [&failures](bool passed, const char* name) {
@@ -858,5 +960,7 @@ int main() {
           "out-of-world hybrid producer failure diagnostic");
     check(empty_probe(), "empty dispatch");
     check(testing_topology_mismatch_probe(), "testing topology mismatch");
+    check(cached_async_order_and_commit_probe(),
+          "cached async order and deferred descriptor commit");
     return failures == 0 ? 0 : 1;
 }

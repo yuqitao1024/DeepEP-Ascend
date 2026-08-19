@@ -327,6 +327,14 @@ TransportStatus CannRuntimeResources::current_stream(StreamIdentity* stream) {
     return TransportStatus::success();
 }
 
+NativeEventCreateResult CannRuntimeResources::create_event() {
+    if (!initialized_)
+        return {TransportStatus::invalid(
+                    "create_native_event", "runtime resources are not initialized"),
+                nullptr};
+    return create_native_event(stream_event_api_, owning_device_);
+}
+
 TransportStatus CannRuntimeResources::current_device(int* device) {
     if (!initialized_ || device == nullptr)
         return TransportStatus::invalid(

@@ -360,7 +360,8 @@ def _install_fake_extension(platform, events):
                     recv_src_metadata,
                     _FakeTensor(device.type, device_index=device.index),
                     token_metadata_at_forward,
-                    None, None if platform == "ascend" else EventHandle())
+                    None,
+                    (EventHandle() if args[22] or platform != "ascend" else None))
 
         def combine(self, *args):
             self.combine_calls.append(args)
@@ -1347,6 +1348,93 @@ def _scenario_ascend_dispatch():
     assert recv_topk_weights is cached_topk_weights
     assert cached_handle is handle
     assert cached_event.event is None
+
+    _, _, _, async_handle, async_event = buffer.dispatch(
+        x, topk_weights=cached_topk_weights, handle=handle,
+        async_with_compute_stream=True)
+    async_args = runtime.dispatch_calls[-1]
+    assert async_args[20:24] == (None, None, True, False)
+    assert async_handle is handle
+    assert async_event.event is not None
+    async_event.current_stream_wait()
+    async_event.current_stream_wait()
+
+    deterministic_calls = []
+    buffer.deterministic = True
+    handle.deterministic_sort = lambda *args: deterministic_calls.append(args)
+    generation_before_wait = handle._ascend_generation
+    _, _, _, deterministic_handle, deterministic_event = buffer.dispatch(
+        x, topk_weights=cached_topk_weights, handle=handle,
+        async_with_compute_stream=True)
+    assert deterministic_handle is handle
+    assert handle._ascend_generation == generation_before_wait
+    deterministic_event.current_stream_wait()
+    assert handle._ascend_generation == generation_before_wait + 1
+    assert len(deterministic_calls) == 1
+    buffer.deterministic = False
+
+    previous = deep_ep.ElasticBuffer.capture()
+    _, _, _, previous_handle, previous_event = buffer.dispatch(
+        x, topk_weights=cached_topk_weights, handle=handle,
+        previous_event=previous, async_with_compute_stream=True,
+        allocate_on_comm_stream=True)
+    previous_args = runtime.dispatch_calls[-1]
+    assert previous_args[20] is previous
+    assert previous_args[21:24] == (None, True, True)
+    assert previous_handle is handle
+    previous_event.current_stream_wait()
+
+    _, _, _, sync_allocated_handle, sync_allocated_event = buffer.dispatch(
+        x, topk_weights=cached_topk_weights, handle=handle,
+        allocate_on_comm_stream=True)
+    assert runtime.dispatch_calls[-1][20:24] == (None, None, False, True)
+    assert sync_allocated_handle is handle
+    assert sync_allocated_event.event is None
+
+    rejected_calls = len(runtime.dispatch_calls)
+    scale_factors = _FakeTensor("npu", (1, 1), torch.float32)
+    try:
+        buffer.dispatch(
+            (x, scale_factors), topk_idx=topk_idx, num_experts=2,
+            num_max_tokens_per_rank=1)
+    except RuntimeError as error:
+        assert "unsupported_dispatch_mode" in str(error), error
+    else:
+        raise AssertionError("Ascend dispatch accepted scale factors")
+    assert len(runtime.dispatch_calls) == rejected_calls
+
+    buffer.allow_hybrid_mode = True
+    try:
+        buffer.dispatch(
+            x, topk_weights=cached_topk_weights, handle=handle,
+            async_with_compute_stream=True)
+    except RuntimeError as error:
+        assert "unsupported_dispatch_mode" in str(error), error
+    else:
+        raise AssertionError("Ascend dispatch accepted hybrid async mode")
+    finally:
+        buffer.allow_hybrid_mode = False
+    assert len(runtime.dispatch_calls) == rejected_calls
+
+    for name, kwargs in (
+            ("uncached async", {
+                "topk_idx": topk_idx, "num_experts": 2,
+                "num_max_tokens_per_rank": 1,
+                "async_with_compute_stream": True}),
+            ("previous without comm allocation", {
+                "topk_weights": cached_topk_weights, "handle": handle,
+                "previous_event": previous}),
+            ("pre-epilogue predecessor", {
+                "topk_weights": cached_topk_weights, "handle": handle,
+                "previous_event_before_epilogue": previous,
+                "allocate_on_comm_stream": True})):
+        try:
+            buffer.dispatch(x, **kwargs)
+        except RuntimeError as error:
+            assert "unsupported_dispatch_mode" in str(error), (name, error)
+        else:
+            raise AssertionError(f"Ascend dispatch accepted {name}")
+        assert len(runtime.dispatch_calls) == rejected_calls
 
     for name, kwargs in (("num_sms", {"num_sms": 2}),
                          ("num_qps", {"num_qps": 1})):
