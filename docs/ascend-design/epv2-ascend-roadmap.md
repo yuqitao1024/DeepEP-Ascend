@@ -277,13 +277,23 @@ fail before resource publication.
 
 Status: synchronous E4M3 dispatch with FP32 or packed UE8M0x4 scale-factor
 transport is implemented; BF16 combine remains the selected upstream-compatible
-combine path. Multi-rank NPU qualification is pending, so this phase is not yet
-complete.
+combine path. Final two-rank qualification passed on devices 6 and 7, but
+four-rank and eight-rank qualification was not run because the active policy
+authorizes at most two devices. Phase 3F therefore remains incomplete.
+
+The final two-rank TaskQueue run `task_20260819_161435_313220230238` used a
+clean `DEEP_EP_ASCEND_TESTING=0` production build/import and exited 0. It
+recorded no CUDA, NCCL, or NVSHMEM dependency; 174 CANN host-suite tests
+passed with 2 skipped across 23 subtests; the FP8 runtime matrix covered 12
+cases; the barrier covered 100 generations; BF16 dispatch covered 14 cases;
+and BF16 combine covered 24 cases. This is correctness evidence for the
+authorized two-rank topology only, not performance qualification or physical
+multi-host support.
 
 ### Deliverables
 
-- implement the upstream EPv2 FP8 payload and scale-factor contracts for
-  dispatch and combine;
+- implement the selected E4M3 dispatch contract with FP32 or packed UE8M0x4
+  scale-factor transport, while retaining BF16 combine;
 - validate supported Ascend FP8 representations and conversion rules;
 - preserve BF16 combine behavior where the public contract requires it;
 - cover normal, expanded, padded, cached, weighted, empty, and asymmetric
