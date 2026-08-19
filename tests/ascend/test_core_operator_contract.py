@@ -70,6 +70,17 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("ACL_EVENT_RECORDED_STATUS_NOT_READY", probe)
         self.assertIn("std::chrono::steady_clock", probe)
 
+        self.assertIn("auto source = torch::zeros({16}, options);", probe)
+        self.assertIn("source.fill_(kExpectedSourceValue);", probe)
+        self.assertLess(
+            probe.index("source.fill_(kExpectedSourceValue);"),
+            probe.index("aclrtRecordEvent(event, compute_stream.stream(false))"))
+        self.assertIn("destination.to(torch::kCPU)", probe)
+        self.assertIn("torch::full_like(observed, kExpectedSourceValue)", probe)
+        self.assertLess(
+            probe.index("wait_for_event(completion_event, timeout_ms);"),
+            probe.index("destination.to(torch::kCPU)"))
+
         self.assertIn(
             "torch.npu.Stream(stream_id=stream_id, device_index=device_index, "
             "device_type=device_type)", runner)

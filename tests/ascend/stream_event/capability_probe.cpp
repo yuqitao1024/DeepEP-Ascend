@@ -15,6 +15,7 @@
 namespace {
 
 constexpr std::uint32_t kTimeoutMs = 5000;
+constexpr float kExpectedSourceValue = 7.0f;
 
 void check_acl(aclError result, const char* operation) {
     if (result != ACL_SUCCESS) {
@@ -51,14 +52,14 @@ pybind11::tuple probe_stream_event_capability() {
     const auto options = torch::TensorOptions()
         .device(c10::Device(c10::DeviceType::PrivateUse1, device_index))
         .dtype(torch::kFloat);
-    auto source = torch::ones({16}, options);
+    auto source = torch::zeros({16}, options);
     auto destination = torch::zeros({16}, options);
 
     aclrtEvent event = nullptr;
     aclrtEvent completion_event = nullptr;
     check_acl(aclrtCreateEventWithFlag(&event, ACL_EVENT_SYNC),
               "aclrtCreateEventWithFlag dependency");
-    source.fill_(1.0);
+    source.fill_(kExpectedSourceValue);
     check_acl(aclrtRecordEvent(event, compute_stream.stream(false)),
               "aclrtRecordEvent dependency");
     check_acl(aclrtStreamWaitEvent(comm_stream.stream(false), event),
@@ -80,6 +81,11 @@ pybind11::tuple probe_stream_event_capability() {
     const auto timeout_ms = kTimeoutMs;
     wait_for_event(event, timeout_ms);
     wait_for_event(completion_event, timeout_ms);
+    const auto observed = destination.to(torch::kCPU);
+    if (!torch::allclose(
+            observed, torch::full_like(observed, kExpectedSourceValue))) {
+        throw std::runtime_error("stream event dependency did not order copy");
+    }
     check_acl(aclrtDestroyEvent(completion_event), "aclrtDestroyEvent completion");
     check_acl(aclrtDestroyEvent(event), "aclrtDestroyEvent dependency");
 
