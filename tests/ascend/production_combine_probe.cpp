@@ -35,9 +35,12 @@ struct Trace {
     int copies = 0;
     int device = 0;
     int fail_copy_at = -1;
+    int fail_create_event_on = 0;
     bool fail_launch = false;
     bool fail_stream = false;
     bool fail_sync = false;
+    bool fail_completion_record = false;
+    bool event_ready = true;
     bool bad_diagnostic = false;
     bool bad_completion = false;
     LifecycleFailure lifecycle_failure = LifecycleFailure::kNone;
@@ -48,6 +51,15 @@ struct Trace {
     elastic::CoreModeFlags mode_flags = 0;
     const void* bias_0 = nullptr;
     const void* bias_1 = nullptr;
+    int create_event_calls = 0;
+    int record_event_calls = 0;
+    int query_event_calls = 0;
+    int destroy_event_calls = 0;
+    int synchronize_stream_calls = 0;
+    int compute_stream_token = 0;
+    int comm_stream_token = 0;
+    bool all_launches_on_comm_stream = true;
+    std::vector<std::string> order;
     std::uint32_t communicator_rank = 0;
     std::uint32_t communicator_size = 2;
     std::vector<void*> transport_allocations;
@@ -64,32 +76,55 @@ int zero(void*, void* pointer, std::uint64_t bytes) {
 int free_(void*, void* pointer) { std::free(pointer); return 0; }
 int current_device(void*, int* device) { *device = trace.device; return 0; }
 int stream(void*, runtime::StreamIdentity* value) {
-    *value = {trace.fail_stream ? nullptr : &trace, 7, trace.device, 20};
+    *value = {trace.fail_stream ? nullptr : &trace.compute_stream_token,
+              7, trace.device, 20};
     return 0;
 }
 int pool_stream(
     void*, int device, bool high_priority, runtime::StreamIdentity* value) {
     if (!high_priority)
         return 86;
-    *value = {&trace, 11, device, 20};
+    *value = {&trace.comm_stream_token, 11, device, 20};
     return 0;
 }
 int create_event(void*, void** event) {
+    const int call = ++trace.create_event_calls;
+    if (call == trace.fail_create_event_on)
+        return 86;
     *event = new int(1);
+    trace.order.emplace_back("create event");
     return 0;
 }
-int record_event(void*, void*, void*) { return 0; }
+int record_event(void*, void*, void* stream_value) {
+    ++trace.record_event_calls;
+    const bool communication = stream_value == &trace.comm_stream_token;
+    trace.order.emplace_back(
+        communication ? "record completion event" : "record dependency event");
+    return communication && trace.fail_completion_record ? 87 : 0;
+}
 int query_event(void*, void*, bool* complete) {
-    *complete = true;
+    ++trace.query_event_calls;
+    *complete = trace.event_ready;
+    trace.order.emplace_back(
+        trace.event_ready ? "finish event" : "event pending");
     return 0;
 }
-int wait_event(void*, void*, void*) { return 0; }
+int wait_event(void*, void* stream_value, void*) {
+    if (stream_value != &trace.comm_stream_token)
+        return 88;
+    trace.order.emplace_back("comm waits dependency");
+    return 0;
+}
 int synchronize_event(void*, void*, std::uint64_t) { return 0; }
 int destroy_event(void*, void* event) {
+    ++trace.destroy_event_calls;
     delete static_cast<int*>(event);
     return 0;
 }
-int sync(void*, void*) { return trace.fail_sync ? 83 : 0; }
+int sync(void*, void*) {
+    ++trace.synchronize_stream_calls;
+    return trace.fail_sync ? 83 : 0;
+}
 int sync_device(void*) { return 0; }
 int h2d(void*, void* destination, const void* source, std::uint64_t bytes) {
     std::memcpy(destination, source, bytes);
@@ -135,10 +170,16 @@ int window(void*, std::int64_t, std::uintptr_t, void*, std::uint64_t,
            std::uintptr_t* value) { *value = 3; return 0; }
 int channels(void*, std::int64_t, std::uintptr_t, std::uint32_t) { return 0; }
 int ha(void*, std::uint64_t bytes, void** pointer) {
-    const int result = alloc(nullptr, bytes, pointer);
-    if (result == 0)
-        trace.transport_allocations.push_back(*pointer);
-    return result;
+    constexpr std::uint64_t alignment = 64;
+    const auto aligned_bytes =
+        ((bytes + alignment - 1) / alignment) * alignment;
+    *pointer = std::aligned_alloc(
+        static_cast<std::size_t>(alignment),
+        static_cast<std::size_t>(aligned_bytes));
+    if (*pointer == nullptr)
+        return 1;
+    trace.transport_allocations.push_back(*pointer);
+    return 0;
 }
 int hz(void*, void* pointer, std::uint64_t bytes) {
     return zero(nullptr, pointer, bytes);
@@ -154,7 +195,7 @@ int noop2(void*, std::uintptr_t, std::uintptr_t) { return 0; }
 int noop1(void*, std::uintptr_t) { return 0; }
 
 std::unique_ptr<runtime::CannRuntimeResources> resources(
-    int world_size = 2, int rank = 0) {
+    int world_size = 2, int rank = 0, bool hybrid = false) {
     trace.communicator_rank = static_cast<std::uint32_t>(rank);
     trace.communicator_size = static_cast<std::uint32_t>(world_size);
     auto result = std::make_unique<runtime::CannRuntimeResources>();
@@ -172,6 +213,12 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
     config.communicator_handle = 1;
     config.device_buffer_bytes = 2 * 1024 * 1024;
     config.requested_channels = 1;
+    if (hybrid) {
+        config.scale_up_size = 2;
+        config.topology_kind =
+            transport::TransportTopologyKind::kLogicalSimulation;
+        config.allow_hybrid_mode = true;
+    }
     if (!result->initialize(
             config, 4096, runtime_api, host_api, stream_api).ok())
         return {};
@@ -209,8 +256,12 @@ extern "C" int deep_ep_ascend_launch_dispatch(
 extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
     elastic::DispatchArguments, elastic::CoreTiling, void*) { return 0; }
 extern "C" int deep_ep_ascend_launch_combine(
-    elastic::CombineArguments arguments, elastic::CoreTiling tiling, void*) {
+    elastic::CombineArguments arguments, elastic::CoreTiling tiling,
+    void* stream_value) {
     ++trace.launches;
+    trace.all_launches_on_comm_stream = trace.all_launches_on_comm_stream &&
+        stream_value == &trace.comm_stream_token;
+    trace.order.emplace_back("launch combine on comm");
     trace.generation = arguments.generation;
     trace.generations.push_back(arguments.generation);
     trace.mode_flags = tiling.mode_flags;
@@ -346,21 +397,24 @@ Result call(Buffer& buffer, Inputs& inputs,
             const std::optional<Event>& event = std::nullopt,
             bool async = false, bool allocate_on_stream = false,
             bool expanded = false, int num_experts = 2,
-            int capacity = 4) {
+            int capacity = 4,
+            const std::optional<Event>& event_before_epilogue = std::nullopt) {
     return buffer.combine(
         inputs.x, weights, bias0, bias1, inputs.source, inputs.indices,
         inputs.prefix, inputs.descriptor, channel, num_experts, capacity,
         num_sms, num_qps,
-        event, event, async, allocate_on_stream, expanded);
+        event, event_before_epilogue, async, allocate_on_stream, expanded);
 }
 
-std::unique_ptr<Buffer> buffer(bool allow_multiple_reduction = true) {
-    auto owned = resources();
+std::unique_ptr<Buffer> buffer(
+    bool allow_multiple_reduction = true, bool allow_hybrid_mode = false) {
+    const int world_size = allow_hybrid_mode ? 4 : 2;
+    auto owned = resources(world_size, 0, allow_hybrid_mode);
     if (!owned)
         return {};
     return Buffer::make_testing_buffer(
         0, std::move(owned), 2 * 1024 * 1024, 1,
-        allow_multiple_reduction, 7, 2, 1);
+        allow_multiple_reduction, 7, world_size, 1, allow_hybrid_mode);
 }
 
 bool error_contains(
@@ -523,6 +577,228 @@ bool normal_and_expanded_success() {
         elastic::has_mode(
             trace.mode_flags, elastic::CoreMode::kAllowMultipleReduction) &&
         trace.bias_0 == expanded.bias0.data_ptr() && trace.bias_1 == nullptr;
+}
+
+bool async_weight_and_layout_matrix_uses_native_completion() {
+    trace = {};
+    auto target = buffer();
+    if (!target)
+        return false;
+    Inputs normal;
+    auto weighted = call(*target, normal, normal.weights);
+    if (std::get<2>(weighted).has_value())
+        return false;
+
+    auto unweighted_async = call(
+        *target, normal, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, true);
+    if (!std::get<2>(unweighted_async).has_value() || trace.copies != 8)
+        return false;
+    std::get<2>(unweighted_async)->current_stream_wait();
+    if (trace.copies != 10)
+        return false;
+
+    Inputs expanded(true);
+    auto expanded_weighted = call(
+        *target, expanded, expanded.weights, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, true, false, true);
+    if (!std::get<1>(expanded_weighted).has_value() ||
+        !std::get<2>(expanded_weighted).has_value() || trace.copies != 13)
+        return false;
+    std::get<2>(expanded_weighted)->current_stream_wait();
+    auto expanded_unweighted = call(
+        *target, expanded, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, false, true, true);
+    return !std::get<1>(expanded_unweighted).has_value() &&
+        !std::get<2>(expanded_unweighted).has_value() &&
+        trace.generations == std::vector<std::uint64_t>({1, 2, 3, 4}) &&
+        trace.copies == 20 && trace.all_launches_on_comm_stream &&
+        trace.synchronize_stream_calls == 0;
+}
+
+bool async_empty_and_asymmetric_inputs_complete() {
+    trace = {};
+    auto target = buffer();
+    if (!target)
+        return false;
+    Inputs empty;
+    empty.x = torch::empty(
+        {0, 8}, torch::TensorOptions().dtype(torch::kBFloat16));
+    empty.source = torch::empty(
+        {0, 4}, torch::TensorOptions().dtype(torch::kInt));
+    empty.prefix.data_ptr<std::int32_t>()[0] = 0;
+    empty.prefix.data_ptr<std::int32_t>()[1] = 0;
+    auto empty_result = call(
+        *target, empty, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, true);
+    if (!std::get<2>(empty_result).has_value())
+        return false;
+    std::get<2>(empty_result)->current_stream_wait();
+
+    Inputs asymmetric;
+    asymmetric.prefix.data_ptr<std::int32_t>()[0] = 0;
+    asymmetric.prefix.data_ptr<std::int32_t>()[1] = 2;
+    const std::array<std::int32_t, 8> metadata{
+        4, 3, -1, -1,
+        5, 3, -1, -1};
+    std::memcpy(asymmetric.source.data_ptr(), metadata.data(), sizeof(metadata));
+    const auto asymmetric_result = call(
+        *target, asymmetric, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, false, true);
+    return !std::get<2>(asymmetric_result).has_value() &&
+        trace.generations == std::vector<std::uint64_t>({1, 2}) &&
+        trace.all_launches_on_comm_stream;
+}
+
+bool async_predecessor_and_deferred_mode_contract() {
+    trace = {};
+    auto source = buffer();
+    auto target = buffer();
+    if (!source || !target)
+        return false;
+    Inputs inputs;
+    auto seed = call(
+        *source, inputs, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, true);
+    if (!std::get<2>(seed).has_value())
+        return false;
+    const std::optional<Event> predecessor = std::get<2>(seed);
+    const auto records_after_capture = trace.record_event_calls;
+    auto async_result = call(
+        *target, inputs, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, predecessor, true, true);
+    if (!std::get<2>(async_result).has_value() ||
+        trace.record_event_calls != records_after_capture + 1)
+        return false;
+    std::get<2>(async_result)->current_stream_wait();
+    if (!error_contains(
+            [&] { (void)call(
+                *target, inputs, std::nullopt, std::nullopt, std::nullopt,
+                std::nullopt, 1, 0, predecessor, false, false); },
+            "allocate_on_comm_stream=True") || trace.launches != 2)
+        return false;
+    if (!error_contains(
+            [&] { (void)call(
+                *target, inputs, std::nullopt, std::nullopt, std::nullopt,
+                std::nullopt, 1, 0, std::nullopt, false, true, false, 2, 4,
+                predecessor); },
+            "previous_event_before_epilogue") || trace.launches != 2)
+        return false;
+    std::get<2>(seed)->current_stream_wait();
+    auto allocated_sync = call(
+        *target, inputs, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, false, true);
+    return !std::get<2>(allocated_sync).has_value() && trace.launches == 3 &&
+        trace.generations == std::vector<std::uint64_t>({1, 1, 2});
+}
+
+bool async_multiflight_and_stable_failure_are_generation_bound() {
+    trace = {};
+    auto target = buffer();
+    if (!target)
+        return false;
+    Inputs inputs;
+    auto first = call(
+        *target, inputs, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, true);
+    if (!std::get<2>(first).has_value() ||
+        !error_contains([&] { (void)call(*target, inputs); }, "busy") ||
+        trace.launches != 1)
+        return false;
+    std::get<2>(first)->current_stream_wait();
+    if (!error_contains(
+            [&] { (void)call(*target, inputs); }, "cannot continue") ||
+        trace.launches != 1)
+        return false;
+
+    trace = {};
+    auto sequential_target = buffer();
+    Inputs sequential_inputs;
+    auto sequential_first = call(
+        *sequential_target, sequential_inputs, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, 1, 0, std::nullopt, true);
+    if (!std::get<2>(sequential_first).has_value())
+        return false;
+    std::get<2>(sequential_first)->current_stream_wait();
+    auto second = call(
+        *sequential_target, sequential_inputs, std::nullopt, std::nullopt,
+        std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, true);
+    if (!std::get<2>(second).has_value())
+        return false;
+    std::get<2>(second)->current_stream_wait();
+    if (trace.generations != std::vector<std::uint64_t>({1, 2}))
+        return false;
+
+    trace = {};
+    auto failing_target = buffer();
+    Inputs failing_inputs;
+    trace.bad_completion = true;
+    auto failed = call(
+        *failing_target, failing_inputs, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, 1, 0, std::nullopt, true);
+    if (!std::get<2>(failed).has_value())
+        return false;
+    const auto first_failure = error_message(
+        [&] { std::get<2>(failed)->current_stream_wait(); });
+    trace.bad_completion = false;
+    const auto repeated_failure = error_message(
+        [&] { std::get<2>(failed)->current_stream_wait(); });
+    return first_failure.find("completion mismatch") !=
+            std::string::npos &&
+        repeated_failure == first_failure &&
+        error_contains(
+            [&] { (void)call(*failing_target, failing_inputs); },
+            "cannot continue") &&
+        trace.launches == 1;
+}
+
+bool async_prelaunch_and_record_failures_are_bounded() {
+    trace = {};
+    auto create_target = buffer();
+    Inputs create_inputs;
+    trace.fail_create_event_on = 2;
+    if (!error_contains(
+            [&] { (void)call(
+                *create_target, create_inputs, std::nullopt, std::nullopt,
+                std::nullopt, std::nullopt, 1, 0, std::nullopt, true); },
+            "create_event") || trace.launches != 0)
+        return false;
+    trace.fail_create_event_on = 0;
+    auto recovered = call(
+        *create_target, create_inputs, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, 1, 0, std::nullopt, true);
+    if (!std::get<2>(recovered).has_value())
+        return false;
+    std::get<2>(recovered)->current_stream_wait();
+    if (trace.generations != std::vector<std::uint64_t>{1})
+        return false;
+
+    trace = {};
+    auto record_target = buffer();
+    Inputs record_inputs;
+    trace.fail_completion_record = true;
+    const auto message = error_message([&] { (void)call(
+        *record_target, record_inputs, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, 1, 0, std::nullopt, true); });
+    return message.find("record_event") != std::string::npos &&
+        trace.launches == 1 &&
+        error_contains(
+            [&] { (void)call(*record_target, record_inputs); },
+            "cannot continue") &&
+        trace.launches == 1;
+}
+
+bool hybrid_async_rejects_before_launch() {
+    trace = {};
+    auto target = buffer(true, true);
+    Inputs inputs;
+    return error_contains(
+            [&] { (void)call(
+                *target, inputs, std::nullopt, std::nullopt, std::nullopt,
+                std::nullopt, 1, 0, std::nullopt, true); },
+            "pure-scale-up") &&
+        trace.launches == 0;
 }
 
 bool successful_dispatch_handle_is_statelessly_valid() {
@@ -836,13 +1112,7 @@ bool tensor_and_flag_validation() {
         !error_contains([&] { (void)call(*target, inputs, std::nullopt,
             std::nullopt, std::nullopt, std::nullopt, 2); }, "num_sms=1") ||
         !error_contains([&] { (void)call(*target, inputs, std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt, 1, 1); }, "num_qps=0") ||
-        !error_contains([&] { (void)call(*target, inputs, std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt, 1, 0, std::nullopt,
-            true); }, "synchronous") ||
-        !error_contains([&] { (void)call(*target, inputs, std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt, 1, 0, std::nullopt,
-            false, true); }, "synchronous"))
+            std::nullopt, std::nullopt, std::nullopt, 1, 1); }, "num_qps=0"))
         return false;
     return trace.launches == 0;
 }
@@ -869,8 +1139,6 @@ bool runtime_failure_poisons(const std::function<void()>& inject,
 bool runtime_failures_poison() {
     return runtime_failure_poisons([] { trace.fail_launch = true; },
                                    "backend error 73") &&
-        runtime_failure_poisons([] { trace.fail_sync = true; },
-                                "synchronize_stream") &&
         runtime_failure_poisons([] { trace.bad_diagnostic = true; },
                                 "device diagnostic") &&
         runtime_failure_poisons([] { trace.bad_completion = true; },
@@ -952,6 +1220,18 @@ int main() {
         }
     };
     check(normal_and_expanded_success(), "normal and expanded outputs");
+    check(async_weight_and_layout_matrix_uses_native_completion(),
+          "async weighted and expanded completion matrix");
+    check(async_empty_and_asymmetric_inputs_complete(),
+          "async empty and asymmetric inputs");
+    check(async_predecessor_and_deferred_mode_contract(),
+          "async predecessor and deferred mode contract");
+    check(async_multiflight_and_stable_failure_are_generation_bound(),
+          "async generation and stable failure contract");
+    check(async_prelaunch_and_record_failures_are_bounded(),
+          "async prelaunch and record failure contract");
+    check(hybrid_async_rejects_before_launch(),
+          "hybrid async reject before launch");
     check(rank_parameterized_capacity(), "rank-parameterized capacity");
     check(successful_dispatch_handle_is_statelessly_valid(),
           "successful dispatch handle is statelessly valid");

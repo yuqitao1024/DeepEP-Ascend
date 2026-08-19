@@ -220,6 +220,13 @@ public:
         last_dispatch_generation_ = generation;
     }
 
+    void stage_combine_completion(
+        std::uint64_t generation, std::uint64_t scratch_status_offset) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        staged_combine_ = StagedCombine{
+            generation, scratch_status_offset, std::nullopt};
+    }
+
     transport::TransportStatus read_diagnostic(
         elastic::BufferOperationKind kind, std::uint64_t,
         transport::DeviceTransportDiagnostic* output) override {
@@ -228,6 +235,11 @@ public:
             return transport::TransportStatus::invalid(
                 "read_diagnostic", "completion resources are unavailable");
         auto status = resources_->transport()->read_diagnostic(output);
+        if (status.ok() && kind == elastic::BufferOperationKind::kCombine) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (staged_combine_.has_value())
+                staged_combine_->diagnostic = *output;
+        }
 #if DEEP_EP_ASCEND_TESTING
         if (status.ok() && kind == elastic::BufferOperationKind::kBarrier &&
             std::getenv("DEEP_EP_ASCEND_TEST_DIAGNOSTIC") != nullptr) {
@@ -255,7 +267,22 @@ public:
             completion_offset);
         auto status = resources_->copy_to_host(
             output, address, sizeof(*output));
-        if (!status.ok() || kind != elastic::BufferOperationKind::kDispatch)
+        if (!status.ok())
+            return status;
+
+        if (kind == elastic::BufferOperationKind::kCombine) {
+            std::optional<StagedCombine> staged;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                staged = staged_combine_;
+                if (staged.has_value() && *output == staged->generation)
+                    staged_combine_.reset();
+            }
+            if (staged.has_value() && *output != staged->generation)
+                return combine_completion_failure(*staged);
+            return status;
+        }
+        if (kind != elastic::BufferOperationKind::kDispatch)
             return status;
 
         std::lock_guard<std::mutex> lock(mutex_);
@@ -289,12 +316,173 @@ private:
         elastic::DispatchHandleDescriptor descriptor{};
     };
 
+    struct StagedCombine {
+        std::uint64_t generation = 0;
+        std::uint64_t scratch_status_offset = 0;
+        std::optional<transport::DeviceTransportDiagnostic> diagnostic;
+    };
+
+    struct CombineLifecycleSnapshot {
+        std::uint64_t scratch_status = 0;
+        transport::TransportCommandQueue queue{};
+        transport::TransportServiceState service{};
+    };
+
+    static const char* diagnostic_name(
+        transport::DeviceTransportError error) {
+        switch (error) {
+            case transport::DeviceTransportError::kNone: return "none";
+            case transport::DeviceTransportError::kInvalidAbi:
+                return "invalid_abi";
+            case transport::DeviceTransportError::kInvalidRank:
+                return "invalid_rank";
+            case transport::DeviceTransportError::kInvalidChannel:
+                return "invalid_channel";
+            case transport::DeviceTransportError::kInvalidAddress:
+                return "invalid_address";
+            case transport::DeviceTransportError::kInvalidProtocol:
+                return "invalid_protocol";
+            case transport::DeviceTransportError::kInvalidQueue:
+                return "invalid_queue";
+            case transport::DeviceTransportError::kUnsupportedOperation:
+                return "unsupported_operation";
+            case transport::DeviceTransportError::kCommandOverflow:
+                return "command_overflow";
+            case transport::DeviceTransportError::kCompletionTimeout:
+                return "completion_timeout";
+            case transport::DeviceTransportError::kCompletionFailure:
+                return "completion_failure";
+        }
+        return "unknown";
+    }
+
+    transport::TransportStatus read_combine_lifecycle_snapshot(
+        std::uint64_t scratch_status_offset,
+        CombineLifecycleSnapshot* snapshot) const {
+        *snapshot = {};
+        const auto* scratch_status = static_cast<const std::uint8_t*>(
+            resources_->workspace()) + scratch_status_offset;
+        auto status = resources_->copy_to_host(
+            &snapshot->scratch_status, scratch_status,
+            sizeof(snapshot->scratch_status));
+        if (!status.ok())
+            return status;
+
+        transport::StagedTransportContext context{};
+        const auto backend_context =
+            resources_->device_context().backend_context;
+        if (backend_context == 0)
+            return transport::TransportStatus::invalid(
+                "combine_lifecycle_snapshot",
+                "staged transport context is unavailable");
+        status = resources_->copy_to_host(
+            &context, reinterpret_cast<const void*>(backend_context),
+            sizeof(context));
+        if (!status.ok())
+            return status;
+        if (!transport::command::valid_staged_context_header(
+                context.abi_version, context.struct_size,
+                context.cann_compatibility, context.command_queue))
+            return transport::TransportStatus::invalid(
+                "combine_lifecycle_snapshot",
+                "malformed staged transport context");
+
+        status = resources_->copy_to_host(
+            &snapshot->queue,
+            reinterpret_cast<const void*>(context.command_queue),
+            sizeof(snapshot->queue));
+        if (!status.ok())
+            return status;
+        if (!transport::command::valid_command_queue_header(
+                snapshot->queue.abi_version, snapshot->queue.struct_size,
+                snapshot->queue.commands, snapshot->queue.capacity,
+                snapshot->queue.count, snapshot->queue.service_state,
+                snapshot->queue.diagnostic))
+            return transport::TransportStatus::invalid(
+                "combine_lifecycle_snapshot",
+                "malformed transport command queue");
+        if (!transport::command::valid_registration_cookie(
+                context.reserved, context.command_queue,
+                snapshot->queue.commands, snapshot->queue.service_state,
+                snapshot->queue.diagnostic, snapshot->queue.capacity))
+            return transport::TransportStatus::invalid(
+                "combine_lifecycle_snapshot",
+                "malformed transport registration cookie");
+
+        status = resources_->copy_to_host(
+            &snapshot->service,
+            reinterpret_cast<const void*>(snapshot->queue.service_state),
+            sizeof(snapshot->service));
+        if (!status.ok())
+            return status;
+        if (!transport::command::valid_service_state_header(
+                snapshot->service.abi_version,
+                snapshot->service.struct_size))
+            return transport::TransportStatus::invalid(
+                "combine_lifecycle_snapshot",
+                "malformed transport service state");
+        return transport::TransportStatus::success();
+    }
+
+    transport::TransportStatus combine_completion_failure(
+        const StagedCombine& staged) const {
+        const auto diagnostic = staged.diagnostic.value_or(
+            transport::DeviceTransportDiagnostic{});
+        auto message = std::string("device diagnostic completion mismatch") +
+            " error=" + diagnostic_name(diagnostic.error) +
+            " command_index=" + std::to_string(diagnostic.command_index) +
+            " opcode=" + std::to_string(
+                static_cast<std::uint32_t>(diagnostic.opcode)) +
+            " peer=" + std::to_string(diagnostic.peer) +
+            " world_peer=" + std::to_string(diagnostic.world_peer) +
+            " team=" + std::to_string(
+                static_cast<std::uint32_t>(diagnostic.team)) +
+            " channel=" + std::to_string(diagnostic.channel) +
+            " backend_status=" +
+                std::to_string(diagnostic.backend_status) +
+            " reserved=" + std::to_string(diagnostic.reserved) +
+            " generation=" + std::to_string(diagnostic.generation) +
+            " diagnostic_generation=" +
+                std::to_string(diagnostic.generation) +
+            " diagnostic_error=" + diagnostic_name(diagnostic.error);
+        CombineLifecycleSnapshot snapshot{};
+        const auto snapshot_status = read_combine_lifecycle_snapshot(
+            staged.scratch_status_offset, &snapshot);
+        if (snapshot_status.ok()) {
+            const auto encoded_peer = snapshot.scratch_status >> 32U;
+            const auto scratch_peer = encoded_peer == 0 ? std::int64_t{-1} :
+                static_cast<std::int64_t>(encoded_peer - 1);
+            message +=
+                " lifecycle_snapshot=available scratch_status=" +
+                std::to_string(snapshot.scratch_status) +
+                " scratch_peer=" + std::to_string(scratch_peer) +
+                " scratch_error=" + std::to_string(
+                    static_cast<std::uint32_t>(snapshot.scratch_status)) +
+                " queue_generation=" +
+                std::to_string(snapshot.queue.generation) +
+                " queue_count=" + std::to_string(snapshot.queue.count) +
+                " consumed_generation=" +
+                std::to_string(snapshot.service.consumed_generation);
+        } else {
+            message +=
+                " lifecycle_snapshot=unavailable snapshot_operation=" +
+                snapshot_status.operation +
+                " snapshot_backend_code=" +
+                std::to_string(snapshot_status.backend_code) +
+                " snapshot_error=" + snapshot_status.message;
+        }
+        return transport::TransportStatus::runtime_failure(
+            "combine", static_cast<int>(diagnostic.backend_status),
+            std::move(message));
+    }
+
     std::unique_ptr<runtime::CannRuntimeResources> resources_;
     mutable std::mutex mutex_;
     std::uint64_t dispatch_family_ = 0;
     std::uint64_t last_dispatch_generation_ = 0;
     int rank_idx_ = -1;
     std::optional<StagedDispatch> staged_dispatch_;
+    std::optional<StagedCombine> staged_combine_;
 };
 
 #if DEEP_EP_ASCEND_TESTING
@@ -492,79 +680,6 @@ class ElasticBuffer {
         return "unknown";
     }
 
-    struct CombineLifecycleSnapshot {
-        std::uint64_t scratch_status = 0;
-        transport::TransportCommandQueue queue{};
-        transport::TransportServiceState service{};
-    };
-
-    transport::TransportStatus read_combine_lifecycle_snapshot(
-        std::uint64_t scratch_status_offset,
-        CombineLifecycleSnapshot* snapshot) const {
-        *snapshot = {};
-        const auto* scratch_status = static_cast<const std::uint8_t*>(
-            resources_->workspace()) + scratch_status_offset;
-        auto status = resources_->copy_to_host(
-            &snapshot->scratch_status, scratch_status,
-            sizeof(snapshot->scratch_status));
-        if (!status.ok())
-            return status;
-
-        transport::StagedTransportContext staged{};
-        const auto& context = resources_->device_context();
-        if (context.backend_context == 0)
-            return transport::TransportStatus::invalid(
-                "combine_lifecycle_snapshot",
-                "staged transport context is unavailable");
-        status = resources_->copy_to_host(
-            &staged, reinterpret_cast<const void*>(context.backend_context),
-            sizeof(staged));
-        if (!status.ok())
-            return status;
-        if (!transport::command::valid_staged_context_header(
-                staged.abi_version, staged.struct_size,
-                staged.cann_compatibility, staged.command_queue))
-            return transport::TransportStatus::invalid(
-                "combine_lifecycle_snapshot",
-                "malformed staged transport context");
-
-        status = resources_->copy_to_host(
-            &snapshot->queue,
-            reinterpret_cast<const void*>(staged.command_queue),
-            sizeof(snapshot->queue));
-        if (!status.ok())
-            return status;
-        if (!transport::command::valid_command_queue_header(
-                snapshot->queue.abi_version, snapshot->queue.struct_size,
-                snapshot->queue.commands, snapshot->queue.capacity,
-                snapshot->queue.count, snapshot->queue.service_state,
-                snapshot->queue.diagnostic))
-            return transport::TransportStatus::invalid(
-                "combine_lifecycle_snapshot",
-                "malformed transport command queue");
-        if (!transport::command::valid_registration_cookie(
-                staged.reserved, staged.command_queue,
-                snapshot->queue.commands, snapshot->queue.service_state,
-                snapshot->queue.diagnostic, snapshot->queue.capacity))
-            return transport::TransportStatus::invalid(
-                "combine_lifecycle_snapshot",
-                "malformed transport registration cookie");
-
-        status = resources_->copy_to_host(
-            &snapshot->service,
-            reinterpret_cast<const void*>(snapshot->queue.service_state),
-            sizeof(snapshot->service));
-        if (!status.ok())
-            return status;
-        if (!transport::command::valid_service_state_header(
-                snapshot->service.abi_version,
-                snapshot->service.struct_size))
-            return transport::TransportStatus::invalid(
-                "combine_lifecycle_snapshot",
-                "malformed transport service state");
-        return transport::TransportStatus::success();
-    }
-
     [[noreturn]] void raise_barrier_diagnostic(
         const transport::DeviceTransportDiagnostic& diagnostic,
         const char* detail) const {
@@ -607,58 +722,6 @@ class ElasticBuffer {
         raise_transport_status(
             transport::TransportStatus::runtime_failure(
                 "dispatch", static_cast<int>(diagnostic.backend_status),
-                std::move(message)),
-            rank_idx_);
-    }
-
-    [[noreturn]] void raise_combine_diagnostic(
-        const transport::DeviceTransportDiagnostic& diagnostic,
-        const char* detail, std::uint64_t scratch_status_offset) const {
-        auto message = std::string("device diagnostic ") + detail +
-            " error=" + diagnostic_name(diagnostic.error) +
-            " command_index=" + std::to_string(diagnostic.command_index) +
-            " opcode=" + std::to_string(
-                static_cast<std::uint32_t>(diagnostic.opcode)) +
-            " peer=" + std::to_string(diagnostic.peer) +
-            " world_peer=" + std::to_string(diagnostic.world_peer) +
-            " team=" + std::to_string(
-                static_cast<std::uint32_t>(diagnostic.team)) +
-            " channel=" + std::to_string(diagnostic.channel) +
-            " backend_status=" + std::to_string(diagnostic.backend_status) +
-            " reserved=" + std::to_string(diagnostic.reserved) +
-            " generation=" + std::to_string(diagnostic.generation) +
-            " diagnostic_generation=" +
-                std::to_string(diagnostic.generation) +
-            " diagnostic_error=" + diagnostic_name(diagnostic.error);
-        CombineLifecycleSnapshot snapshot{};
-        const auto snapshot_status = read_combine_lifecycle_snapshot(
-            scratch_status_offset, &snapshot);
-        if (snapshot_status.ok()) {
-            const auto encoded_peer = snapshot.scratch_status >> 32U;
-            const auto scratch_peer = encoded_peer == 0 ? std::int64_t{-1} :
-                static_cast<std::int64_t>(encoded_peer - 1);
-            message +=
-                " lifecycle_snapshot=available scratch_status=" +
-                std::to_string(snapshot.scratch_status) +
-                " scratch_peer=" + std::to_string(scratch_peer) +
-                " scratch_error=" + std::to_string(
-                    static_cast<std::uint32_t>(snapshot.scratch_status)) +
-                " queue_generation=" +
-                std::to_string(snapshot.queue.generation) +
-                " queue_count=" + std::to_string(snapshot.queue.count) +
-                " consumed_generation=" +
-                std::to_string(snapshot.service.consumed_generation);
-        } else {
-            message +=
-                " lifecycle_snapshot=unavailable snapshot_operation=" +
-                snapshot_status.operation +
-                " snapshot_backend_code=" +
-                std::to_string(snapshot_status.backend_code) +
-                " snapshot_error=" + snapshot_status.message;
-        }
-        raise_transport_status(
-            transport::TransportStatus::runtime_failure(
-                "combine", static_cast<int>(diagnostic.backend_status),
                 std::move(message)),
             rank_idx_);
     }
@@ -2090,10 +2153,17 @@ public:
             const bool& async_with_compute_stream,
             const bool& allocate_on_comm_stream,
             const bool& use_expanded_layout) const {
-        TORCH_CHECK(!previous_event.has_value() &&
-                        !previous_event_before_epilogue.has_value() &&
-                        !async_with_compute_stream && !allocate_on_comm_stream,
-                    "DeepEP Ascend backend: combine is synchronous");
+        TORCH_CHECK(!previous_event_before_epilogue.has_value(),
+                    "DeepEP Ascend backend: combine does not support "
+                    "previous_event_before_epilogue");
+        TORCH_CHECK(!previous_event.has_value() || allocate_on_comm_stream,
+                    "DeepEP Ascend backend: combine previous_event requires "
+                    "allocate_on_comm_stream=True");
+        const bool stream_mode = previous_event.has_value() ||
+            async_with_compute_stream || allocate_on_comm_stream;
+        TORCH_CHECK(!stream_mode || !allow_hybrid_mode_,
+                    "DeepEP Ascend backend: combine stream overlap requires "
+                    "BF16 pure-scale-up mode");
         TORCH_CHECK(!channel_linked_list.has_value(),
                     "DeepEP Ascend backend: combine does not support channel handles");
         TORCH_CHECK(num_sms == 1,
@@ -2113,6 +2183,11 @@ public:
             elastic::BufferOperationKind::kCombine, "combine");
         require_transport("combine",
                           operation_capabilities(kCombineCapabilities));
+        TORCH_CHECK(
+            !stream_mode ||
+                resources_->device_context().topology.scale_out_size == 1,
+            "DeepEP Ascend backend: combine stream overlap requires "
+            "BF16 pure-scale-up mode");
 
         const auto device = x.device();
         int current_device = -1;
@@ -2367,6 +2442,32 @@ public:
                             static_cast<std::uint64_t>(num_buffer_bytes_) &&
                         tiling.workspace_bytes <= resources_->workspace_bytes(),
                     "DeepEP Ascend backend: combine capacity exceeds runtime storage");
+        runtime::StreamIdentity current_stream;
+        status = resources_->current_stream(&current_stream);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        elastic::EventDependency predecessor;
+        if (previous_event.has_value()) {
+            predecessor = previous_event->dependency();
+        } else {
+            auto created = resources_->create_event();
+            if (!created.status.ok())
+                raise_transport_status(created.status, rank_idx_);
+            status = created.event->record(current_stream);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            predecessor.event = std::move(created.event);
+        }
+        const auto stream = resources_->comm_stream();
+        status = predecessor.event->wait(stream);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+#if DEEP_EP_ASCEND_HAS_GENERIC_STREAM_GUARD
+        std::optional<c10::StreamGuard> allocation_guard;
+        if (allocate_on_comm_stream)
+            allocation_guard.emplace(get_comm_stream());
+#endif
+
         auto combined_x = torch::empty(
             {combined_topk_idx.size(0), x.size(1)}, x.options());
         std::optional<torch::Tensor> combined_weights;
@@ -2375,10 +2476,36 @@ public:
                 {combined_topk_idx.size(0), combined_topk_idx.size(1)},
                 topk_weights->options());
 
-        runtime::StreamIdentity stream;
-        status = resources_->current_stream(&stream);
-        if (!status.ok())
-            raise_transport_status(status, rank_idx_);
+        std::vector<std::optional<torch::Tensor>> retained_tensors;
+        const auto retain = [&retained_tensors](
+                                const std::optional<torch::Tensor>& tensor) {
+            retained_tensors.emplace_back(tensor);
+        };
+        retain(x);
+        retain(topk_weights);
+        retain(bias_0);
+        retain(bias_1);
+        retain(src_metadata);
+        retain(combined_topk_idx);
+        retain(psum_num_recv_tokens_per_scaleup_rank);
+        retain(token_metadata_at_forward);
+        retain(channel_linked_list);
+        retain(combined_x);
+        retain(combined_weights);
+#ifndef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+        for (const auto& tensor : retained_tensors) {
+            if (!tensor.has_value())
+                continue;
+            const auto record_status = resources_->record_tensor_stream(
+                *tensor, stream);
+            if (!record_status.ok())
+                raise_transport_status(record_status, rank_idx_);
+        }
+#endif
+
+        auto completion = resources_->create_event();
+        if (!completion.status.ok())
+            raise_transport_status(completion.status, rank_idx_);
         elastic::CombineArguments arguments{};
         arguments.x = x.data_ptr();
         arguments.topk_weights = topk_weights.has_value() ?
@@ -2413,41 +2540,41 @@ public:
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_),
             resources_->workspace_bytes()};
+        completion_resources_->stage_combine_completion(
+            generation, tiling.workspace_layout.scratch_status_offset);
         const auto launch_status = elastic::launch_internal_combine(
             arguments, tiling, storage, stream.raw);
         if (!launch_status.ok())
             raise_combine_launch_status(launch_status, rank_idx_);
-        status = resources_->synchronize_stream(stream.raw);
-        if (!status.ok())
-            raise_transport_status(status, rank_idx_);
-        transport::DeviceTransportDiagnostic diagnostic{};
-        status = host_transport()->read_diagnostic(&diagnostic);
-        if (!status.ok())
-            raise_transport_status(status, rank_idx_);
-        if (diagnostic.abi_version !=
-                transport::kTransportCommandAbiVersion ||
-            diagnostic.error != transport::DeviceTransportError::kNone ||
-            diagnostic.generation != generation)
-            raise_combine_diagnostic(
-                diagnostic, "reported failure",
-                tiling.workspace_layout.scratch_status_offset);
-        std::uint64_t completion = 0;
         const auto completion_offset =
             tiling.symmetric_window_layout.control_offset +
             offsetof(elastic::SymmetricControlHeader, combine_generation);
-        const auto* completion_address = reinterpret_cast<const void*>(
-            reinterpret_cast<std::uintptr_t>(resources_->window_base()) +
-            completion_offset);
-        status = resources_->copy_to_host(
-            &completion, completion_address, sizeof(completion));
-        if (!status.ok())
+        std::vector<elastic::EventDependency> predecessors;
+        predecessors.emplace_back(std::move(predecessor));
+        auto published = async_state_->publish(
+            std::move(lease), completion.event,
+            {elastic::BufferOperationKind::kCombine, generation,
+             completion_offset,
+             tiling.workspace_layout.scratch_status_offset},
+            std::move(retained_tensors), std::move(predecessors));
+        if (!published.status.ok())
+            raise_transport_status(published.status, rank_idx_);
+        status = completion.event->record(stream);
+        if (!status.ok()) {
+            (void)published.operation->finish(0);
             raise_transport_status(status, rank_idx_);
-        if (completion != generation)
-            raise_combine_diagnostic(
-                diagnostic, "completion mismatch",
-                tiling.workspace_layout.scratch_status_offset);
-        lease.complete();
-        return {combined_x, combined_weights, std::nullopt};
+        }
+
+        std::optional<EventHandle> event;
+        if (async_with_compute_stream) {
+            event.emplace(
+                completion.event, published.operation, async_state_);
+        } else {
+            status = published.operation->finish(5000);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+        }
+        return {combined_x, combined_weights, std::move(event)};
     }
 };
 

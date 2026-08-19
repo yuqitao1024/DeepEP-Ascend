@@ -321,6 +321,7 @@ def _install_fake_extension(platform, events):
             self.world_size = args[1]
             self.dispatch_calls = []
             self.combine_calls = []
+            self.combine_events = []
             self.destroyed = False
             self.destroy_error = None
             self.destroy_error_destroys_runtime = False
@@ -385,7 +386,9 @@ def _install_fake_extension(platform, events):
 
         def combine(self, *args):
             self.combine_calls.append(args)
-            return args[0], args[1], None if platform == "ascend" else EventHandle()
+            event = EventHandle() if args[15] or platform != "ascend" else None
+            self.combine_events.append(event)
+            return args[0], args[1], event
 
     def calculate_elastic_buffer_size(*args):
         extension.size_calls.append(args)
@@ -1780,21 +1783,64 @@ def _scenario_ascend_combine():
     recv_src_metadata.device.index = 0
     buffer.combine(x, handle)
 
-    _, _, one_bias_event = buffer.combine(x, handle, bias=bias_0, num_sms=1)
+    _, _, one_bias_event = buffer.combine(
+        x, handle, bias=bias_0, num_sms=1, allocate_on_comm_stream=True)
     assert runtime.combine_calls[-1][2:4] == (bias_0, None)
     assert one_bias_event.event is None
+    assert runtime.combine_calls[-1][13:17] == (None, None, False, True)
+
+    _, _, async_event = buffer.combine(
+        x, handle, async_with_compute_stream=True)
+    assert async_event.event is not None
+    assert async_event.event is runtime.combine_events[-1]
+    assert runtime.combine_calls[-1][13:17] == (None, None, True, False)
+    async_event.current_stream_wait()
+    async_event.current_stream_wait()
+
+    previous = deep_ep.ElasticBuffer.capture()
+    _, _, predecessor_event = buffer.combine(
+        x, handle, previous_event=previous,
+        async_with_compute_stream=True, allocate_on_comm_stream=True)
+    assert predecessor_event.event is not None
+    assert runtime.combine_calls[-1][13:17] == (
+        previous, None, True, True)
+    predecessor_event.current_stream_wait()
+    _, _, predecessor_sync_event = buffer.combine(
+        x, handle, previous_event=previous,
+        allocate_on_comm_stream=True)
+    assert predecessor_sync_event.event is None
+    assert runtime.combine_calls[-1][13:17] == (
+        previous, None, False, True)
+
+    handle.do_expand = True
+    expanded_weights = _FakeTensor("npu", (2,), torch.float32)
+    _, returned_expanded_weights, expanded_event = buffer.combine(
+        x, handle, topk_weights=expanded_weights,
+        async_with_compute_stream=True)
+    assert returned_expanded_weights is expanded_weights
+    assert runtime.combine_calls[-1][17] is True
+    expanded_event.current_stream_wait()
+    _, returned_unweighted, unweighted_event = buffer.combine(x, handle)
+    assert returned_unweighted is None
+    assert unweighted_event.event is None
+    handle.do_expand = False
+
+    empty_x = _FakeTensor("npu", (0, 16), torch.bfloat16)
+    _, _, empty_event = buffer.combine(
+        empty_x, handle, async_with_compute_stream=True)
+    assert runtime.combine_calls[-1][0] is empty_x
+    empty_event.current_stream_wait()
+
     buffer.combine(x, handle)
     assert runtime.combine_calls[-1][2:4] == (None, None)
 
     invalid_calls = (
         ("num_sms", {"num_sms": 2}),
         ("num_qps", {"num_qps": 1}),
-        ("previous_event", {"previous_event": deep_ep.EventOverlap(
-            extension.EventHandle())}),
+        ("previous_event_without_allocation", {
+            "previous_event": deep_ep.EventOverlap(extension.EventHandle())}),
         ("previous_event_before_epilogue", {
             "previous_event_before_epilogue": extension.EventHandle()}),
-        ("async_with_compute_stream", {"async_with_compute_stream": True}),
-        ("allocate_on_comm_stream", {"allocate_on_comm_stream": True}),
     )
     calls_before = len(runtime.combine_calls)
     for name, kwargs in invalid_calls:
@@ -1805,6 +1851,57 @@ def _scenario_ascend_combine():
         else:
             raise AssertionError(f"Ascend combine accepted unsupported {name}")
     assert len(runtime.combine_calls) == calls_before
+
+    torch.npu.capturing = True
+    try:
+        buffer.combine(x, handle, async_with_compute_stream=True)
+    except RuntimeError as error:
+        assert "unsupported_graph_capture" in str(error), error
+    else:
+        raise AssertionError("Ascend async combine accepted graph capture")
+    finally:
+        torch.npu.capturing = False
+    assert len(runtime.combine_calls) == calls_before
+
+    buffer.allow_hybrid_mode = True
+    try:
+        buffer.combine(x, handle, async_with_compute_stream=True)
+    except RuntimeError as error:
+        assert "unsupported_combine_mode" in str(error), error
+    else:
+        raise AssertionError("Ascend async combine accepted hybrid mode")
+    finally:
+        buffer.allow_hybrid_mode = False
+    assert len(runtime.combine_calls) == calls_before
+
+    saved_topology = buffer._ascend_topology
+    saved_scaleout = buffer.num_scaleout_ranks
+    buffer._ascend_topology = (
+        saved_topology[0], saved_topology[1], saved_topology[2],
+        saved_topology[1] * 2)
+    buffer.num_scaleout_ranks = 2
+    try:
+        buffer.combine(x, handle, async_with_compute_stream=True)
+    except RuntimeError as error:
+        assert "unsupported_combine_mode" in str(error), error
+    else:
+        raise AssertionError("Ascend async combine accepted physical scale-out")
+    finally:
+        buffer._ascend_topology = saved_topology
+        buffer.num_scaleout_ranks = saved_scaleout
+    assert len(runtime.combine_calls) == calls_before
+
+    for name, invalid_x in (
+            ("mapped CPU", _FakeTensor("cpu", (2, 16), torch.bfloat16)),
+            ("FP8", _FakeTensor("npu", (2, 16), torch.float8_e4m3fn))):
+        try:
+            buffer.combine(
+                invalid_x, handle, async_with_compute_stream=True)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"Ascend async combine accepted {name} input")
+        assert len(runtime.combine_calls) == calls_before
     buffer.destroy()
 
 
@@ -2115,7 +2212,7 @@ class PythonApiIsolationTest(unittest.TestCase):
     def test_dispatch_count_validation_survives_optimized_python(self):
         self.run_scenario("ascend_dispatch_optimized", optimize=True)
 
-    def test_combine_routes_to_the_synchronous_ascend_runtime(self):
+    def test_combine_async_routes_native_events_and_rejects_deferred_modes(self):
         self.run_scenario("ascend_combine")
 
     def test_cached_method_gates_before_hashing_arguments(self):

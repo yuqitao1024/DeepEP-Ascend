@@ -761,9 +761,16 @@ class ElasticBuffer:
         scalar_error = None
         if num_sms not in (0, 1) or num_qps != 0:
             scalar_error = "invalid_launch_configuration"
-        elif (previous_event is not None or
-              previous_event_before_epilogue is not None or
-              async_with_compute_stream or allocate_on_comm_stream):
+        elif (async_with_compute_stream and
+              ascend_current_stream_is_capturing()):
+            scalar_error = "unsupported_graph_capture"
+        elif previous_event_before_epilogue is not None:
+            scalar_error = "unsupported_combine_mode"
+        elif previous_event is not None and not allocate_on_comm_stream:
+            scalar_error = "unsupported_combine_mode"
+        elif ((previous_event is not None or async_with_compute_stream or
+               allocate_on_comm_stream) and
+              (self.allow_hybrid_mode or self.num_scaleout_ranks > 1)):
             scalar_error = "unsupported_combine_mode"
         handle_device_error = (
             "invalid_buffer_device" if isinstance(handle, EPHandle) and
@@ -1621,11 +1628,20 @@ class ElasticBuffer:
             if (num_sms not in (0, 1) or num_qps != 0):
                 raise RuntimeError(
                     'DeepEP Ascend backend: combine requires num_sms=1 and num_qps=0')
-            if (previous_event is not None or
-                    previous_event_before_epilogue is not None or
-                    async_with_compute_stream or allocate_on_comm_stream):
+            if previous_event_before_epilogue is not None:
                 raise RuntimeError(
-                    'DeepEP Ascend backend: combine is synchronous')
+                    'DeepEP Ascend backend: combine does not support '
+                    'previous_event_before_epilogue')
+            if previous_event is not None and not allocate_on_comm_stream:
+                raise RuntimeError(
+                    'DeepEP Ascend backend: combine previous_event requires '
+                    'allocate_on_comm_stream=True')
+            if ((previous_event is not None or async_with_compute_stream or
+                 allocate_on_comm_stream) and
+                    (self.allow_hybrid_mode or self.num_scaleout_ranks > 1)):
+                raise RuntimeError(
+                    'DeepEP Ascend backend: combine stream overlap requires '
+                    'BF16 pure-scale-up mode')
             num_sms = 1
 
         bias_0, bias_1 = ElasticBuffer._unpack_bias(bias)
@@ -1646,4 +1662,4 @@ class ElasticBuffer:
                                  allocate_on_comm_stream,
                                  handle.do_expand)
         return combined_x, combined_topk_weights, \
-            EventOverlap(event if is_cuda() else None)
+            EventOverlap(event)

@@ -1912,7 +1912,7 @@ int main() {
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
-    def test_public_combine_probe_executes(self):
+    def test_public_combine_async_probe_executes(self):
         probe = ROOT / "tests/ascend/production_combine_probe.cpp"
         self.assertTrue(probe.is_file(), str(probe))
         with tempfile.TemporaryDirectory() as directory:
@@ -1926,6 +1926,7 @@ int main() {
                 ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                  "-DDEEP_EP_ASCEND_TESTING=1",
                  "-DDEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR=1",
+                 *HOST_SANITIZER_FLAGS,
                  f"-I{directory}", f"-I{ROOT}", "-include",
                  str(directory / "torch/python.h"),
                  str(probe), str(ELASTIC / "runtime.cpp"),

@@ -45,6 +45,7 @@ struct Trace {
     bool release_sync = false;
     std::atomic<int> sync_failures{0};
     std::atomic<int> barrier_launches{0};
+    std::atomic<int> combine_launches{0};
     std::atomic<int> current_device_calls{0};
     std::atomic<int> current_stream_calls{0};
     std::atomic<int> pool_stream_calls{0};
@@ -340,6 +341,8 @@ ResourceIdentity identity(
 }
 
 using Buffer = deep_ep::ascend::ElasticBuffer;
+using Event = deep_ep::ascend::EventHandle;
+using Tensor = torch::Tensor;
 
 std::unique_ptr<Buffer> make_buffer(
     Trace& trace, ResourceIdentity* resource_identity,
@@ -353,6 +356,56 @@ std::unique_ptr<Buffer> make_buffer(
         0, std::move(resources), 2 * 1024 * 1024, 1,
         true, 7, 2, 0, false, completion_timeout_ms,
         std::move(lifecycle_control));
+}
+
+std::unique_ptr<Buffer> make_combine_buffer(
+    Trace& trace, ResourceIdentity* resource_identity,
+    std::uint64_t completion_timeout_ms = 5000) {
+    auto resources = make_resources(trace);
+    if (resources == nullptr)
+        return nullptr;
+    *resource_identity = identity(*resources, trace);
+    return Buffer::make_testing_buffer(
+        0, std::move(resources), 2 * 1024 * 1024, 1,
+        true, 7, 2, 1, false, completion_timeout_ms);
+}
+
+struct CombineInputs {
+    Tensor x = torch::empty(
+        {2, 8}, torch::TensorOptions().dtype(torch::kBFloat16));
+    Tensor source = torch::empty(
+        {2, 4}, torch::TensorOptions().dtype(torch::kInt));
+    Tensor indices = torch::empty(
+        {1, 2}, torch::TensorOptions().dtype(torch::kLong));
+    Tensor prefix = torch::empty(
+        {2}, torch::TensorOptions().dtype(torch::kInt));
+    Tensor descriptor = torch::empty(
+        {static_cast<std::int64_t>(
+            sizeof(elastic::DispatchHandleDescriptor))},
+        torch::TensorOptions().dtype(torch::kByte));
+
+    CombineInputs() {
+        indices.data_ptr<std::int64_t>()[0] = 0;
+        indices.data_ptr<std::int64_t>()[1] = 1;
+        prefix.data_ptr<std::int32_t>()[0] = 1;
+        prefix.data_ptr<std::int32_t>()[1] = 2;
+        const std::array<std::int32_t, 8> metadata{
+            0, 0, -1, -1,
+            4, 3, -1, -1};
+        std::memcpy(source.data_ptr(), metadata.data(), sizeof(metadata));
+        const auto value = elastic::make_attested_dispatch_handle_descriptor(
+            7, {0, 2, 0, 2, 0, 1}, 1, 1, 8, 2, 2, 4, 4, 0);
+        std::memcpy(descriptor.data_ptr(), &value, sizeof(value));
+    }
+};
+
+auto launch_async_combine(Buffer& buffer, CombineInputs& inputs) {
+    const std::optional<Tensor> no_tensor;
+    const std::optional<Event> no_event;
+    return buffer.combine(
+        inputs.x, no_tensor, no_tensor, no_tensor, inputs.source,
+        inputs.indices, inputs.prefix, inputs.descriptor, no_tensor,
+        2, 4, 1, 0, no_event, no_event, true, false, false);
 }
 
 bool error_contains(
@@ -668,6 +721,30 @@ void check_current_stream_barrier_has_bounded_event_timeout() {
     CHECK(trace.synchronize_stream_calls == 0);
 }
 
+void check_async_combine_record_failure_quarantines_ownership() {
+    Trace trace;
+    ResourceIdentity resource_identity;
+    auto buffer = make_combine_buffer(trace, &resource_identity, 1);
+    CHECK(buffer != nullptr);
+    if (buffer == nullptr)
+        return;
+    CombineInputs inputs;
+    trace.order.clear();
+    trace.fail_completion_record = true;
+    CHECK(error_contains(
+        [&] { (void)launch_async_combine(*buffer, inputs); },
+        "record_event"));
+    CHECK(trace.combine_launches == 1);
+    CHECK(trace.synchronize_stream_calls == 0);
+    CHECK(error_contains([&] { buffer->destroy(); }, "synchronize_event"));
+    CHECK(!buffer->is_destroyed());
+    CHECK(trace.runtime_free_calls == 0);
+    CHECK(trace.host_free_calls == 0);
+    buffer.reset();
+    CHECK(trace.runtime_free_calls == 0);
+    CHECK(trace.host_free_calls == 0);
+}
+
 void check_concurrent_destroy_serializes_wrapper_ownership() {
     Trace trace;
     ResourceIdentity resource_identity;
@@ -785,7 +862,24 @@ extern "C" int deep_ep_ascend_launch_dispatch(
 extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
     elastic::DispatchArguments, elastic::CoreTiling, void*) { return 0; }
 extern "C" int deep_ep_ascend_launch_combine(
-    elastic::CombineArguments, elastic::CoreTiling, void*) { return 0; }
+    elastic::CombineArguments arguments, elastic::CoreTiling tiling,
+    void* stream) {
+    auto& trace = *static_cast<StreamToken*>(stream)->trace;
+    ++trace.combine_launches;
+    trace.order.emplace_back(
+        static_cast<StreamToken*>(stream)->communication ?
+            "activate lease and launch combine on comm" :
+            "activate lease and launch combine on current");
+    transport::DeviceTransportDiagnostic diagnostic{};
+    diagnostic.abi_version = transport::kTransportCommandAbiVersion;
+    diagnostic.generation = arguments.generation;
+    std::memcpy(trace.diagnostic, &diagnostic, sizeof(diagnostic));
+    auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(
+        arguments.local_window_base +
+        tiling.symmetric_window_layout.control_offset);
+    control->combine_generation = arguments.generation;
+    return 0;
+}
 extern "C" int deep_ep_ascend_launch_combine_epilogue(
     elastic::CombineArguments, elastic::CoreTiling, void*) { return 0; }
 
@@ -798,6 +892,7 @@ int main() {
     check_barrier_completion_record_failure_retains_launch();
     check_failed_operation_destroy_invalidates_public_access();
     check_current_stream_barrier_has_bounded_event_timeout();
+    check_async_combine_record_failure_quarantines_ownership();
     for (int iteration = 0;
          iteration < wrapper_lifecycle_stress_iterations(); ++iteration) {
         check_concurrent_destroy_serializes_wrapper_ownership();
