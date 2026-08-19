@@ -14,7 +14,8 @@
 
 namespace deep_ep::ascend::elastic {
 
-constexpr std::uint64_t scale_factor_byte_offset(
+DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE constexpr std::uint64_t
+scale_factor_byte_offset(
     std::uint64_t token, std::uint64_t pack,
     std::uint64_t token_stride, std::uint64_t pack_stride,
     std::uint64_t pack_bytes) {

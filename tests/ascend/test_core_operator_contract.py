@@ -750,6 +750,14 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             combine.index("__simt_vf__ inline void hybrid_combine_return_vf")]
         self.assertIn("is_complete_hybrid_route_stage_flags(", producer)
 
+    def test_scale_factor_offset_helper_is_device_callable(self):
+        """Keeps strided scale-factor addressing callable from AICore code."""
+        source = (ELASTIC / "dispatch_state.hpp").read_text()
+        self.assertRegex(
+            source,
+            r"DEEP_EP_ASCEND_DISPATCH_STATE_SIMT_CALLEE\s+constexpr\s+"
+            r"std::uint64_t\s+scale_factor_byte_offset\s*\(")
+
     def test_combine_record_trailer_geometry_is_shared_by_all_stages(self):
         def block_end(source, statement_start):
             opening = source.index("{", statement_start)
