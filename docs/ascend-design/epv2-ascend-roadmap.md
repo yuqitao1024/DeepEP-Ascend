@@ -267,16 +267,8 @@ publication. Phase 3E.3 (a real pre-epilogue dependency boundary) and Phase
 3E.4 (same-buffer multiflight resource slots) remain deferred design
 directions. FP8 remains Phase 3F and is not credited to any Phase 3E slice.
 
-Phase 3E.1 is accepted as of 2026-08-20. Its final evidence appears after the
-qualification history below. Phase 3E overall remains incomplete; 3E.2 is the
-next planned development slice, while 3E.3, 3E.4, and FP8 Phase 3F remain
-outside this acceptance boundary.
-
-#### Qualification history
-
-Before final qualification, Phase 3E.1 was not accepted. The exact-archive
-build/import task `task_20260819_203518_127255030913` passed, and one-NPU
-event/lifecycle
+Phase 3E.1 is not accepted as of 2026-08-19. The exact-archive build/import
+task `task_20260819_203518_127255030913` passed, and one-NPU event/lifecycle
 task `task_20260819_203858_128526415799` passed its five cases. Two-NPU matrix
 task `task_20260819_204026_128929210009` passed only
 `capture-current-stream`; cached dispatch sync/async with allocation
@@ -342,7 +334,7 @@ both ranks. Runtime objects expose those streams as logical IDs `0/128`.
 This closes the bounded diagnostic question: hardware overlap is present, but
 the tested load ratio cannot satisfy the fixed 5% wall-time criterion. Because
 the run used one sample and is explicitly acceptance-ineligible, Phase 3E.1
-remained not accepted after that task.
+remains not accepted.
 
 The final acceptance matrix therefore retains 256 communication tokens,
 `4096x4096` BF16 compute, three warmups, seven repetitions, the fixed 5% gate,
@@ -358,8 +350,8 @@ production change, event-deadline increase, or acceptance-threshold decrease.
 The runner also separates logical runtime stream IDs from physical profiler
 lane IDs. Physical lanes must be uniquely identified by the `MatMulV3` and
 DeepEP `dispatch_kernel` event families, must differ, and must have a positive
-overlap interval. At that point, one final complete 21-case two-rank matrix
-remained required before Phase 3E.1 could be accepted.
+overlap interval. One final complete 21-case two-rank matrix is required before
+Phase 3E.1 can be accepted.
 
 Final full-matrix task `task_20260820_031911_304861030703` reached the overlap
 row but did not pass it. The fail-fast report contains 21 selected, 16
@@ -391,8 +383,8 @@ Overlapped wall was `0.357143020`/`0.357857410`, saving only
 `0.342516940`/`0.342942600` seconds even though the profiler proved
 `269032.25us`/`268594.75us` of physical overlap on streams `61/26`. This rules
 out an unserialized control and supports compute/communication resource
-contention. No production change or unchanged full-matrix retry followed from
-this result; Phase 3E.1 remained unaccepted under its fixed 5% gate while the
+contention. No production change or unchanged full-matrix retry follows from
+this result; Phase 3E.1 remains unaccepted under its fixed 5% gate while the
 specific contention source is investigated separately.
 
 Static investigation also rules out two immediate tuning assumptions. In the
@@ -419,8 +411,8 @@ while event waits remained stretched to `0.341599990`/`0.340491320` seconds
 despite `268224.5us`/`269994.5us` of physical overlap on streams `61/26`.
 Removing the elementwise chain reduced compute-only time but did not remove
 the communication stretch, so the `mul_` contention hypothesis is rejected.
-The formal mixed workload and fixed 5% gate remained unchanged, no further full
-matrix was justified, and Phase 3E.1 remained unaccepted.
+The formal mixed workload and fixed 5% gate remain unchanged, no further full
+matrix is justified, and Phase 3E.1 remains unaccepted.
 
 The next component-only capability probe used BF16 NCDHW
 `torch.nn.functional.conv3d` with primary `Conv3DV2` compute. Runner commit
@@ -438,9 +430,9 @@ the intended 0.20-0.30s range. Each trace also inventories tiny `Greater` and
 `ZerosLike` auxiliary AIV families and no TransData, so the primary kernel is
 AIC-only but the complete compute path is not. The report SHA-256 is
 `88a4fa784c660ffa078b1a443e6b0b9573230ceed458a3932eb2c7944c31a813`.
-This single-sample result established capability and motivated a formal
-fixed-workload matrix; Phase 3E.1 remained unaccepted pending that matrix's
-unchanged 5% and profiler gates.
+This single-sample result establishes capability and motivates a formal
+fixed-workload matrix; Phase 3E.1 remains unaccepted until that entire matrix
+passes its unchanged 5% and profiler gates.
 
 The resulting final matrix keeps communication fixed at 256 tokens, hidden
 size 4096, and `num_sms=1`, and replaces only its formal compute workload with
@@ -457,43 +449,9 @@ Formal profiler acceptance requires exact `Conv3DV2=KERNEL_AICORE` and
 overlap, retained logical/physical IDs, and an inventory of every auxiliary AIV
 family. Auxiliary AIV total duration must stay below 1% of the primary Conv3D
 span. Known tiny `Greater` and `ZerosLike` families are allowed within that
-bound, but `compute_path_aic_only` remained false and no whole-path pure-AIC
-claim was made. The declared gate required one complete 21/21 matrix with both
-ranks above 5% and every profiler check passing.
-
-#### Final acceptance
-
-Corrected final task `task_20260820_052826_33515907092` ran on devices `6,7`
-with `--max-time 300`, reached authoritative `completed (exit=0)` after 1m52s,
-and passed 21/21 selected and executed cases. Rank 0 serialized median/p95
-`0.304676380/0.305456684s` fell to overlapped
-`0.277614190/0.279148822s`, an `8.8823%` gain. Rank 1
-`0.304825410/0.305500666s` fell to `0.277762130/0.278448983s`, an
-`8.8783%` gain. Both ranks cleared the unchanged 5% gate with three warmups,
-seven measured samples, and zero global synchronizations.
-
-Profiler evidence identifies `Conv3DV2=KERNEL_AICORE` and
-`dispatch_kernel=KERNEL_AIVEC`, logical streams `0/143`, distinct physical
-lanes `61/11`, and positive overlap of `111.75us`/`111.0us`. The only
-auxiliary AIV families are `Greater` and `ZerosLike`; their ratios to the
-primary Conv3D span are `0.0001347174`/`0.0001226342`, below the 1% gate, and
-neither trace contains TransData. `compute_path_aic_only=false` remains
-explicit, so no whole-path pure-AIC claim is made.
-
-The accepted production commit/tree are
-`9854a4e24fd918f30f0360ee45870dcb8f3a7bc9`/
-`016a76c6561d503d8293261986c787497c226674`; the source archive and extension
-SHA-256 values are
-`f67f8b27bded1d372bde5f62a92211e34d991d165418b91ec201b7ae8681b10e` and
-`cccf590c4831ddf5c3fb786c8e93c4d9bf7142a04251feec2684b2646a152165`.
-Runner commit `ea51af1aab1654d56929c328e3902a1af2cb6892` has SHA-256
-`0bea60a994ec87976adfce48cc0a4e3ae01835818a907eb4a75e7d4e8351ef08`.
-Final report SHA-256 is
-`e879d745a5e607a1f5f0a4ddd0508c8af77334b9fcfcdb06f49155013e9792b4`;
-rank trace hashes are
-`5d8a4baa53f93e9bdc5cfa3d5ff189df8086b14dfbc474af5b0e082012542074`
-and `d622a92f02a3fba02a75564da424244b53ddfeca48f205ef89545d12c1e8f0e8`.
-Every fixed Phase 3E.1 acceptance gate passed.
+bound, but `compute_path_aic_only` remains false and no whole-path pure-AIC
+claim is made. Phase 3E.1 still requires one complete 21/21 matrix with both
+ranks above 5% and every profiler gate passing.
 
 ### Deliverables
 

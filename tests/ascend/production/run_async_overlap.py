@@ -1,6 +1,7 @@
 import argparse
 import ast
 import copy
+import gc
 import json
 import math
 import os
@@ -101,8 +102,6 @@ EVENT_CASES = (
     "capture-current-stream",
     "record-failure",
     "event-timeout",
-    "drop-event",
-    "destroy-pending-retry",
 )
 
 CASE_START_PREFIX = "PHASE3E_CASE_START"
@@ -110,35 +109,21 @@ CASE_RESULT_PREFIX = "PHASE3E_CASE_RESULT"
 OVERLAP_DIAGNOSTIC_RESULT_PREFIX = "PHASE3E_OVERLAP_DIAGNOSTIC_RESULT"
 OVERLAP_SWEEP_RESULT_PREFIX = "PHASE3E_OVERLAP_SWEEP_RESULT"
 OVERLAP_COMPONENT_RESULT_PREFIX = "PHASE3E_OVERLAP_COMPONENT_RESULT"
+WORKER_RESULT_PREFIX = "PHASE3E_WORKER_RESULT"
 
-HOST_CONTRACT_CASES = {
-    "record-failure": (
-        "tests/ascend/test_core_operator_contract.py::"
-        "AscendCoreOperatorContractTest::test_public_combine_async_probe_executes"
-    ),
-    "event-timeout": (
-        "tests/ascend/test_core_operator_contract.py::"
-        "AscendCoreOperatorContractTest::test_async_runtime_stream_event_contract"
-    ),
-    "completion-mismatch": (
-        "tests/ascend/test_core_operator_contract.py::"
-        "AscendCoreOperatorContractTest::test_async_runtime_stream_event_contract"
-    ),
-    "drop-event": (
-        "tests/ascend/test_core_operator_contract.py::"
-        "AscendCoreOperatorContractTest::test_async_runtime_stream_event_contract"
-    ),
-    "destroy-pending-retry": (
-        "tests/ascend/test_core_operator_contract.py::"
-        "AscendCoreOperatorContractTest::"
-        "test_barrier_buffer_lifecycle_resource_concurrency"
-    ),
+STANDALONE_MEASUREMENT_FIELDS = {
+    "capture-current-stream": {
+        "repeated_waits", "global_synchronizations"},
+    "record-failure": {
+        "injected_failure", "recovery_event_waited",
+        "global_synchronizations"},
+    "event-timeout": {
+        "injected_failure", "same_event_recovered",
+        "recovery_event_waited", "global_synchronizations"},
 }
 
 DISTRIBUTED_CASES = tuple(
-    case for case in CASE_NAMES
-    if case != "capture-current-stream" and case not in HOST_CONTRACT_CASES
-)
+    case for case in CASE_NAMES if case not in EVENT_CASES)
 
 MATRIX_GROUPS = (
     "capture-current-stream",
@@ -225,9 +210,7 @@ def _contract():
 
     _check(set(EVENT_CASES).issubset(CASE_NAMES),
            "event suite contains an unregistered case")
-    _check(set(HOST_CONTRACT_CASES).issubset(CASE_NAMES),
-           "host lifecycle suite contains an unregistered case")
-    _check("subprocess.run" in bounded_calls,
+    _check("subprocess.Popen" in bounded_calls,
            "per-case subprocess execution is missing")
     _check("dist.all_gather_object" in aggregate_calls,
            "rank failure aggregation is missing")
@@ -338,27 +321,30 @@ def _text_output(value):
 
 def _run_bounded(command, timeout_seconds=CASE_TIMEOUT_SECONDS, env=None):
     started = time.monotonic()
+    process = subprocess.Popen(
+        command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
-        completed = subprocess.run(
-            command, cwd=ROOT, env=env, capture_output=True, text=True,
-            timeout=timeout_seconds, check=False)
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as error:
+        _terminate_process_group(process)
+        stdout, stderr = process.communicate()
         return {
             "status": "failed",
             "failure": f"process timeout after {timeout_seconds}s",
             "duration_seconds": time.monotonic() - started,
             "exit_code": None,
-            "stdout": _text_output(error.stdout),
-            "stderr": _text_output(error.stderr),
+            "stdout": _text_output(stdout or error.stdout),
+            "stderr": _text_output(stderr or error.stderr),
         }
     return {
-        "status": "passed" if completed.returncode == 0 else "failed",
-        "failure": None if completed.returncode == 0 else
-            f"process exited {completed.returncode}",
+        "status": "passed" if process.returncode == 0 else "failed",
+        "failure": None if process.returncode == 0 else
+            f"process exited {process.returncode}",
         "duration_seconds": time.monotonic() - started,
-        "exit_code": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
+        "exit_code": process.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
     }
 
 
@@ -383,7 +369,9 @@ def _measurement_failures(case, reports):
 
 def _case_measurements(case, reports):
     ordered = sorted(reports, key=lambda value: value["rank"])
-    if case == "overlap-vs-serialized":
+    if case in {
+            "completion-mismatch", "drop-event", "destroy-pending-retry",
+            "overlap-vs-serialized"}:
         return {
             "ranks": [
                 {"rank": report["rank"], **(report.get("measurements") or {})}
@@ -673,21 +661,41 @@ def _summary(samples):
     }
 
 
-def _worker_payload(stdout):
-    prefix = "PHASE3E_WORKER_RESULT "
-    for line in reversed(stdout.splitlines()):
-        if line.startswith(prefix):
-            return json.loads(line[len(prefix):])
-    return {}
+def _worker_payload(stdout, expected_case):
+    prefix = WORKER_RESULT_PREFIX + " "
+    markers = [line[len(prefix):] for line in stdout.splitlines()
+               if line.startswith(prefix)]
+    if len(markers) != 1:
+        raise ValueError(
+            f"worker result marker count is {len(markers)}, expected 1")
+    try:
+        payload = json.loads(markers[0])
+    except json.JSONDecodeError as error:
+        raise ValueError(f"worker result is malformed JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("worker result must be a JSON object")
+    if payload.get("case") != expected_case:
+        raise ValueError(
+            f"worker result case is {payload.get('case')!r}, "
+            f"expected {expected_case!r}")
+    measurements = payload.get("measurements")
+    if not isinstance(measurements, dict):
+        raise ValueError("worker result measurements must be a JSON object")
+    required = STANDALONE_MEASUREMENT_FIELDS.get(expected_case)
+    if required is None:
+        raise ValueError(
+            f"worker result case {expected_case!r} is not standalone")
+    missing = sorted(required - measurements.keys())
+    if missing:
+        raise ValueError(
+            "worker result measurements are missing " + ", ".join(missing))
+    return payload
 
 
 def _case_command(case, trace_dir):
-    if case in HOST_CONTRACT_CASES:
-        return [sys.executable, "-m", "pytest", "-q",
-                HOST_CONTRACT_CASES[case]]
     worker = [str(pathlib.Path(__file__).resolve()),
               "--worker", case, "--trace-dir", str(trace_dir)]
-    if case == "capture-current-stream":
+    if case in EVENT_CASES:
         return [sys.executable, *worker]
     return [sys.executable, "-m", "torch.distributed.run", "--standalone",
             f"--nproc-per-node={WORLD_SIZE}", *worker]
@@ -1413,16 +1421,17 @@ def _terminate_process_group(process):
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
-    if process.poll() is not None:
-        return
-    try:
-        process.wait(timeout=1.0)
-    except subprocess.TimeoutExpired:
+        pass
+    if process.poll() is None:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
             pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
         process.wait()
 
 
@@ -1640,14 +1649,24 @@ def _run_suite(suite, output, trace_dir):
 
     def run_standalone(case):
         result = _run_bounded(_case_command(case, trace_dir))
-        payload = _worker_payload(result["stdout"])
+        payload = None
+        if result["status"] == "passed":
+            try:
+                payload = _worker_payload(result["stdout"], case)
+            except ValueError as error:
+                result = {
+                    **result,
+                    "status": "failed",
+                    "failure": str(error),
+                }
         row = {
             "case": case,
             "status": result["status"],
             "duration_seconds": result["duration_seconds"],
             "exit_code": result["exit_code"],
             "failure": result["failure"],
-            "measurements": payload.get("measurements", {}),
+            "measurements": payload.get("measurements", {})
+                if payload is not None else {},
         }
         if result["status"] == "failed":
             row["diagnostic"] = (
@@ -1718,6 +1737,69 @@ def _run_capture_worker():
         _check(torch.equal(observed, expected),
                "captured current-stream event did not publish the queued write")
     return {"repeated_waits": 2, "global_synchronizations": 0}
+
+
+def _run_record_failure_worker():
+    import torch
+    import torch_npu  # noqa: F401
+    import deep_ep
+
+    torch.npu.set_device(0)
+    with _forbid_global_sync(torch):
+        failure = None
+        os.environ["DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT"] = \
+            "record_failure"
+        try:
+            try:
+                deep_ep.ElasticBuffer.capture()
+            except RuntimeError as error:
+                failure = str(error)
+        finally:
+            os.environ.pop("DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT", None)
+        _check(failure is not None and "record_event" in failure and
+               "backend error -2" in failure,
+               f"native record failure was not observed: {failure}")
+
+        recovery = deep_ep.ElasticBuffer.capture()
+        recovery.current_stream_wait()
+    return {
+        "injected_failure": failure,
+        "recovery_event_waited": True,
+        "global_synchronizations": 0,
+    }
+
+
+def _run_event_timeout_worker():
+    import torch
+    import torch_npu  # noqa: F401
+    import deep_ep
+
+    torch.npu.set_device(0)
+    with _forbid_global_sync(torch):
+        event = deep_ep.ElasticBuffer.capture()
+        failure = None
+        os.environ["DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT"] = \
+            "query_not_ready"
+        try:
+            try:
+                event.current_stream_wait()
+            except RuntimeError as error:
+                failure = str(error)
+        finally:
+            os.environ.pop("DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT", None)
+        _check(failure is not None and "synchronize_event" in failure and
+               "backend error -1" in failure,
+               f"bounded native event timeout was not observed: {failure}")
+
+        event.current_stream_wait()
+        recovery = deep_ep.ElasticBuffer.capture()
+        recovery.current_stream_wait()
+    return {
+        "injected_failure": failure,
+        "same_event_recovered": True,
+        "recovery_event_waited": True,
+        "global_synchronizations": 0,
+    }
 
 
 def _offset_fixture(fixture, offset):
@@ -2051,6 +2133,127 @@ class AsyncOverlapWorker:
                    f"destroy lost diagnostic failure: {error}")
         self.buffers.remove(buffer)
         return {"aggregated_failure": aggregate}
+
+    def _run_completion_mismatch(self):
+        buffer = self.new_buffer()
+        handle = self._seed(buffer)
+        fixture = _offset_fixture(REGULAR_FIXTURE, 100)
+        recv_x, event, expected_x, _ = self._cached_dispatch(
+            buffer, handle, fixture,
+            async_mode=True, allocate=True, wait=False)
+        local_failure = None
+        if self.rank == 0:
+            os.environ["DEEP_EP_ASCEND_TEST_COMPLETION_FAULT"] = \
+                "completion_mismatch"
+        try:
+            try:
+                event.current_stream_wait()
+            except RuntimeError as error:
+                local_failure = str(error)
+        finally:
+            os.environ.pop("DEEP_EP_ASCEND_TEST_COMPLETION_FAULT", None)
+
+        reports = [None] * WORLD_SIZE
+        self.dist.all_gather_object(
+            reports,
+            {"rank": self.rank, "failure": local_failure},
+            group=self.group,
+        )
+        aggregate = _aggregate_rank_failures(reports)
+        expected_rank_zero = reports[0]["failure"]
+        _check(expected_rank_zero is not None and
+               "device completion generation mismatch" in expected_rank_zero,
+               f"rank 0 completion mismatch is missing: {aggregate}")
+        _check(reports[1]["failure"] is None,
+               f"rank 1 unexpectedly failed: {aggregate}")
+        self._assert_tensor(recv_x, expected_x, "completion mismatch recv_x")
+
+        destroy_failure = None
+        try:
+            buffer.destroy()
+        except RuntimeError as error:
+            destroy_failure = str(error)
+        _check(buffer.runtime is None,
+               "completion mismatch buffer retained destroyed runtime")
+        if self.rank == 0:
+            _check(destroy_failure is not None and
+                   "device completion generation mismatch" in destroy_failure,
+                   f"destroy lost completion mismatch: {destroy_failure}")
+        else:
+            _check(destroy_failure is None,
+                   f"healthy rank destroy failed: {destroy_failure}")
+        self.buffers.remove(buffer)
+        return {
+            "local_failure": local_failure,
+            "aggregated_failure": aggregate,
+            "destroy_failure": destroy_failure,
+            "runtime_released": True,
+        }
+
+    def _run_drop_event(self):
+        buffer = self.new_buffer()
+        handle = self._seed(buffer)
+        first_fixture = _offset_fixture(REGULAR_FIXTURE, 100)
+        first_x, dropped_event, first_expected, _ = self._cached_dispatch(
+            buffer, handle, first_fixture,
+            async_mode=True, allocate=True, wait=False)
+        del dropped_event
+        gc.collect()
+        self._assert_tensor(first_x, first_expected, "dropped-event recv_x")
+
+        second_fixture = _offset_fixture(REGULAR_FIXTURE, 200)
+        second_x, _, second_expected, _ = self._cached_dispatch(
+            buffer, handle, second_fixture,
+            async_mode=True, allocate=True, wait=True)
+        self._assert_tensor(second_x, second_expected, "post-drop recv_x")
+        return {
+            "event_dropped_without_wait": True,
+            "garbage_collection_completed": True,
+            "buffer_reused": True,
+        }
+
+    def _run_destroy_pending_retry(self):
+        buffer = self.new_buffer()
+        handle = self._seed(buffer)
+        fixture = _offset_fixture(REGULAR_FIXTURE, 100)
+        _, event, _, _ = self._cached_dispatch(
+            buffer, handle, fixture,
+            async_mode=True, allocate=True, wait=False)
+
+        first_failure = None
+        os.environ["DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT"] = \
+            "destroy_failure"
+        try:
+            try:
+                buffer.destroy()
+            except RuntimeError as error:
+                first_failure = str(error)
+        finally:
+            os.environ.pop("DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT", None)
+        _check(first_failure is not None and "destroy_event" in first_failure and
+               "backend error -2" in first_failure,
+               f"first destroy did not expose native failure: {first_failure}")
+        _check(buffer.runtime is not None,
+               "failed destroy released Python runtime ownership")
+
+        retry_failure = None
+        try:
+            buffer.destroy()
+        except RuntimeError as error:
+            retry_failure = str(error)
+        _check(retry_failure is not None and "destroy_event" in retry_failure,
+               f"retry lost stable destroy failure: {retry_failure}")
+        _check(buffer.runtime is None,
+               "destroy retry did not release Python runtime ownership")
+        self.buffers.remove(buffer)
+        del event
+        gc.collect()
+        return {
+            "first_destroy_failure": first_failure,
+            "retry_failure": retry_failure,
+            "runtime_retained_after_first_failure": True,
+            "runtime_released_after_retry": True,
+        }
 
     def _make_overlap_communication_inputs(
             self, tokens=OVERLAP_COMMUNICATION_TOKENS):
@@ -2855,6 +3058,12 @@ class AsyncOverlapWorker:
                 return self._run_independent_buffers()
             if case == "diagnostic-failure":
                 return self._run_diagnostic_failure()
+            if case == "completion-mismatch":
+                return self._run_completion_mismatch()
+            if case == "drop-event":
+                return self._run_drop_event()
+            if case == "destroy-pending-retry":
+                return self._run_destroy_pending_retry()
             if case == "overlap-vs-serialized":
                 return self._run_overlap()
         raise AssertionError(f"distributed case is not implemented: {case}")
@@ -3201,7 +3410,21 @@ def _run_overlap_component_diagnostic_worker(output, trace_dir):
 def _run_worker(case, trace_dir):
     if case == "capture-current-stream":
         measurements = _run_capture_worker()
-        print("PHASE3E_WORKER_RESULT " + json.dumps({
+        print(WORKER_RESULT_PREFIX + " " + json.dumps({
+            "case": case,
+            "measurements": measurements,
+        }, sort_keys=True), flush=True)
+        return 0
+    if case == "record-failure":
+        measurements = _run_record_failure_worker()
+        print(WORKER_RESULT_PREFIX + " " + json.dumps({
+            "case": case,
+            "measurements": measurements,
+        }, sort_keys=True), flush=True)
+        return 0
+    if case == "event-timeout":
+        measurements = _run_event_timeout_worker()
+        print(WORKER_RESULT_PREFIX + " " + json.dumps({
             "case": case,
             "measurements": measurements,
         }, sort_keys=True), flush=True)

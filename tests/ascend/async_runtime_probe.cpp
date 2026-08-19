@@ -2,6 +2,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -64,6 +65,30 @@ constexpr int kTimeoutFailure = -1;
 constexpr int kDestroyFailure = 15;
 constexpr int kCurrentDeviceFailure = 16;
 constexpr int kQueryFailure = 17;
+constexpr int kInjectedTestingFailure = -2;
+
+class ScopedStreamEventFault {
+public:
+    explicit ScopedStreamEventFault(const char* value) {
+        const char* previous = std::getenv(
+            "DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT");
+        if (previous != nullptr)
+            previous_ = previous;
+        setenv("DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT", value, 1);
+    }
+
+    ~ScopedStreamEventFault() {
+        if (previous_.has_value()) {
+            setenv("DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT",
+                   previous_->c_str(), 1);
+        } else {
+            unsetenv("DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT");
+        }
+    }
+
+private:
+    std::optional<std::string> previous_;
+};
 
 struct FakeApi {
     int current_device_result = 0;
@@ -379,6 +404,103 @@ bool destructor_attempts_nonthrowing_cleanup() {
             return false;
     }
     return fake.destroy_calls == 1;
+}
+
+bool testing_fault_requires_an_exact_value() {
+    FakeApi fake;
+    runtime::NativeEventCreateResult created;
+    {
+        ScopedStreamEventFault fault("record_failure_typo");
+        created = runtime::create_native_event(api_for(&fake), 2);
+        if (!created.status.ok() ||
+            !created.event->record(stream_for(2)).ok())
+            return false;
+    }
+    return fake.create_calls == 1 && fake.record_calls == 1 &&
+        created.event->finish(0).ok() && created.event->destroy().ok();
+}
+
+bool testing_faults_are_unavailable_when_disabled() {
+#if DEEP_EP_ASCEND_TESTING
+    return true;
+#else
+    FakeApi fake;
+    runtime::NativeEventCreateResult created;
+    {
+        ScopedStreamEventFault fault("record_failure");
+        created = runtime::create_native_event(api_for(&fake), 2);
+        if (!created.status.ok() ||
+            !created.event->record(stream_for(2)).ok())
+            return false;
+    }
+    return fake.record_calls == 1 && created.event->finish(0).ok() &&
+        created.event->destroy().ok();
+#endif
+}
+
+bool injected_record_failure_retains_created_event_for_cleanup() {
+#if DEEP_EP_ASCEND_TESTING
+    FakeApi fake;
+    runtime::NativeEventCreateResult created;
+    transport::TransportStatus status;
+    {
+        ScopedStreamEventFault fault("record_failure");
+        created = runtime::create_native_event(api_for(&fake), 2);
+        if (!created.status.ok())
+            return false;
+        status = created.event->record(stream_for(2));
+    }
+    return is_failure(
+               status, transport::TransportStatusCode::kRuntimeFailure,
+               "record_event", kInjectedTestingFailure) &&
+        fake.create_calls == 1 && fake.record_calls == 0 &&
+        created.event->destroy().ok() && fake.destroy_calls == 1;
+#else
+    return true;
+#endif
+}
+
+bool injected_query_not_ready_times_out_then_recovers() {
+#if DEEP_EP_ASCEND_TESTING
+    FakeApi fake;
+    auto created = runtime::create_native_event(api_for(&fake), 2);
+    if (!created.status.ok() || !created.event->record(stream_for(2)).ok())
+        return false;
+    transport::TransportStatus timeout;
+    {
+        ScopedStreamEventFault fault("query_not_ready");
+        timeout = created.event->finish(0);
+    }
+    if (!is_failure(
+            timeout, transport::TransportStatusCode::kRuntimeFailure,
+            "synchronize_event", kTimeoutFailure) || fake.query_calls != 0)
+        return false;
+    return created.event->finish(0).ok() && fake.query_calls == 1 &&
+        created.event->destroy().ok();
+#else
+    return true;
+#endif
+}
+
+bool injected_destroy_failure_retains_ownership_for_retry() {
+#if DEEP_EP_ASCEND_TESTING
+    FakeApi fake;
+    auto created = runtime::create_native_event(api_for(&fake), 2);
+    if (!created.status.ok())
+        return false;
+    transport::TransportStatus failure;
+    {
+        ScopedStreamEventFault fault("destroy_failure");
+        failure = created.event->destroy();
+    }
+    return is_failure(
+               failure, transport::TransportStatusCode::kRuntimeFailure,
+               "destroy_event", kInjectedTestingFailure) &&
+        fake.destroy_calls == 0 && created.event->destroy().ok() &&
+        fake.destroy_calls == 1;
+#else
+    return true;
+#endif
 }
 
 #define ASYNC_CHECK(expression) do { if (!(expression)) return __LINE__; } while (0)
@@ -1182,7 +1304,12 @@ int main() {
         timed_out_recorded_event_can_complete_and_retry_destruction() &&
         timed_out_recorded_event_is_not_force_destroyed_on_last_release() &&
         destroy_failure_retains_native_ownership_for_retry() &&
-        destructor_attempts_nonthrowing_cleanup();
+        destructor_attempts_nonthrowing_cleanup() &&
+        testing_fault_requires_an_exact_value() &&
+        testing_faults_are_unavailable_when_disabled() &&
+        injected_record_failure_retains_created_event_for_cleanup() &&
+        injected_query_not_ready_times_out_then_recovers() &&
+        injected_destroy_failure_retains_ownership_for_retry();
     if (!passed) {
         std::cerr << "async runtime probe failed\n";
         return 1;

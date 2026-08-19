@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -84,6 +85,30 @@ def _component_stage_seconds():
     }
 
 
+def _async_overlap_worker_stdout(case):
+    measurements = {
+        "capture-current-stream": {
+            "repeated_waits": 2,
+            "global_synchronizations": 0,
+        },
+        "record-failure": {
+            "injected_failure": "record_event failed",
+            "recovery_event_waited": True,
+            "global_synchronizations": 0,
+        },
+        "event-timeout": {
+            "injected_failure": "synchronize_event failed",
+            "same_event_recovered": True,
+            "recovery_event_waited": True,
+            "global_synchronizations": 0,
+        },
+    }[case]
+    return "PHASE3E_WORKER_RESULT " + json.dumps({
+        "case": case,
+        "measurements": measurements,
+    }) + "\n"
+
+
 def _valid_component_rank(rank):
     return {
         "rank": rank,
@@ -136,17 +161,23 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
     def test_async_runtime_stream_event_contract(self):
         runtime = ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"
         with tempfile.TemporaryDirectory() as directory:
-            binary = pathlib.Path(directory) / "async_runtime_probe"
-            compile_result = subprocess.run(
-                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                 f"-I{ROOT}", str(ASYNC_RUNTIME_PROBE), str(runtime),
-                 "-o", str(binary)], capture_output=True, text=True,
-                check=False)
-            self.assertEqual(compile_result.returncode, 0,
-                             compile_result.stderr)
-            run_result = subprocess.run(
-                [str(binary)], capture_output=True, text=True, check=False)
-            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+            for testing in (0, 1):
+                with self.subTest(testing=testing):
+                    binary = pathlib.Path(directory) / \
+                        f"async_runtime_probe_testing_{testing}"
+                    compile_result = subprocess.run(
+                        ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                         f"-DDEEP_EP_ASCEND_TESTING={testing}",
+                         f"-I{ROOT}", str(ASYNC_RUNTIME_PROBE), str(runtime),
+                         "-o", str(binary)], capture_output=True, text=True,
+                        check=False)
+                    self.assertEqual(compile_result.returncode, 0,
+                                     compile_result.stderr)
+                    run_result = subprocess.run(
+                        [str(binary)], capture_output=True, text=True,
+                        check=False)
+                    self.assertEqual(run_result.returncode, 0,
+                                     run_result.stderr)
 
     def test_async_runtime_uses_an_explicit_current_stream_device(self):
         runtime = (
@@ -2067,8 +2098,6 @@ int main() {
                     "capture-current-stream",
                     "record-failure",
                     "event-timeout",
-                    "drop-event",
-                    "destroy-pending-retry",
                 ],
                 "full_cases": expected_cases,
                 "matrix_groups": [
@@ -2243,6 +2272,122 @@ int main() {
         )
         self.assertEqual(overlap["physical_compute_stream_id"], 61)
         self.assertEqual(overlap["physical_communication_stream_id"], 26)
+
+    def test_async_overlap_failure_cases_run_through_production_workers(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_production_failures", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        self.assertFalse(hasattr(module, "HOST_CONTRACT_CASES"))
+        self.assertEqual(module.EVENT_CASES, (
+            "capture-current-stream",
+            "record-failure",
+            "event-timeout",
+        ))
+        self.assertEqual(
+            set(module.DISTRIBUTED_CASES),
+            set(module.CASE_NAMES) - set(module.EVENT_CASES),
+        )
+        for case in module.EVENT_CASES:
+            with self.subTest(case=case):
+                command = module._case_command(case, "/tmp/traces")
+                self.assertNotIn("pytest", command)
+                self.assertNotIn("torch.distributed.run", command)
+                self.assertEqual(command[command.index("--worker") + 1], case)
+        for case in (
+                "completion-mismatch", "drop-event",
+                "destroy-pending-retry"):
+            with self.subTest(case=case):
+                command = module._case_command(case, "/tmp/traces")
+                self.assertIn("torch.distributed.run", command)
+                self.assertIn(case, module.DISTRIBUTED_CASES)
+
+    def test_async_overlap_lifecycle_measurements_preserve_both_ranks(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_lifecycle_measurements", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        reports = [
+            {"rank": 1, "measurements": {"local_failure": None}},
+            {"rank": 0, "measurements": {"local_failure": "expected"}},
+        ]
+        for case in (
+                "completion-mismatch", "drop-event",
+                "destroy-pending-retry"):
+            with self.subTest(case=case):
+                self.assertEqual(
+                    module._case_measurements(case, reports),
+                    {"ranks": [
+                        {"rank": 0, "local_failure": "expected"},
+                        {"rank": 1, "local_failure": None},
+                    ]},
+                )
+
+    def test_async_overlap_bounded_timeout_terminates_descendants(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_descendant_timeout", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            sentinel = pathlib.Path(directory) / "descendant-survived"
+            child = (
+                "import pathlib, sys, time; time.sleep(0.4); "
+                "pathlib.Path(sys.argv[1]).write_text('survived')"
+            )
+            parent = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}, "
+                f"{str(sentinel)!r}]); time.sleep(5)"
+            )
+            bounded = module._run_bounded(
+                [sys.executable, "-c", parent], timeout_seconds=0.05)
+            time.sleep(0.6)
+
+            self.assertEqual(bounded["status"], "failed")
+            self.assertFalse(sentinel.exists())
+
+    def test_async_overlap_standalone_worker_marker_is_strict(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_worker_marker", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        prefix = "PHASE3E_WORKER_RESULT "
+        valid = {
+            "case": "record-failure",
+            "measurements": {
+                "injected_failure": "record_event failed",
+                "recovery_event_waited": True,
+                "global_synchronizations": 0,
+            },
+        }
+        self.assertEqual(
+            module._worker_payload(prefix + json.dumps(valid),
+                                   "record-failure"),
+            valid,
+        )
+        invalid = {
+            "missing": "",
+            "malformed": prefix + "{",
+            "non-object": prefix + "[]",
+            "duplicate": (prefix + json.dumps(valid) + "\n" +
+                          prefix + json.dumps(valid)),
+            "wrong-case": prefix + json.dumps({
+                **valid, "case": "event-timeout"}),
+            "missing-measurements": prefix + json.dumps({
+                "case": "record-failure"}),
+            "incomplete-measurements": prefix + json.dumps({
+                "case": "record-failure",
+                "measurements": {"injected_failure": "record_event failed"},
+            }),
+        }
+        for name, stdout in invalid.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                    ValueError, "worker result"):
+                module._worker_payload(stdout, "record-failure")
 
     def test_async_overlap_profiler_accepts_torch_npu_list_trace(self):
         spec = importlib.util.spec_from_file_location(
@@ -3662,15 +3807,16 @@ int main() {
             output = pathlib.Path(directory) / "report.json"
             observed_checkpoint = []
 
-            def run_bounded(_command):
+            def run_bounded(command):
                 if output.exists():
                     observed_checkpoint.append(json.loads(output.read_text()))
+                case = command[command.index("--worker") + 1]
                 return {
                     "status": "passed",
                     "failure": None,
                     "duration_seconds": 0.25,
                     "exit_code": 0,
-                    "stdout": "",
+                    "stdout": _async_overlap_worker_stdout(case),
                     "stderr": "",
                 }
 
@@ -3696,15 +3842,17 @@ int main() {
         selected = module.EVENT_CASES[:3]
         calls = []
 
-        def run_bounded(_command):
+        def run_bounded(command):
             calls.append(len(calls))
             failed = len(calls) == 2
+            case = command[command.index("--worker") + 1]
             return {
                 "status": "failed" if failed else "passed",
                 "failure": "process exited 17" if failed else None,
                 "duration_seconds": 0.25,
                 "exit_code": 17 if failed else 0,
-                "stdout": "",
+                "stdout": "" if failed else
+                    _async_overlap_worker_stdout(case),
                 "stderr": "rank 0 traceback" if failed else "",
             }
 
@@ -3822,14 +3970,15 @@ int main() {
                 })
             return True
 
-        def run_bounded(_command):
+        def run_bounded(command):
             bounded_calls.append(True)
+            case = command[command.index("--worker") + 1]
             return {
                 "status": "passed",
                 "failure": None,
                 "duration_seconds": 0.25,
                 "exit_code": 0,
-                "stdout": "",
+                "stdout": _async_overlap_worker_stdout(case),
                 "stderr": "",
             }
 

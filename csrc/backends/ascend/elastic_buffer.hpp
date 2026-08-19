@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -36,6 +37,21 @@
 #include "transport/topology_config.hpp"
 
 namespace deep_ep::ascend {
+
+#if DEEP_EP_ASCEND_TESTING
+inline bool testing_environment_is(
+    const char* name, const char* expected) {
+    const char* value = std::getenv(name);
+    return value != nullptr && std::strcmp(value, expected) == 0;
+}
+
+inline void inject_testing_completion_mismatch(std::uint64_t* output) {
+    if (output != nullptr && testing_environment_is(
+            "DEEP_EP_ASCEND_TEST_COMPLETION_FAULT",
+            "completion_mismatch"))
+        *output ^= 1U;
+}
+#endif
 
 [[noreturn]] inline void raise_unsupported(
     const char* operation, const std::string& detail) {
@@ -242,7 +258,8 @@ public:
         }
 #if DEEP_EP_ASCEND_TESTING
         if (status.ok() && kind == elastic::BufferOperationKind::kBarrier &&
-            std::getenv("DEEP_EP_ASCEND_TEST_DIAGNOSTIC") != nullptr) {
+            testing_environment_is(
+                "DEEP_EP_ASCEND_TEST_DIAGNOSTIC", "completion_timeout")) {
             auto& diagnostic = *output;
             diagnostic.abi_version = transport::kTransportCommandAbiVersion;
             diagnostic.error = transport::DeviceTransportError::kCompletionTimeout;
@@ -280,6 +297,9 @@ public:
             }
             if (staged.has_value() && *output != staged->generation)
                 return combine_completion_failure(*staged);
+#if DEEP_EP_ASCEND_TESTING
+            inject_testing_completion_mismatch(output);
+#endif
             return status;
         }
         if (kind != elastic::BufferOperationKind::kDispatch)
@@ -297,6 +317,9 @@ public:
             return status;
         last_dispatch_generation_ = staged_dispatch_->generation;
         staged_dispatch_.reset();
+#if DEEP_EP_ASCEND_TESTING
+        inject_testing_completion_mismatch(output);
+#endif
         return transport::TransportStatus::success();
     }
 
@@ -1851,7 +1874,9 @@ public:
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
 #if DEEP_EP_ASCEND_TESTING
-        if (std::getenv("DEEP_EP_ASCEND_TEST_DISPATCH_DIAGNOSTIC") != nullptr) {
+        if (testing_environment_is(
+                "DEEP_EP_ASCEND_TEST_DISPATCH_DIAGNOSTIC",
+                "completion_timeout")) {
             diagnostic.abi_version = transport::kTransportCommandAbiVersion;
             diagnostic.error = transport::DeviceTransportError::kCompletionTimeout;
             diagnostic.generation = generation;

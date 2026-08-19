@@ -1,6 +1,8 @@
 #include "stream_event.hpp"
 
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <utility>
 
@@ -19,6 +21,16 @@ namespace {
 using transport::TransportStatus;
 
 constexpr int kEventTimeoutBackendCode = -1;
+
+#if DEEP_EP_ASCEND_TESTING
+constexpr int kTestingFaultBackendCode = -2;
+
+bool testing_fault_enabled(const char* expected) {
+    const char* value = std::getenv(
+        "DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT");
+    return value != nullptr && std::strcmp(value, expected) == 0;
+}
+#endif
 
 bool valid_api(const StreamEventApi& api) {
     return api.current_device != nullptr && api.current_stream != nullptr &&
@@ -152,6 +164,10 @@ TransportStatus NativeEventState::record(StreamIdentity stream) {
     if (!same_device(stream, device_index_))
         return TransportStatus::invalid(
             "record_event", "stream does not belong to the event device");
+#if DEEP_EP_ASCEND_TESTING
+    if (testing_fault_enabled("record_failure"))
+        return backend_failure("record_event", kTestingFaultBackendCode);
+#endif
     const int result = api_.record_event(api_.user_data, native_event_, stream.raw);
     if (result != 0)
         return backend_failure("record_event", result);
@@ -195,10 +211,16 @@ TransportStatus NativeEventState::finish(std::uint64_t timeout_ms) {
         std::chrono::milliseconds(timeout_ms);
     while (true) {
         bool completed = false;
-        const int result = api_.query_event(
-            api_.user_data, native_event_, &completed);
-        if (result != 0)
-            return backend_failure("query_event", result);
+        bool query_runtime = true;
+#if DEEP_EP_ASCEND_TESTING
+        query_runtime = !testing_fault_enabled("query_not_ready");
+#endif
+        if (query_runtime) {
+            const int result = api_.query_event(
+                api_.user_data, native_event_, &completed);
+            if (result != 0)
+                return backend_failure("query_event", result);
+        }
         if (completed) {
             state_ = State::Completed;
             return TransportStatus::success();
@@ -217,6 +239,10 @@ TransportStatus NativeEventState::destroy() {
     if (state_ == State::Recorded)
         return TransportStatus::invalid(
             "destroy_event", "native event is not complete");
+#if DEEP_EP_ASCEND_TESTING
+    if (testing_fault_enabled("destroy_failure"))
+        return backend_failure("destroy_event", kTestingFaultBackendCode);
+#endif
     const int result = api_.destroy_event(api_.user_data, native_event_);
     if (result != 0)
         return backend_failure("destroy_event", result);

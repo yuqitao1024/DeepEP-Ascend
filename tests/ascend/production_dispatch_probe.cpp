@@ -1010,6 +1010,60 @@ bool completion_record_failure_retains_launched_dispatch_probe() {
     return trace.frees == 0;
 }
 
+bool completion_mismatch_fault_is_exact_and_post_commit() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources)
+        return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> weights = inputs.weights;
+    auto initial = uncached_dispatch(*buffer, inputs, weights);
+    auto* descriptor = reinterpret_cast<elastic::DispatchHandleDescriptor*>(
+        std::get<13>(initial)->data_ptr());
+
+    auto unaffected = cached_dispatch(
+        *buffer, inputs, initial, std::get<8>(initial), false,
+        std::nullopt, true, false);
+    setenv("DEEP_EP_ASCEND_TEST_COMPLETION_FAULT",
+           "completion_mismatch_typo", 1);
+    try {
+        std::get<15>(unaffected)->current_stream_wait();
+    } catch (const std::runtime_error&) {
+        unsetenv("DEEP_EP_ASCEND_TEST_COMPLETION_FAULT");
+        return false;
+    }
+    unsetenv("DEEP_EP_ASCEND_TEST_COMPLETION_FAULT");
+    if (descriptor->generation != 2)
+        return false;
+
+    auto injected = cached_dispatch(
+        *buffer, inputs, initial, std::get<8>(initial), false,
+        std::nullopt, true, false);
+    setenv("DEEP_EP_ASCEND_TEST_COMPLETION_FAULT",
+           "completion_mismatch", 1);
+    std::string failure;
+    try {
+        std::get<15>(injected)->current_stream_wait();
+    } catch (const std::runtime_error& error) {
+        failure = error.what();
+    }
+    unsetenv("DEEP_EP_ASCEND_TEST_COMPLETION_FAULT");
+    if (failure.find("device completion generation mismatch") ==
+            std::string::npos || descriptor->generation != 3)
+        return false;
+    std::string destroy_failure;
+    try {
+        buffer->destroy();
+    } catch (const std::runtime_error& error) {
+        destroy_failure = error.what();
+    }
+    return destroy_failure.find("device completion generation mismatch") !=
+            std::string::npos && trace.event_destroys == 4 &&
+        buffer->is_destroyed();
+}
+
 int main() {
     int failures = 0;
     const auto check = [&failures](bool passed, const char* name) {
@@ -1041,5 +1095,7 @@ int main() {
           "completion create failure precedes cached launch");
     check(completion_record_failure_retains_launched_dispatch_probe(),
           "completion record failure retains launched dispatch");
+    check(completion_mismatch_fault_is_exact_and_post_commit(),
+          "completion mismatch fault is exact and post-commit");
     return failures == 0 ? 0 : 1;
 }
