@@ -317,6 +317,12 @@ class FP8RuntimeMatrix:
             self._assert_exact(
                 recv_sf.view(self.torch.int32), reference["sf"],
                 "scale factor packs")
+            _check(recv_x.dtype == self.torch.float8_e4m3fn,
+                   f"unexpected FP8 payload dtype {recv_x.dtype}")
+            expected_sf_dtype = (
+                self.torch.int32 if spec.packed_sf else self.torch.float32)
+            _check(recv_sf.dtype == expected_sf_dtype,
+                   f"unexpected scale factor dtype {recv_sf.dtype}")
             expected_values = self._dequantize_fp8(
                 reference["payload"], reference["sf"], spec.packed_sf)
             actual_values = self._dequantize_fp8(
@@ -462,7 +468,8 @@ class FP8RuntimeMatrix:
                 "zero-padded", expanded=True, zero_padding=True,
                 expert_alignment=4, column_major_output=True),
             "weighted": CaseSpec("weighted", weighted=True),
-            "empty-input": CaseSpec("empty-input"),
+            "empty-input": CaseSpec(
+                "empty-input", column_major_output=True),
             "asymmetric-routing": CaseSpec("asymmetric-routing"),
             "negative-one-route": CaseSpec("negative-one-route"),
         }

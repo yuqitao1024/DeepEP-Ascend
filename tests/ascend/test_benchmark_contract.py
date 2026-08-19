@@ -1,3 +1,4 @@
+import ast
 import json
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from tests.ascend.benchmark.report import (
 )
 from tests.ascend.benchmark.compare import compare_reports
 from tests.ascend.benchmark.bench_ep import build_parser, _selected_case_ids
-from tests.ascend.benchmark.runtime import AscendRuntime
+from tests.ascend.benchmark.runtime import AscendRuntime, PreparedCase
 from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
 from tests.ascend.benchmark.timing import NpuEventTimer
 from tests.ascend.benchmark.workloads import classify_ascend_case
@@ -451,6 +452,99 @@ def test_runtime_source_pins_supported_ascend_contract():
     assert "num_qps=0" in source
     assert source.index("buffer.destroy()") < source.index(
         "dist.destroy_process_group()")
+
+
+def test_timed_handle_operations_prepare_current_handles_outside_measurement():
+    class Handle:
+        def __init__(self, generation):
+            self.generation = generation
+
+    class Buffer:
+        def barrier(self, **_kwargs):
+            return None
+
+    state = {"generation": 0, "prepared": [], "measured": []}
+    handles = {
+        "cached": Handle(0),
+        "combine": Handle(0),
+        "reduced": Handle(0),
+    }
+
+    def fresh(operation_id):
+        def operation():
+            state["generation"] += 1
+            state["measured"].append(operation_id)
+        return operation
+
+    def handle_operation(operation_id, slot, updates_generation=False):
+        def operation():
+            assert handles[slot].generation == state["generation"], (
+                f"{operation_id} received stale handle")
+            state["measured"].append(operation_id)
+            if updates_generation:
+                state["generation"] += 1
+                handles[slot].generation = state["generation"]
+        return operation
+
+    def prepare(slot):
+        def operation():
+            state["generation"] += 1
+            handles[slot] = Handle(state["generation"])
+            state["prepared"].append(slot)
+        return operation
+
+    prepared = PreparedCase(
+        case=SimpleNamespace(case_id="stateful"), x=None, topk_idx=None,
+        topk_weights=None, bias=None,
+        launches={
+            "dispatch": fresh("dispatch"),
+            "expanded_dispatch": fresh("expanded_dispatch"),
+            "cached_dispatch": handle_operation(
+                "cached_dispatch", "cached", updates_generation=True),
+            "combine": handle_operation("combine", "combine"),
+            "reduced_combine": handle_operation("reduced_combine", "reduced"),
+        },
+        prepare_launches={},
+        traffic={operation_id: {} for operation_id in (
+            "dispatch", "expanded_dispatch", "cached_dispatch", "combine",
+            "reduced_combine")},
+    )
+    prepared.prepare_launches = {
+        "cached_dispatch": prepare("cached"),
+        "combine": prepare("combine"),
+        "reduced_combine": prepare("reduced"),
+    }
+    runtime = AscendRuntime.__new__(AscendRuntime)
+    runtime.buffer = Buffer()
+    runtime.args = SimpleNamespace(warmups=0, iterations=1)
+    runtime._prepare_case = lambda _case: prepared
+    runtime.synchronized_step = lambda operation, _label: operation()
+    runtime.timer = SimpleNamespace(
+        measure=lambda operation: (
+            operation() or SimpleNamespace(device_seconds=1.0, wall_seconds=1.0)))
+
+    runtime.run_case(prepared.case)
+
+    assert state["prepared"] == ["cached", "combine", "reduced"]
+    assert state["measured"] == [
+        "dispatch", "expanded_dispatch", "cached_dispatch", "combine",
+        "reduced_combine",
+    ]
+
+
+def test_fp8_empty_input_case_requests_exact_column_major_output():
+    tree = ast.parse((ROOT / "tests/ascend/production/run_fp8_dispatch_combine.py").read_text())
+    run = next(node for node in ast.walk(tree)
+               if isinstance(node, ast.FunctionDef) and node.name == "run")
+    specs = next(node.value for node in ast.walk(run)
+                 if isinstance(node, ast.Assign) and
+                 any(isinstance(target, ast.Name) and target.id == "specs"
+                     for target in node.targets))
+    empty_case = next(value for key, value in zip(specs.keys, specs.values)
+                      if isinstance(key, ast.Constant) and key.value == "empty-input")
+    column_major = next((keyword.value.value for keyword in empty_case.keywords
+                         if keyword.arg == "column_major_output"), False)
+    assert column_major is True
 
 
 def _report_fixture(

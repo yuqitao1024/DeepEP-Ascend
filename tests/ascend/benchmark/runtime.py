@@ -59,6 +59,7 @@ class PreparedCase:
     topk_weights: Any
     bias: Any
     launches: dict[str, Callable[[], Any]]
+    prepare_launches: dict[str, Callable[[], Any]]
     traffic: dict[str, dict[str, int]]
 
 
@@ -314,19 +315,12 @@ class AscendRuntime:
             num_qps=self.num_qps,
         )
         normal = self.buffer.dispatch(**dispatch_arguments.normal)
-        expanded = self.buffer.dispatch(**dispatch_arguments.expanded)
         recv_x, recv_topk_idx, recv_weights, handle, _ = normal
-        expanded_x, _, expanded_weights, expanded_handle, _ = expanded
         cached = self.buffer.dispatch(**dispatch_arguments.cached(handle))
-        cached_expanded = self.buffer.dispatch(
-            **dispatch_arguments.cached_expanded(expanded_handle)
-        )
+        handle = cached[3]
 
         num_recv_tokens = int(
             handle.psum_num_recv_tokens_per_scaleup_rank[-1].item()
-        )
-        num_expanded_tokens = int(
-            expanded_handle.psum_num_recv_tokens_per_expert[-1].item()
         )
         src_global_idx = handle.recv_src_metadata[:num_recv_tokens, 0]
         local_y = generate_pre_combine_data(
@@ -338,6 +332,25 @@ class AscendRuntime:
             recv_payload.shape, dtype=self.torch.bfloat16, device=self.device)
         input_for_combine[:num_recv_tokens] = ordered_accumulate(local_y)
 
+        combine_args = {
+            "x": input_for_combine,
+            "topk_weights": recv_weights,
+            "bias": bias,
+            "handle": handle,
+            "num_sms": self.num_sms,
+            "num_qps": self.num_qps,
+        }
+        combined = self.buffer.combine(**combine_args)
+
+        expanded = self.buffer.dispatch(**dispatch_arguments.expanded)
+        expanded_x, _, expanded_weights, expanded_handle, _ = expanded
+        cached_expanded = self.buffer.dispatch(
+            **dispatch_arguments.cached_expanded(expanded_handle)
+        )
+        expanded_handle = cached_expanded[3]
+        num_expanded_tokens = int(
+            expanded_handle.psum_num_recv_tokens_per_expert[-1].item()
+        )
         expanded_src_global_idx = expanded_handle.recv_src_metadata[
             :num_recv_tokens, 0
         ]
@@ -360,15 +373,6 @@ class AscendRuntime:
             -1, spec.hidden
         )
         input_for_reduced = input_for_reduced[:-1]
-
-        combine_args = {
-            "x": input_for_combine,
-            "topk_weights": recv_weights,
-            "bias": bias,
-            "handle": handle,
-            "num_sms": self.num_sms,
-            "num_qps": self.num_qps,
-        }
         reduced_args = {
             "x": input_for_reduced,
             "bias": bias,
@@ -378,7 +382,6 @@ class AscendRuntime:
         }
         if self.args.allow_multiple_reduction:
             reduced_args["topk_weights"] = expanded_weights
-        combined = self.buffer.combine(**combine_args)
         reduced = self.buffer.combine(**reduced_args)
 
         if reference is not None:
@@ -396,6 +399,15 @@ class AscendRuntime:
                 num_recv_tokens,
             )
 
+        timing_handles = {
+            "cached_dispatch": handle,
+            "combine": handle,
+            "reduced_combine": expanded_handle,
+        }
+
+        def refresh_handle(operation_id: str, arguments: dict[str, Any]) -> None:
+            timing_handles[operation_id] = self.buffer.dispatch(**arguments)[3]
+
         launches = {
             "dispatch": lambda: self.buffer.dispatch(
                 **dispatch_arguments.normal
@@ -404,10 +416,23 @@ class AscendRuntime:
                 **dispatch_arguments.expanded
             ),
             "cached_dispatch": lambda: self.buffer.dispatch(
-                **dispatch_arguments.cached(handle)
+                **dispatch_arguments.cached(timing_handles["cached_dispatch"])
             ),
-            "combine": lambda: self.buffer.combine(**combine_args),
-            "reduced_combine": lambda: self.buffer.combine(**reduced_args),
+            "combine": lambda: self.buffer.combine(
+                **(combine_args | {"handle": timing_handles["combine"]})
+            ),
+            "reduced_combine": lambda: self.buffer.combine(
+                **(reduced_args | {
+                    "handle": timing_handles["reduced_combine"]})
+            ),
+        }
+        prepare_launches = {
+            "cached_dispatch": lambda: refresh_handle(
+                "cached_dispatch", dispatch_arguments.normal),
+            "combine": lambda: refresh_handle(
+                "combine", dispatch_arguments.normal),
+            "reduced_combine": lambda: refresh_handle(
+                "reduced_combine", dispatch_arguments.expanded),
         }
         traffic = self._traffic(
             topk_idx,
@@ -428,6 +453,7 @@ class AscendRuntime:
             topk_weights=topk_weights,
             bias=bias,
             launches=launches,
+            prepare_launches=prepare_launches,
             traffic=traffic,
         )
 
@@ -676,6 +702,11 @@ class AscendRuntime:
         )
         records = []
         for operation_id in PERFORMANCE_OPERATIONS:
+            prepare = prepared.prepare_launches.get(operation_id)
+            if prepare is not None:
+                self.synchronized_step(
+                    prepare, f"{case.case_id}: {operation_id}: preparation"
+                )
             operation = prepared.launches[operation_id]
             for _ in range(self.args.warmups):
                 self.buffer.barrier(with_cpu_sync=True, sequential=True)
