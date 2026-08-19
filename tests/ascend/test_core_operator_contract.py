@@ -2026,6 +2026,7 @@ int main() {
                         "communication_tokens": 256,
                         "compute_iterations": 256,
                         "compute_shape": [4096, 4096],
+                        "compute_variant": "pure-matmul",
                         "repetitions": 1,
                         "timeout_seconds": 120,
                         "warmups": 0,
@@ -2895,6 +2896,7 @@ int main() {
                 "rank": rank,
                 "communication_tokens": 256,
                 "compute_iterations": 256,
+                "compute_variant": "pure-matmul",
                 "buffer_instance": f"rank-{rank}-component-buffer",
                 "communication_only_seconds": 0.20,
                 "compute_only_seconds": 0.30,
@@ -2962,6 +2964,49 @@ int main() {
                         serialized * 0.05,
                     )
 
+    def test_async_overlap_component_compute_submits_only_pure_matmuls(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_component_compute", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class MatmulResult:
+            def mul(self, *_args, **_kwargs):
+                raise AssertionError("pure matmul called mul")
+
+            def mul_(self, *_args, **_kwargs):
+                raise AssertionError("pure matmul called mul_")
+
+        class FakeTorch:
+            def __init__(self):
+                self.matmul_calls = []
+                self.results = []
+
+            def matmul(self, left, right):
+                self.matmul_calls.append((left, right))
+                result = MatmulResult()
+                self.results.append(result)
+                return result
+
+        class FakeDist:
+            @staticmethod
+            def get_rank(_group):
+                return 0
+
+        torch = FakeTorch()
+        left = object()
+        right = object()
+        worker = module.AsyncOverlapWorker(
+            torch, None, FakeDist, None, object(), None, "/tmp")
+
+        result = worker._component_compute(left, right)
+
+        self.assertEqual(len(torch.matmul_calls), 256)
+        self.assertTrue(all(
+            call_left is left and call_right is right
+            for call_left, call_right in torch.matmul_calls))
+        self.assertIs(result, torch.results[-1])
+
     def test_async_overlap_component_diagnostic_is_bounded_and_preserves_stages(
             self):
         spec = importlib.util.spec_from_file_location(
@@ -2996,6 +3041,7 @@ int main() {
                 "rank": rank,
                 "communication_tokens": 256,
                 "compute_iterations": 256,
+                "compute_variant": "pure-matmul",
                 "buffer_instance": f"rank-{rank}-component-buffer",
                 "communication_only_seconds": 0.20,
                 "compute_only_seconds": 0.30,
@@ -3047,9 +3093,11 @@ int main() {
         self.assertIsNone(environment)
         self.assertIn("--overlap-component-diagnostic-worker", command)
         self.assertEqual(report["classification"], "resource-contention")
+        self.assertEqual(report["compute_variant"], "pure-matmul")
         self.assertFalse(report["acceptance_eligible"])
         self.assertEqual(report["warmups"], 0)
         self.assertEqual(report["repetitions"], 1)
+        self.assertEqual(report["ranks"][0]["compute_variant"], "pure-matmul")
         self.assertEqual(report["ranks"][0]["stage_seconds"], stage_seconds)
 
     def test_async_overlap_component_diagnostic_checkpoints_each_phase(self):
@@ -3152,6 +3200,7 @@ int main() {
             ],
         )
         self.assertEqual(measurement["communication_only_seconds"], 0.20)
+        self.assertEqual(measurement["compute_variant"], "pure-matmul")
         self.assertEqual(measurement["compute_only_seconds"], 0.30)
         self.assertEqual(measurement["serialized_seconds"], 0.50)
         self.assertEqual(measurement["overlapped_seconds"], 0.49)
@@ -3166,6 +3215,9 @@ int main() {
                          0.10)
         self.assertEqual(measurement["profiler_overlap"]["overlap_us"],
                          100000.0)
+        worker._profile_overlap.assert_called_once_with(
+            worker.new_buffer.return_value, "handle", tensor, tensor, tensor,
+            component=True)
         self.assertEqual(measurement, checkpoints[-1][1])
 
     def test_async_overlap_suite_checkpoints_each_completed_case(self):

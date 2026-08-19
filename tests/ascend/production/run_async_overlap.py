@@ -39,6 +39,7 @@ OVERLAP_SWEEP_REPETITIONS = 1
 OVERLAP_COMPONENT_TIMEOUT_SECONDS = 120
 OVERLAP_COMPONENT_WARMUPS = 0
 OVERLAP_COMPONENT_REPETITIONS = 1
+OVERLAP_COMPONENT_COMPUTE_VARIANT = "pure-matmul"
 OVERLAP_COMPONENT_CLASSIFICATIONS = (
     "unserialized-baseline",
     "resource-contention",
@@ -246,6 +247,7 @@ def _contract():
                 "communication_tokens": OVERLAP_COMMUNICATION_TOKENS,
                 "compute_iterations": OVERLAP_COMPUTE_ITERATIONS,
                 "compute_shape": list(OVERLAP_COMPUTE_SHAPE),
+                "compute_variant": OVERLAP_COMPONENT_COMPUTE_VARIANT,
                 "repetitions": OVERLAP_COMPONENT_REPETITIONS,
                 "timeout_seconds": OVERLAP_COMPONENT_TIMEOUT_SECONDS,
                 "warmups": OVERLAP_COMPONENT_WARMUPS,
@@ -933,6 +935,7 @@ def _overlap_component_report(ranks, *, duration_seconds=None,
         "communication_tokens": OVERLAP_COMMUNICATION_TOKENS,
         "compute_shape": list(OVERLAP_COMPUTE_SHAPE),
         "compute_iterations": OVERLAP_COMPUTE_ITERATIONS,
+        "compute_variant": OVERLAP_COMPONENT_COMPUTE_VARIANT,
         "warmups": OVERLAP_COMPONENT_WARMUPS,
         "repetitions": OVERLAP_COMPONENT_REPETITIONS,
         "duration_seconds": duration_seconds,
@@ -973,6 +976,9 @@ def _validate_overlap_component(ranks):
                "overlap component communication tokens changed")
         _check(row.get("compute_iterations") == OVERLAP_COMPUTE_ITERATIONS,
                "overlap component compute iterations changed")
+        _check(row.get("compute_variant") ==
+               OVERLAP_COMPONENT_COMPUTE_VARIANT,
+               "overlap component compute variant changed")
         _check(all(isinstance(row.get(name), (int, float)) and
                    row[name] >= 0 for name in required_durations),
                "overlap component durations are incomplete")
@@ -1753,6 +1759,12 @@ class AsyncOverlapWorker:
             value = self.torch.matmul(value, right).mul_(0.001)
         return value
 
+    def _component_compute(self, left, right):
+        value = None
+        for _ in range(OVERLAP_COMPUTE_ITERATIONS):
+            value = self.torch.matmul(left, right)
+        return value
+
     def _light_compute(self, left, right):
         extent = 512
         return self.torch.matmul(
@@ -1964,7 +1976,7 @@ class AsyncOverlapWorker:
     def _component_compute_iteration(self, left, right):
         started = time.monotonic()
         enqueue_started = time.monotonic()
-        value = self._compute(left, right)
+        value = self._component_compute(left, right)
         enqueue_seconds = time.monotonic() - enqueue_started
         completion_started = time.monotonic()
         self._wait_current_stream()
@@ -2003,7 +2015,7 @@ class AsyncOverlapWorker:
                    "component serialized dispatch returned a native event")
 
         enqueue_started = time.monotonic()
-        value = self._compute(left, right)
+        value = self._component_compute(left, right)
         stages["compute_enqueue"] = time.monotonic() - enqueue_started
         if overlap:
             wait_started = time.monotonic()
@@ -2019,14 +2031,19 @@ class AsyncOverlapWorker:
             "stage_seconds": stages,
         }
 
-    def _profile_overlap(self, buffer, handle, x, left, right):
+    def _profile_overlap(
+            self, buffer, handle, x, left, right, *, component=False):
         profiler = self.torch_npu.profiler
         activity = profiler.ProfilerActivity.NPU
         self.trace_dir.mkdir(parents=True, exist_ok=True)
         trace_path = self.trace_dir / f"overlap-rank{self.rank}.json"
         with profiler.profile(activities=[activity]) as profile:
-            self._overlap_iteration(
-                buffer, handle, x, left, right, overlap=True)
+            if component:
+                self._component_combined_iteration(
+                    buffer, handle, x, left, right, overlap=True)
+            else:
+                self._overlap_iteration(
+                    buffer, handle, x, left, right, overlap=True)
         profile.export_chrome_trace(str(trace_path))
         compute_stream = self.torch.npu.current_stream()
         comm_stream = buffer.get_comm_stream()
@@ -2265,6 +2282,7 @@ class AsyncOverlapWorker:
             "communication_tokens": OVERLAP_COMMUNICATION_TOKENS,
             "compute_shape": list(OVERLAP_COMPUTE_SHAPE),
             "compute_iterations": OVERLAP_COMPUTE_ITERATIONS,
+            "compute_variant": OVERLAP_COMPONENT_COMPUTE_VARIANT,
             "warmups": OVERLAP_COMPONENT_WARMUPS,
             "repetitions": OVERLAP_COMPONENT_REPETITIONS,
             "buffer_instance":
@@ -2323,7 +2341,7 @@ class AsyncOverlapWorker:
 
         checkpoint_phase("profiler", "started")
         profiler = self._profile_overlap(
-            buffer, handle, changed_x, left, right)
+            buffer, handle, changed_x, left, right, component=True)
         measurement["profiler_overlap"] = profiler
         for key in (
                 "logical_compute_stream_id",
