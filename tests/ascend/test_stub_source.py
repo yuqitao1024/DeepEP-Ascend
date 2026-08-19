@@ -527,10 +527,13 @@ int main() {
     if (module.names != std::set<std::string>{
             "EventHandle", "ElasticBuffer", "calculate_elastic_buffer_size"})
         return 1;
+    if (module.class_methods["EventHandle"] !=
+        std::set<std::string>{"__copy__", "current_stream_wait"})
+        return 2;
     if (module.class_methods["ElasticBuffer"] != std::set<std::string>{
             "destroy", "get_comm_stream", "get_physical_domain_size",
             "get_logical_domain_size", "barrier", "dispatch", "combine"})
-        return 2;
+        return 3;
 
     deep_ep::ascend::transport::CannHostApi host_api{};
     host_api.get_size = fake_get_size;

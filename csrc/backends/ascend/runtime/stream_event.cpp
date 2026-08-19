@@ -138,6 +138,8 @@ StreamEventApi make_stream_event_api() {
 
 NativeEventState::~NativeEventState() {
     try {
+        if (state_ == State::Recorded && !finish(0).ok())
+            return;
         (void)destroy();
     } catch (...) {
     }
@@ -198,6 +200,9 @@ TransportStatus NativeEventState::finish(std::uint64_t timeout_ms) {
 TransportStatus NativeEventState::destroy() {
     if (state_ == State::Destroyed)
         return TransportStatus::success();
+    if (state_ == State::Recorded)
+        return TransportStatus::invalid(
+            "destroy_event", "native event is not complete");
     const int result = api_.destroy_event(api_.user_data, native_event_);
     if (result != 0)
         return backend_failure("destroy_event", result);

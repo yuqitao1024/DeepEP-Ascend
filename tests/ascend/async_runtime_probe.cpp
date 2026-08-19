@@ -317,6 +317,45 @@ bool finish_is_bounded_and_idempotent() {
         fake.synchronize_calls == 0;
 }
 
+bool timed_out_recorded_event_can_complete_and_retry_destruction() {
+    FakeApi fake;
+    auto created = runtime::create_native_event(api_for(&fake), 2);
+    if (!created.status.ok() || !created.event->record(stream_for(2)).ok())
+        return false;
+
+    fake.query_completed = false;
+    const auto timeout = created.event->finish(0);
+    if (!is_failure(timeout, transport::TransportStatusCode::kRuntimeFailure,
+                    "synchronize_event", kTimeoutFailure) ||
+        fake.destroy_calls != 0)
+        return false;
+
+    const auto premature_destroy = created.event->destroy();
+    if (!is_failure(premature_destroy,
+                    transport::TransportStatusCode::kInvalidArgument,
+                    "destroy_event") || fake.destroy_calls != 0)
+        return false;
+
+    fake.query_completed = true;
+    return created.event->finish(0).ok() && created.event->destroy().ok() &&
+        fake.destroy_calls == 1;
+}
+
+bool timed_out_recorded_event_is_not_force_destroyed_on_last_release() {
+    FakeApi fake;
+    {
+        auto created = runtime::create_native_event(api_for(&fake), 2);
+        if (!created.status.ok() || !created.event->record(stream_for(2)).ok())
+            return false;
+        fake.query_completed = false;
+        const auto timeout = created.event->finish(0);
+        if (!is_failure(timeout, transport::TransportStatusCode::kRuntimeFailure,
+                        "synchronize_event", kTimeoutFailure))
+            return false;
+    }
+    return fake.destroy_calls == 0;
+}
+
 bool destroy_failure_retains_native_ownership_for_retry() {
     FakeApi fake;
     auto created = runtime::create_native_event(api_for(&fake), 2);
@@ -1114,6 +1153,8 @@ int main() {
         create_failures_are_reported() && record_and_wait_enforce_device_identity() &&
         create_checks_the_current_device_before_allocating_an_event() &&
         finish_is_bounded_and_idempotent() &&
+        timed_out_recorded_event_can_complete_and_retry_destruction() &&
+        timed_out_recorded_event_is_not_force_destroyed_on_last_release() &&
         destroy_failure_retains_native_ownership_for_retry() &&
         destructor_attempts_nonthrowing_cleanup();
     if (!passed) {
