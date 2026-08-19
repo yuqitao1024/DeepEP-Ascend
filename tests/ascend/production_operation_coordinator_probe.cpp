@@ -3,6 +3,7 @@
 #include <limits>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 #include "csrc/backends/ascend/elastic/operation_coordinator.hpp"
 
@@ -246,6 +247,30 @@ int check_generation_overflow() {
     return 0;
 }
 
+int check_active_lease_move_retires_exactly_once() {
+    BufferOperationCoordinator coordinator;
+    auto lease = coordinator.reserve(BufferOperationKind::kDispatch);
+    CHECK(lease.valid());
+    CHECK(lease.activate());
+    CHECK(coordinator.completed_operation_count() == 0);
+    CHECK(coordinator.abandoned_operation_count() == 0);
+
+    auto moved = std::move(lease);
+    CHECK(!lease.valid());
+    CHECK(moved.valid());
+    CHECK(moved.active());
+    CHECK(coordinator.state() == CoordinatorState::kActive);
+    CHECK(coordinator.completed_operation_count() == 0);
+    CHECK(coordinator.abandoned_operation_count() == 0);
+
+    moved.complete();
+    moved.complete();
+    CHECK(coordinator.state() == CoordinatorState::kIdle);
+    CHECK(coordinator.completed_operation_count() == 1);
+    CHECK(coordinator.abandoned_operation_count() == 0);
+    return 0;
+}
+
 int main() {
     if (const int status = check_two_buffers_can_be_active()) return status;
     if (const int status = check_same_buffer_busy_and_deferred_poison())
@@ -253,5 +278,6 @@ int main() {
     if (const int status = check_post_activation_failure_is_buffer_local())
         return status;
     if (const int status = check_destroy_race_and_retry()) return status;
-    return check_generation_overflow();
+    if (const int status = check_generation_overflow()) return status;
+    return check_active_lease_move_retires_exactly_once();
 }

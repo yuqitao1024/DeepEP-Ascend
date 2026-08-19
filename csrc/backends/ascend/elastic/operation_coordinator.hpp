@@ -60,6 +60,7 @@ public:
 
         LeaseStatus status() const noexcept { return status_; }
         std::uint64_t generation() const noexcept { return generation_; }
+        bool active() const noexcept { return active_; }
 
         bool activate() noexcept {
             if (!valid() || active_)
@@ -80,19 +81,19 @@ public:
             coordinator_ = nullptr;
         }
 
-    private:
-        friend class BufferOperationCoordinator;
-
-        OperationLease(BufferOperationCoordinator* coordinator,
-                       LeaseStatus status, std::uint64_t token) noexcept
-            : coordinator_(coordinator), status_(status), token_(token) {}
-
         void abandon() noexcept {
             if (coordinator_ == nullptr)
                 return;
             coordinator_->abandon_operation(token_, active_);
             coordinator_ = nullptr;
         }
+
+    private:
+        friend class BufferOperationCoordinator;
+
+        OperationLease(BufferOperationCoordinator* coordinator,
+                       LeaseStatus status, std::uint64_t token) noexcept
+            : coordinator_(coordinator), status_(status), token_(token) {}
 
         void move_from(OperationLease&& other) noexcept {
             coordinator_ = std::exchange(other.coordinator_, nullptr);
@@ -221,6 +222,16 @@ public:
         return last_generation_;
     }
 
+    std::uint64_t completed_operation_count() const noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return completed_operation_count_;
+    }
+
+    std::uint64_t abandoned_operation_count() const noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return abandoned_operation_count_;
+    }
+
 private:
     std::uint64_t next_token() noexcept {
         ++lease_token_;
@@ -251,6 +262,8 @@ private:
             CoordinatorState::kReserved;
         if (state_ != expected || token != lease_token_)
             return;
+        if (active)
+            ++completed_operation_count_;
         state_ = active && poison_requested_ ? CoordinatorState::kPoisoned :
             CoordinatorState::kIdle;
         poison_requested_ = false;
@@ -262,6 +275,8 @@ private:
             CoordinatorState::kReserved;
         if (state_ != expected || token != lease_token_)
             return;
+        if (active)
+            ++abandoned_operation_count_;
         state_ = active ? CoordinatorState::kPoisoned :
             CoordinatorState::kIdle;
         poison_requested_ = false;
@@ -279,6 +294,8 @@ private:
     CoordinatorState state_ = CoordinatorState::kIdle;
     std::uint64_t last_generation_ = 0;
     std::uint64_t lease_token_ = 0;
+    std::uint64_t completed_operation_count_ = 0;
+    std::uint64_t abandoned_operation_count_ = 0;
     bool poison_requested_ = false;
 };
 

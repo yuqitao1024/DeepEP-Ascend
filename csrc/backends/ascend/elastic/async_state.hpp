@@ -1,0 +1,107 @@
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <vector>
+
+#include "operation_coordinator.hpp"
+#include "../runtime/stream_event.hpp"
+#include "../transport/transport_commands.hpp"
+#include "../transport/types.hpp"
+
+namespace torch {
+class Tensor;
+}
+
+namespace deep_ep::ascend::elastic {
+
+enum class PendingState : std::uint8_t {
+    kLaunched,
+    kFinalizing,
+    kSucceeded,
+    kFailed,
+};
+
+struct CompletionRecipe {
+    BufferOperationKind kind = BufferOperationKind::kTopologyQuery;
+    std::uint64_t generation = 0;
+    std::uint64_t completion_offset = 0;
+    std::uint64_t scratch_status_offset = 0;
+};
+
+class AsyncCompletionResources {
+public:
+    virtual ~AsyncCompletionResources() = default;
+
+    virtual transport::TransportStatus read_diagnostic(
+        BufferOperationKind kind, std::uint64_t scratch_status_offset,
+        transport::DeviceTransportDiagnostic* output) = 0;
+    virtual transport::TransportStatus read_completion(
+        BufferOperationKind kind, std::uint64_t completion_offset,
+        std::uint64_t* output) = 0;
+    virtual transport::TransportStatus destroy() = 0;
+};
+
+class PendingOperation {
+public:
+    ~PendingOperation();
+
+    PendingOperation(const PendingOperation&) = delete;
+    PendingOperation& operator=(const PendingOperation&) = delete;
+
+    transport::TransportStatus finish(std::uint64_t timeout_ms);
+    PendingState state() const noexcept;
+    std::uint64_t generation() const noexcept;
+
+private:
+    struct Impl;
+
+    explicit PendingOperation(std::shared_ptr<Impl> impl);
+    transport::TransportStatus teardown(std::uint64_t timeout_ms);
+    bool lifetime_safe() const noexcept;
+
+    std::shared_ptr<Impl> impl_;
+
+    friend class AsyncBufferState;
+};
+
+struct EventDependency {
+    std::shared_ptr<runtime::NativeEventState> event;
+    std::shared_ptr<PendingOperation> pending_operation;
+};
+
+struct PendingOperationCreateResult {
+    transport::TransportStatus status;
+    std::shared_ptr<PendingOperation> operation;
+};
+
+class AsyncBufferState {
+public:
+    explicit AsyncBufferState(
+        std::shared_ptr<AsyncCompletionResources> resources,
+        std::uint64_t owned_timeout_ms = 5000,
+        std::uint64_t last_generation = 0);
+    ~AsyncBufferState();
+
+    AsyncBufferState(const AsyncBufferState&) = delete;
+    AsyncBufferState& operator=(const AsyncBufferState&) = delete;
+
+    BufferOperationCoordinator& coordinator() noexcept;
+
+    PendingOperationCreateResult publish(
+        BufferOperationCoordinator::OperationLease lease,
+        std::shared_ptr<runtime::NativeEventState> event,
+        CompletionRecipe recipe,
+        std::vector<std::optional<torch::Tensor>> retained_tensors,
+        std::vector<EventDependency> predecessors);
+    transport::TransportStatus finish_pending();
+    transport::TransportStatus destroy();
+    std::optional<transport::TransportStatus> terminal_failure() const;
+
+private:
+    struct Impl;
+    std::shared_ptr<Impl> impl_;
+};
+
+}  // namespace deep_ep::ascend::elastic

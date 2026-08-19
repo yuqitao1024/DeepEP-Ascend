@@ -93,6 +93,7 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
         csrc/backends/ascend/elastic/barrier.asc
         csrc/backends/ascend/elastic/dispatch.asc
         csrc/backends/ascend/elastic/combine.asc
+        csrc/backends/ascend/elastic/async_state.cpp
         csrc/backends/ascend/elastic/runtime.cpp
         csrc/backends/ascend/runtime/mapped_memory.cpp
         csrc/backends/ascend/runtime/cann_runtime.cpp
