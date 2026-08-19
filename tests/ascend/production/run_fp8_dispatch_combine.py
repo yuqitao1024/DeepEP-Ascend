@@ -66,6 +66,11 @@ def _check(condition, message):
         raise AssertionError(message)
 
 
+def _bf16_reduction_reference(torch, values):
+    operands = torch.tensor(values, dtype=torch.bfloat16)
+    return operands.to(torch.float32).sum().to(torch.bfloat16).item()
+
+
 class FP8RuntimeMatrix:
     def __init__(self, torch, dist, deep_ep, group, device):
         self.torch = torch
@@ -414,8 +419,10 @@ class FP8RuntimeMatrix:
                 value = int(expert.item())
                 if value >= 0:
                     destinations.add(value // 2)
-            value = sum(self.rank * 100 + token * 10 + destination + 1
-                        for destination in destinations)
+            value = _bf16_reduction_reference(self.torch, [
+                self.rank * 100 + token * 10 + destination + 1
+                for destination in destinations
+            ])
             expected[token].fill_(value)
         self._assert_exact(combined, expected, "BF16 combine")
         _check(combined_weights is None and event.event is None,
