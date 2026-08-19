@@ -195,9 +195,19 @@ No remote floating-point atomic is required by this schedule.
 
 ### NPU8P logical two-host tests
 
-A serialized four-rank job on devices `0,1,6,7` validates device-only hybrid
-routing for local, rail, and diagonal token graphs. It compares dispatch and
-combine with an independent BF16 reference and repeats multiple generations.
+A serialized four-rank job maps two complete device pairs to logical hosts and
+validates device-only hybrid routing for local, rail, and diagonal token
+graphs. The final qualification used snapshot `53fec72`, devices `2,3` as
+logical host A and `4,5` as logical host B, and task
+`task_20260819_122044_73205324377`. It compared dispatch and combine with an
+independent exact BF16 reference; covered fresh and cached handles, empty and
+asymmetric routes, both multiple-reduction policies, and repeated generations;
+and completed bounded failure plus poisoned teardown. The task printed
+`PASS logical-single-host device-only hybrid smoke` and exited zero. Its
+production build/import prerequisite was
+`task_20260819_121747_7237407472`, and the tracked source archive SHA-256 was
+`c4a62f050bee82adb7bf99d49815fce09930bd5d69b67634735a42c45bf6aaa6`.
+
 This evidence is labeled `logical-single-host` and does not qualify CPU
 mapping across hosts or physical RoCE.
 

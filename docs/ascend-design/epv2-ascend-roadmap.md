@@ -196,6 +196,36 @@ Until then, both remain explicitly unsupported.
 
 ## Phase 3D: Hybrid Routing And Mapped CPU Memory
 
+### Current status
+
+Status: logical 2x2 device-only hybrid routing implemented and qualified;
+physical multi-host/RoCE hybrid routing and mapped CPU memory remain open.
+
+The accepted snapshot is commit `53fec72`. NPU8P production build/import task
+`task_20260819_121747_7237407472` passed on devices `0,1`. The later serialized
+four-rank task `task_20260819_122044_73205324377` used devices `2,3` as logical
+host A and `4,5` as logical host B and printed
+`PASS logical-single-host device-only hybrid smoke`. It covered local,
+scale-up, scale-out-rail, and diagonal dispatch/combine; independent exact BF16
+payload and shape checks; fresh and cached handles; empty and asymmetric
+routes; both multiple-reduction policies; repeated generations; rank-qualified
+bounded failure; poisoned teardown; and repeated destruction. The tracked
+source archive had SHA-256
+`c4a62f050bee82adb7bf99d49815fce09930bd5d69b67634735a42c45bf6aaa6`.
+
+This evidence qualifies only the explicit `logical-single-host` device path.
+It does not qualify physical RoCE addressing, NIC selection, cross-host memory
+registration, link/process failure behavior, mapped CPU visibility, or
+performance.
+
+The transactional mapped-memory provider, descriptor, bounds, publication,
+and retryable reverse-teardown contracts are implemented and covered with a
+fake provider. Production mapped CPU capability remains disabled because the
+pinned public CANN/HCOMM surface does not expose both a supported host-
+allocation device map/unmap pair and documented CPU/NPU release-acquire cache
+visibility semantics. Nonzero CPU communication bytes therefore continue to
+fail before resource publication.
+
 ### Deliverables
 
 - implement scale-up/scale-out hybrid routing through the existing EPv2 handle
