@@ -32,6 +32,10 @@ OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT = 0.05
 OVERLAP_DIAGNOSTIC_TIMEOUT_SECONDS = 180
 OVERLAP_DIAGNOSTIC_GRACE_SECONDS = 10.0
 OVERLAP_DIAGNOSTIC_IDLE_SECONDS = 6.0
+OVERLAP_SWEEP_TIMEOUT_SECONDS = 180
+OVERLAP_SWEEP_TOKENS = (256, 512, 1024)
+OVERLAP_SWEEP_WARMUPS = 1
+OVERLAP_SWEEP_REPETITIONS = 3
 OVERLAP_DIAGNOSTIC_VARIANTS = (
     "pure-communication",
     "pure-compute",
@@ -75,6 +79,7 @@ EVENT_CASES = (
 CASE_START_PREFIX = "PHASE3E_CASE_START"
 CASE_RESULT_PREFIX = "PHASE3E_CASE_RESULT"
 OVERLAP_DIAGNOSTIC_RESULT_PREFIX = "PHASE3E_OVERLAP_DIAGNOSTIC_RESULT"
+OVERLAP_SWEEP_RESULT_PREFIX = "PHASE3E_OVERLAP_SWEEP_RESULT"
 
 HOST_CONTRACT_CASES = {
     "record-failure": (
@@ -230,6 +235,8 @@ def _contract():
             "communication_tokens": OVERLAP_COMMUNICATION_TOKENS,
             "compute_iterations": OVERLAP_COMPUTE_ITERATIONS,
             "compute_shape": list(OVERLAP_COMPUTE_SHAPE),
+            "diagnostic_timeout_seconds": OVERLAP_SWEEP_TIMEOUT_SECONDS,
+            "diagnostic_tokens": list(OVERLAP_SWEEP_TOKENS),
             "minimum_median_improvement":
                 OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT,
             "profiler_interval_required": True,
@@ -275,6 +282,29 @@ def _aggregate_rank_failures(reports):
         for report in sorted(reports, key=lambda value: value["rank"])
         if report.get("failure")
     )
+
+
+def _measurement_failures(case, reports):
+    if case != "overlap-vs-serialized":
+        return []
+    return [
+        f"rank {report['rank']}: "
+        f"{report.get('measurements', {}).get('acceptance_failure')}"
+        for report in sorted(reports, key=lambda value: value["rank"])
+        if report.get("measurements", {}).get("acceptance_failure")
+    ]
+
+
+def _case_measurements(case, reports):
+    ordered = sorted(reports, key=lambda value: value["rank"])
+    if case == "overlap-vs-serialized":
+        return {
+            "ranks": [
+                {"rank": report["rank"], **(report.get("measurements") or {})}
+                for report in ordered
+            ],
+        }
+    return ordered[0].get("measurements") or {}
 
 
 def _stream_id(event):
@@ -388,6 +418,17 @@ def _overlap_diagnostic_command(output, trace_dir):
     worker = [
         str(pathlib.Path(__file__).resolve()),
         "--overlap-diagnostic-worker",
+        "--output", str(output),
+        "--trace-dir", str(trace_dir),
+    ]
+    return [sys.executable, "-m", "torch.distributed.run", "--standalone",
+            f"--nproc-per-node={WORLD_SIZE}", *worker]
+
+
+def _overlap_sweep_command(output, trace_dir):
+    worker = [
+        str(pathlib.Path(__file__).resolve()),
+        "--overlap-sweep-worker",
         "--output", str(output),
         "--trace-dir", str(trace_dir),
     ]
@@ -557,6 +598,130 @@ def _run_overlap_diagnostic(output, trace_dir):
         launcher_failure=result.get("failure"))
     _write_suite_report(output, report)
     print(OVERLAP_DIAGNOSTIC_RESULT_PREFIX + " " +
+          json.dumps(report, sort_keys=True), flush=True)
+    return 0 if result.get("status") == "passed" else 1
+
+
+def _classify_overlap_sweep_point(point):
+    ranks = point.get("ranks") or []
+    if len(ranks) != WORLD_SIZE:
+        return "incomplete"
+    if any(row.get("diagnostic_failure") or
+           not row.get("event_wait_completed") for row in ranks):
+        return "operation-failure"
+    if any(row.get("theoretical_maximum_improvement", 0) <
+           OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT for row in ranks):
+        return "workload-ratio-cannot-meet-threshold"
+    if any(row.get("profiler_overlap", {}).get("overlap_us", 0) <= 0
+           for row in ranks):
+        return "profiler-overlap-missing"
+    if all(row.get("median_improvement", 0) >=
+           OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT for row in ranks):
+        return "candidate"
+    return "overlap-efficiency-below-threshold"
+
+
+def _validate_overlap_sweep(points):
+    _check(tuple(point.get("tokens") for point in points) ==
+           OVERLAP_SWEEP_TOKENS,
+           "overlap sweep token points are missing or out of order")
+    buffer_instances = []
+    required_summaries = (
+        "communication", "compute", "serialized", "overlapped")
+    required_summary_fields = {
+        "median_seconds", "p95_seconds", "samples_seconds"}
+    for point in points:
+        ranks = point.get("ranks") or []
+        _check([row.get("rank") for row in ranks] == list(range(WORLD_SIZE)),
+               f"overlap sweep tokens={point.get('tokens')} omitted a rank")
+        for row in ranks:
+            _check(row.get("tokens") == point.get("tokens"),
+                   "overlap sweep rank token count mismatches its point")
+            buffer_instances.append(row.get("buffer_instance"))
+            _check(row.get("compute_stream_id",
+                           row.get("profiler_overlap", {}).get(
+                               "compute_stream_id")) !=
+                   row.get("communication_stream_id",
+                           row.get("profiler_overlap", {}).get(
+                               "communication_stream_id")),
+                   "overlap sweep compute and communication streams alias")
+            for name in required_summaries:
+                _check(set(row.get(name, {})) == required_summary_fields,
+                       f"overlap sweep {name} summary is incomplete")
+            _check(isinstance(
+                row.get("theoretical_maximum_improvement"), (int, float)),
+                "overlap sweep theoretical improvement is missing")
+            _check(isinstance(row.get("median_improvement"), (int, float)),
+                   "overlap sweep observed improvement is missing")
+    _check(None not in buffer_instances and
+           len(set(buffer_instances)) == len(buffer_instances),
+           "overlap sweep did not use fresh per-rank buffers")
+
+
+def _overlap_sweep_report(points, *, duration_seconds=None,
+                          launcher_failure=None):
+    classified = []
+    for point in points:
+        row = dict(point)
+        row["classification"] = _classify_overlap_sweep_point(row)
+        classified.append(row)
+    candidates = [
+        point["tokens"] for point in classified
+        if point["classification"] == "candidate"
+    ]
+    return {
+        "schema_version": 1,
+        "diagnostic": "overlap-load-ratio-sweep",
+        "diagnostic_timeout_seconds": OVERLAP_SWEEP_TIMEOUT_SECONDS,
+        "minimum_median_improvement":
+            OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT,
+        "compute_shape": list(OVERLAP_COMPUTE_SHAPE),
+        "compute_iterations": OVERLAP_COMPUTE_ITERATIONS,
+        "warmups": OVERLAP_SWEEP_WARMUPS,
+        "repetitions": OVERLAP_SWEEP_REPETITIONS,
+        "duration_seconds": duration_seconds,
+        "launcher_failure": launcher_failure,
+        "recommended_tokens": min(candidates) if candidates else None,
+        "points": classified,
+    }
+
+
+def _run_overlap_sweep(output, trace_dir):
+    pathlib.Path(trace_dir).mkdir(parents=True, exist_ok=True)
+    result = _run_bounded(
+        _overlap_sweep_command(output, trace_dir),
+        timeout_seconds=OVERLAP_SWEEP_TIMEOUT_SECONDS)
+    payload = _marker_payload(
+        result.get("stdout", ""), OVERLAP_SWEEP_RESULT_PREFIX)
+    if payload is None:
+        points = []
+        if pathlib.Path(output).exists():
+            points = json.loads(pathlib.Path(output).read_text()).get(
+                "points", [])
+        report = _overlap_sweep_report(
+            points, duration_seconds=result.get("duration_seconds"),
+            launcher_failure=result.get("failure") or
+            "overlap sweep worker omitted its result marker")
+        _write_suite_report(output, report)
+        print(OVERLAP_SWEEP_RESULT_PREFIX + " " +
+              json.dumps(report, sort_keys=True), flush=True)
+        return 1
+    points = payload.get("points") or []
+    try:
+        _validate_overlap_sweep(points)
+    except AssertionError as error:
+        report = _overlap_sweep_report(
+            points, duration_seconds=result.get("duration_seconds"),
+            launcher_failure=str(error))
+        _write_suite_report(output, report)
+        print(OVERLAP_SWEEP_RESULT_PREFIX + " " +
+              json.dumps(report, sort_keys=True), flush=True)
+        return 1
+    report = _overlap_sweep_report(
+        points, duration_seconds=result.get("duration_seconds"),
+        launcher_failure=result.get("failure"))
+    _write_suite_report(output, report)
+    print(OVERLAP_SWEEP_RESULT_PREFIX + " " +
           json.dumps(report, sort_keys=True), flush=True)
     return 0 if result.get("status") == "passed" else 1
 
@@ -1230,8 +1395,7 @@ class AsyncOverlapWorker:
         self.buffers.remove(buffer)
         return {"aggregated_failure": aggregate}
 
-    def _make_overlap_inputs(self):
-        tokens = OVERLAP_COMMUNICATION_TOKENS
+    def _make_overlap_inputs(self, tokens=OVERLAP_COMMUNICATION_TOKENS):
         hidden = OVERLAP_COMPUTE_SHAPE[0]
         cpu = self.torch.arange(
             tokens * hidden, dtype=self.torch.float32).reshape(
@@ -1422,9 +1586,31 @@ class AsyncOverlapWorker:
         _check(value.device.type == "npu", "compute result left the NPU")
         return time.monotonic() - started
 
+    def _communication_iteration(self, buffer, handle, x):
+        started = time.monotonic()
+        _, _, _, _, event = buffer.dispatch(
+            x,
+            handle=handle,
+            num_sms=1,
+            num_qps=0,
+            async_with_compute_stream=True,
+            allocate_on_comm_stream=True,
+        )
+        event.current_stream_wait()
+        self._wait_current_stream()
+        return time.monotonic() - started
+
+    def _compute_iteration(self, left, right):
+        started = time.monotonic()
+        value = self._compute(left, right)
+        self._wait_current_stream()
+        _check(value.device.type == "npu", "compute result left the NPU")
+        return time.monotonic() - started
+
     def _profile_overlap(self, buffer, handle, x, left, right):
         profiler = self.torch_npu.profiler
         activity = profiler.ProfilerActivity.NPU
+        self.trace_dir.mkdir(parents=True, exist_ok=True)
         trace_path = self.trace_dir / f"overlap-rank{self.rank}.json"
         with profiler.profile(activities=[activity]) as profile:
             self._overlap_iteration(
@@ -1432,11 +1618,14 @@ class AsyncOverlapWorker:
         profile.export_chrome_trace(str(trace_path))
         compute_stream = self.torch.npu.current_stream()
         comm_stream = buffer.get_comm_stream()
-        interval = _find_npu_overlap_interval(
-            tuple(self.trace_dir.rglob("*.json")),
-            compute_stream_id=compute_stream.stream_id,
-            comm_stream_id=comm_stream.stream_id,
-        )
+        try:
+            interval = _find_npu_overlap_interval(
+                (trace_path,),
+                compute_stream_id=compute_stream.stream_id,
+                comm_stream_id=comm_stream.stream_id,
+            )
+        except AssertionError as error:
+            interval = {"overlap_us": 0.0, "failure": str(error)}
         interval["trace"] = str(trace_path)
         interval["compute_stream_id"] = compute_stream.stream_id
         interval["communication_stream_id"] = comm_stream.stream_id
@@ -1485,13 +1674,9 @@ class AsyncOverlapWorker:
         improvement = 1.0 - (
             overlapped_summary["median_seconds"] /
             serialized_summary["median_seconds"])
-        _check(improvement >= OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT,
-               "overlap median improvement "
-               f"{improvement:.6f} is below "
-               f"{OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT:.6f}")
         interval = self._profile_overlap(
             buffer, handle, changed_x, left, right)
-        return {
+        measurement = {
             "warmups": OVERLAP_WARMUPS,
             "repetitions": OVERLAP_REPETITIONS,
             "communication_tokens": OVERLAP_COMMUNICATION_TOKENS,
@@ -1504,6 +1689,99 @@ class AsyncOverlapWorker:
                 OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT,
             "profiler_overlap": interval,
             "global_synchronizations": 0,
+        }
+        failures = []
+        if improvement < OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT:
+            failures.append(
+                "overlap median improvement "
+                f"{improvement:.6f} is below "
+                f"{OVERLAP_MINIMUM_MEDIAN_IMPROVEMENT:.6f}")
+        if interval.get("overlap_us", 0) <= 0:
+            failures.append(
+                interval.get("failure") or
+                "NPU profiler did not contain a positive overlap interval")
+        if failures:
+            measurement["acceptance_failure"] = "; ".join(failures)
+        return measurement
+
+    def _run_overlap_sweep_point(self, tokens):
+        x, routes, left, right = self._make_overlap_inputs(tokens)
+        hint = self.deep_ep.ElasticBuffer.get_buffer_size_hint(
+            self.group,
+            num_max_tokens_per_rank=x.shape[0],
+            hidden=x.shape[1],
+            num_topk=1,
+            use_fp8_dispatch=False,
+            allow_hybrid_mode=False,
+            allow_multiple_reduction=True,
+        )
+        buffer = self.new_buffer(num_bytes=hint)
+        seed = buffer.dispatch(
+            x,
+            topk_idx=routes,
+            num_experts=NUM_EXPERTS,
+            num_max_tokens_per_rank=x.shape[0],
+            expert_alignment=1,
+            num_sms=1,
+            num_qps=0,
+            do_handle_copy=True,
+            do_cpu_sync=True,
+        )
+        handle = seed[3]
+        changed_x = x.add(1)
+        for _ in range(OVERLAP_SWEEP_WARMUPS):
+            self._communication_iteration(buffer, handle, changed_x)
+            self._compute_iteration(left, right)
+            self._overlap_iteration(
+                buffer, handle, changed_x, left, right, overlap=False)
+            self._overlap_iteration(
+                buffer, handle, changed_x, left, right, overlap=True)
+
+        communication = []
+        compute = []
+        serialized = []
+        overlapped = []
+        for _ in range(OVERLAP_SWEEP_REPETITIONS):
+            communication.append(
+                self._communication_iteration(buffer, handle, changed_x))
+            compute.append(self._compute_iteration(left, right))
+            serialized.append(self._overlap_iteration(
+                buffer, handle, changed_x, left, right, overlap=False))
+            overlapped.append(self._overlap_iteration(
+                buffer, handle, changed_x, left, right, overlap=True))
+
+        communication_summary = _summary(communication)
+        compute_summary = _summary(compute)
+        serialized_summary = _summary(serialized)
+        overlapped_summary = _summary(overlapped)
+        component_total = (
+            communication_summary["median_seconds"] +
+            compute_summary["median_seconds"])
+        _check(component_total > 0, "overlap sweep component time is zero")
+        theoretical = min(
+            communication_summary["median_seconds"],
+            compute_summary["median_seconds"]) / component_total
+        observed = 1.0 - (
+            overlapped_summary["median_seconds"] /
+            serialized_summary["median_seconds"])
+        profiler = self._profile_overlap(
+            buffer, handle, changed_x, left, right)
+        return {
+            "rank": self.rank,
+            "tokens": tokens,
+            "buffer_instance":
+                f"rank-{self.rank}:sweep-{tokens}:{id(buffer)}",
+            "event_wait_completed": True,
+            "compute_stream_id": profiler["compute_stream_id"],
+            "communication_stream_id":
+                profiler["communication_stream_id"],
+            "communication": communication_summary,
+            "compute": compute_summary,
+            "serialized": serialized_summary,
+            "overlapped": overlapped_summary,
+            "theoretical_maximum_improvement": theoretical,
+            "median_improvement": observed,
+            "profiler_overlap": profiler,
         }
 
     def run(self, case):
@@ -1578,10 +1856,14 @@ def _run_distributed_batch_worker(cases, trace_dir, batch_protocol=True):
                     "rank": rank,
                     "failure": local_failure,
                     "duration_seconds": time.monotonic() - started,
+                    "measurements": measurements,
                 },
                 group=group,
             )
-            aggregate = _aggregate_rank_failures(reports)
+            aggregate = "; ".join(value for value in (
+                [_aggregate_rank_failures(reports)] +
+                _measurement_failures(case, reports)
+            ) if value)
             if rank == 0:
                 if batch_protocol:
                     print(CASE_RESULT_PREFIX + " " + json.dumps({
@@ -1591,12 +1873,12 @@ def _run_distributed_batch_worker(cases, trace_dir, batch_protocol=True):
                             report["duration_seconds"] for report in reports),
                         "exit_code": 1 if aggregate else 0,
                         "failure": aggregate or None,
-                        "measurements": measurements or {},
+                        "measurements": _case_measurements(case, reports),
                     }, sort_keys=True), flush=True)
                 elif not aggregate:
                     print("PHASE3E_WORKER_RESULT " + json.dumps({
                         "case": case,
-                        "measurements": measurements,
+                        "measurements": _case_measurements(case, reports),
                     }, sort_keys=True), flush=True)
             if aggregate:
                 return 1
@@ -1698,6 +1980,77 @@ def _run_overlap_diagnostic_worker(output, trace_dir):
             dist.destroy_process_group()
 
 
+def _run_overlap_sweep_worker(output, trace_dir):
+    import torch
+    import torch.distributed as dist
+    import torch_npu
+    import deep_ep
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.npu.set_device(local_rank)
+    initialized = False
+    try:
+        dist.init_process_group(
+            backend="hccl", timeout=timedelta(seconds=25))
+        initialized = True
+        group = dist.group.WORLD
+        _check(dist.get_world_size(group) == WORLD_SIZE,
+               f"overlap sweep requires {WORLD_SIZE} ranks")
+        rank = dist.get_rank(group)
+        points = []
+        for tokens in OVERLAP_SWEEP_TOKENS:
+            dist.barrier(group=group)
+            point_trace_dir = pathlib.Path(trace_dir) / f"tokens-{tokens}"
+            worker = AsyncOverlapWorker(
+                torch, torch_npu, dist, deep_ep, group,
+                torch.device("npu", local_rank), point_trace_dir)
+            local_measurement = None
+            local_failure = None
+            with _forbid_global_sync(torch):
+                try:
+                    local_measurement = worker._run_overlap_sweep_point(tokens)
+                except BaseException as error:
+                    local_failure = f"{type(error).__name__}: {error}"
+                try:
+                    worker.destroy_buffers()
+                except BaseException as error:
+                    cleanup = f"cleanup {type(error).__name__}: {error}"
+                    local_failure = "; ".join(
+                        value for value in (local_failure, cleanup) if value)
+            if local_measurement is None:
+                local_measurement = {
+                    "rank": rank,
+                    "tokens": tokens,
+                    "diagnostic_failure": local_failure or
+                    "overlap sweep point produced no measurement",
+                }
+            elif local_failure:
+                local_measurement["diagnostic_failure"] = local_failure
+
+            reports = [None] * WORLD_SIZE
+            dist.all_gather_object(reports, local_measurement, group=group)
+            if rank == 0:
+                point = {
+                    "tokens": tokens,
+                    "ranks": sorted(
+                        reports, key=lambda value: value["rank"]),
+                }
+                points.append(point)
+                checkpoint = _overlap_sweep_report(points)
+                _write_suite_report(output, checkpoint)
+                print("PHASE3E_OVERLAP_SWEEP_POINT " +
+                      json.dumps(point, sort_keys=True), flush=True)
+
+        if rank == 0:
+            print(OVERLAP_SWEEP_RESULT_PREFIX + " " + json.dumps({
+                "points": points,
+            }, sort_keys=True), flush=True)
+        return 0
+    finally:
+        if initialized:
+            dist.destroy_process_group()
+
+
 def _run_worker(case, trace_dir):
     if case == "capture-current-stream":
         measurements = _run_capture_worker()
@@ -1719,6 +2072,8 @@ def main():
         metavar="CASE")
     parser.add_argument("--overlap-diagnostic", action="store_true")
     parser.add_argument("--overlap-diagnostic-worker", action="store_true")
+    parser.add_argument("--overlap-sweep", action="store_true")
+    parser.add_argument("--overlap-sweep-worker", action="store_true")
     parser.add_argument("--output", default="/tmp/phase3e-async-overlap.json")
     parser.add_argument("--trace-dir", default="/tmp/phase3e-async-traces")
     args = parser.parse_args()
@@ -1733,11 +2088,16 @@ def main():
         return _run_overlap_diagnostic_worker(args.output, args.trace_dir)
     if args.overlap_diagnostic:
         return _run_overlap_diagnostic(args.output, args.trace_dir)
+    if args.overlap_sweep_worker:
+        return _run_overlap_sweep_worker(args.output, args.trace_dir)
+    if args.overlap_sweep:
+        return _run_overlap_sweep(args.output, args.trace_dir)
     if args.suite:
         return _run_suite(args.suite, args.output, args.trace_dir)
     parser.error(
         "one of --contract, --suite, --worker, --batch-worker, "
-        "--overlap-diagnostic, or --overlap-diagnostic-worker is required")
+        "--overlap-diagnostic, --overlap-diagnostic-worker, "
+        "--overlap-sweep, or --overlap-sweep-worker is required")
 
 
 if __name__ == "__main__":

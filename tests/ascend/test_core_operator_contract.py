@@ -2020,6 +2020,8 @@ int main() {
                     "communication_tokens": 256,
                     "compute_iterations": 8,
                     "compute_shape": [4096, 4096],
+                    "diagnostic_timeout_seconds": 180,
+                    "diagnostic_tokens": [256, 512, 1024],
                     "minimum_median_improvement": 0.05,
                     "profiler_interval_required": True,
                     "repetitions": 7,
@@ -2221,6 +2223,301 @@ int main() {
         self.assertEqual(
             module._classify_overlap_diagnostic(observations),
             "workload-exceeds-event-deadline",
+        )
+
+    def test_async_overlap_threshold_failure_keeps_timing_and_profiler_evidence(
+            self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_threshold_evidence", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class FakeTensor:
+            shape = (256, 4096)
+
+            def add(self, _value):
+                return self
+
+        class FakeBuffer:
+            def dispatch(self, *_args, **_kwargs):
+                return None, None, None, "handle"
+
+        class FakeElasticBuffer:
+            @staticmethod
+            def get_buffer_size_hint(*_args, **_kwargs):
+                return 4096
+
+        class FakeDeepEp:
+            ElasticBuffer = FakeElasticBuffer
+
+        class FakeDist:
+            @staticmethod
+            def get_rank(_group):
+                return 0
+
+        tensor = FakeTensor()
+        worker = module.AsyncOverlapWorker(
+            None, None, FakeDist, FakeDeepEp, object(), object(), "/tmp")
+        worker.new_buffer = mock.Mock(return_value=FakeBuffer())
+        worker._make_overlap_inputs = mock.Mock(
+            return_value=(tensor, tensor, tensor, tensor))
+        worker._overlap_iteration = mock.Mock(side_effect=(
+            1.00, 0.99,
+            1.02, 1.00,
+            0.98, 0.97,
+        ))
+        profiler = {
+            "overlap_us": 17.0,
+            "compute_event": "matmul",
+            "communication_event": "dispatch",
+            "compute_interval_us": [100.0, 140.0],
+            "communication_interval_us": [120.0, 170.0],
+            "trace": "/tmp/overlap-rank0.json",
+            "compute_stream_id": 7,
+            "communication_stream_id": 11,
+        }
+        worker._profile_overlap = mock.Mock(return_value=profiler)
+
+        with mock.patch.object(module, "OVERLAP_WARMUPS", 0), \
+                mock.patch.object(module, "OVERLAP_REPETITIONS", 3):
+            measurement = worker._run_overlap()
+
+        worker._profile_overlap.assert_called_once()
+        self.assertEqual(measurement["serialized"], {
+            "median_seconds": 1.0,
+            "p95_seconds": 1.018,
+            "samples_seconds": [1.0, 1.02, 0.98],
+        })
+        self.assertEqual(measurement["overlapped"], {
+            "median_seconds": 0.99,
+            "p95_seconds": 0.999,
+            "samples_seconds": [0.99, 1.0, 0.97],
+        })
+        self.assertAlmostEqual(measurement["median_improvement"], 0.01)
+        self.assertEqual(measurement["profiler_overlap"], profiler)
+        self.assertIn("below 0.050000", measurement["acceptance_failure"])
+
+    def test_async_overlap_missing_profiler_interval_keeps_stream_evidence(
+            self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_missing_profiler", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class FakeProfile:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def export_chrome_trace(path):
+                pathlib.Path(path).write_text('{"traceEvents": []}')
+
+        class FakeProfiler:
+            class ProfilerActivity:
+                NPU = "npu"
+
+            @staticmethod
+            def profile(*_args, **_kwargs):
+                return FakeProfile()
+
+        class FakeStream:
+            def __init__(self, stream_id):
+                self.stream_id = stream_id
+
+        class FakeNpu:
+            @staticmethod
+            def current_stream():
+                return FakeStream(7)
+
+        class FakeTorch:
+            npu = FakeNpu()
+
+        class FakeDist:
+            @staticmethod
+            def get_rank(_group):
+                return 0
+
+        class FakeBuffer:
+            @staticmethod
+            def get_comm_stream():
+                return FakeStream(11)
+
+        with tempfile.TemporaryDirectory() as directory:
+            trace_dir = pathlib.Path(directory) / "tokens-256"
+            worker = module.AsyncOverlapWorker(
+                FakeTorch, type("FakeTorchNpu", (), {"profiler": FakeProfiler}),
+                FakeDist, None, object(), object(), trace_dir)
+            worker._overlap_iteration = mock.Mock(return_value=0.25)
+            with mock.patch.object(
+                    module, "_find_npu_overlap_interval",
+                    side_effect=AssertionError("no positive profiler interval")):
+                evidence = worker._profile_overlap(
+                    FakeBuffer(), "handle", object(), object(), object())
+
+        self.assertEqual(evidence["overlap_us"], 0.0)
+        self.assertEqual(evidence["compute_stream_id"], 7)
+        self.assertEqual(evidence["communication_stream_id"], 11)
+        self.assertEqual(evidence["failure"], "no positive profiler interval")
+
+    def test_async_overlap_failed_result_keeps_both_rank_measurements(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_rank_evidence", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        reports = []
+        for rank, improvement in ((0, 0.014373), (1, 0.012169)):
+            reports.append({
+                "rank": rank,
+                "failure": None,
+                "duration_seconds": 6.2,
+                "measurements": {
+                    "serialized": {
+                        "median_seconds": 0.30 + rank * 0.01,
+                        "p95_seconds": 0.32 + rank * 0.01,
+                        "samples_seconds": [0.29, 0.30, 0.32],
+                    },
+                    "overlapped": {
+                        "median_seconds": 0.30 * (1.0 - improvement),
+                        "p95_seconds": 0.31,
+                        "samples_seconds": [0.28, 0.30, 0.31],
+                    },
+                    "median_improvement": improvement,
+                    "minimum_median_improvement": 0.05,
+                    "profiler_overlap": {
+                        "overlap_us": 9.0 + rank,
+                        "compute_stream_id": 7 + rank,
+                        "communication_stream_id": 17 + rank,
+                    },
+                    "acceptance_failure":
+                        f"overlap median improvement {improvement:.6f} "
+                        "is below 0.050000",
+                },
+            })
+
+        measurements = module._case_measurements(
+            "overlap-vs-serialized", reports)
+        failures = module._measurement_failures(
+            "overlap-vs-serialized", reports)
+
+        self.assertEqual([row["rank"] for row in measurements["ranks"]],
+                         [0, 1])
+        self.assertEqual(
+            measurements["ranks"][0]["profiler_overlap"]
+            ["communication_stream_id"],
+            17,
+        )
+        self.assertEqual(len(failures), 2)
+        self.assertTrue(any(
+            "rank 0: overlap median improvement 0.014373" in failure
+            for failure in failures))
+        self.assertTrue(any(
+            "rank 1: overlap median improvement 0.012169" in failure
+            for failure in failures))
+
+    def test_async_overlap_sweep_is_bounded_fresh_and_classifies_ratio(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_sweep_contract", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        point_inputs = (
+            (256, 0.03, 0.014, 12.0),
+            (512, 0.08, 0.020, 0.0),
+            (1024, 0.12, 0.060, 18.0),
+        )
+        points = []
+        for point_index, (tokens, theoretical, observed, overlap_us) in \
+                enumerate(point_inputs):
+            ranks = []
+            for rank in range(2):
+                profiler = {
+                    "overlap_us": overlap_us,
+                    "compute_stream_id": 7 + rank,
+                    "communication_stream_id": 17 + rank,
+                }
+                if overlap_us == 0:
+                    profiler["failure"] = "no positive profiler interval"
+                ranks.append({
+                    "rank": rank,
+                    "tokens": tokens,
+                    "buffer_instance":
+                        f"rank-{rank}-sweep-buffer-{point_index}",
+                    "event_wait_completed": True,
+                    "communication": {
+                        "median_seconds": 0.10,
+                        "p95_seconds": 0.11,
+                        "samples_seconds": [0.09, 0.10, 0.11],
+                    },
+                    "compute": {
+                        "median_seconds": 0.20,
+                        "p95_seconds": 0.21,
+                        "samples_seconds": [0.19, 0.20, 0.21],
+                    },
+                    "serialized": {
+                        "median_seconds": 0.30,
+                        "p95_seconds": 0.31,
+                        "samples_seconds": [0.29, 0.30, 0.31],
+                    },
+                    "overlapped": {
+                        "median_seconds": 0.30 * (1.0 - observed),
+                        "p95_seconds": 0.30,
+                        "samples_seconds": [0.28, 0.29, 0.30],
+                    },
+                    "theoretical_maximum_improvement": theoretical,
+                    "median_improvement": observed,
+                    "profiler_overlap": profiler,
+                })
+            points.append({"tokens": tokens, "ranks": ranks})
+
+        bounded_calls = []
+
+        def run_bounded(command, timeout_seconds, env=None):
+            bounded_calls.append((command, timeout_seconds, env))
+            return {
+                "status": "passed",
+                "failure": None,
+                "duration_seconds": 19.0,
+                "exit_code": 0,
+                "stdout": "PHASE3E_OVERLAP_SWEEP_RESULT " +
+                json.dumps({"points": points}) + "\n",
+                "stderr": "",
+            }
+
+        run_sweep = getattr(module, "_run_overlap_sweep", None)
+        self.assertIsNotNone(run_sweep)
+        if run_sweep is None:
+            return
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "sweep.json"
+            trace_dir = pathlib.Path(directory) / "traces"
+            with mock.patch.object(module, "_run_bounded", run_bounded):
+                exit_code = run_sweep(output, trace_dir)
+            report = json.loads(output.read_text())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(bounded_calls), 1)
+        command, timeout_seconds, environment = bounded_calls[0]
+        self.assertEqual(timeout_seconds, 180)
+        self.assertIsNone(environment)
+        self.assertIn("--overlap-sweep-worker", command)
+        self.assertEqual(
+            [point["classification"] for point in report["points"]],
+            [
+                "workload-ratio-cannot-meet-threshold",
+                "profiler-overlap-missing",
+                "candidate",
+            ],
+        )
+        self.assertEqual(report["recommended_tokens"], 1024)
+        self.assertEqual(
+            len({rank_row["buffer_instance"]
+                 for point in report["points"]
+                 for rank_row in point["ranks"]}),
+            6,
         )
 
     def test_async_overlap_suite_checkpoints_each_completed_case(self):
