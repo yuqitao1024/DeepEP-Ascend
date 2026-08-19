@@ -353,6 +353,20 @@ DeepEP `dispatch_kernel` event families, must differ, and must have a positive
 overlap interval. One final complete 21-case two-rank matrix is required before
 Phase 3E.1 can be accepted.
 
+Final full-matrix task `task_20260820_031911_304861030703` reached the overlap
+row but did not pass it. The fail-fast report contains 21 selected, 16
+executed, 15 passed, one failed, and five not run. Rank 0 serialized/overlapped
+medians were `0.360265130`/`0.360237910` seconds for only `0.000075555`
+improvement; rank 1 medians were `0.361493950`/`0.358961650` for
+`0.007005097`. Both are below 5%. Nevertheless the event-family parser proves
+positive physical overlap of `268335.5us` and `270927.0us`, with logical IDs
+`0/143` and physical IDs `61/11` on both ranks.
+
+This result keeps Phase 3E.1 unaccepted and narrows the next action to one
+bounded component-timing diagnostic. It must distinguish an unserialized
+control from true compute/communication resource contention before any
+production change or further full-matrix run is considered.
+
 ### Deliverables
 
 - implement native Ascend event ownership behind `EventOverlap`;

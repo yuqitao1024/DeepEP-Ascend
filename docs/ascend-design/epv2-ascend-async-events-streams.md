@@ -164,6 +164,27 @@ unique DeepEP `dispatch_kernel` communication event family, rejects aliased
 or ambiguous physical lanes, and reports runtime logical IDs separately from
 trace physical IDs. A final 21-case matrix is still required for acceptance.
 
+Final full-matrix task `task_20260820_031911_304861030703` used those exact
+parameters on devices `6,7` and reached terminal `completed (exit=1)` after
+1m15s. Its fail-fast summary is 21 selected, 16 executed, 15 passed, one
+failed, and five not run. The overlap case completed in 29.315 seconds and
+retained seven raw samples per mode and rank. Rank 0 measured serialized
+median/p95 `0.360265130`/`0.362707628` seconds and overlapped
+`0.360237910`/`0.362412710`, an improvement of `0.000075555`. Rank 1 measured
+`0.361493950`/`0.362399942` versus `0.358961650`/`0.360509258`, an improvement
+of `0.007005097`. Both remain below the unchanged 5% gate.
+
+The same report proves positive `MatMulV3`/DeepEP-dispatch profiler overlap:
+rank 0 `268335.5us` and rank 1 `270927.0us`. Runtime logical
+compute/communication IDs were `0/143`; trace physical IDs were `61/11`.
+Report SHA-256 is
+`db667b7e4a2afd490b3f5b9ae59a176432cae69cbc22b8b0bc8ce1a907236189`.
+Because the overlap row failed, fail-fast did not run `record-failure`,
+`event-timeout`, `completion-mismatch`, `drop-event`, or
+`destroy-pending-retry`. Phase 3E.1 remains unaccepted while a bounded
+component-timing diagnostic determines why positive physical overlap does not
+improve the current wall-time control.
+
 ## Decisions
 
 ### Native resource model
