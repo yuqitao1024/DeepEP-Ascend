@@ -295,6 +295,33 @@ SHA-256 is
 `88a4fa784c660ffa078b1a443e6b0b9573230ceed458a3932eb2c7944c31a813`.
 Phase 3E.1 remains unaccepted until the complete formal matrix passes.
 
+The capability result authorizes one formal-workload substitution. The final
+`overlap-vs-serialized` row keeps 256 communication tokens, hidden size 4096,
+`num_sms=1`, the production five-second event deadline, the 5% median gate,
+and the 30-second case watchdog. It replaces only formal runner compute with
+fixed BF16 NCDHW Conv3D: input `(1,64,24,96,96)`, weight
+`(64,64,3,3,3)`, stride `(1,1,1)`, padding `(0,0,0)`, dilation `(1,1,1)`,
+groups 1, and 256 iterations. There is no formal dynamic calibration, MatMul,
+`mul`, or `mul_`; the component capability diagnostic remains unchanged.
+
+Three warmups and seven repetitions are retained. Scaling the slower observed
+capability compute wall (`0.056503370` seconds for 2039 iterations) by output
+volume and iteration count estimates `0.168339307` seconds per fixed compute
+call. Conservatively charging each of the 21 warmup, measured, and profiler
+calls for both that compute and the slower observed `0.282109590`-second
+communication wall estimates `9.459426836` seconds before setup and trace
+export, below the 30-second watchdog. Repetitions therefore remain at seven.
+
+Formal profiling requires `Conv3DV2` exactly `KERNEL_AICORE`, DeepEP
+`dispatch_kernel` exactly `KERNEL_AIVEC`, distinct physical lanes, and a
+positive interval; logical and physical IDs are reported separately. Every
+other AIV family, including the known tiny `Greater` and `ZerosLike` work, is
+inventoried with total duration. That total must be below 1% of the primary
+Conv3D span. The report always records `compute_path_aic_only=false` and never
+promotes primary-kernel task type into a whole-path purity claim. Phase 3E.1 is
+accepted only if the complete matrix passes 21/21, both ranks clear 5%, and
+every profiler gate passes.
+
 ## Decisions
 
 ### Native resource model

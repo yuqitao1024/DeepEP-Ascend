@@ -434,6 +434,25 @@ This single-sample result establishes capability and motivates a formal
 fixed-workload matrix; Phase 3E.1 remains unaccepted until that entire matrix
 passes its unchanged 5% and profiler gates.
 
+The resulting final matrix keeps communication fixed at 256 tokens, hidden
+size 4096, and `num_sms=1`, and replaces only its formal compute workload with
+256 iterations of BF16 NCDHW Conv3D over input `(1,64,24,96,96)` and weight
+`(64,64,3,3,3)`, using unit stride/dilation, zero padding, and groups 1. It
+retains three warmups, seven measured samples, the production five-second event
+deadline, the 5% per-rank median gate, and the 30-second case watchdog; there is
+no formal calibration, MatMul, `mul`, or `mul_`. The static timed/profile
+workload estimate is `9.459426836` seconds before setup and trace export, so no
+warmup or repetition reduction is justified.
+
+Formal profiler acceptance requires exact `Conv3DV2=KERNEL_AICORE` and
+`dispatch_kernel=KERNEL_AIVEC` task types, distinct physical streams, positive
+overlap, retained logical/physical IDs, and an inventory of every auxiliary AIV
+family. Auxiliary AIV total duration must stay below 1% of the primary Conv3D
+span. Known tiny `Greater` and `ZerosLike` families are allowed within that
+bound, but `compute_path_aic_only` remains false and no whole-path pure-AIC
+claim is made. Phase 3E.1 still requires one complete 21/21 matrix with both
+ranks above 5% and every profiler gate passing.
+
 ### Deliverables
 
 - implement native Ascend event ownership behind `EventOverlap`;

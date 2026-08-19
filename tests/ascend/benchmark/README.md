@@ -123,6 +123,18 @@ failed child, and stops at the first failure. The report summary distinguishes
 selected, executed, failed, and not-run cases so an outer TaskQueue timeout
 cannot be mistaken for a completed matrix.
 
+The formal `overlap-vs-serialized` row fixes communication at 256 tokens,
+hidden size 4096, and `num_sms=1`. Its compute workload is BF16 NCDHW Conv3D
+with input `(1,64,24,96,96)`, weight `(64,64,3,3,3)`, stride `(1,1,1)`, zero
+padding, dilation `(1,1,1)`, groups 1, and 256 iterations. It uses three
+warmups and seven measured repetitions without dynamic calibration. Acceptance
+requires all 21 matrix rows, at least 5% median improvement on both ranks,
+`Conv3DV2=KERNEL_AICORE`, `dispatch_kernel=KERNEL_AIVEC`, distinct physical
+streams, a positive overlap interval, and auxiliary AIV duration below 1% of
+the primary Conv3D span. Auxiliary families remain inventoried and the report
+keeps `compute_path_aic_only=false`; the complete path is not claimed as pure
+AIC.
+
 Retain the returned task ID and use `task-submit --wait ID`,
 `task-submit --status ID`, and `task-submit --log ID`. Resolve a failed or
 timed-out task before submitting another. A production-size run uses the same
