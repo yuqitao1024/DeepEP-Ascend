@@ -185,6 +185,35 @@ Because the overlap row failed, fail-fast did not run `record-failure`,
 component-timing diagnostic determines why positive physical overlap does not
 improve the current wall-time control.
 
+Component diagnostic task `task_20260820_033904_310487927692` used a fresh
+buffer per rank with 256 communication tokens, 256 compute iterations, zero
+warmups, one repetition, and a 120-second controller bound. It ran on devices
+`6,7` with the required 300-second outer bound and reached terminal
+`completed (exit=0)` after 59 seconds. The runner completed in 50.007 seconds
+and classified both ranks as `resource-contention`.
+
+Rank 0 measured communication-only/compute-only/serialized/overlapped walls
+of `0.279502830`/`0.095801200`/`0.359756550`/`0.357143020` seconds. Its
+component sum exceeded serialized by `0.015547480` seconds, within the measured
+`0.018765202` tolerance; overlap saved only `0.002613530` seconds, within its
+`0.017987828` tolerance. Rank 1 measured
+`0.279471440`/`0.095291040`/`0.359411640`/`0.357857410`; its corresponding
+gaps were `0.015350840` versus tolerance `0.018738124` and `0.001554230`
+versus `0.017970582`.
+
+The synchronous dispatch returns took `0.278580530` and `0.278420550`
+seconds, matching communication-only wall and ruling out an unserialized
+control. Asynchronous returns took only `0.007083720` and `0.007498330`, but
+event waits stretched to `0.342516940` and `0.342942600` seconds while compute
+completion after those waits was already below `0.000071` seconds. The exact
+traces still prove `269032.25us` and `268594.75us` of positive
+`MatMulV3`/DeepEP-dispatch overlap on physical streams `61/26` (logical
+`0/128`). The report SHA-256 is
+`13a5d76521841f9bfbf55aaa74e9b85828567417c078b0ce530cd031255ebb3e`.
+This evidence supports resource contention, not a synchronous baseline defect;
+production remains unchanged and rerunning the same full matrix is not
+justified. Phase 3E.1 remains unaccepted under the fixed 5% wall-time gate.
+
 ## Decisions
 
 ### Native resource model

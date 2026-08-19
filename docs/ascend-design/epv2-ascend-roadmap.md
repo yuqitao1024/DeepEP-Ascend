@@ -367,6 +367,26 @@ bounded component-timing diagnostic. It must distinguish an unserialized
 control from true compute/communication resource contention before any
 production change or further full-matrix run is considered.
 
+The single authorized component diagnostic,
+`task_20260820_033904_310487927692`, then completed successfully on devices
+`6,7`. Both ranks classified as `resource-contention`. Communication-only was
+`0.279502830`/`0.279471440` seconds and compute-only was
+`0.095801200`/`0.095291040`; serialized was
+`0.359756550`/`0.359411640`, within the measured 5%-of-component-sum
+tolerances of `0.018765202`/`0.018738124`. Synchronous dispatch return itself
+took `0.278580530`/`0.278420550`, proving that the baseline does wait for
+communication.
+
+Overlapped wall was `0.357143020`/`0.357857410`, saving only
+`0.002613530`/`0.001554230`, below measured serialized-wall tolerances of
+`0.017987828`/`0.017970582`. During overlap, event wait expanded to
+`0.342516940`/`0.342942600` seconds even though the profiler proved
+`269032.25us`/`268594.75us` of physical overlap on streams `61/26`. This rules
+out an unserialized control and supports compute/communication resource
+contention. No production change or unchanged full-matrix retry follows from
+this result; Phase 3E.1 remains unaccepted under its fixed 5% gate while the
+specific contention source is investigated separately.
+
 ### Deliverables
 
 - implement native Ascend event ownership behind `EventOverlap`;
