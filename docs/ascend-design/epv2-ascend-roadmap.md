@@ -83,7 +83,7 @@ accepted subphases.
 Status: closed for the current NPU8P development baseline.
 
 Freeze the validated downstream package built from HCOMM baseline `8c5d5ad`
-plus `third_party/patches/hcomm/hcomm-team-window-deregister.patch`. NPU8P
+plus `third-party/patches/hcomm/hcomm-team-window-deregister.patch`. NPU8P
 tasks consume it through `hcomm-deepep-current`. The MR 4655 backport is
 abandoned and further Phase 3A patch development is closed; neither resumes
 without a new explicit project decision. Revisit the dependency only when a

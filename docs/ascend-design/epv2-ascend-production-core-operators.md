@@ -174,7 +174,7 @@ internally.
 ### HCOMM memory and channel generations
 
 Repeated team/window lifecycles require an HCOMM source fix archived at
-`third_party/patches/hcomm/hcomm-team-window-deregister.patch`. The patch is
+`third-party/patches/hcomm/hcomm-team-window-deregister.patch`. The patch is
 based on HCOMM commit `8c5d5ad081e763f981c237d8dfdb15faea292d6e` and has
 SHA256 `7394982ec1c5432b3fe15898974e64441ba5a24a2bf5c110e49bb758174a9329`.
 
@@ -345,14 +345,14 @@ three explicit create/destroy cycles, descriptor proof that a later channel
 uses the new team synchronization memory, 100 public barrier generations,
 Phase 2D `barrier-repeat` and `teardown`, and injected rank-qualified timeout
 diagnostics. Task identifiers and artifact hashes are recorded in
-`third_party/patches/hcomm/README.md`.
+`third-party/patches/hcomm/README.md`.
 
 The final clean production task used `DEEP_EP_ASCEND_TESTING=0`, passed 53
 Ascend tests, 15 platform tests, 10 build tests, and a fresh 100-generation
 two-rank run. The same task also passed 100 injected-diagnostic generations.
 Its extension had no CUDA, NCCL, or NVSHMEM runtime dependency. The final task
 is `task_20260816_173926_27925920094`; artifact hashes and the HCOMM regression
-record are in `third_party/patches/hcomm/README.md`.
+record are in `third-party/patches/hcomm/README.md`.
 
 ## Phase 2F: BF16 Dispatch
 
