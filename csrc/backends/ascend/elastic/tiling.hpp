@@ -2,6 +2,7 @@
 
 #include <cstdint>
 
+#include "dispatch_parallel.hpp"
 #include "layout.hpp"
 #include "../transport/types.hpp"
 
@@ -42,7 +43,7 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 12;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 13;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -157,8 +158,12 @@ inline bool build_token_layout(
     return true;
 }
 
+inline bool build_dispatch_output_capacity(
+    const CoreTilingInput& input, std::uint64_t* output);
+
 inline bool build_workspace_layout(
-    const CoreTilingInput& input, WorkspaceLayout* output) {
+    const CoreTilingInput& input, std::uint64_t dispatch_output_capacity,
+    WorkspaceLayout* output) {
     WorkspaceLayout layout{};
     LayoutBuilder builder;
     layout.barrier_bytes = 2 * sizeof(std::uint64_t);
@@ -191,9 +196,23 @@ inline bool build_workspace_layout(
     layout.scratch_outbound_ingress_count =
         has_mode(input.mode_flags, CoreMode::kHybrid) ?
             layout.scratch_rank_count : 0;
+    const bool parallel_dispatch =
+        input.operation == OperationKind::kDispatch &&
+        !has_mode(input.mode_flags, CoreMode::kHybrid);
+    const std::uint64_t local_experts = parallel_dispatch ?
+        input.num_experts /
+            static_cast<std::uint64_t>(input.topology.world_size) : 0;
+    if (parallel_dispatch &&
+        !checked_add(
+            layout.scratch_rank_count, local_experts,
+            &layout.dispatch_error_count))
+        return false;
     std::uint64_t rank_u64_bytes = 0;
     std::uint64_t outbound_ingress_count_bytes = 0;
     std::uint64_t rank_i32_bytes = 0;
+    std::uint64_t dispatch_error_bytes = 0;
+    std::uint64_t dispatch_rank_bitmap_words = 0;
+    std::uint64_t dispatch_expert_bitmap_words = 0;
     std::uint64_t scratch_cursor = 0;
     if (!checked_multiply(
             layout.scratch_rank_count, sizeof(std::uint64_t),
@@ -204,6 +223,22 @@ inline bool build_workspace_layout(
         !checked_multiply(
             layout.scratch_outbound_ingress_count, sizeof(std::uint64_t),
             &outbound_ingress_count_bytes) ||
+        !checked_multiply(
+            layout.dispatch_error_count, sizeof(std::uint64_t),
+            &dispatch_error_bytes) ||
+        (parallel_dispatch &&
+         (!dispatch_owner_bitmap_words(
+              layout.scratch_rank_count, input.num_max_tokens_per_rank,
+              &dispatch_rank_bitmap_words) ||
+          !dispatch_owner_bitmap_words(
+              local_experts, dispatch_output_capacity,
+              &dispatch_expert_bitmap_words))) ||
+        !checked_multiply(
+            dispatch_rank_bitmap_words, sizeof(std::uint64_t),
+            &layout.dispatch_rank_bitmap_bytes) ||
+        !checked_multiply(
+            dispatch_expert_bitmap_words, sizeof(std::uint64_t),
+            &layout.dispatch_expert_bitmap_bytes) ||
         !checked_add(scratch_cursor, sizeof(std::uint64_t),
                      &scratch_cursor))
         return false;
@@ -229,7 +264,28 @@ inline bool build_workspace_layout(
         return false;
     layout.scratch_rank_flags_offset = scratch_cursor;
     if (!checked_add(
-            scratch_cursor, layout.scratch_rank_count, &scratch_cursor) ||
+            scratch_cursor, layout.scratch_rank_count, &scratch_cursor))
+        return false;
+    if (parallel_dispatch) {
+        if (!checked_align(
+                scratch_cursor, alignof(std::uint64_t), &scratch_cursor))
+            return false;
+        layout.dispatch_error_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, dispatch_error_bytes, &scratch_cursor))
+            return false;
+        layout.dispatch_rank_bitmap_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, layout.dispatch_rank_bitmap_bytes,
+                &scratch_cursor))
+            return false;
+        layout.dispatch_expert_bitmap_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, layout.dispatch_expert_bitmap_bytes,
+                &scratch_cursor))
+            return false;
+    }
+    if (
         !checked_align(
             scratch_cursor, kAscendElasticAlignment,
             &layout.scratch_bytes))
@@ -265,7 +321,17 @@ inline bool build_workspace_layout(
             &layout.scratch_rank_indices_offset) ||
         !checked_add(
             layout.scratch_offset, layout.scratch_rank_flags_offset,
-            &layout.scratch_rank_flags_offset))
+            &layout.scratch_rank_flags_offset) ||
+        (parallel_dispatch &&
+         (!checked_add(
+              layout.scratch_offset, layout.dispatch_error_offset,
+              &layout.dispatch_error_offset) ||
+          !checked_add(
+              layout.scratch_offset, layout.dispatch_rank_bitmap_offset,
+              &layout.dispatch_rank_bitmap_offset) ||
+          !checked_add(
+              layout.scratch_offset, layout.dispatch_expert_bitmap_offset,
+              &layout.dispatch_expert_bitmap_offset))))
         return false;
     *output = layout;
     return true;
@@ -358,9 +424,11 @@ inline TilingStatus build_core_tiling(
     CoreTiling tiling{};
     if (!detail::build_token_layout(
             input, element_bytes, &tiling.token_layout) ||
-        !detail::build_workspace_layout(input, &tiling.workspace_layout) ||
         !detail::build_dispatch_output_capacity(
-            input, &tiling.dispatch_output_capacity))
+            input, &tiling.dispatch_output_capacity) ||
+        !detail::build_workspace_layout(
+            input, tiling.dispatch_output_capacity,
+            &tiling.workspace_layout))
         return TilingStatus::overflow("layout size overflow");
     if (has_mode(input.mode_flags, CoreMode::kHybrid) &&
         !checked_multiply(

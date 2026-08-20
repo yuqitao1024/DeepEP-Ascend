@@ -1,7 +1,9 @@
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <type_traits>
 
+#include "csrc/backends/ascend/elastic/dispatch_parallel.hpp"
 #include "csrc/backends/ascend/elastic/layout.hpp"
 #include "csrc/backends/ascend/elastic/tiling.hpp"
 
@@ -44,6 +46,19 @@ bool aligned(std::uint64_t value) {
 }  // namespace
 
 int main() {
+    std::uint64_t bitmap_words = 0;
+    if (!dispatch_bitmap_words(0, &bitmap_words) || bitmap_words != 0 ||
+        !dispatch_bitmap_words(1, &bitmap_words) || bitmap_words != 1 ||
+        !dispatch_bitmap_words(64, &bitmap_words) || bitmap_words != 1 ||
+        !dispatch_bitmap_words(65, &bitmap_words) || bitmap_words != 2 ||
+        dispatch_bitmap_words(1, nullptr) ||
+        !dispatch_owner_bitmap_words(3, 65, &bitmap_words) ||
+        bitmap_words != 6 ||
+        dispatch_owner_bitmap_words(
+            std::numeric_limits<std::uint64_t>::max(), 65,
+            &bitmap_words))
+        return 29;
+
     CoreTiling tiling{};
     auto input = valid_input();
     auto status = build_core_tiling(input, &tiling);
@@ -209,11 +224,16 @@ int main() {
 
     struct ScratchFixture {
         int world_size;
-        std::uint64_t bytes;
+        std::uint64_t dispatch_bytes;
+        std::uint64_t dispatch_error_count;
+        std::uint64_t dispatch_rank_bitmap_bytes;
+        std::uint64_t dispatch_expert_bitmap_bytes;
+        std::uint64_t combine_bytes;
     };
     for (const auto fixture : {
-             ScratchFixture{2, 64}, ScratchFixture{4, 128},
-             ScratchFixture{8, 192}}) {
+             ScratchFixture{2, 160, 4, 16, 32, 64},
+             ScratchFixture{4, 256, 6, 32, 48, 128},
+             ScratchFixture{8, 416, 10, 64, 80, 192}}) {
         for (const auto operation : {
                  OperationKind::kDispatch, OperationKind::kCombine}) {
             input = valid_input();
@@ -228,7 +248,10 @@ int main() {
             const auto& rank_scratch = tiling.workspace_layout;
             const auto count =
                 static_cast<std::uint64_t>(fixture.world_size);
-            if (rank_scratch.scratch_bytes != fixture.bytes ||
+            const bool dispatch = operation == OperationKind::kDispatch;
+            const auto expected_bytes = dispatch ?
+                fixture.dispatch_bytes : fixture.combine_bytes;
+            if (rank_scratch.scratch_bytes != expected_bytes ||
                 rank_scratch.scratch_rank_count != count ||
                 rank_scratch.scratch_outbound_ingress_counts_offset != 0 ||
                 rank_scratch.scratch_outbound_ingress_count != 0 ||
@@ -249,8 +272,43 @@ int main() {
                     rank_scratch.scratch_rank_indices_offset +
                         count * sizeof(std::int32_t) ||
                 rank_scratch.scratch_rank_flags_offset + count >
-                    rank_scratch.scratch_offset + rank_scratch.scratch_bytes)
-                return 18;
+                    rank_scratch.scratch_offset + rank_scratch.scratch_bytes) {
+                std::cerr << "scratch mismatch operation="
+                          << static_cast<int>(operation)
+                          << " world_size=" << fixture.world_size
+                          << " actual_bytes=" << rank_scratch.scratch_bytes
+                          << " expected_bytes=" << expected_bytes << '\n';
+                return 32;
+            }
+            if (dispatch) {
+                if (rank_scratch.dispatch_error_count !=
+                        fixture.dispatch_error_count ||
+                    rank_scratch.dispatch_rank_bitmap_bytes !=
+                        fixture.dispatch_rank_bitmap_bytes ||
+                    rank_scratch.dispatch_expert_bitmap_bytes !=
+                        fixture.dispatch_expert_bitmap_bytes ||
+                    rank_scratch.dispatch_error_offset %
+                            alignof(std::uint64_t) != 0 ||
+                    rank_scratch.dispatch_rank_bitmap_offset <
+                        rank_scratch.dispatch_error_offset +
+                            rank_scratch.dispatch_error_count *
+                                sizeof(std::uint64_t) ||
+                    rank_scratch.dispatch_expert_bitmap_offset <
+                        rank_scratch.dispatch_rank_bitmap_offset +
+                            rank_scratch.dispatch_rank_bitmap_bytes ||
+                    rank_scratch.dispatch_expert_bitmap_offset +
+                            rank_scratch.dispatch_expert_bitmap_bytes >
+                        rank_scratch.scratch_offset +
+                            rank_scratch.scratch_bytes)
+                    return 30;
+            } else if (rank_scratch.dispatch_error_offset != 0 ||
+                       rank_scratch.dispatch_error_count != 0 ||
+                       rank_scratch.dispatch_rank_bitmap_offset != 0 ||
+                       rank_scratch.dispatch_rank_bitmap_bytes != 0 ||
+                       rank_scratch.dispatch_expert_bitmap_offset != 0 ||
+                       rank_scratch.dispatch_expert_bitmap_bytes != 0) {
+                return 31;
+            }
         }
     }
 
@@ -277,6 +335,12 @@ int main() {
             hybrid_scratch.scratch_outbound_ingress_counts_offset +
                 4 * sizeof(std::uint64_t) ||
         hybrid_scratch.scratch_bytes != 160 ||
+        hybrid_scratch.dispatch_error_offset != 0 ||
+        hybrid_scratch.dispatch_error_count != 0 ||
+        hybrid_scratch.dispatch_rank_bitmap_offset != 0 ||
+        hybrid_scratch.dispatch_rank_bitmap_bytes != 0 ||
+        hybrid_scratch.dispatch_expert_bitmap_offset != 0 ||
+        hybrid_scratch.dispatch_expert_bitmap_bytes != 0 ||
         hybrid_scratch.scratch_outbound_ingress_counts_offset +
                 4 * sizeof(std::uint64_t) >
             hybrid_scratch.scratch_offset + hybrid_scratch.scratch_bytes)

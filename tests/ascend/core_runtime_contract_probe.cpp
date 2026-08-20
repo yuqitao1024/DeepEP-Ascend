@@ -383,11 +383,11 @@ bool combine_runner_allocation_contract_matches() {
         required_core_launch_storage(dispatch),
         required_core_launch_storage(combine));
     return dispatch.communication_buffer_bytes == 3584 &&
-           dispatch.workspace_bytes == 448 &&
+           dispatch.workspace_bytes == 512 &&
            combine.communication_buffer_bytes == 2097152 &&
            combine.workspace_bytes == 448 &&
            allocation.communication_buffer_bytes == 2097152 &&
-           allocation.workspace_bytes == 448 &&
+           allocation.workspace_bytes == 512 &&
            combine.topology.world_size == 2;
 }
 
@@ -437,7 +437,7 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 }
 
 int main() {
-    static_assert(kCoreTilingAbiVersion == 12);
+    static_assert(kCoreTilingAbiVersion == 13);
     auto hybrid_tiling = valid_two_dimensional_tiling(
         OperationKind::kDispatch, 0,
         transport::TransportTopologyKind::kLogicalSimulation,
@@ -800,6 +800,29 @@ int main() {
     if (validate_internal_launch(malformed, storage).code !=
         CoreRuntimeStatusCode::kInvalidArgument)
         return 72;
+    malformed = dispatch_tiling;
+    malformed.workspace_layout.dispatch_error_offset +=
+        sizeof(std::uint64_t);
+    if (validate_internal_launch(malformed, storage).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 88;
+    malformed = dispatch_tiling;
+    --malformed.workspace_layout.dispatch_error_count;
+    if (validate_internal_launch(malformed, storage).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 89;
+    malformed = dispatch_tiling;
+    malformed.workspace_layout.dispatch_rank_bitmap_bytes +=
+        sizeof(std::uint64_t);
+    if (validate_internal_launch(malformed, storage).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 90;
+    malformed = dispatch_tiling;
+    malformed.workspace_layout.dispatch_expert_bitmap_offset +=
+        sizeof(std::uint64_t);
+    if (validate_internal_launch(malformed, storage).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 91;
     malformed = hybrid_tiling;
     --malformed.symmetric_window_layout
           .hybrid_dispatch_ingress_staging_shard_count;
@@ -1216,7 +1239,7 @@ int main() {
             status.message,
             "expanded combine weights require allow_multiple_reduction") != 0 ||
         launch_trace_size != 0)
-        return 58;
+        return 92;
     auto expanded_multiple_tiling = valid_tiling(
         OperationKind::kCombine, ElementKind::kBFloat16, 1, 2,
         mode_bit(CoreMode::kExpanded) |

@@ -89,6 +89,15 @@ bool same_workspace_layout(
            lhs.scratch_rank_indices_offset == rhs.scratch_rank_indices_offset &&
            lhs.scratch_rank_flags_offset == rhs.scratch_rank_flags_offset &&
            lhs.scratch_rank_count == rhs.scratch_rank_count &&
+           lhs.dispatch_error_offset == rhs.dispatch_error_offset &&
+           lhs.dispatch_error_count == rhs.dispatch_error_count &&
+           lhs.dispatch_rank_bitmap_offset ==
+               rhs.dispatch_rank_bitmap_offset &&
+           lhs.dispatch_rank_bitmap_bytes == rhs.dispatch_rank_bitmap_bytes &&
+           lhs.dispatch_expert_bitmap_offset ==
+               rhs.dispatch_expert_bitmap_offset &&
+           lhs.dispatch_expert_bitmap_bytes ==
+               rhs.dispatch_expert_bitmap_bytes &&
            lhs.total_bytes == rhs.total_bytes;
 }
 
