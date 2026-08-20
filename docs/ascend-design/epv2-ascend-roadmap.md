@@ -643,14 +643,17 @@ FP8 combine support, or evidence for the Phase 3E async/stream-overlap path.
 
 The accepted async source is commit
 `b3e43e86640276f869b3203122b961bbf173300e`, rebased onto
-`origin/main@9bce96e`. The exact source archive SHA-256 is
+`origin/main@9bce96e`. The exact source archive was created with
+`git archive --format=tar.gz -o <archive> HEAD`; its SHA-256 is
 `965d4b03116aeb82481bb7eea7ff727728edf950f60c73e146fe5230a89e63aa`;
-the pinned `fmt@a4c7e171` archive SHA-256 is
+the pinned `fmt@a4c7e171` archive was created with
+`git -C third-party/fmt archive --format=tar.gz -o <fmt-archive> HEAD` and has
+SHA-256
 `70ee451622c98bfdea3194c26bd643171a05771636e7a2d52c4cb992e55e3648`.
 Post-rebase host regression passed 171 tests with 2 environment skips and 67
 subtests.
 
-Serialized NPU8P acceptance produced four successful terminal tasks:
+Serialized NPU8P acceptance produced five successful terminal tasks:
 
 - `task_20260820_180654_6094346110`, devices `0,1`: clean build and complete
   two-rank FP8 async matrix, 16 selected, 16 executed, 16 passed, zero failed
@@ -668,13 +671,22 @@ Serialized NPU8P acceptance produced four successful terminal tasks:
   `547fee1b3d41c1a5e7fdf7df743212ca33720ad4720a8b39d77f3773d50ff3a0`
   and
   `ea9bbd763544a0c3f2c5cec447cc484daf6c137e159df858d73750eeec6cdda8`.
+- `task_20260820_184107_67532332300`, devices `0,1`: clean
+  `DEEP_EP_ASCEND_TESTING=0` build/import, dependency audit with no CUDA,
+  NCCL, or NVSHMEM, and 14/14 production-compatible FP8 async cases passed;
+  matrix and dependency-report SHA-256 values
+  `22aa24df1539040c0242bc68a081acec4334e1d16fa7855a0f512ea2a4a208cf`
+  and
+  `b068edf2736af18e693b3775bec213633c89d2799ec9aec7113399c9571641de`.
 
 The benchmark inventory now has 144 supported performance rows: 24
 synchronous baseline rows, 60 BF16 async/event rows, and 60 FP8 async/event
-rows. No row remains deferred. This closes Phase 3F for functional and
-topology acceptance. It does not claim throughput tuning, physical multi-host
-support, E5M2, FP8 combine, pre-epilogue events, same-buffer multiflight,
-hybrid/scale-out async, mapped CPU async, or graph capture.
+rows. No row remains deferred. This capability-based promotion does not claim
+that all 60 FP8 benchmark permutations were individually executed. This closes
+Phase 3F for functional and topology acceptance. It does not claim throughput
+tuning, physical multi-host support, E5M2, FP8 combine, pre-epilogue events,
+same-buffer multiflight, hybrid/scale-out async, mapped CPU async, or graph
+capture.
 
 ### Deliverables
 

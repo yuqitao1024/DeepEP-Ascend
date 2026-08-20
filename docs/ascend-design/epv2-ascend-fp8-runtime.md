@@ -257,16 +257,19 @@ this completes the synchronous Phase 3F acceptance boundary.
 #### Async qualification
 
 The async qualification source is commit
-`b3e43e86640276f869b3203122b961bbf173300e`. Its exact Git archive SHA-256 is
+`b3e43e86640276f869b3203122b961bbf173300e`. Its exact compressed archive was
+created with `git archive --format=tar.gz -o <archive> HEAD`; its SHA-256 is
 `965d4b03116aeb82481bb7eea7ff727728edf950f60c73e146fe5230a89e63aa`.
 The separately archived `fmt` gitlink is
-`a4c7e17133ee9cb6a2f45545f6e974dd3c393efa`, with archive SHA-256
+`a4c7e17133ee9cb6a2f45545f6e974dd3c393efa`. It was created with
+`git -C third-party/fmt archive --format=tar.gz -o <fmt-archive> HEAD` and has
+SHA-256
 `70ee451622c98bfdea3194c26bd643171a05771636e7a2d52c4cb992e55e3648`.
 The branch was rebased onto `origin/main` commit
 `9bce96e` before this archive was produced. The complete post-rebase host gate
 passed 171 tests with 2 environment skips across 67 subtests.
 
-Four serialized NPU8P tasks used system CANN 9.2.0, the fixed
+Five serialized NPU8P tasks used system CANN 9.2.0, the fixed
 `hcomm-deepep-current` package, and the qualified Python 3.10/Torch-NPU 2.10
 environment:
 
@@ -293,10 +296,21 @@ environment:
   `547fee1b3d41c1a5e7fdf7df743212ca33720ad4720a8b39d77f3773d50ff3a0`
   and
   `ea9bbd763544a0c3f2c5cec447cc484daf6c137e159df858d73750eeec6cdda8`.
+- `task_20260820_184107_67532332300` ran on devices `0,1` from a second clean
+  extraction, built with `DEEP_EP_ASCEND_TESTING=0`, imported the extension,
+  and found no CUDA, NCCL, or NVSHMEM dependency. It reached
+  `completed (exit=0)` and passed 14/14 production-compatible FP8 async cases;
+  only the two testing-only injected completion/destroy failures were omitted.
+  The NDJSON and dependency-report SHA-256 values are
+  `22aa24df1539040c0242bc68a081acec4334e1d16fa7855a0f512ea2a4a208cf`
+  and
+  `b068edf2736af18e693b3775bec213633c89d2799ec9aec7113399c9571641de`.
 
 This evidence promotes the 60 FP8 async/event benchmark rows. Together with
 the 24 synchronous baseline rows and 60 BF16 async/event rows, all 144 rows
-classify as supported performance cases. The qualification is functional and
-topological: it does not claim tuned throughput, physical multi-host support,
-E5M2, FP8 combine, pre-epilogue events, same-buffer multiflight,
-hybrid/scale-out async, mapped CPU async, or graph capture.
+classify as supported performance cases. The promotion follows the covered
+capability dimensions; it does not claim that every one of the 60 benchmark
+permutations was executed during qualification. The qualification is
+functional and topological: it does not claim tuned throughput, physical
+multi-host support, E5M2, FP8 combine, pre-epilogue events, same-buffer
+multiflight, hybrid/scale-out async, mapped CPU async, or graph capture.
