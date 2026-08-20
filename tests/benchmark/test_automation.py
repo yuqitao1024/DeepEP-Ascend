@@ -3,6 +3,7 @@ from dataclasses import asdict
 import json
 import math
 import re
+import signal
 from pathlib import Path
 import sys
 
@@ -911,12 +912,13 @@ class _TeeFailureStdout:
 
 
 class _LaunchedProcessDouble:
-    def __init__(self, fail_first_wait=False):
+    def __init__(self, wait_outcomes=()):
+        self.pid = 4321
         self.stdout = _TeeFailureStdout()
         self.terminate_called = False
         self.kill_called = False
         self.wait_calls = []
-        self.fail_first_wait = fail_first_wait
+        self.wait_outcomes = list(wait_outcomes)
 
     def poll(self):
         return None
@@ -930,8 +932,11 @@ class _LaunchedProcessDouble:
 
     def wait(self, timeout=None):
         self.wait_calls.append(timeout)
-        if self.fail_first_wait and len(self.wait_calls) == 1:
-            raise OSError("first wait failed")
+        if self.wait_outcomes:
+            outcome = self.wait_outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
         return -9
 
 
@@ -943,25 +948,90 @@ class _FailingLogTee:
         raise AssertionError("flush must follow a successful write")
 
 
-def test_run_logged_command_kills_and_reaps_child_when_log_tee_fails(monkeypatch):
+def test_run_logged_command_starts_child_in_new_session(monkeypatch, capsys):
     process = _LaunchedProcessDouble()
+    popen_call = {}
+
+    def capture_popen(command, **kwargs):
+        popen_call["command"] = command
+        popen_call["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setattr(run_ep.subprocess, "Popen", capture_popen)
+
+    exit_code, output = run_ep.run_logged_command(
+        ("harmless-child",), _RecordingLogTee()
+    )
+
+    assert exit_code == -9
+    assert output == "child output before tee failure\n"
+    assert capsys.readouterr().out == output
+    assert popen_call["command"] == ("harmless-child",)
+    assert popen_call["kwargs"]["start_new_session"] is True
+
+
+class _RecordingLogTee:
+    def __init__(self):
+        self.content = ""
+
+    def write(self, content):
+        self.content += content
+
+    def flush(self):
+        pass
+
+
+def test_run_logged_command_signals_process_group_and_uses_bounded_waits(
+    monkeypatch
+):
+    process = _LaunchedProcessDouble(wait_outcomes=(
+        run_ep.subprocess.TimeoutExpired("harmless-child", 5.0),
+        -9,
+    ))
+    group_signals = []
     monkeypatch.setattr(run_ep.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        run_ep.os,
+        "killpg",
+        lambda process_group, sent_signal: group_signals.append(
+            (process_group, sent_signal)
+        ),
+    )
 
     with pytest.raises(OSError, match="run log write failed"):
         run_ep.run_logged_command(("harmless-child",), _FailingLogTee())
 
     assert process.stdout.closed
-    assert process.terminate_called
-    assert process.kill_called
-    assert process.wait_calls
+    assert group_signals == [
+        (process.pid, signal.SIGTERM),
+        (process.pid, signal.SIGKILL),
+    ]
+    assert process.wait_calls == [5.0, 5.0]
+    assert not process.terminate_called
+    assert not process.kill_called
 
 
-def test_run_logged_command_retries_reaping_without_masking_tee_error(monkeypatch):
-    process = _LaunchedProcessDouble(fail_first_wait=True)
+def test_run_logged_command_never_waits_unbounded_when_group_cleanup_fails(
+    monkeypatch
+):
+    process = _LaunchedProcessDouble(wait_outcomes=(
+        run_ep.subprocess.TimeoutExpired("harmless-child", 5.0),
+        run_ep.subprocess.TimeoutExpired("harmless-child", 5.0),
+    ))
+    group_signals = []
     monkeypatch.setattr(run_ep.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    def fail_group_signal(process_group, sent_signal):
+        group_signals.append((process_group, sent_signal))
+        raise OSError("group signal failed")
+
+    monkeypatch.setattr(run_ep.os, "killpg", fail_group_signal)
 
     with pytest.raises(OSError, match="run log write failed"):
         run_ep.run_logged_command(("harmless-child",), _FailingLogTee())
 
-    assert process.kill_called
-    assert len(process.wait_calls) == 2
+    assert group_signals == [
+        (process.pid, signal.SIGTERM),
+        (process.pid, signal.SIGKILL),
+    ]
+    assert process.wait_calls == [5.0, 5.0]

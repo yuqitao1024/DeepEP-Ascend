@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 from typing import TextIO
@@ -33,6 +34,7 @@ FINAL_REPORT_NAME = "benchmark.json"
 FINAL_MARKDOWN_NAME = "benchmark.md"
 WORKLOAD_NAME = "workload.json"
 RUN_LOG_NAME = "run.log"
+CHILD_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,7 @@ def run_logged_command(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        start_new_session=True,
     )
     output = []
     assert process.stdout is not None
@@ -151,37 +154,15 @@ def _stop_and_reap_child(process) -> None:
     except BaseException:
         pass
 
-    try:
-        running = process.poll() is None
-    except BaseException:
-        running = True
-    if running:
+    for group_signal in (signal.SIGTERM, signal.SIGKILL):
         try:
-            process.terminate()
-        except BaseException:
-            try:
-                process.kill()
-            except BaseException:
-                pass
-
-    try:
-        process.wait(timeout=5.0 if running else None)
-        return
-    except (subprocess.TimeoutExpired, OSError):
-        try:
-            process.kill()
+            os.killpg(process.pid, group_signal)
         except BaseException:
             pass
-    except BaseException:
         try:
-            process.kill()
+            process.wait(timeout=CHILD_CLEANUP_TIMEOUT_SECONDS)
         except BaseException:
             pass
-
-    try:
-        process.wait()
-    except BaseException:
-        pass
 
 
 def _utc_now() -> str:
