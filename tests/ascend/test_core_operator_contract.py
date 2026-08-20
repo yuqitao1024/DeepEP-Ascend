@@ -57,8 +57,57 @@ STREAM_EVENT_CAPABILITY_PROBE = \
 STREAM_EVENT_CAPABILITY_RUNNER = \
     ROOT / "tests/ascend/stream_event/run_capability_probe.py"
 ASYNC_RUNTIME_PROBE = ROOT / "tests/ascend/async_runtime_probe.cpp"
+ELASTIC_BINDING_PROBE = ROOT / "tests/ascend/elastic_binding_probe.cpp"
 ELASTIC = ROOT / "csrc/backends/ascend/elastic"
 CORE_OPS = ROOT / "tests/ascend/core_ops"
+
+BINDING_PYBIND11_HEADER = r"""
+#pragma once
+#include <functional>
+#include <string_view>
+#include <utility>
+
+extern bool binding_probe_gil_released;
+
+namespace pybind11 {
+
+class gil_scoped_release {
+public:
+    gil_scoped_release() { binding_probe_gil_released = true; }
+    ~gil_scoped_release() { binding_probe_gil_released = false; }
+};
+
+class module_ {
+public:
+    template <typename Function>
+    void def(const char*, Function&&) {}
+};
+
+template <typename... Args>
+struct init {};
+
+template <typename Type>
+class class_ {
+public:
+    class_(module_&, const char*) {}
+
+    template <typename... Args>
+    class_& def(init<Args...>) {
+        return *this;
+    }
+
+    template <typename Function>
+    class_& def(const char* name, Function&& function) {
+        if (std::string_view(name) == "destroy") {
+            Type instance;
+            std::invoke(std::forward<Function>(function), instance);
+        }
+        return *this;
+    }
+};
+
+}  // namespace pybind11
+"""
 
 
 def _component_stage_seconds():
@@ -1127,6 +1176,24 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                  "-pthread", f"-I{ROOT}",
                  str(PRODUCTION_OPERATION_COORDINATOR_PROBE),
+                 "-o", str(binary)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_ascend_destroy_binding_releases_gil_without_changing_cuda(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            (directory / "pybind11").mkdir()
+            (directory / "pybind11/pybind11.h").write_text(
+                BINDING_PYBIND11_HEADER)
+            binary = directory / "elastic_binding_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{directory}", f"-I{ROOT}", str(ELASTIC_BINDING_PROBE),
                  "-o", str(binary)], capture_output=True, text=True,
                 check=False)
             self.assertEqual(compile_result.returncode, 0,

@@ -46,7 +46,7 @@ def ascend_current_stream_is_capturing() -> bool:
     if is_cuda():
         return False
     query = getattr(torch.npu, "is_current_stream_capturing", None)
-    return bool(query()) if callable(query) else False
+    return bool(query()) if callable(query) else True
 
 
 def unwrap_event(event):

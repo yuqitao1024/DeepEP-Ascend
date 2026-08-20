@@ -1572,6 +1572,34 @@ def _scenario_ascend_dispatch():
     assert handle.token_metadata_at_forward.cpu_calls == \
         descriptor_cpu_calls_before_capture
 
+    capture_query = torch.npu.is_current_stream_capturing
+    torch.npu.is_current_stream_capturing = None
+    try:
+        for name, kwargs in (
+                ("cached", {
+                    "topk_weights": cached_topk_weights,
+                    "handle": handle,
+                }),
+                ("uncached", {
+                    "topk_idx": topk_idx,
+                    "num_experts": 2,
+                    "num_max_tokens_per_rank": 1,
+                })):
+            try:
+                buffer.dispatch(x, **kwargs)
+            except RuntimeError as error:
+                assert "unsupported_graph_capture" in str(error), (name, error)
+            else:
+                raise AssertionError(
+                    f"Ascend dispatch accepted missing capture probe for {name}")
+    finally:
+        torch.npu.is_current_stream_capturing = capture_query
+    assert len(runtime.dispatch_calls) == rejected_calls
+    assert runtime.dispatch_generation_queries == \
+        generation_queries_before_capture
+    assert handle.token_metadata_at_forward.cpu_calls == \
+        descriptor_cpu_calls_before_capture
+
     buffer.allow_hybrid_mode = True
     try:
         buffer.dispatch(
@@ -2078,6 +2106,22 @@ def _scenario_ascend_combine():
                     f"Ascend combine accepted graph capture for {name}")
     finally:
         torch.npu.capturing = False
+    assert len(runtime.combine_calls) == calls_before
+    assert runtime.dispatch_generation_queries == \
+        generation_queries_before_capture
+    assert descriptor.cpu_calls == descriptor_cpu_calls_before_capture
+
+    capture_query = torch.npu.is_current_stream_capturing
+    torch.npu.is_current_stream_capturing = None
+    try:
+        try:
+            buffer.combine(x, handle)
+        except RuntimeError as error:
+            assert "unsupported_graph_capture" in str(error), error
+        else:
+            raise AssertionError("Ascend combine accepted missing capture probe")
+    finally:
+        torch.npu.is_current_stream_capturing = capture_query
     assert len(runtime.combine_calls) == calls_before
     assert runtime.dispatch_generation_queries == \
         generation_queries_before_capture

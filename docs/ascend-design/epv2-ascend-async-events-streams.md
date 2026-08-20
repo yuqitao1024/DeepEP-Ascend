@@ -445,9 +445,9 @@ This post-rebase result is the integration qualification record for Phase
 
 ### Native resource model
 
-- Each `ElasticBuffer` owns one Torch-NPU pool stream for communication. The
-  stream is retained as a `c10_npu::NPUStream` value and is never destroyed by
-  DeepEP.
+- Each `ElasticBuffer` owns one Torch-NPU pool stream identity for
+  communication. DeepEP retains the checked identity while Torch-NPU owns the
+  underlying pool stream; DeepEP never destroys that stream.
 - DeepEP owns raw CANN events through a small RAII adapter. Raw events are used
   instead of `c10_npu::NPUEvent` because Phase 3E needs explicit timeout,
   backend-code, and retryable destruction behavior.
