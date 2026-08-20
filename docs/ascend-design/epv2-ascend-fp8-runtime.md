@@ -3,10 +3,13 @@
 ## Status
 
 Synchronous single-host execution is implemented and qualified at 2, 4, and
-8 ranks. The pure-scale-up async/stream-overlap extension described here is
-the next implementation slice. Performance qualification, physical
-multi-host execution, FP8 combine, the Phase 3E.3 pre-epilogue dependency
-boundary, and Phase 3E.4 same-buffer multiflight remain outside this scope.
+8 ranks. Pure-scale-up cached and CPU-synchronized non-cached async dispatch
+is implemented and qualified with the complete two-rank public matrix plus
+focused four-rank and eight-rank smoke coverage. The 144-row benchmark
+inventory is runnable with no deferred FP8 rows. Throughput qualification,
+physical multi-host execution, FP8 combine, the Phase 3E.3 pre-epilogue
+dependency boundary, and Phase 3E.4 same-buffer multiflight remain outside
+this scope.
 
 ## Goal
 
@@ -245,12 +248,55 @@ benchmark and exposed a four-rank BF16 reference-order error. Commit `72de60f`
 made the reference quantize each BF16 contribution before FP32 accumulation
 and added a host regression.
 
-Final task `task_20260819_184826_108102819968` ran on devices 0-7 at commit
-`72de60f` and exited 0. It passed 56 focused host tests plus 20 subtests, both
-two-rank benchmark cases, and all 12 FP8 runtime cases at four and eight ranks.
-Combined with the clean-build and broad two-rank evidence, this completes the
-synchronous Phase 3F acceptance boundary.
+Final synchronous task `task_20260819_184826_108102819968` ran on devices 0-7
+at commit `72de60f` and exited 0. It passed 56 focused host tests plus 20
+subtests, both two-rank benchmark cases, and all 12 FP8 runtime cases at four
+and eight ranks. Combined with the clean-build and broad two-rank evidence,
+this completes the synchronous Phase 3F acceptance boundary.
 
-Compile coverage or an enabled benchmark case alone is not completion, and the
-qualification above does not claim performance, physical multi-host,
-FP8-combine, or async/stream-overlap support.
+#### Async qualification
+
+The async qualification source is commit
+`b3e43e86640276f869b3203122b961bbf173300e`. Its exact Git archive SHA-256 is
+`965d4b03116aeb82481bb7eea7ff727728edf950f60c73e146fe5230a89e63aa`.
+The separately archived `fmt` gitlink is
+`a4c7e17133ee9cb6a2f45545f6e974dd3c393efa`, with archive SHA-256
+`70ee451622c98bfdea3194c26bd643171a05771636e7a2d52c4cb992e55e3648`.
+The branch was rebased onto `origin/main` commit
+`9bce96e` before this archive was produced. The complete post-rebase host gate
+passed 171 tests with 2 environment skips across 67 subtests.
+
+Four serialized NPU8P tasks used system CANN 9.2.0, the fixed
+`hcomm-deepep-current` package, and the qualified Python 3.10/Torch-NPU 2.10
+environment:
+
+- `task_20260820_180654_6094346110` ran on devices `0,1`, clean-built the
+  testing-enabled extension, reached `completed (exit=0)`, and passed all 16
+  selected and executed two-rank FP8 async cases with zero failed or not-run
+  rows. The JSON report SHA-256 is
+  `da7cf149c47d83cf1affa37979eb132257bcb3129a14b8e6f0aa627b46a867c7`.
+- `task_20260820_181250_62359216052` ran on devices `0-3`, reached
+  `completed (exit=0)`, and passed 6/6 four-rank smoke cases. These cover
+  cached and non-cached normal/expanded dispatch, both SF representations and
+  layouts, predecessor ordering, and empty column-major output. The NDJSON
+  evidence SHA-256 is
+  `c0ebe485e39ba344d21dc4d23861722934f14549df927fbcdf5de6e6827468b5`.
+- `task_20260820_181454_62831218012` ran on devices `0-7`, reached
+  `completed (exit=0)`, and passed 6/6 eight-rank smoke cases. It covers the
+  same cached/non-cached representation matrix, predecessor ordering, and
+  asymmetric routing. The NDJSON evidence SHA-256 is
+  `f6b0ea4719d13f85f30092e36b9986a6ae91077ca346e7a1ca64aed1c981e69d`.
+- `task_20260820_182030_6397023024` ran on devices `0,1`, reached
+  `completed (exit=0)`, and passed all 15 BF16 non-cached async regression
+  cases plus all 12 synchronous FP8 runtime cases. Their evidence SHA-256
+  values are
+  `547fee1b3d41c1a5e7fdf7df743212ca33720ad4720a8b39d77f3773d50ff3a0`
+  and
+  `ea9bbd763544a0c3f2c5cec447cc484daf6c137e159df858d73750eeec6cdda8`.
+
+This evidence promotes the 60 FP8 async/event benchmark rows. Together with
+the 24 synchronous baseline rows and 60 BF16 async/event rows, all 144 rows
+classify as supported performance cases. The qualification is functional and
+topological: it does not claim tuned throughput, physical multi-host support,
+E5M2, FP8 combine, pre-epilogue events, same-buffer multiflight,
+hybrid/scale-out async, mapped CPU async, or graph capture.

@@ -265,9 +265,8 @@ benchmark rows.
 Phase 3E.3 (a real pre-epilogue dependency boundary) and Phase
 3E.4 (same-buffer multiflight resource slots) remain deferred design
 directions. The public FP8 async matrix and all 60 FP8 functional benchmark
-rows are now implemented and runnable, but they are not credited to Phase
-3E.2 and carry no production-qualification claim before Phase 3F async
-qualification completes.
+rows are implemented, runnable, and qualified under Phase 3F below. They are
+not credited to Phase 3E.2.
 
 Phase 3E.1 and Phase 3E.2 are accepted as of 2026-08-20. The
 production-backed evidence appears below. Phase 3E overall remains incomplete;
@@ -600,10 +599,12 @@ functional rows.
 
 ## Phase 3F: FP8 Runtime
 
-Status: synchronous E4M3 dispatch with FP32 or packed UE8M0x4 scale-factor
-transport is implemented; BF16 combine remains the selected upstream-compatible
-combine path. The synchronous Phase 3F scope is complete for single-host 2-,
-4-, and 8-rank execution.
+Status: complete for the selected E4M3 functional boundary. Synchronous E4M3
+dispatch with FP32 or packed UE8M0x4 scale-factor transport is qualified at
+2, 4, and 8 ranks. Pure-scale-up cached and CPU-synchronized non-cached async
+dispatch is qualified with the complete two-rank public matrix and focused
+four-rank and eight-rank smoke coverage. BF16 combine remains the selected
+upstream-compatible combine path.
 
 The public two-rank FP8 async production matrix is implemented and runnable.
 It covers cached and non-cached normal/expanded dispatch, FP32 row-major and
@@ -611,8 +612,8 @@ packed UE8M0x4 column-major scale-factor output, communication-stream
 allocation, predecessor ordering, empty/asymmetric routing, representation
 changes, repeated generations, event drop, completion mismatch, and retryable
 pending destruction. The benchmark inventory consequently exposes all 144
-rows as runnable. This is implementation status only: async 2-, 4-, and
-8-rank production qualification and its evidence remain open.
+rows as runnable. The async 2-, 4-, and 8-rank production qualification is
+recorded below.
 
 TaskQueue run `task_20260819_171408_412650329832` established the clean
 `DEEP_EP_ASCEND_TESTING=0` CANN 9.2.0 production build/import and dependency
@@ -637,6 +638,43 @@ FP8 runtime matrix at both four and eight ranks. Together with the clean-build,
 dependency, and broad two-rank evidence above, this closes synchronous Phase
 3F. It is not performance qualification, physical multi-host qualification,
 FP8 combine support, or evidence for the Phase 3E async/stream-overlap path.
+
+#### FP8 async acceptance
+
+The accepted async source is commit
+`b3e43e86640276f869b3203122b961bbf173300e`, rebased onto
+`origin/main@9bce96e`. The exact source archive SHA-256 is
+`965d4b03116aeb82481bb7eea7ff727728edf950f60c73e146fe5230a89e63aa`;
+the pinned `fmt@a4c7e171` archive SHA-256 is
+`70ee451622c98bfdea3194c26bd643171a05771636e7a2d52c4cb992e55e3648`.
+Post-rebase host regression passed 171 tests with 2 environment skips and 67
+subtests.
+
+Serialized NPU8P acceptance produced four successful terminal tasks:
+
+- `task_20260820_180654_6094346110`, devices `0,1`: clean build and complete
+  two-rank FP8 async matrix, 16 selected, 16 executed, 16 passed, zero failed
+  and zero not-run; report SHA-256
+  `da7cf149c47d83cf1affa37979eb132257bcb3129a14b8e6f0aa627b46a867c7`.
+- `task_20260820_181250_62359216052`, devices `0-3`: four-rank topology smoke,
+  6/6 passed; evidence SHA-256
+  `c0ebe485e39ba344d21dc4d23861722934f14549df927fbcdf5de6e6827468b5`.
+- `task_20260820_181454_62831218012`, devices `0-7`: eight-rank topology
+  smoke, 6/6 passed; evidence SHA-256
+  `f6b0ea4719d13f85f30092e36b9986a6ae91077ca346e7a1ca64aed1c981e69d`.
+- `task_20260820_182030_6397023024`, devices `0,1`: BF16 non-cached async
+  regression 15/15 and synchronous FP8 runtime regression 12/12, both passed;
+  evidence SHA-256 values
+  `547fee1b3d41c1a5e7fdf7df743212ca33720ad4720a8b39d77f3773d50ff3a0`
+  and
+  `ea9bbd763544a0c3f2c5cec447cc484daf6c137e159df858d73750eeec6cdda8`.
+
+The benchmark inventory now has 144 supported performance rows: 24
+synchronous baseline rows, 60 BF16 async/event rows, and 60 FP8 async/event
+rows. No row remains deferred. This closes Phase 3F for functional and
+topology acceptance. It does not claim throughput tuning, physical multi-host
+support, E5M2, FP8 combine, pre-epilogue events, same-buffer multiflight,
+hybrid/scale-out async, mapped CPU async, or graph capture.
 
 ### Deliverables
 
