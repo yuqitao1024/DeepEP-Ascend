@@ -317,6 +317,62 @@ bool record_and_wait_enforce_device_identity() {
         wait_lease != nullptr && fake.wait_calls == 2;
 }
 
+bool failed_wait_does_not_release_an_existing_lease() {
+    const auto run_case = [](int mode) {
+        FakeApi fake;
+        auto created = runtime::create_native_event(api_for(&fake), 2);
+        if (!created.status.ok() ||
+            !created.event->record(stream_for(2)).ok())
+            return false;
+
+        std::shared_ptr<runtime::NativeEventWaitLease> active_lease;
+        if (!created.event->wait(stream_for(2), &active_lease).ok() ||
+            active_lease == nullptr)
+            return false;
+        const int successful_wait_calls = fake.wait_calls;
+
+        std::shared_ptr<runtime::NativeEventWaitLease> failed_lease;
+        transport::TransportStatus failure;
+        if (mode == 0) {
+            failure = created.event->wait(stream_for(2), nullptr);
+        } else if (mode == 1) {
+            failed_lease = active_lease;
+            failure = created.event->wait(stream_for(2), &failed_lease);
+        } else if (mode == 2) {
+            failure = created.event->wait(stream_for(3), &failed_lease);
+        } else {
+            fake.wait_result = kWaitFailure;
+            failure = created.event->wait(stream_for(2), &failed_lease);
+        }
+        if (failure.ok() || !is_failure(
+                failure,
+                mode == 3 ? transport::TransportStatusCode::kRuntimeFailure :
+                    transport::TransportStatusCode::kInvalidArgument,
+                "wait_event", mode == 3 ? kWaitFailure : 0) ||
+            failed_lease != (mode == 1 ? active_lease : nullptr) ||
+            fake.wait_calls != successful_wait_calls + (mode == 3 ? 1 : 0))
+            return false;
+
+        fake.wait_result = 0;
+        if (!created.event->finish(20).ok())
+            return false;
+        const auto blocked = created.event->destroy();
+        if (!is_failure(
+                blocked, transport::TransportStatusCode::kInvalidArgument,
+                "destroy_event") || fake.destroy_calls != 0)
+            return false;
+        failed_lease.reset();
+        active_lease.reset();
+        return created.event->destroy().ok() && fake.destroy_calls == 1;
+    };
+
+    const bool null_output = run_case(0);
+    const bool occupied_output = run_case(1);
+    const bool cross_device = run_case(2);
+    const bool backend_failure = run_case(3);
+    return null_output && occupied_output && cross_device && backend_failure;
+}
+
 bool finish_is_bounded_and_idempotent() {
     FakeApi fake;
     auto created = runtime::create_native_event(api_for(&fake), 2);
@@ -1475,6 +1531,7 @@ int main() {
     const bool passed = invalid_callback_tables_are_rejected() &&
         default_api_is_complete_or_unavailable() &&
         create_failures_are_reported() && record_and_wait_enforce_device_identity() &&
+        failed_wait_does_not_release_an_existing_lease() &&
         create_checks_the_current_device_before_allocating_an_event() &&
         finish_is_bounded_and_idempotent() &&
         timed_out_recorded_event_can_complete_and_retry_destruction() &&

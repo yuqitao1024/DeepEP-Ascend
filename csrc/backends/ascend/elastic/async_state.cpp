@@ -91,7 +91,65 @@ TransportStatus invalid_publish(const char* message) {
     return TransportStatus::invalid("publish_pending", message);
 }
 
+TransportStatus retire_enqueued_dependency(
+    EventDependency& dependency, std::uint64_t timeout_ms) {
+    if (dependency.retirement_event == nullptr)
+        return TransportStatus::invalid(
+            "retire_dependency", "retirement event is unavailable");
+    if (!dependency.retirement_recorded) {
+        const auto status = dependency.retirement_event->record(
+            dependency.retirement_stream);
+        if (!status.ok())
+            return status;
+        dependency.retirement_recorded = true;
+    }
+    return dependency.retirement_event->finish(timeout_ms);
+}
+
 }  // namespace
+
+EnqueuedEventDependencyGuard::~EnqueuedEventDependencyGuard() {
+    if (!quarantine_on_destroy_)
+        return;
+    if (owner_ != nullptr)
+        owner_->retire_or_quarantine(std::move(dependency_));
+    if (dependency_ != nullptr) {
+        // Without a completed comm-stream marker, releasing this capsule could
+        // let source teardown destroy an event still referenced by the device.
+        (void)dependency_.release();
+    }
+}
+
+void EnqueuedEventDependencyGuard::adopt(
+    EventDependency dependency, std::shared_ptr<AsyncBufferState> owner) {
+    dependency_ = std::make_unique<EventDependency>(std::move(dependency));
+    owner_ = std::move(owner);
+    quarantine_on_destroy_ = false;
+}
+
+EventDependency& EnqueuedEventDependencyGuard::dependency() noexcept {
+    return *dependency_;
+}
+
+void EnqueuedEventDependencyGuard::arm() noexcept {
+    quarantine_on_destroy_ = dependency_ != nullptr &&
+        dependency_->wait_lease != nullptr;
+}
+
+void EnqueuedEventDependencyGuard::mark_retirement_recorded() noexcept {
+    dependency_->retirement_recorded = true;
+}
+
+void EnqueuedEventDependencyGuard::copy_to(
+    EventDependency& output) const noexcept {
+    output = *dependency_;
+}
+
+void EnqueuedEventDependencyGuard::dismiss() noexcept {
+    quarantine_on_destroy_ = false;
+    dependency_.reset();
+    owner_.reset();
+}
 
 const char* diagnostic_name(
     transport::DeviceTransportError error) noexcept {
@@ -395,6 +453,7 @@ struct AsyncBufferState::Impl {
     mutable std::mutex mutex;
     std::condition_variable cv;
     std::shared_ptr<PendingOperation> pending;
+    std::unique_ptr<EventDependency> quarantined_dependency;
     DestroyState destroy_state = DestroyState::kAlive;
     TransportStatus destroy_result = TransportStatus::success();
     bool destroy_reserved = false;
@@ -426,8 +485,9 @@ AsyncBufferState::~AsyncBufferState() {
         bool unresolved_launch = false;
         {
             std::lock_guard<std::mutex> lock(impl_->mutex);
-            unresolved_launch = impl_->pending != nullptr &&
-                !impl_->pending->teardown_complete();
+            unresolved_launch = impl_->quarantined_dependency != nullptr ||
+                (impl_->pending != nullptr &&
+                 !impl_->pending->teardown_complete());
         }
         if (!unresolved_launch)
             return;
@@ -499,6 +559,32 @@ PendingOperationCreateResult AsyncBufferState::publish(
     return {TransportStatus::success(), std::move(operation)};
 }
 
+void AsyncBufferState::retire_or_quarantine(
+    std::unique_ptr<EventDependency> dependency) noexcept {
+    if (dependency == nullptr)
+        return;
+    try {
+        const auto status = retire_enqueued_dependency(
+            *dependency, impl_->owned_timeout_ms);
+        if (status.ok())
+            return;
+        bool stored = false;
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            if (impl_->quarantined_dependency == nullptr) {
+                impl_->quarantined_dependency = std::move(dependency);
+                stored = true;
+            }
+        }
+        impl_->context->coordinator.poison();
+        if (stored)
+            return;
+    } catch (...) {
+        impl_->context->coordinator.poison();
+    }
+    (void)dependency.release();
+}
+
 TransportStatus AsyncBufferState::finish_pending() {
     std::shared_ptr<PendingOperation> pending;
     {
@@ -553,6 +639,22 @@ TransportStatus AsyncBufferState::destroy() {
     auto pending_status = TransportStatus::success();
     BufferOperationCoordinator::DestroyLease teardown;
     while (true) {
+        EventDependency* quarantined_dependency = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            quarantined_dependency = impl_->quarantined_dependency.get();
+        }
+        if (quarantined_dependency != nullptr) {
+            const auto retirement_status = retire_enqueued_dependency(
+                *quarantined_dependency, impl_->owned_timeout_ms);
+            if (!retirement_status.ok()) {
+                impl_->finish_destroy_attempt();
+                return retirement_status;
+            }
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            if (impl_->quarantined_dependency.get() == quarantined_dependency)
+                impl_->quarantined_dependency.reset();
+        }
         if (pending != nullptr) {
             const bool was_terminal = terminal(pending->state());
             pending_status = pending->finish(impl_->owned_timeout_ms);
@@ -571,7 +673,8 @@ TransportStatus AsyncBufferState::destroy() {
         }
 
         std::unique_lock<std::mutex> lock(impl_->mutex);
-        if (impl_->pending != pending) {
+        if (impl_->pending != pending ||
+            impl_->quarantined_dependency != nullptr) {
             pending = impl_->pending;
             continue;
         }

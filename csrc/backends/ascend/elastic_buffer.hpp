@@ -51,7 +51,27 @@ inline void inject_testing_completion_mismatch(std::uint64_t* output) {
             "completion_mismatch"))
         *output ^= 1U;
 }
+
+inline void inject_testing_post_wait_failure(const char* stage) {
+    TORCH_CHECK(
+        !testing_environment_is("DEEP_EP_ASCEND_TEST_POST_WAIT_FAULT", stage),
+        "DeepEP Ascend backend: injected post-wait ", stage, " failure");
+}
 #endif
+
+inline std::vector<std::uint8_t> dispatch_descriptor_snapshot(
+    const elastic::DispatchHandleDescriptor& descriptor,
+    const std::vector<elastic::HybridRouteRecord>& route_records) {
+    std::vector<std::uint8_t> snapshot(
+        sizeof(descriptor) +
+        route_records.size() * sizeof(elastic::HybridRouteRecord));
+    std::memcpy(snapshot.data(), &descriptor, sizeof(descriptor));
+    if (!route_records.empty())
+        std::memcpy(
+            snapshot.data() + sizeof(descriptor), route_records.data(),
+            route_records.size() * sizeof(elastic::HybridRouteRecord));
+    return snapshot;
+}
 
 [[noreturn]] inline void raise_unsupported(
     const char* operation, const std::string& detail) {
@@ -225,19 +245,24 @@ public:
 
     void stage_dispatch_descriptor(
         std::uint64_t generation, torch::Tensor tensor,
-        elastic::DispatchHandleDescriptor descriptor) {
+        elastic::DispatchHandleDescriptor descriptor,
+        std::vector<std::uint8_t> descriptor_bytes) {
+#if DEEP_EP_ASCEND_TESTING
+        inject_testing_post_wait_failure("dispatch_staging");
+#endif
         std::lock_guard<std::mutex> lock(mutex_);
         staged_dispatch_ = StagedDispatch{
-            generation, std::move(tensor), descriptor};
+            generation, std::move(tensor), descriptor,
+            std::move(descriptor_bytes)};
     }
 
     void commit_dispatch_descriptor(
         std::uint64_t generation, const torch::Tensor& descriptor_tensor,
-        const elastic::DispatchHandleDescriptor& descriptor) {
+        std::vector<std::uint8_t> descriptor_bytes) {
         std::lock_guard<std::mutex> lock(mutex_);
         last_dispatch_generation_ = generation;
         committed_dispatch_tensor_ = descriptor_tensor;
-        committed_dispatch_descriptor_ = descriptor;
+        committed_dispatch_bytes_ = std::move(descriptor_bytes);
     }
 
     std::uint64_t dispatch_handle_generation(
@@ -245,22 +270,30 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (resources_ == nullptr ||
             !committed_dispatch_tensor_.has_value() ||
-            !committed_dispatch_descriptor_.has_value() ||
+            committed_dispatch_bytes_.empty() ||
+            descriptor_tensor.scalar_type() != torch::kByte ||
             descriptor_tensor.data_ptr() !=
                 committed_dispatch_tensor_->data_ptr())
             return 0;
-        elastic::DispatchHandleDescriptor observed{};
+        const auto observed_size = static_cast<std::size_t>(
+            descriptor_tensor.numel());
+        if (observed_size != committed_dispatch_bytes_.size())
+            return 0;
+        std::vector<std::uint8_t> observed(observed_size);
         const auto status = resources_->copy_to_host(
-            &observed, descriptor_tensor.data_ptr(), sizeof(observed));
+            observed.data(), descriptor_tensor.data_ptr(), observed.size());
         if (!status.ok() || std::memcmp(
-                &observed, &*committed_dispatch_descriptor_,
-                sizeof(observed)) != 0)
+                observed.data(), committed_dispatch_bytes_.data(),
+                observed.size()) != 0)
             return 0;
         return last_dispatch_generation_;
     }
 
     void stage_combine_completion(
         std::uint64_t generation, std::uint64_t scratch_status_offset) {
+#if DEEP_EP_ASCEND_TESTING
+        inject_testing_post_wait_failure("combine_staging");
+#endif
         std::lock_guard<std::mutex> lock(mutex_);
         staged_combine_ = StagedCombine{
             generation, scratch_status_offset, std::nullopt};
@@ -358,7 +391,7 @@ public:
             return status;
         last_dispatch_generation_ = generation;
         committed_dispatch_tensor_ = staged_dispatch_->tensor;
-        committed_dispatch_descriptor_ = staged_dispatch_->descriptor;
+        committed_dispatch_bytes_ = std::move(staged_dispatch_->descriptor_bytes);
         staged_dispatch_.reset();
         return transport::TransportStatus::success();
     }
@@ -377,6 +410,7 @@ private:
         std::uint64_t generation = 0;
         torch::Tensor tensor;
         elastic::DispatchHandleDescriptor descriptor{};
+        std::vector<std::uint8_t> descriptor_bytes;
     };
 
     struct StagedCombine {
@@ -519,8 +553,7 @@ private:
     int rank_idx_ = -1;
     std::optional<StagedDispatch> staged_dispatch_;
     std::optional<torch::Tensor> committed_dispatch_tensor_;
-    std::optional<elastic::DispatchHandleDescriptor>
-        committed_dispatch_descriptor_;
+    std::vector<std::uint8_t> committed_dispatch_bytes_;
     std::optional<StagedCombine> staged_combine_;
 };
 
@@ -608,6 +641,7 @@ class ElasticBuffer {
     std::shared_ptr<ElasticAsyncCompletionResources> completion_resources_;
     std::shared_ptr<elastic::AsyncBufferState> async_state_;
     std::uint64_t barrier_timeout_cycles_ = 0;
+    std::uint64_t completion_timeout_ms_ = 5000;
 #if DEEP_EP_ASCEND_TESTING
     std::shared_ptr<ElasticBufferTestingLifecycleControl>
         testing_lifecycle_control_;
@@ -852,6 +886,7 @@ class ElasticBuffer {
           allow_hybrid_mode_(allow_hybrid_mode),
           allow_multiple_reduction_(allow_multiple_reduction),
           barrier_timeout_cycles_(timeout_cycles),
+          completion_timeout_ms_(completion_timeout_ms),
           testing_lifecycle_control_(std::move(lifecycle_control)) {
         completion_resources_ =
             std::make_shared<ElasticAsyncCompletionResources>(
@@ -928,7 +963,7 @@ public:
                 std::move(resources), dispatch_family, 0, rank_idx_);
         resources_ = completion_resources_->runtime();
         async_state_ = std::make_shared<elastic::AsyncBufferState>(
-            completion_resources_, 5000);
+            completion_resources_, completion_timeout_ms_);
         if (allow_hybrid_mode_) {
             const auto& topology = resources_->device_context().topology;
             TORCH_CHECK(topology.scale_up_size == 2 &&
@@ -1437,6 +1472,7 @@ public:
 
         runtime::StreamIdentity dispatch_stream;
         elastic::EventDependency predecessor;
+        elastic::EnqueuedEventDependencyGuard predecessor_guard;
         if (cached_mode) {
             auto status = resources_->current_stream(&dispatch_stream);
             if (!status.ok())
@@ -1453,10 +1489,27 @@ public:
                 predecessor.event = std::move(created.event);
             }
             dispatch_stream = resources_->comm_stream();
-            status = predecessor.event->wait(
-                dispatch_stream, &predecessor.wait_lease);
+            auto retirement = resources_->create_event();
+            if (!retirement.status.ok())
+                raise_transport_status(retirement.status, rank_idx_);
+            predecessor.retirement_event = std::move(retirement.event);
+            predecessor.retirement_stream = dispatch_stream;
+            predecessor_guard.adopt(
+                std::move(predecessor), async_state_);
+            status = predecessor_guard.dependency().event->wait(
+                dispatch_stream,
+                &predecessor_guard.dependency().wait_lease);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
+            predecessor_guard.arm();
+            status = predecessor_guard.dependency().retirement_event->record(
+                dispatch_stream);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            predecessor_guard.mark_retirement_recorded();
+#if DEEP_EP_ASCEND_TESTING
+            inject_testing_post_wait_failure("allocation");
+#endif
         }
 #if DEEP_EP_ASCEND_HAS_GENERIC_STREAM_GUARD
         std::optional<c10::StreamGuard> allocation_guard;
@@ -1852,27 +1905,43 @@ public:
         runtime::NativeEventCreateResult completion{};
         std::vector<elastic::EventDependency> predecessors;
         if (cached_mode) {
+            predecessors.resize(1);
             completion = resources_->create_event();
             if (!completion.status.ok())
                 raise_transport_status(completion.status, rank_idx_);
-            predecessors.emplace_back(std::move(predecessor));
         }
+#if DEEP_EP_ASCEND_TESTING
+        if (cached_mode)
+            inject_testing_post_wait_failure("activation");
+#endif
         const auto generation = activate_operation(lease, "dispatch");
         arguments.generation = generation;
         if (cached_mode) {
-            const auto committed_descriptor =
+            const auto committed_descriptor = allow_hybrid_mode_ ?
+                elastic::make_attested_hybrid_dispatch_handle_descriptor(
+                    completion_resources_->dispatch_family(), tiling.topology,
+                    generation, num_tokens, hidden, experts, num_topk,
+                    alignment, capacity, descriptor_mode_flags,
+                    elastic::kHybridRouteLayoutVersion,
+                    host_route_records.size(),
+                    sizeof(elastic::HybridRouteRecord),
+                    elastic::kHybridRouteCompleteStageFlags,
+                    {host_route_records.data(), host_route_records.size()}) :
                 elastic::make_attested_dispatch_handle_descriptor(
                     completion_resources_->dispatch_family(), tiling.topology,
                     generation, num_tokens, hidden, experts, num_topk,
                     alignment, capacity, descriptor_mode_flags);
             completion_resources_->stage_dispatch_descriptor(
-                generation, descriptor_tensor, committed_descriptor);
+                generation, descriptor_tensor, committed_descriptor,
+                dispatch_descriptor_snapshot(
+                    committed_descriptor, host_route_records));
         }
         const auto launch_status = elastic::launch_internal_dispatch(
             arguments, tiling, storage, stream.raw);
         if (!launch_status.ok())
             raise_launch_status(launch_status, rank_idx_);
         if (cached_mode) {
+            predecessor_guard.copy_to(predecessors.front());
             const auto completion_offset =
                 tiling.symmetric_window_layout.control_offset +
                 offsetof(elastic::SymmetricControlHeader, dispatch_generation);
@@ -1884,6 +1953,7 @@ public:
                 std::move(retained_tensors), std::move(predecessors));
             if (!published.status.ok())
                 raise_transport_status(published.status, rank_idx_);
+            predecessor_guard.dismiss();
             status = completion.event->record(stream);
             if (!status.ok()) {
                 (void)published.operation->finish(0);
@@ -2089,7 +2159,9 @@ public:
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         completion_resources_->commit_dispatch_descriptor(
-            generation, descriptor_tensor, committed_descriptor);
+            generation, descriptor_tensor,
+            dispatch_descriptor_snapshot(
+                committed_descriptor, host_route_records));
         lease.complete();
         const int output_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
         auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
@@ -2444,6 +2516,7 @@ public:
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         elastic::EventDependency predecessor;
+        elastic::EnqueuedEventDependencyGuard predecessor_guard;
         if (previous_event.has_value()) {
             predecessor = previous_event->dependency();
         } else {
@@ -2456,10 +2529,25 @@ public:
             predecessor.event = std::move(created.event);
         }
         const auto stream = resources_->comm_stream();
-        status = predecessor.event->wait(
-            stream, &predecessor.wait_lease);
+        auto retirement = resources_->create_event();
+        if (!retirement.status.ok())
+            raise_transport_status(retirement.status, rank_idx_);
+        predecessor.retirement_event = std::move(retirement.event);
+        predecessor.retirement_stream = stream;
+        predecessor_guard.adopt(
+            std::move(predecessor), async_state_);
+        status = predecessor_guard.dependency().event->wait(
+            stream, &predecessor_guard.dependency().wait_lease);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
+        predecessor_guard.arm();
+        status = predecessor_guard.dependency().retirement_event->record(stream);
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+        predecessor_guard.mark_retirement_recorded();
+#if DEEP_EP_ASCEND_TESTING
+        inject_testing_post_wait_failure("allocation");
+#endif
 #if DEEP_EP_ASCEND_HAS_GENERIC_STREAM_GUARD
         std::optional<c10::StreamGuard> allocation_guard;
         if (allocate_on_comm_stream)
@@ -2504,6 +2592,7 @@ public:
         auto completion = resources_->create_event();
         if (!completion.status.ok())
             raise_transport_status(completion.status, rank_idx_);
+        std::vector<elastic::EventDependency> predecessors(1);
         elastic::CombineArguments arguments{};
         arguments.x = x.data_ptr();
         arguments.topk_weights = topk_weights.has_value() ?
@@ -2528,6 +2617,9 @@ public:
         arguments.combined_x = combined_x.data_ptr();
         arguments.combined_topk_weights = combined_weights.has_value() ?
             combined_weights->data_ptr<float>() : nullptr;
+#if DEEP_EP_ASCEND_TESTING
+        inject_testing_post_wait_failure("activation");
+#endif
         const auto generation = activate_operation(lease, "combine");
         arguments.generation = generation;
         arguments.timeout_cycles = barrier_timeout_cycles_;
@@ -2544,11 +2636,10 @@ public:
             arguments, tiling, storage, stream.raw);
         if (!launch_status.ok())
             raise_combine_launch_status(launch_status, rank_idx_);
+        predecessor_guard.copy_to(predecessors.front());
         const auto completion_offset =
             tiling.symmetric_window_layout.control_offset +
             offsetof(elastic::SymmetricControlHeader, combine_generation);
-        std::vector<elastic::EventDependency> predecessors;
-        predecessors.emplace_back(std::move(predecessor));
         auto published = async_state_->publish(
             std::move(lease), completion.event,
             {elastic::BufferOperationKind::kCombine, generation,
@@ -2557,6 +2648,7 @@ public:
             std::move(retained_tensors), std::move(predecessors));
         if (!published.status.ok())
             raise_transport_status(published.status, rank_idx_);
+        predecessor_guard.dismiss();
         status = completion.event->record(stream);
         if (!status.ok()) {
             (void)published.operation->finish(0);

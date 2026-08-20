@@ -72,6 +72,7 @@ class _FakeTensor:
         for extent in shape:
             numel *= extent
         self._values = list(values) if values is not None else [0] * numel
+        self.cpu_calls = 0
 
     def dim(self):
         return len(self.shape)
@@ -86,6 +87,7 @@ class _FakeTensor:
         return self
 
     def cpu(self):
+        self.cpu_calls += 1
         return self
 
     def reshape(self, *shape):
@@ -348,6 +350,8 @@ def _install_fake_extension(platform, events):
             self.last_dispatch_generation = 0
             self.committed_dispatch_tensor = None
             self.committed_dispatch_fingerprint = None
+            self.dispatch_generation_queries = 0
+            self.dispatch_identity_prefix = None
             self.fail_next_dispatch_completion = False
             events.append(("runtime.construct", args))
 
@@ -368,9 +372,14 @@ def _install_fake_extension(platform, events):
             return _FakeStream(17, 2, 1)
 
         def get_dispatch_handle_generation(self, tensor):
+            self.dispatch_generation_queries += 1
+            observed = tuple(tensor._values)
+            expected = self.committed_dispatch_fingerprint
+            if self.dispatch_identity_prefix is not None:
+                observed = observed[:self.dispatch_identity_prefix]
+                expected = expected[:self.dispatch_identity_prefix]
             if (tensor is not self.committed_dispatch_tensor or
-                    tuple(tensor._values) !=
-                    self.committed_dispatch_fingerprint):
+                    observed != expected):
                 return 0
             return self.last_dispatch_generation
 
@@ -1522,6 +1531,9 @@ def _scenario_ascend_dispatch():
         raise AssertionError("Ascend dispatch accepted scale factors")
     assert len(runtime.dispatch_calls) == rejected_calls
 
+    generation_queries_before_capture = runtime.dispatch_generation_queries
+    descriptor_cpu_calls_before_capture = \
+        handle.token_metadata_at_forward.cpu_calls
     torch.npu.capturing = True
     try:
         capture_modes = (
@@ -1555,6 +1567,10 @@ def _scenario_ascend_dispatch():
     finally:
         torch.npu.capturing = False
     assert len(runtime.dispatch_calls) == rejected_calls
+    assert runtime.dispatch_generation_queries == \
+        generation_queries_before_capture
+    assert handle.token_metadata_at_forward.cpu_calls == \
+        descriptor_cpu_calls_before_capture
 
     buffer.allow_hybrid_mode = True
     try:
@@ -1866,6 +1882,56 @@ def _scenario_ascend_failed_event_does_not_publish():
     buffer.destroy()
 
 
+def _new_ascend_hybrid_route_identity_fixture(deep_ep, extension, events):
+    buffer = deep_ep.ElasticBuffer(
+        _FakeGroup(events, rank=0, size=2), num_bytes=2 * 1024 * 1024,
+        allow_hybrid_mode=False, explicitly_destroy=True)
+    torch = sys.modules["torch"]
+    x = _FakeTensor("npu", (1, 16), torch.bfloat16)
+    topk_idx = _FakeTensor("npu", (1, 1), torch.int64)
+    _, _, _, handle, _ = buffer.dispatch(
+        x, topk_idx=topk_idx, num_experts=2,
+        num_max_tokens_per_rank=1)
+    runtime = extension.runtime_instances[-1]
+    buffer.allow_hybrid_mode = True
+    descriptor = handle.token_metadata_at_forward
+    descriptor._values.extend([37])
+    descriptor.shape = (len(descriptor._values),)
+    committed_fingerprint = tuple(descriptor._values)
+    runtime.committed_dispatch_fingerprint = committed_fingerprint
+    runtime.dispatch_identity_prefix = 120
+    handle._ascend_descriptor_fingerprint = committed_fingerprint
+    descriptor._values[-1] = 41
+    return buffer, runtime, x, handle
+
+
+def _scenario_ascend_hybrid_route_mutation_is_rejected():
+    deep_ep, extension, events = _load_package("ascend", True)
+    dispatch_buffer, dispatch_runtime, dispatch_x, dispatch_handle = \
+        _new_ascend_hybrid_route_identity_fixture(deep_ep, extension, events)
+    dispatch_calls = len(dispatch_runtime.dispatch_calls)
+    try:
+        dispatch_buffer.dispatch(dispatch_x, handle=dispatch_handle)
+    except RuntimeError as error:
+        assert "invalid_dispatch_handle" in str(error), error
+    else:
+        raise AssertionError("cached dispatch accepted mutated hybrid route payload")
+    assert len(dispatch_runtime.dispatch_calls) == dispatch_calls
+    dispatch_buffer.destroy()
+
+    combine_buffer, combine_runtime, combine_x, combine_handle = \
+        _new_ascend_hybrid_route_identity_fixture(deep_ep, extension, events)
+    combine_calls = len(combine_runtime.combine_calls)
+    try:
+        combine_buffer.combine(combine_x, combine_handle)
+    except RuntimeError as error:
+        assert "invalid_dispatch_handle" in str(error), error
+    else:
+        raise AssertionError("combine accepted mutated hybrid route payload")
+    assert len(combine_runtime.combine_calls) == combine_calls
+    combine_buffer.destroy()
+
+
 def _scenario_ascend_combine():
     deep_ep, extension, events = _load_package("ascend", True)
     buffer = deep_ep.ElasticBuffer(
@@ -1987,6 +2053,8 @@ def _scenario_ascend_combine():
             raise AssertionError(f"Ascend combine accepted unsupported {name}")
     assert len(runtime.combine_calls) == calls_before
 
+    generation_queries_before_capture = runtime.dispatch_generation_queries
+    descriptor_cpu_calls_before_capture = descriptor.cpu_calls
     torch.npu.capturing = True
     try:
         capture_modes = (
@@ -2011,6 +2079,9 @@ def _scenario_ascend_combine():
     finally:
         torch.npu.capturing = False
     assert len(runtime.combine_calls) == calls_before
+    assert runtime.dispatch_generation_queries == \
+        generation_queries_before_capture
+    assert descriptor.cpu_calls == descriptor_cpu_calls_before_capture
 
     buffer.allow_hybrid_mode = True
     try:
@@ -2262,6 +2333,8 @@ SCENARIOS = {
         _scenario_ascend_dropped_event_publication,
     "ascend_failed_event_does_not_publish":
         _scenario_ascend_failed_event_does_not_publish,
+    "ascend_hybrid_route_mutation_is_rejected":
+        _scenario_ascend_hybrid_route_mutation_is_rejected,
     "ascend_combine": _scenario_ascend_combine,
     "ascend_weak_lru_gate": _scenario_ascend_weak_lru_gate,
     "cuda_preservation": _scenario_cuda_preservation,
@@ -2375,6 +2448,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_failed_event_completion_does_not_publish_cached_handle(self):
         self.run_scenario("ascend_failed_event_does_not_publish")
+
+    def test_hybrid_route_mutation_is_rejected_before_dispatch_or_combine(self):
+        self.run_scenario("ascend_hybrid_route_mutation_is_rejected")
 
     def test_combine_async_routes_native_events_and_rejects_deferred_modes(self):
         self.run_scenario("ascend_combine")

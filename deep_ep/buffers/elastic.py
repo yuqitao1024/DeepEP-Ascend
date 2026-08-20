@@ -564,10 +564,17 @@ class ElasticBuffer:
         fingerprint = _ascend_descriptor_fingerprint(descriptor)
         if fingerprint is None:
             return False
+        known_generation = getattr(handle, '_ascend_generation', None)
+        known_fingerprint = getattr(
+            handle, '_ascend_descriptor_fingerprint', None)
+        if (generation == known_generation and known_fingerprint is not None and
+                fingerprint != known_fingerprint):
+            return False
         self._ascend_handle_generation = generation
         handle._ascend_owner = self
         handle._ascend_generation = generation
-        handle._ascend_descriptor_fingerprint = fingerprint
+        if generation != known_generation or known_fingerprint is None:
+            handle._ascend_descriptor_fingerprint = fingerprint
         return True
 
     def _preflight_ascend_dispatch(
@@ -578,9 +585,10 @@ class ElasticBuffer:
             allocate_on_comm_stream, do_expand, do_zero_padding,
             use_tma_aligned_col_major_sf):
         cached = handle is not None
+        capturing = ascend_current_stream_is_capturing()
         handle_error = None
         descriptor_valid = True
-        if cached:
+        if cached and not capturing:
             self._reconcile_ascend_handle(handle)
             descriptor_fingerprint = _ascend_descriptor_fingerprint(
                 getattr(handle, 'token_metadata_at_forward', None))
@@ -662,7 +670,9 @@ class ElasticBuffer:
                 weights_shape != topk_shape):
             shape_error = "invalid_dispatch_shape"
         scalar_error = None
-        if num_sms not in (0, 1) or num_qps != 0:
+        if capturing:
+            scalar_error = "unsupported_graph_capture"
+        elif num_sms not in (0, 1) or num_qps != 0:
             scalar_error = "invalid_launch_configuration"
         elif (not isinstance(num_experts, int) or num_experts <= 0 or
                 num_experts % self.num_ranks != 0):
@@ -671,8 +681,6 @@ class ElasticBuffer:
             scalar_error = "invalid_capacity"
         elif not isinstance(alignment, int) or alignment <= 0:
             scalar_error = "invalid_expert_alignment"
-        elif ascend_current_stream_is_capturing():
-            scalar_error = "unsupported_graph_capture"
         elif previous_event_before_epilogue is not None:
             scalar_error = "unsupported_dispatch_mode"
         elif previous_event is not None and not allocate_on_comm_stream:
@@ -687,10 +695,10 @@ class ElasticBuffer:
         elif do_zero_padding and not do_expand:
             scalar_error = "invalid_zero_padding_mode"
 
-        error = _first_error(
+        error = ("unsupported_graph_capture" if capturing else _first_error(
             handle_error, handle_device_error, scalar_error, pairing_error,
             x_error, sf_error,
-            topk_error, weights_error, shape_error)
+            topk_error, weights_error, shape_error))
         contract = {
             "buffer_bytes": self.num_bytes,
             "cached": cached,
@@ -739,20 +747,22 @@ class ElasticBuffer:
             self, x, handle, topk_weights, bias, num_sms, num_qps,
             previous_event, previous_event_before_epilogue,
             async_with_compute_stream, allocate_on_comm_stream):
+        capturing = ascend_current_stream_is_capturing()
         handle_error = None
         descriptor_valid = True
-        self._reconcile_ascend_handle(handle)
-        descriptor_fingerprint = _ascend_descriptor_fingerprint(
-            getattr(handle, 'token_metadata_at_forward', None))
-        if (not isinstance(handle, EPHandle) or
-                getattr(handle, '_ascend_owner', None) is not self or
-                getattr(handle, '_ascend_generation', None) !=
-                self._ascend_handle_generation or
-                descriptor_fingerprint is None or
-                descriptor_fingerprint !=
-                getattr(handle, '_ascend_descriptor_fingerprint', None)):
-            handle_error = "invalid_dispatch_handle"
-            descriptor_valid = False
+        if not capturing:
+            self._reconcile_ascend_handle(handle)
+            descriptor_fingerprint = _ascend_descriptor_fingerprint(
+                getattr(handle, 'token_metadata_at_forward', None))
+            if (not isinstance(handle, EPHandle) or
+                    getattr(handle, '_ascend_owner', None) is not self or
+                    getattr(handle, '_ascend_generation', None) !=
+                    self._ascend_handle_generation or
+                    descriptor_fingerprint is None or
+                    descriptor_fingerprint !=
+                    getattr(handle, '_ascend_descriptor_fingerprint', None)):
+                handle_error = "invalid_dispatch_handle"
+                descriptor_valid = False
         x_shape, x_error = _ascend_tensor_contract(
             x, 2, torch.bfloat16, "x", self._ascend_owner_device)
         weights_error = None
@@ -779,10 +789,10 @@ class ElasticBuffer:
                 bias_error = "invalid_bias"
                 break
         scalar_error = None
-        if num_sms not in (0, 1) or num_qps != 0:
-            scalar_error = "invalid_launch_configuration"
-        elif ascend_current_stream_is_capturing():
+        if capturing:
             scalar_error = "unsupported_graph_capture"
+        elif num_sms not in (0, 1) or num_qps != 0:
+            scalar_error = "invalid_launch_configuration"
         elif previous_event_before_epilogue is not None:
             scalar_error = "unsupported_combine_mode"
         elif previous_event is not None and not allocate_on_comm_stream:
@@ -804,9 +814,9 @@ class ElasticBuffer:
                     getattr(value.device, "index", None) !=
                     self._ascend_owner_device for value in bias_values)):
             handle_device_error = "invalid_buffer_device"
-        error = _first_error(
+        error = ("unsupported_graph_capture" if capturing else _first_error(
             handle_error, handle_device_error, x_error, weights_error,
-            bias_error, scalar_error)
+            bias_error, scalar_error))
         contract = {
             "buffer_bytes": self.num_bytes,
             "handle_generation": getattr(handle, '_ascend_generation', None),

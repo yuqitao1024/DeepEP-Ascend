@@ -28,6 +28,8 @@ struct Trace {
     bool fail_h2d = false;
     bool fail_launch = false;
     bool fail_stream = false;
+    bool fail_comm_records = false;
+    bool event_ready = true;
     bool corrupt_fresh_route = false;
     bool masked_producer_failure = false;
     int masked_producer_world_rank = 0;
@@ -35,10 +37,11 @@ struct Trace {
     std::uint64_t preserved_scratch_status = 0;
     int world_size = 2;
     int event_creates = 0;
+    int event_records = 0;
     int event_destroys = 0;
     int frees = 0;
     int fail_event_create_on = 0;
-    bool fail_completion_record = false;
+    int fail_event_record_on = 0;
     std::vector<std::string> order;
 } trace;
 
@@ -71,14 +74,16 @@ int create_event(void*, void** event) {
     return 0;
 }
 int record_event(void*, void*, void* stream_value) {
+    ++trace.event_records;
     trace.order.emplace_back(stream_value == &comm_stream_token ?
         "record completion event" : "record compute dependency");
-    if (stream_value == &comm_stream_token && trace.fail_completion_record)
+    if ((stream_value == &comm_stream_token && trace.fail_comm_records) ||
+        trace.event_records == trace.fail_event_record_on)
         return 96;
     return 0;
 }
 int query_event(void*, void*, bool* completed) {
-    *completed = true;
+    *completed = trace.event_ready;
     trace.order.emplace_back("finish completion event");
     return 0;
 }
@@ -607,6 +612,23 @@ bool cached_hybrid_route_validation_probe() {
     if (trace.launches != 1 || !std::get<13>(first).has_value())
         return false;
 
+    auto& committed_tensor = *std::get<13>(first);
+    if (buffer->get_dispatch_handle_generation(committed_tensor) != 1)
+        return false;
+    auto* committed_record = reinterpret_cast<elastic::HybridRouteRecord*>(
+        static_cast<std::uint8_t*>(committed_tensor.data_ptr()) +
+        sizeof(elastic::DispatchHandleDescriptor));
+    const auto saved_reserved = committed_record->reserved;
+    committed_record->reserved = saved_reserved + 1;
+    const auto launches_before_identity_query = trace.launches;
+    const auto mutated_generation =
+        buffer->get_dispatch_handle_generation(committed_tensor);
+    committed_record->reserved = saved_reserved;
+    if (mutated_generation != 0 ||
+        trace.launches != launches_before_identity_query ||
+        buffer->get_dispatch_handle_generation(committed_tensor) != 1)
+        return false;
+
     auto corrupted = first;
     std::get<13>(corrupted) = std::get<13>(first)->clone();
     auto* record = reinterpret_cast<elastic::HybridRouteRecord*>(
@@ -916,7 +938,9 @@ bool cached_async_order_and_commit_probe() {
         "capture compute dependency",
         "create event",
         "record compute dependency",
+        "create event",
         "comm waits dependency/previous event",
+        "record completion event",
         "create event",
         "activate lease and launch cached dispatch on comm",
         "record completion event",
@@ -938,8 +962,186 @@ bool cached_async_order_and_commit_probe() {
 
     std::get<15>(pending)->current_stream_wait();
     std::get<15>(pending)->current_stream_wait();
-    return descriptor->generation == 2 && trace.event_destroys == 1 &&
+    return descriptor->generation == 2 && trace.event_destroys == 2 &&
         buffer->testing_operation_generation() == 2;
+}
+
+enum class PostWaitFailure {
+    kAllocation,
+    kCompletionEvent,
+    kActivation,
+    kStaging,
+    kLaunch,
+};
+
+bool failed_cached_dispatch_retains_enqueued_predecessor_wait(
+    PostWaitFailure failure) {
+    trace = {};
+    auto source_resources = resources();
+    auto target_resources = resources();
+    if (!source_resources || !target_resources)
+        return false;
+    auto source = Buffer::make_testing_buffer(
+        0, std::move(source_resources), 2 * 1024 * 1024, 1);
+    auto target = Buffer::make_testing_buffer(
+        0, std::move(target_resources), 2 * 1024 * 1024, 1);
+    Inputs source_inputs;
+    Inputs target_inputs;
+    const std::optional<Tensor> source_weights = source_inputs.weights;
+    const std::optional<Tensor> target_weights = target_inputs.weights;
+    auto source_handle = uncached_dispatch(
+        *source, source_inputs, source_weights);
+    auto target_handle = uncached_dispatch(
+        *target, target_inputs, target_weights);
+    auto source_pending = cached_dispatch(
+        *source, source_inputs, source_handle, std::get<8>(source_handle),
+        false, std::nullopt, true, false);
+    if (!std::get<15>(source_pending).has_value())
+        return false;
+    const std::optional<deep_ep::ascend::EventHandle> predecessor =
+        std::get<15>(source_pending);
+
+    const char* injected_fault = nullptr;
+    const char* expected_failure = nullptr;
+    switch (failure) {
+        case PostWaitFailure::kAllocation:
+            injected_fault = "allocation";
+            expected_failure = "injected post-wait allocation failure";
+            break;
+        case PostWaitFailure::kCompletionEvent:
+            trace.fail_event_create_on = trace.event_creates + 2;
+            expected_failure = "backend error 95";
+            break;
+        case PostWaitFailure::kActivation:
+            injected_fault = "activation";
+            expected_failure = "injected post-wait activation failure";
+            break;
+        case PostWaitFailure::kStaging:
+            injected_fault = "dispatch_staging";
+            expected_failure = "injected post-wait dispatch_staging failure";
+            break;
+        case PostWaitFailure::kLaunch:
+            trace.fail_launch = true;
+            expected_failure = "backend error 73";
+            break;
+    }
+    if (injected_fault != nullptr)
+        setenv("DEEP_EP_ASCEND_TEST_POST_WAIT_FAULT", injected_fault, 1);
+    std::string failure_message;
+    try {
+        (void)cached_dispatch(
+            *target, target_inputs, target_handle, std::get<8>(target_handle),
+            false, std::nullopt, true, true, predecessor);
+    } catch (const std::runtime_error& error) {
+        failure_message = error.what();
+    }
+    unsetenv("DEEP_EP_ASCEND_TEST_POST_WAIT_FAULT");
+    trace.fail_event_create_on = 0;
+    trace.fail_launch = false;
+    if (failure_message.find(expected_failure) == std::string::npos)
+        return false;
+
+    try {
+        source->destroy();
+    } catch (...) {
+        return false;
+    }
+    try {
+        target->destroy();
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+bool all_failed_cached_dispatch_paths_retain_enqueued_predecessor_waits() {
+    return failed_cached_dispatch_retains_enqueued_predecessor_wait(
+               PostWaitFailure::kAllocation) &&
+        failed_cached_dispatch_retains_enqueued_predecessor_wait(
+            PostWaitFailure::kCompletionEvent) &&
+        failed_cached_dispatch_retains_enqueued_predecessor_wait(
+            PostWaitFailure::kActivation) &&
+        failed_cached_dispatch_retains_enqueued_predecessor_wait(
+            PostWaitFailure::kStaging) &&
+        failed_cached_dispatch_retains_enqueued_predecessor_wait(
+            PostWaitFailure::kLaunch);
+}
+
+enum class RetirementFailure {
+    kRecord,
+    kFinish,
+};
+
+bool failed_retirement_marker_is_quarantined_and_retryable(
+    RetirementFailure failure) {
+    trace = {};
+    auto source_resources = resources();
+    auto target_resources = resources();
+    if (!source_resources || !target_resources)
+        return false;
+    auto source = Buffer::make_testing_buffer(
+        0, std::move(source_resources), 2 * 1024 * 1024, 1);
+    auto target = Buffer::make_testing_buffer(
+        0, std::move(target_resources), 2 * 1024 * 1024, 1,
+        true, 7, 2, 0, false, 0);
+    Inputs source_inputs;
+    Inputs target_inputs;
+    const std::optional<Tensor> source_weights = source_inputs.weights;
+    const std::optional<Tensor> target_weights = target_inputs.weights;
+    auto source_handle = uncached_dispatch(
+        *source, source_inputs, source_weights);
+    auto target_handle = uncached_dispatch(
+        *target, target_inputs, target_weights);
+    auto source_pending = cached_dispatch(
+        *source, source_inputs, source_handle, std::get<8>(source_handle),
+        false, std::nullopt, true, false);
+    if (!std::get<15>(source_pending).has_value())
+        return false;
+    const std::optional<deep_ep::ascend::EventHandle> predecessor =
+        std::get<15>(source_pending);
+
+    trace.fail_comm_records = failure == RetirementFailure::kRecord;
+    trace.event_ready = failure != RetirementFailure::kFinish;
+    setenv("DEEP_EP_ASCEND_TEST_POST_WAIT_FAULT", "allocation", 1);
+    std::string failure_message;
+    try {
+        (void)cached_dispatch(
+            *target, target_inputs, target_handle, std::get<8>(target_handle),
+            false, std::nullopt, true, true, predecessor);
+    } catch (const std::runtime_error& error) {
+        failure_message = error.what();
+    }
+    unsetenv("DEEP_EP_ASCEND_TEST_POST_WAIT_FAULT");
+    trace.fail_comm_records = false;
+    trace.event_ready = true;
+    if (failure_message.empty())
+        return false;
+
+    bool poisoned = false;
+    try {
+        (void)target->get_logical_domain_size();
+    } catch (const std::runtime_error& error) {
+        poisoned = std::string(error.what()).find("poisoned") !=
+            std::string::npos;
+    }
+    if (!poisoned)
+        return false;
+    bool source_blocked = false;
+    try {
+        source->destroy();
+    } catch (const std::runtime_error& error) {
+        source_blocked = std::string(error.what()).find(
+            "outstanding stream waits") != std::string::npos;
+    }
+    if (!source_blocked)
+        return false;
+    try {
+        target->destroy();
+        source->destroy();
+    } catch (...) {
+        return false;
+    }
+    return true;
 }
 
 bool completion_create_failure_precedes_cached_launch_probe() {
@@ -979,7 +1181,7 @@ bool completion_record_failure_retains_launched_dispatch_probe() {
     const std::optional<Tensor> weights = inputs.weights;
     auto initial = uncached_dispatch(*buffer, inputs, weights);
     const int launches_before = trace.launches;
-    trace.fail_completion_record = true;
+    trace.fail_event_record_on = trace.event_records + 3;
     try {
         (void)cached_dispatch(
             *buffer, inputs, initial, std::get<8>(initial), false,
@@ -1060,7 +1262,7 @@ bool completion_mismatch_fault_does_not_publish() {
         destroy_failure = error.what();
     }
     return destroy_failure.find("device completion generation mismatch") !=
-            std::string::npos && trace.event_destroys == 3 &&
+            std::string::npos && trace.event_destroys == 5 &&
         buffer->is_destroyed();
 }
 
@@ -1091,6 +1293,13 @@ int main() {
     check(testing_topology_mismatch_probe(), "testing topology mismatch");
     check(cached_async_order_and_commit_probe(),
           "cached async order and deferred descriptor commit");
+    check(all_failed_cached_dispatch_paths_retain_enqueued_predecessor_waits(),
+          "failed cached dispatch retains enqueued predecessor waits");
+    check(failed_retirement_marker_is_quarantined_and_retryable(
+              RetirementFailure::kRecord) &&
+              failed_retirement_marker_is_quarantined_and_retryable(
+                  RetirementFailure::kFinish),
+          "failed retirement marker is quarantined and retryable");
     check(completion_create_failure_precedes_cached_launch_probe(),
           "completion create failure precedes cached launch");
     check(completion_record_failure_retains_launched_dispatch_probe(),

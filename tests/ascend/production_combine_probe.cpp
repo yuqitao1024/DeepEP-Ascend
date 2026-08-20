@@ -39,7 +39,7 @@ struct Trace {
     bool fail_launch = false;
     bool fail_stream = false;
     bool fail_sync = false;
-    bool fail_completion_record = false;
+    int fail_record_event_on = 0;
     bool event_ready = true;
     bool bad_diagnostic = false;
     bool bad_completion = false;
@@ -100,7 +100,7 @@ int record_event(void*, void*, void* stream_value) {
     const bool communication = stream_value == &trace.comm_stream_token;
     trace.order.emplace_back(
         communication ? "record completion event" : "record dependency event");
-    return communication && trace.fail_completion_record ? 87 : 0;
+    return trace.record_event_calls == trace.fail_record_event_on ? 87 : 0;
 }
 int query_event(void*, void*, bool* complete) {
     ++trace.query_event_calls;
@@ -668,7 +668,7 @@ bool async_predecessor_and_deferred_mode_contract() {
         *target, inputs, std::nullopt, std::nullopt, std::nullopt,
         std::nullopt, 1, 0, predecessor, true, true);
     if (!std::get<2>(async_result).has_value() ||
-        trace.record_event_calls != records_after_capture + 1)
+        trace.record_event_calls != records_after_capture + 2)
         return false;
     std::get<2>(async_result)->current_stream_wait();
     if (!error_contains(
@@ -690,6 +690,92 @@ bool async_predecessor_and_deferred_mode_contract() {
         std::nullopt, 1, 0, std::nullopt, false, true);
     return !std::get<2>(allocated_sync).has_value() && trace.launches == 3 &&
         trace.generations == std::vector<std::uint64_t>({1, 1, 2});
+}
+
+enum class PostWaitFailure {
+    kAllocation,
+    kCompletionEvent,
+    kActivation,
+    kStaging,
+    kLaunch,
+};
+
+bool failed_combine_retains_enqueued_predecessor_wait(PostWaitFailure failure) {
+    trace = {};
+    auto source = buffer();
+    auto target = buffer();
+    if (!source || !target)
+        return false;
+    Inputs source_inputs;
+    Inputs target_inputs;
+    auto source_pending = call(
+        *source, source_inputs, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, 1, 0, std::nullopt, true);
+    if (!std::get<2>(source_pending).has_value())
+        return false;
+    const std::optional<Event> predecessor = std::get<2>(source_pending);
+
+    const char* injected_fault = nullptr;
+    const char* expected_failure = nullptr;
+    switch (failure) {
+        case PostWaitFailure::kAllocation:
+            injected_fault = "allocation";
+            expected_failure = "injected post-wait allocation failure";
+            break;
+        case PostWaitFailure::kCompletionEvent:
+            trace.fail_create_event_on = trace.create_event_calls + 2;
+            expected_failure = "create_event";
+            break;
+        case PostWaitFailure::kActivation:
+            injected_fault = "activation";
+            expected_failure = "injected post-wait activation failure";
+            break;
+        case PostWaitFailure::kStaging:
+            injected_fault = "combine_staging";
+            expected_failure = "injected post-wait combine_staging failure";
+            break;
+        case PostWaitFailure::kLaunch:
+            trace.fail_launch = true;
+            expected_failure = "backend error 73";
+            break;
+    }
+    if (injected_fault != nullptr)
+        setenv("DEEP_EP_ASCEND_TEST_POST_WAIT_FAULT", injected_fault, 1);
+    const auto failure_message = error_message([&] {
+        (void)call(
+            *target, target_inputs, std::nullopt, std::nullopt, std::nullopt,
+            std::nullopt, 1, 0, predecessor, true, true);
+    });
+    unsetenv("DEEP_EP_ASCEND_TEST_POST_WAIT_FAULT");
+    trace.fail_create_event_on = 0;
+    trace.fail_launch = false;
+    if (failure_message.find(expected_failure) == std::string::npos)
+        return false;
+
+    try {
+        source->destroy();
+    } catch (...) {
+        return false;
+    }
+    try {
+        target->destroy();
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+bool all_failed_combine_paths_retain_enqueued_predecessor_waits() {
+    return failed_combine_retains_enqueued_predecessor_wait(
+               PostWaitFailure::kAllocation) &&
+        failed_combine_retains_enqueued_predecessor_wait(
+            PostWaitFailure::kCompletionEvent) &&
+        failed_combine_retains_enqueued_predecessor_wait(
+            PostWaitFailure::kActivation) &&
+        failed_combine_retains_enqueued_predecessor_wait(
+            PostWaitFailure::kStaging) &&
+        failed_combine_retains_enqueued_predecessor_wait(
+            PostWaitFailure::kLaunch);
 }
 
 bool async_multiflight_and_stable_failure_are_generation_bound() {
@@ -777,7 +863,7 @@ bool async_prelaunch_and_record_failures_are_bounded() {
     trace = {};
     auto record_target = buffer();
     Inputs record_inputs;
-    trace.fail_completion_record = true;
+    trace.fail_record_event_on = trace.record_event_calls + 3;
     const auto message = error_message([&] { (void)call(
         *record_target, record_inputs, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, 1, 0, std::nullopt, true); });
@@ -1226,6 +1312,8 @@ int main() {
           "async empty and asymmetric inputs");
     check(async_predecessor_and_deferred_mode_contract(),
           "async predecessor and deferred mode contract");
+    check(all_failed_combine_paths_retain_enqueued_predecessor_waits(),
+          "failed combine retains enqueued predecessor waits");
     check(async_multiflight_and_stable_failure_are_generation_bound(),
           "async generation and stable failure contract");
     check(async_prelaunch_and_record_failures_are_bounded(),

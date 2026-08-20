@@ -51,6 +51,7 @@ struct Trace {
     std::atomic<int> pool_stream_calls{0};
     std::atomic<int> destroy_event_calls{0};
     std::atomic<int> create_event_calls{0};
+    std::atomic<int> record_event_calls{0};
     std::atomic<int> synchronize_stream_calls{0};
     std::atomic<int> runtime_copy_to_host_calls{0};
     std::atomic<int> transport_copy_from_device_calls{0};
@@ -59,7 +60,7 @@ struct Trace {
     std::atomic<int> deregister_calls{0};
     std::atomic<int> destroy_team_calls{0};
     int fail_create_event_on = 0;
-    bool fail_completion_record = false;
+    int fail_record_event_on = 0;
     bool fail_barrier_diagnostic = false;
     bool current_stream_completion_record = false;
     bool event_ready = true;
@@ -131,10 +132,11 @@ int stream_create_event(void* data, void** event) {
 int stream_record_event(void* data, void*, void* stream) {
     const auto* token = static_cast<StreamToken*>(stream);
     auto& trace = self(data);
+    const int call = ++trace.record_event_calls;
     trace.order.emplace_back(
         token->communication || trace.current_stream_completion_record ?
         "record completion event" : "record compute dependency");
-    if (token->communication && trace.fail_completion_record)
+    if (call == trace.fail_record_event_on)
         return 23;
     return 0;
 }
@@ -664,7 +666,7 @@ void check_barrier_completion_record_failure_retains_launch() {
     CHECK(buffer != nullptr);
     if (buffer == nullptr)
         return;
-    trace.fail_completion_record = true;
+    trace.fail_record_event_on = trace.record_event_calls.load() + 2;
     CHECK(error_contains(
         [&] { buffer->barrier(true, false, true); }, "backend error 23"));
     CHECK(trace.barrier_launches == 1);
@@ -731,7 +733,7 @@ void check_async_combine_record_failure_quarantines_ownership() {
         return;
     CombineInputs inputs;
     trace.order.clear();
-    trace.fail_completion_record = true;
+    trace.fail_record_event_on = trace.record_event_calls.load() + 3;
     CHECK(error_contains(
         [&] { (void)launch_async_combine(*buffer, inputs); },
         "record_event"));

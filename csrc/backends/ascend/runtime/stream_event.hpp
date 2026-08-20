@@ -84,7 +84,10 @@ private:
     explicit NativeEventWaitLease(std::shared_ptr<NativeEventState> event)
         : event_(std::move(event)) {}
 
+    void arm() noexcept { armed_ = true; }
+
     std::shared_ptr<NativeEventState> event_;
+    bool armed_ = false;
 
     friend class NativeEventState;
 };

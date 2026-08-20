@@ -236,6 +236,15 @@ public:
         return abandoned_operation_count_;
     }
 
+    void poison() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (state_ == CoordinatorState::kDestroying ||
+            state_ == CoordinatorState::kDestroyed)
+            return;
+        state_ = CoordinatorState::kPoisoned;
+        poison_requested_ = false;
+    }
+
 private:
     std::uint64_t next_token() noexcept {
         ++lease_token_;

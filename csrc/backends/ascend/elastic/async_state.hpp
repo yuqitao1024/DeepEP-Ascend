@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
@@ -82,9 +83,47 @@ private:
 };
 
 struct EventDependency {
+    EventDependency() = default;
+
+    EventDependency(
+        std::shared_ptr<runtime::NativeEventState> dependency_event,
+        std::shared_ptr<PendingOperation> operation,
+        std::shared_ptr<runtime::NativeEventWaitLease> lease)
+        : event(std::move(dependency_event)),
+          pending_operation(std::move(operation)),
+          wait_lease(std::move(lease)) {}
+
     std::shared_ptr<runtime::NativeEventState> event;
     std::shared_ptr<PendingOperation> pending_operation;
     std::shared_ptr<runtime::NativeEventWaitLease> wait_lease;
+    std::shared_ptr<runtime::NativeEventState> retirement_event;
+    runtime::StreamIdentity retirement_stream;
+    bool retirement_recorded = false;
+};
+
+class AsyncBufferState;
+
+class EnqueuedEventDependencyGuard {
+public:
+    EnqueuedEventDependencyGuard() = default;
+    ~EnqueuedEventDependencyGuard();
+
+    EnqueuedEventDependencyGuard(const EnqueuedEventDependencyGuard&) = delete;
+    EnqueuedEventDependencyGuard& operator=(
+        const EnqueuedEventDependencyGuard&) = delete;
+
+    void adopt(
+        EventDependency dependency, std::shared_ptr<AsyncBufferState> owner);
+    EventDependency& dependency() noexcept;
+    void arm() noexcept;
+    void mark_retirement_recorded() noexcept;
+    void copy_to(EventDependency& output) const noexcept;
+    void dismiss() noexcept;
+
+private:
+    std::unique_ptr<EventDependency> dependency_;
+    std::shared_ptr<AsyncBufferState> owner_;
+    bool quarantine_on_destroy_ = false;
 };
 
 struct PendingOperationCreateResult {
@@ -133,6 +172,8 @@ public:
     transport::TransportStatus destroy();
     bool finalization_in_progress() const;
     std::optional<transport::TransportStatus> terminal_failure() const;
+    void retire_or_quarantine(
+        std::unique_ptr<EventDependency> dependency) noexcept;
 
 private:
     struct Impl;

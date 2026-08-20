@@ -182,8 +182,6 @@ TransportStatus NativeEventState::wait(
     if (wait_lease == nullptr || *wait_lease != nullptr)
         return TransportStatus::invalid(
             "wait_event", "native event wait lease is unavailable");
-    auto candidate = std::shared_ptr<NativeEventWaitLease>(
-        new NativeEventWaitLease(shared_from_this()));
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ != State::Recorded && state_ != State::Completed)
         return TransportStatus::invalid(
@@ -191,9 +189,12 @@ TransportStatus NativeEventState::wait(
     if (!same_device(stream, device_index_))
         return TransportStatus::invalid(
             "wait_event", "stream does not belong to the event device");
+    auto candidate = std::shared_ptr<NativeEventWaitLease>(
+        new NativeEventWaitLease(shared_from_this()));
     const int result = api_.wait_event(api_.user_data, stream.raw, native_event_);
     if (result != 0)
         return backend_failure("wait_event", result);
+    candidate->arm();
     ++active_wait_leases_;
     *wait_lease = std::move(candidate);
     return TransportStatus::success();
@@ -280,7 +281,7 @@ void NativeEventState::release_wait_lease() noexcept {
 }
 
 NativeEventWaitLease::~NativeEventWaitLease() {
-    if (event_ != nullptr)
+    if (armed_ && event_ != nullptr)
         event_->release_wait_lease();
 }
 
