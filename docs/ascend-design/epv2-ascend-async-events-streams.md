@@ -408,6 +408,39 @@ controller margin does not change the five-second native event deadline, the
 5% median-improvement threshold, the three warmups, seven measured samples, or
 the 300-second TaskQueue bound.
 
+#### Post-rebase final qualification
+
+The final source archive is based on commit
+`2edbb03f6ba585a0dcece141500f0914cb97eeb2` and has SHA-256
+`e768b8dc53a0a9980a093dbb4cfff7f660b8fc1f534975fde5f4dbddab034cf2`.
+The production extension has SHA-256
+`479e8120dd1b4cf82df89683462c4b03158b8948a2965c4dc253def8ab8df705`.
+Final NPU8P task `task_20260820_111821_163519019431` ran on devices `6,7`
+with `--max-time 300`, imported the Ascend extension from the exact staged
+source, reached authoritative `completed (exit=0)`, and reported 21 selected,
+21 executed, 21 passed, zero failed, and zero not-run cases.
+
+| Rank | Serialized median/p95 | Overlapped median/p95 | Median gain |
+|---:|---:|---:|---:|
+| 0 | `0.331386100/0.332046710s` | `0.304571860/0.305052711s` | `8.0915%` |
+| 1 | `0.331472180/0.331833023s` | `0.304526140/0.305674353s` | `8.1292%` |
+
+Both ranks again exceeded the unchanged 5% gate with three warmups, seven
+measured samples, and zero global synchronizations. The profiler identified
+logical compute/communication streams `0/146` and distinct physical streams
+`61/8` on both ranks. Rank 0 recorded `112.5us` of positive
+`Conv3DV2`/`dispatch_kernel` overlap and rank 1 recorded `109.75us`.
+`Conv3DV2` remained `KERNEL_AICORE`, dispatch remained `KERNEL_AIVEC`, and no
+whole-path pure-AIC claim is made.
+
+The final report SHA-256 is
+`495cc516ca97ada744bbcddcfca904cbd3785ee0c028493e74301f40b6024455`.
+Rank 0 and rank 1 trace SHA-256 values are
+`4012fccba9b3e5f835b43623de9a5872fc88bb8fd856db77afb4b06f32e22686`
+and `6cf1e40f347d17c5f3793241d8ce7c6d3ce0c41aa4009950a0fefbee8af6aab2`.
+This post-rebase result is the integration qualification record for Phase
+3E.1; it does not expand the accepted feature boundary.
+
 ## Decisions
 
 ### Native resource model

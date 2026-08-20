@@ -515,6 +515,27 @@ and `e9dc5c3c487a63ed3d0f8f70c75884171aa0a15e435f14bf80fcef5ef4882001`.
 Every Phase 3E.1 gate passed. All 120 full functional benchmark rows remain
 deferred to 3E.2, and 3E.3, 3E.4, and FP8 Phase 3F remain incomplete.
 
+Post-rebase integration qualification used exact source commit
+`2edbb03f6ba585a0dcece141500f0914cb97eeb2`. Final NPU8P task
+`task_20260820_111821_163519019431` ran on devices `6,7`, reached
+`completed (exit=0)`, and passed 21/21 selected and executed cases with no
+failures or not-run rows. Rank 0 and rank 1 median overlap gains were
+`8.0915%` and `8.1292%`; profiler evidence retained logical streams `0/146`,
+distinct physical streams `61/8`, and positive overlap of `112.5us` and
+`109.75us`. The 45-second external case watchdog only accommodates bounded
+CANN profiler export; the native five-second event deadline, 5% gate, three
+warmups, seven samples, and 300-second TaskQueue bound remain unchanged.
+
+The final archive and production extension SHA-256 values are
+`e768b8dc53a0a9980a093dbb4cfff7f660b8fc1f534975fde5f4dbddab034cf2`
+and `479e8120dd1b4cf82df89683462c4b03158b8948a2965c4dc253def8ab8df705`.
+The report SHA-256 is
+`495cc516ca97ada744bbcddcfca904cbd3785ee0c028493e74301f40b6024455`;
+rank trace hashes are
+`4012fccba9b3e5f835b43623de9a5872fc88bb8fd856db77afb4b06f32e22686`
+and `6cf1e40f347d17c5f3793241d8ce7c6d3ce0c41aa4009950a0fefbee8af6aab2`.
+This closes Phase 3E.1 only and does not credit any deferred 3E.2-3E.4 work.
+
 ### Deliverables
 
 - implement native Ascend event ownership behind `EventOverlap`;
