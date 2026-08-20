@@ -41,6 +41,22 @@ dispatch_owner_bitmap_words(
 }
 
 DEEP_EP_ASCEND_DISPATCH_PARALLEL_CALLEE constexpr bool
+dispatch_owner_bitmap_range(
+    std::uint64_t owner, std::uint64_t owners,
+    std::uint64_t bits_per_owner, std::uint64_t* base_word,
+    std::uint64_t* word_count) noexcept {
+    if (base_word == nullptr || word_count == nullptr || owner >= owners)
+        return false;
+    if (!dispatch_bitmap_words(bits_per_owner, word_count) ||
+        (*word_count != 0 &&
+         owner > std::numeric_limits<std::uint64_t>::max() /
+             *word_count))
+        return false;
+    *base_word = owner * *word_count;
+    return true;
+}
+
+DEEP_EP_ASCEND_DISPATCH_PARALLEL_CALLEE constexpr bool
 dispatch_bitmap_location(
     std::uint64_t bit, std::uint64_t bit_count,
     std::uint64_t* word, std::uint64_t* mask) noexcept {

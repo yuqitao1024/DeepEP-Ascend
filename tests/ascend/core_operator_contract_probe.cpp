@@ -76,6 +76,21 @@ int main() {
         dispatch_bitmap_location(
             0, 65, &bitmap_word, nullptr))
         return 33;
+    std::uint64_t owner_word = 0;
+    std::uint64_t owner_words = 0;
+    if (!dispatch_owner_bitmap_range(
+            0, 3, 65, &owner_word, &owner_words) ||
+        owner_word != 0 || owner_words != 2 ||
+        !dispatch_owner_bitmap_range(
+            2, 3, 65, &owner_word, &owner_words) ||
+        owner_word != 4 || owner_words != 2 ||
+        dispatch_owner_bitmap_range(
+            3, 3, 65, &owner_word, &owner_words) ||
+        dispatch_owner_bitmap_range(
+            0, 3, 65, nullptr, &owner_words) ||
+        dispatch_owner_bitmap_range(
+            0, 3, 65, &owner_word, nullptr))
+        return 34;
 
     CoreTiling tiling{};
     auto input = valid_input();

@@ -1995,7 +1995,8 @@ int main() {
         producer_begin = source.index(
             "__simt_vf__ inline void dispatch_producer_vf")
         epilogue_begin = source.index(
-            "__simt_vf__ inline void dispatch_epilogue_vf")
+            "__simt_vf__ inline void "
+            "direct_dispatch_epilogue_acquire_vf")
         producer = source[producer_begin:epilogue_begin]
         self.assertNotIn("prefix_per_rank[", producer)
         self.assertIn("local_count_address", producer)
