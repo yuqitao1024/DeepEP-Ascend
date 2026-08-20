@@ -411,33 +411,42 @@ the 300-second TaskQueue bound.
 #### Post-rebase final qualification
 
 The final source archive is based on commit
-`2edbb03f6ba585a0dcece141500f0914cb97eeb2` and has SHA-256
-`e768b8dc53a0a9980a093dbb4cfff7f660b8fc1f534975fde5f4dbddab034cf2`.
+`88829ba02a2b8a3f964fca8a27de2fa01c70a93a` and has SHA-256
+`44bc33e8e2639cf7ebf6b6af4f22e507f4b439d1e2ac7bc3c2f2860114e1b87a`.
 The production extension has SHA-256
-`479e8120dd1b4cf82df89683462c4b03158b8948a2965c4dc253def8ab8df705`.
-Final NPU8P task `task_20260820_111821_163519019431` ran on devices `6,7`
+`869b0a1e8ce4fac816a182c411f8fef15a4d2619dbd5eaecfd68336e99e1b606`.
+NPU8P build task `task_20260820_115216_277302926350` completed with exit
+code zero. Final task `task_20260820_115539_278562813437` ran on devices `6,7`
 with `--max-time 300`, imported the Ascend extension from the exact staged
 source, reached authoritative `completed (exit=0)`, and reported 21 selected,
 21 executed, 21 passed, zero failed, and zero not-run cases.
 
 | Rank | Serialized median/p95 | Overlapped median/p95 | Median gain |
 |---:|---:|---:|---:|
-| 0 | `0.331386100/0.332046710s` | `0.304571860/0.305052711s` | `8.0915%` |
-| 1 | `0.331472180/0.331833023s` | `0.304526140/0.305674353s` | `8.1292%` |
+| 0 | `0.332436420/0.333825999s` | `0.303806380/0.304618546s` | `8.6122%` |
+| 1 | `0.331927790/0.332541374s` | `0.304816140/0.305770553s` | `8.1679%` |
 
 Both ranks again exceeded the unchanged 5% gate with three warmups, seven
 measured samples, and zero global synchronizations. The profiler identified
 logical compute/communication streams `0/146` and distinct physical streams
-`61/8` on both ranks. Rank 0 recorded `112.5us` of positive
-`Conv3DV2`/`dispatch_kernel` overlap and rank 1 recorded `109.75us`.
+`61/8` on both ranks. Rank 0 recorded `111.5us` of positive
+`Conv3DV2`/`dispatch_kernel` overlap and rank 1 recorded `110.25us`.
 `Conv3DV2` remained `KERNEL_AICORE`, dispatch remained `KERNEL_AIVEC`, and no
 whole-path pure-AIC claim is made.
 
 The final report SHA-256 is
-`495cc516ca97ada744bbcddcfca904cbd3785ee0c028493e74301f40b6024455`.
+`fd795707cae564a4bc73415e96d75410ebc6b0a682a21034fcc72fb97cf3385a`.
 Rank 0 and rank 1 trace SHA-256 values are
-`4012fccba9b3e5f835b43623de9a5872fc88bb8fd856db77afb4b06f32e22686`
-and `6cf1e40f347d17c5f3793241d8ce7c6d3ce0c41aa4009950a0fefbee8af6aab2`.
+`fb0b6660198601e19e13ec0507d71fff455086d1db272f1993c982e364241519`
+and `c573782f9de130389b24784ee6d9f35831f046b4c0a03842234db87c2371ff28`.
+
+The final review also qualified three teardown boundaries. A missing
+`torch.npu.is_current_stream_capturing` capability now rejects graph capture
+before descriptor or runtime access; the Ascend `ElasticBuffer.destroy()`
+binding releases the Python GIL during bounded native waits while CUDA keeps
+its existing direct binding; and DeepEP retains only the checked pool-stream
+identity while Torch-NPU owns the underlying stream. Host regressions cover
+the fail-closed capture behavior and platform-specific binding policy.
 This post-rebase result is the integration qualification record for Phase
 3E.1; it does not expand the accepted feature boundary.
 
