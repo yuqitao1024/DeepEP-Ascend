@@ -1,7 +1,7 @@
 # Ascend Dispatch and Direct Combine SIMT Parallelization
 
-**Status:** Implemented; representative 8P correctness passed, final benchmark
-profiles pending post-push execution
+**Status:** Implemented; representative 8P correctness and the complete
+post-push smoke profile passed; canonical performance run pending
 
 ## Purpose
 
@@ -289,6 +289,7 @@ qualified Python 3.10 environment, and serialized TaskQueue submission.
 | BF16 alignment 1, sync, handle copy | `task_20260821_035424_27140337624` | 1 case passed, `exit=0` |
 | BF16 alignment 1, async, previous event, comm-stream allocation | `task_20260821_035649_272065721223` | 1 case passed, `exit=0` |
 | FP8 alignment 128, async, previous event, comm-stream allocation | `task_20260821_035912_272675920526` | 1 case passed, `exit=0` |
+| Post-push 144-case smoke at `088d29f` | `task_20260821_040757_274044121759` | 144 cases and 720 operations passed, `exit=0` |
 
 Each device case used the canonical `4096 x 7168`, top-k 6, 256-expert,
 eight-rank workload with correctness enabled, one warmup, and one measured
@@ -304,8 +305,10 @@ to exclude it. A production dispatch probe covers uncached and cached expanded
 launches. Host verification after this fix passed `102` tests plus `48`
 subtests in the core suite and `134` benchmark contract/automation tests.
 
-The 144-case smoke profile and full canonical performance profile remain
-pending and must run only after the branch is rebased and pushed.
+The smoke automation produced schema-v2 `benchmark.json`, `benchmark.md`,
+`workload.json`, and `run.log` artifacts in
+`results/ascend-smoke-088d29f`. The full canonical performance profile remains
+pending because it is a separate long-duration measurement run.
 
 ## Success Criteria
 
