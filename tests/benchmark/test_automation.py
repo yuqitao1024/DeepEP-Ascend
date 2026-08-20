@@ -1,12 +1,22 @@
 from copy import deepcopy
 from dataclasses import asdict
+import json
 import math
 import re
 from pathlib import Path
+import sys
 
 import pytest
 
 from tests.benchmark.profiles import BenchmarkProfile, PROFILES, profile_manifest
+from tests.benchmark.run_ep import (
+    RunConfig,
+    build_backend_command,
+    build_parser,
+    execute_run,
+    validate_ascend_readiness,
+)
+import tests.benchmark.run_ep as run_ep
 from tests.benchmark.report_markdown import (
     comparison_rows,
     identify_profile,
@@ -16,7 +26,11 @@ from tests.benchmark.report_markdown import (
     validate_complete_report,
     write_text_atomic,
 )
-from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
+from tests.utils.ep_benchmark_manifest import (
+    enumerate_ep_mode_cases,
+    load_manifest,
+    write_manifest,
+)
 
 
 OPERATIONS = (
@@ -459,3 +473,368 @@ def test_write_text_atomic_replaces_destination_and_cleans_failed_temporary_file
 
     assert output.read_text(encoding="utf-8") == "new\n"
     assert list(Path(tmp_path).glob(".report.md.*")) == []
+
+
+def _adjacent_pairs(command):
+    return tuple(zip(command, command[1:]))
+
+
+def _argument_value(command, option):
+    return command[command.index(option) + 1]
+
+
+def test_run_parser_defaults_to_smoke_without_per_size_overrides(tmp_path):
+    parser = build_parser()
+
+    args = parser.parse_args([
+        "--backend", "cuda", "--output-dir", str(tmp_path),
+    ])
+
+    assert args.profile == "smoke"
+    help_text = parser.format_help()
+    assert "--num-tokens" not in help_text
+    assert "--hidden" not in help_text
+    assert "--num-topk" not in help_text
+    assert "--num-experts" not in help_text
+
+
+def test_cuda_command_expands_canonical_profile_and_all_cases(tmp_path):
+    staging = tmp_path / "benchmark.staging.json"
+    manifest = tmp_path / "workload.json"
+    command = build_backend_command(
+        RunConfig("cuda", "canonical", tmp_path, None), staging, manifest
+    )
+
+    assert isinstance(command, tuple)
+    assert command[:3] == (
+        sys.executable, "tests/elastic/test_ep.py", "--benchmark-profile",
+    )
+    pairs = _adjacent_pairs(command)
+    assert ("--benchmark-profile", "parity") in pairs
+    assert ("--num-processes", "8") in pairs
+    assert ("--num-tokens", "4096") in pairs
+    assert ("--hidden", "7168") in pairs
+    assert ("--num-topk", "6") in pairs
+    assert ("--num-experts", "256") in pairs
+    assert ("--warmups", "30") in pairs
+    assert ("--iterations", "30") in pairs
+    assert ("--workload-manifest", str(manifest)) in pairs
+    assert ("--benchmark-json", str(staging)) in pairs
+    assert "benchmark.json" not in command
+    assert len(_argument_value(command, "--cases").split(",")) == 144
+    assert "--num-sms" not in command
+    assert "--num-qps" not in command
+
+
+def test_ascend_command_uses_eight_rank_torchrun_and_staging_only(tmp_path):
+    staging = tmp_path / "benchmark.staging.json"
+    manifest = tmp_path / "workload.json"
+    command = build_backend_command(
+        RunConfig("ascend", "smoke", tmp_path, None), staging, manifest
+    )
+
+    assert isinstance(command, tuple)
+    assert command[:4] == (
+        "torchrun", "--standalone", "--nproc-per-node=8",
+        "tests/ascend/benchmark/bench_ep.py",
+    )
+    pairs = _adjacent_pairs(command)
+    assert ("--num-tokens", "16") in pairs
+    assert ("--hidden", "128") in pairs
+    assert ("--num-topk", "2") in pairs
+    assert ("--num-experts", "8") in pairs
+    assert ("--warmups", "1") in pairs
+    assert ("--iterations", "1") in pairs
+    assert ("--workload-manifest", str(manifest)) in pairs
+    assert ("--output", str(staging)) in pairs
+    assert "benchmark.json" not in command
+    assert len(_argument_value(command, "--cases").split(",")) == 144
+
+
+def test_ascend_readiness_requires_the_complete_supported_inventory():
+    validate_ascend_readiness({
+        "summary": {"total": 144, "supported": 144, "deferred": 0},
+        "cases": [],
+    })
+
+    for summary in (
+        {"total": 143, "supported": 143, "deferred": 0},
+        {"total": 144, "supported": 84, "deferred": 60},
+        {"total": 144, "supported": 144, "deferred": 1},
+        {"total": 144, "supported": 144},
+    ):
+        with pytest.raises(ValueError, match="Ascend readiness"):
+            validate_ascend_readiness({"summary": summary})
+
+
+class FakeRunCommand:
+    def __init__(
+        self,
+        report=None,
+        exit_code=0,
+        write_staging=True,
+        readiness_summary=None,
+    ):
+        self.report = report
+        self.exit_code = exit_code
+        self.write_staging = write_staging
+        self.readiness_summary = readiness_summary or {
+            "total": 144, "supported": 144, "deferred": 0,
+        }
+        self.commands = []
+
+    def __call__(self, command, log_handle):
+        self.commands.append(command)
+        if "--list-cases" in command:
+            payload = {
+                "summary": self.readiness_summary,
+                "cases": [],
+            }
+            output = json.dumps(payload) + "\n"
+            log_handle.write(output)
+            return 0, output
+
+        staging_option = "--benchmark-json" if "--benchmark-json" in command else "--output"
+        if self.write_staging:
+            staging = Path(_argument_value(command, staging_option))
+            if self.report is None:
+                staging.write_text("child diagnostic staging\n", encoding="utf-8")
+            else:
+                staging.write_text(json.dumps(self.report), encoding="utf-8")
+        log_handle.write("fake child output\n")
+        return self.exit_code, "fake child output\n"
+
+
+@pytest.mark.parametrize(
+    ("backend", "device_name"),
+    (("cuda", "NVIDIA H800"), ("ascend", "Ascend 950")),
+)
+def test_execute_run_publishes_exactly_four_final_artifacts(
+    tmp_path, backend, device_name
+):
+    output_dir = tmp_path / backend
+    runner = FakeRunCommand(complete_report(backend, "smoke", device_name))
+
+    result = execute_run(
+        RunConfig(backend, "smoke", output_dir, None),
+        command_runner=runner,
+    )
+
+    assert result == 0
+    assert {path.name for path in output_dir.iterdir()} == {
+        "workload.json", "benchmark.json", "benchmark.md", "run.log",
+    }
+    assert load_manifest(output_dir / "workload.json") == profile_manifest(
+        PROFILES["smoke"]
+    )
+    assert json.loads((output_dir / "benchmark.json").read_text(encoding="utf-8"))[
+        "platform"
+    ] == backend
+    assert (output_dir / "benchmark.md").read_text(encoding="utf-8").startswith(
+        f"# EP Benchmark: {'CUDA' if backend == 'cuda' else 'Ascend'} / smoke\n"
+    )
+    log = (output_dir / "run.log").read_text(encoding="utf-8")
+    assert '"command": [' in log
+    assert '"backend": "' + backend + '"' in log
+    assert '"profile": "smoke"' in log
+    assert "fake child output" in log
+    if backend == "ascend":
+        assert runner.commands[0] == (
+            sys.executable,
+            "tests/ascend/benchmark/bench_ep.py",
+            "--list-cases", "--suite", "all", "--format", "json",
+        )
+
+
+def test_execute_run_returns_child_exit_and_retains_failure_artifacts(tmp_path):
+    output_dir = tmp_path / "failed-child"
+    runner = FakeRunCommand(report=None, exit_code=17)
+
+    result = execute_run(
+        RunConfig("cuda", "smoke", output_dir, None),
+        command_runner=runner,
+    )
+
+    assert result == 17
+    assert (output_dir / "run.log").exists()
+    assert (output_dir / "workload.json").exists()
+    assert (output_dir / "benchmark.staging.json").read_text(
+        encoding="utf-8"
+    ) == "child diagnostic staging\n"
+    assert not (output_dir / "benchmark.json").exists()
+    assert not (output_dir / "benchmark.md").exists()
+    log = (output_dir / "run.log").read_text(encoding="utf-8")
+    assert "fake child output" in log
+    assert '"event": "run_end"' in log
+    assert '"exit_code": 17' in log
+
+
+def test_ascend_readiness_failure_retains_workload_and_skips_device_command(tmp_path):
+    output_dir = tmp_path / "not-ready"
+    runner = FakeRunCommand(
+        readiness_summary={"total": 144, "supported": 84, "deferred": 60}
+    )
+
+    result = execute_run(
+        RunConfig("ascend", "smoke", output_dir, None),
+        command_runner=runner,
+    )
+
+    assert result == 1
+    assert len(runner.commands) == 1
+    assert "--list-cases" in runner.commands[0]
+    assert (output_dir / "workload.json").exists()
+    assert not (output_dir / "benchmark.staging.json").exists()
+    assert not (output_dir / "benchmark.json").exists()
+    assert not (output_dir / "benchmark.md").exists()
+    log = (output_dir / "run.log").read_text(encoding="utf-8")
+    assert "Ascend readiness" in log
+    assert '"event": "run_end"' in log
+    assert '"exit_code": 1' in log
+
+
+@pytest.mark.parametrize("failure", ("missing", "invalid"))
+def test_execute_run_rejects_missing_or_invalid_staging_report(tmp_path, failure):
+    output_dir = tmp_path / failure
+    report = None
+    write_staging = False
+    if failure == "invalid":
+        report = complete_report("cuda", "smoke", "NVIDIA A100")
+        write_staging = True
+    runner = FakeRunCommand(report=report, write_staging=write_staging)
+
+    result = execute_run(
+        RunConfig("cuda", "smoke", output_dir, None),
+        command_runner=runner,
+    )
+
+    assert result == 1
+    assert (output_dir / "run.log").exists()
+    assert (output_dir / "workload.json").exists()
+    assert not (output_dir / "benchmark.json").exists()
+    assert not (output_dir / "benchmark.md").exists()
+    log = (output_dir / "run.log").read_text(encoding="utf-8")
+    assert ("staging report" if failure == "missing" else "device.name") in log
+    if failure == "invalid":
+        assert (output_dir / "benchmark.staging.json").exists()
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    ("benchmark.json", "benchmark.md", "benchmark.staging.json"),
+)
+def test_execute_run_rejects_output_with_completed_or_staging_artifact(
+    tmp_path, artifact_name
+):
+    output_dir = tmp_path / "occupied"
+    output_dir.mkdir()
+    artifact = output_dir / artifact_name
+    artifact.write_text("keep me\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="already contains"):
+        execute_run(
+            RunConfig("cuda", "smoke", output_dir, None),
+            command_runner=FakeRunCommand(),
+        )
+
+    assert artifact.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_execute_run_rejects_repository_root_output():
+    repository_root = Path(run_ep.__file__).resolve().parents[2]
+
+    with pytest.raises(ValueError, match="repository root"):
+        execute_run(
+            RunConfig("cuda", "smoke", repository_root, None),
+            command_runner=FakeRunCommand(),
+        )
+
+
+def test_execute_run_keeps_staging_diagnostics_when_markdown_rendering_fails(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path / "markdown-failure"
+    runner = FakeRunCommand(complete_report("cuda", "smoke", "NVIDIA H800"))
+
+    def fail_markdown(report, profile):
+        raise RuntimeError("markdown exploded")
+
+    monkeypatch.setattr(run_ep, "render_backend_markdown", fail_markdown)
+    result = execute_run(
+        RunConfig("cuda", "smoke", output_dir, None),
+        command_runner=runner,
+    )
+
+    assert result == 1
+    assert (output_dir / "run.log").exists()
+    assert (output_dir / "workload.json").exists()
+    assert (output_dir / "benchmark.staging.json").exists()
+    assert not (output_dir / "benchmark.json").exists()
+    assert not (output_dir / "benchmark.md").exists()
+    assert list(output_dir.glob(".benchmark.md.*")) == []
+    assert "markdown exploded" in (output_dir / "run.log").read_text(encoding="utf-8")
+
+
+def test_input_manifest_is_validated_and_copied_byte_for_byte(tmp_path):
+    source = tmp_path / "shared.json"
+    write_manifest(source, profile_manifest(PROFILES["smoke"]))
+    source_bytes = source.read_bytes() + b" \n"
+    source.write_bytes(source_bytes)
+    output_dir = tmp_path / "copied"
+    runner = FakeRunCommand(exit_code=9, write_staging=False)
+
+    result = execute_run(
+        RunConfig("cuda", "smoke", output_dir, source),
+        command_runner=runner,
+    )
+
+    assert result == 9
+    copied = output_dir / "workload.json"
+    assert copied.read_bytes() == source_bytes
+    assert ("--workload-manifest", str(copied.resolve())) in _adjacent_pairs(
+        runner.commands[-1]
+    )
+
+
+@pytest.mark.parametrize("mutation", ("fingerprint", "profile"))
+def test_input_manifest_rejects_bad_fingerprint_or_wrong_profile(tmp_path, mutation):
+    source = tmp_path / "shared.json"
+    write_manifest(source, profile_manifest(PROFILES["canonical"]))
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    if mutation == "fingerprint":
+        payload["fingerprint"] = "0" * 64
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    runner = FakeRunCommand()
+    output_dir = tmp_path / mutation
+
+    result = execute_run(
+        RunConfig("cuda", "smoke", output_dir, source),
+        command_runner=runner,
+    )
+
+    assert result == 1
+    assert runner.commands == []
+    assert not (output_dir / "benchmark.json").exists()
+    assert not (output_dir / "benchmark.md").exists()
+    assert ("fingerprint" if mutation == "fingerprint" else "profile") in (
+        output_dir / "run.log"
+    ).read_text(encoding="utf-8")
+
+
+def test_generated_manifest_is_deterministic_and_child_consumes_output_copy(tmp_path):
+    generated = []
+    for name in ("one", "two"):
+        output_dir = tmp_path / name
+        runner = FakeRunCommand(exit_code=8, write_staging=False)
+        result = execute_run(
+            RunConfig("cuda", "smoke", output_dir, None),
+            command_runner=runner,
+        )
+        assert result == 8
+        manifest_path = (output_dir / "workload.json").resolve()
+        generated.append(manifest_path.read_bytes())
+        assert ("--workload-manifest", str(manifest_path)) in _adjacent_pairs(
+            runner.commands[-1]
+        )
+
+    assert generated[0] == generated[1]
