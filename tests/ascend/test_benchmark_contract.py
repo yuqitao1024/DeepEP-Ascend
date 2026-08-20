@@ -20,7 +20,12 @@ from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
 from tests.ascend.benchmark.timing import NpuEventTimer
 from tests.ascend.benchmark import workloads
 from tests.ascend.benchmark.workloads import classify_ascend_case
-from tests.utils.ep_benchmark_manifest import EPModeCase, enumerate_ep_mode_cases
+from tests.utils.ep_benchmark_core import build_dispatch_arguments
+from tests.utils.ep_benchmark_manifest import (
+    EPModeCase,
+    case_suite,
+    enumerate_ep_mode_cases,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,18 +54,20 @@ def test_case_suite_counts_are_exhaustive():
         for classification in classified
     ) == {
         ("performance", True): 24,
-        ("functional", False): 120,
+        ("functional", True): 60,
+        ("functional", False): 60,
     }
     assert Counter(
         classification.reason
         for classification in classified
-        if classification.suite == "functional"
+        if (classification.suite == "functional" and
+            not classification.supported)
     ) == {
-        "full_row_noncached_dispatch_deferred_3e2": 120,
+        "fp8_full_row_deferred_3f": 60,
     }
 
 
-def test_phase_3e1_cached_bf16_coverage_is_separate_from_full_rows():
+def test_phase_3e2_promotes_only_bf16_full_rows():
     assert workloads.phase_3e1_acceptance_operations() == (
         "cached-bf16-dispatch-sync",
         "cached-bf16-dispatch-async",
@@ -74,24 +81,32 @@ def test_phase_3e1_cached_bf16_coverage_is_separate_from_full_rows():
         if classify_ascend_case(case).suite == "functional"
     ]
     assert len(full_functional_rows) == 120
+    assert sum(
+        classify_ascend_case(case).supported
+        for case in full_functional_rows
+    ) == 60
     assert all(
-        not classify_ascend_case(case).supported
+        classify_ascend_case(case).supported ==
+        (not case.use_fp8_dispatch)
         for case in full_functional_rows
     )
 
 
-def test_supported_ascend_cases_are_the_synchronous_intersection():
+def test_supported_ascend_cases_include_phase_3e2_bf16_modes():
     supported = [
         case
         for case in enumerate_ep_mode_cases()
         if classify_ascend_case(case).supported
     ]
 
-    assert len(supported) == 24
+    assert len(supported) == 84
     assert {case.use_fp8_dispatch for case in supported} == {False, True}
-    assert all(not case.with_previous_event for case in supported)
-    assert all(not case.async_with_compute_stream for case in supported)
-    assert all(not case.allocate_on_comm_stream for case in supported)
+    functional = [case for case in supported if case_suite(case) == "functional"]
+    assert len(functional) == 60
+    assert all(not case.use_fp8_dispatch for case in functional)
+    assert {case.with_previous_event for case in functional} == {False, True}
+    assert {case.async_with_compute_stream for case in functional} == {False, True}
+    assert {case.allocate_on_comm_stream for case in functional} == {False, True}
     assert {
         (case.expert_alignment, case.num_bias, case.do_handle_copy)
         for case in supported
@@ -101,6 +116,79 @@ def test_supported_ascend_cases_are_the_synchronous_intersection():
         for num_bias in (0, 1, 2)
         for do_handle_copy in (True, False)
     }
+
+
+def test_runtime_launch_applies_predecessor_and_waits_async_event():
+    calls = []
+    waits = []
+    predecessor = object()
+
+    class Event:
+        event = object()
+
+        @staticmethod
+        def current_stream_wait():
+            waits.append("waited")
+
+    class Buffer:
+        @staticmethod
+        def capture():
+            calls.append(("capture", {}))
+            return predecessor
+
+        @staticmethod
+        def dispatch(**arguments):
+            calls.append(("dispatch", arguments))
+            return ("x", "routes", "weights", "handle", Event())
+
+    case = EPModeCase(
+        do_handle_copy=True,
+        expert_alignment=1,
+        use_fp8_dispatch=False,
+        num_bias=0,
+        with_previous_event=True,
+        async_with_compute_stream=True,
+        allocate_on_comm_stream=True,
+    )
+    runtime = AscendRuntime.__new__(AscendRuntime)
+    runtime.buffer = Buffer()
+    arguments = {"x": "payload"}
+
+    result = runtime._launch(case, "dispatch", arguments)
+
+    assert result[:4] == ("x", "routes", "weights", "handle")
+    assert calls == [
+        ("capture", {}),
+        ("dispatch", {"x": "payload", "previous_event": predecessor}),
+    ]
+    assert waits == ["waited"]
+    assert arguments == {"x": "payload"}
+
+
+def test_cached_dispatch_arguments_preserve_stream_modes():
+    case = EPModeCase(
+        do_handle_copy=True,
+        expert_alignment=1,
+        use_fp8_dispatch=False,
+        num_bias=0,
+        with_previous_event=False,
+        async_with_compute_stream=True,
+        allocate_on_comm_stream=True,
+    )
+    arguments = build_dispatch_arguments(
+        case=case,
+        x="payload",
+        topk_idx="routes",
+        topk_weights="weights",
+        num_max_tokens_per_rank=64,
+        num_experts=16,
+        num_sms=1,
+        num_qps=0,
+    )
+
+    cached = arguments.cached("handle")
+    assert cached["async_with_compute_stream"] is True
+    assert cached["allocate_on_comm_stream"] is True
 
 
 class _ContractTensor:
@@ -276,7 +364,7 @@ def test_summary_rejects_invalid_samples(samples):
         summarize_samples(samples)
 
 
-def test_performance_report_contains_only_current_cases(tmp_path):
+def test_default_report_contains_all_current_cases(tmp_path):
     current_performance = tuple(
         case
         for case in enumerate_ep_mode_cases()
@@ -302,10 +390,10 @@ def test_performance_report_contains_only_current_cases(tmp_path):
         capture_output=True,
         text=True,
     ).stdout.strip()
-    assert len(payload["cases"]) == 24
+    assert len(payload["cases"]) == 84
     assert payload["case_summary"] == {
-        "total": 24,
-        "pending": 24,
+        "total": 84,
+        "pending": 84,
         "passed": 0,
         "failed": 0,
     }
@@ -365,13 +453,15 @@ def test_benchmark_parser_preserves_production_size_defaults():
     assert args.allow_multiple_reduction == 1
 
 
-def test_default_selection_contains_only_current_performance_cases():
+def test_default_selection_contains_all_current_supported_cases():
     selected = _selected_case_ids(build_parser(), None)
 
-    assert len(selected) == 24
+    assert len(selected) == 84
     assert any("-fp8-" in case_id for case_id in selected)
     assert any("-bf16-" in case_id for case_id in selected)
-    assert all("-prev0-async0-alloc0" in case_id for case_id in selected)
+    assert any("-prev1-" in case_id for case_id in selected)
+    assert any("-async1-" in case_id for case_id in selected)
+    assert any("-alloc1" in case_id for case_id in selected)
 
 
 @pytest.mark.parametrize(
@@ -423,9 +513,9 @@ def test_cli_rejects_unknown_case_before_runtime_import():
     ("case_id", "suite", "reason"),
     (
         (
-            "ep-bf16-align128-bias0-hcopy1-prev1-async0-alloc1",
+            "ep-fp8-align128-bias0-hcopy1-prev1-async0-alloc1",
             "functional",
-            "full_row_noncached_dispatch_deferred_3e2",
+            "fp8_full_row_deferred_3f",
         ),
     ),
 )

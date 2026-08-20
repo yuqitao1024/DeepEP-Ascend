@@ -14,7 +14,7 @@ from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Benchmark synchronous Ascend EPv2 kernels",
+        description="Benchmark the supported Ascend EPv2 kernel matrix",
     )
     parser.add_argument("--list-cases", action="store_true")
     parser.add_argument(

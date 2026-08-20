@@ -1336,12 +1336,15 @@ public:
         TORCH_CHECK(!previous_event.has_value() || allocate_on_comm_stream,
                     "DeepEP Ascend backend: dispatch previous_event requires "
                     "allocate_on_comm_stream=True");
+        const bool split_dispatch = !cached_mode && do_cpu_sync &&
+            !sf.has_value() && !allow_hybrid_mode_;
         const bool stream_mode = previous_event.has_value() ||
             async_with_compute_stream || allocate_on_comm_stream;
         TORCH_CHECK(!stream_mode ||
-                        (cached_mode && !sf.has_value() && !allow_hybrid_mode_),
+                        ((cached_mode || split_dispatch) &&
+                         !sf.has_value() && !allow_hybrid_mode_),
                     "DeepEP Ascend backend: dispatch stream overlap requires "
-                    "cached BF16 pure-scale-up mode");
+                    "BF16 pure-scale-up mode with cached metadata or CPU sync");
         TORCH_CHECK(do_cpu_sync || cached_mode,
                     "DeepEP Ascend backend: dispatch requires do_cpu_sync unless cached");
         TORCH_CHECK(num_sms == 1 && num_qps == 0,
@@ -1433,6 +1436,10 @@ public:
             mode_flags |= elastic::mode_bit(elastic::CoreMode::kZeroPadding);
         if (allow_hybrid_mode_)
             mode_flags |= elastic::mode_bit(elastic::CoreMode::kHybrid);
+        if (split_dispatch)
+            mode_flags |= elastic::mode_bit(elastic::CoreMode::kCpuSync);
+        if (split_dispatch && async_with_compute_stream)
+            mode_flags |= elastic::mode_bit(elastic::CoreMode::kAsyncEvent);
         const auto num_tokens = static_cast<std::uint64_t>(x.size(0));
         const auto hidden = static_cast<std::uint64_t>(x.size(1));
         const auto num_topk = static_cast<std::uint64_t>(topk_idx.size(1));
@@ -1450,8 +1457,10 @@ public:
                         tiling.workspace_bytes <= resources_->workspace_bytes(),
                     "DeepEP Ascend backend: dispatch capacity exceeds runtime storage");
 
-        const auto descriptor_mode_flags = mode_flags & ~elastic::mode_bit(
-            elastic::CoreMode::kCached);
+        const auto descriptor_mode_flags = mode_flags &
+            ~(elastic::mode_bit(elastic::CoreMode::kCached) |
+              elastic::mode_bit(elastic::CoreMode::kCpuSync) |
+              elastic::mode_bit(elastic::CoreMode::kAsyncEvent));
         const auto routing_mode = allow_hybrid_mode_ ?
             elastic::DispatchRoutingMode::kHybrid :
             elastic::DispatchRoutingMode::kDirect;
@@ -1473,7 +1482,8 @@ public:
         runtime::StreamIdentity dispatch_stream;
         elastic::EventDependency predecessor;
         elastic::EnqueuedEventDependencyGuard predecessor_guard;
-        if (cached_mode) {
+        const bool use_comm_stream = cached_mode || stream_mode;
+        if (use_comm_stream) {
             auto status = resources_->current_stream(&dispatch_stream);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
@@ -1761,17 +1771,21 @@ public:
                 {static_cast<int64_t>(local_experts)}, int_options);
             destination_slots = torch::empty({x.size(0), topk_idx.size(1)}, int_options);
             source_metadata = torch::empty(
-                {static_cast<int64_t>(max_recv_tokens), topk_idx.size(1) + 2},
+                {static_cast<int64_t>(split_dispatch ? 0 : max_recv_tokens),
+                 topk_idx.size(1) + 2},
                 int_options);
         }
 
+        const auto initial_recv_tokens = static_cast<int64_t>(
+            split_dispatch ? 0 : max_recv_tokens);
+        const auto initial_output_tokens = static_cast<int64_t>(
+            split_dispatch ? 0 :
+            (do_expand ? expanded_records : max_recv_tokens));
         auto recv_x = torch::empty(
-            {static_cast<int64_t>(do_expand ? expanded_records : max_recv_tokens),
-             x.size(1)}, x.options());
+            {initial_output_tokens, x.size(1)}, x.options());
         auto recv_sf = std::optional<torch::Tensor>();
         if (sf.has_value()) {
-            const auto allocated_tokens = static_cast<int64_t>(
-                do_expand ? expanded_records : max_recv_tokens);
+            const auto allocated_tokens = initial_output_tokens;
             const auto sf_token_stride = use_tma_aligned_col_major_sf ?
                 int64_t{1} : static_cast<int64_t>(num_scale_factor_packs);
             std::uint64_t aligned_tokens = 0;
@@ -1789,16 +1803,16 @@ public:
                 {sf_token_stride, sf_pack_stride}, sf->options());
         }
         auto recv_topk_indices = torch::empty(
-            {static_cast<int64_t>(max_recv_tokens), topk_idx.size(1)},
+            {initial_recv_tokens, topk_idx.size(1)},
             topk_idx.options());
         auto recv_topk_weights = std::optional<torch::Tensor>();
         if (topk_weights.has_value()) {
             recv_topk_weights = do_expand ?
                 torch::empty(
-                    {static_cast<int64_t>(expanded_records)},
+                    {initial_output_tokens},
                     topk_weights->options()) :
                 torch::empty(
-                    {static_cast<int64_t>(max_recv_tokens), topk_idx.size(1)},
+                    {initial_recv_tokens, topk_idx.size(1)},
                     topk_weights->options());
         }
         auto copied_topk_idx = !cached_mode && do_handle_copy ?
@@ -1814,11 +1828,20 @@ public:
                          0))},
                 metadata_options);
         std::vector<std::optional<torch::Tensor>> retained_tensors;
-        if (cached_mode) {
-            const auto retain = [&retained_tensors](
-                                    const std::optional<torch::Tensor>& tensor) {
-                retained_tensors.emplace_back(tensor);
-            };
+        const auto retain = [&](const std::optional<torch::Tensor>& tensor) {
+            if (!use_comm_stream)
+                return;
+            retained_tensors.emplace_back(tensor);
+#ifndef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+            if (tensor.has_value()) {
+                const auto record_status = resources_->record_tensor_stream(
+                    *tensor, dispatch_stream);
+                if (!record_status.ok())
+                    raise_transport_status(record_status, rank_idx_);
+            }
+#endif
+        };
+        if (use_comm_stream) {
             retain(x);
             retain(sf);
             retain(topk_idx);
@@ -1837,22 +1860,15 @@ public:
             retain(expert_prefix);
             retain(unaligned);
             retain(destination_slots);
-            retain(source_metadata);
-            retain(recv_x);
-            retain(recv_topk_indices);
-            retain(recv_topk_weights);
+            if (!split_dispatch) {
+                retain(source_metadata);
+                retain(recv_x);
+                retain(recv_sf);
+                retain(recv_topk_indices);
+                retain(recv_topk_weights);
+            }
             retain(copied_topk_idx);
             retain(descriptor_tensor);
-#ifndef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
-            for (const auto& tensor : retained_tensors) {
-                if (!tensor.has_value())
-                    continue;
-                const auto record_status = resources_->record_tensor_stream(
-                    *tensor, dispatch_stream);
-                if (!record_status.ok())
-                    raise_transport_status(record_status, rank_idx_);
-            }
-#endif
         }
         auto status = transport::TransportStatus{};
 
@@ -1885,6 +1901,13 @@ public:
             kernel_unaligned.data_ptr<std::int32_t>();
         arguments.destination_slots = destination_slots.data_ptr<std::int32_t>();
         arguments.source_metadata = source_metadata.data_ptr<std::int32_t>();
+        arguments.num_recv_tokens = static_cast<std::uint64_t>(
+            cached_mode ? *cached_num_recv_tokens : initial_recv_tokens);
+        arguments.num_output_tokens = static_cast<std::uint64_t>(
+            cached_mode ?
+                (do_expand ? *cached_num_expanded_tokens :
+                             *cached_num_recv_tokens) :
+                initial_output_tokens);
         if (allow_hybrid_mode_) {
             arguments.route_records =
                 reinterpret_cast<elastic::HybridRouteRecord*>(
@@ -1895,7 +1918,7 @@ public:
         }
         arguments.timeout_cycles = barrier_timeout_cycles_;
         runtime::StreamIdentity stream = dispatch_stream;
-        if (!cached_mode) {
+        if (!use_comm_stream) {
             status = resources_->current_stream(&stream);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
@@ -1904,8 +1927,11 @@ public:
             static_cast<std::uint64_t>(num_buffer_bytes_), resources_->workspace_bytes()};
         runtime::NativeEventCreateResult completion{};
         std::vector<elastic::EventDependency> predecessors;
+        if (cached_mode || split_dispatch) {
+            if (use_comm_stream)
+                predecessors.resize(1);
+        }
         if (cached_mode) {
-            predecessors.resize(1);
             completion = resources_->create_event();
             if (!completion.status.ok())
                 raise_transport_status(completion.status, rank_idx_);
@@ -2078,6 +2104,52 @@ public:
                         num_expanded_tokens >= 0 &&
                         num_expanded_tokens <= static_cast<int>(expanded_records),
                     "DeepEP Ascend backend: dispatch returned invalid output counts");
+        if (split_dispatch) {
+            const auto output_tokens = static_cast<int64_t>(
+                do_expand ? num_expanded_tokens : num_recv_tokens);
+            recv_x = torch::empty({output_tokens, x.size(1)}, x.options());
+            recv_topk_indices = torch::empty(
+                {static_cast<int64_t>(num_recv_tokens), topk_idx.size(1)},
+                topk_idx.options());
+            recv_topk_weights = topk_weights.has_value() ?
+                std::optional<torch::Tensor>(do_expand ?
+                    torch::empty({output_tokens}, topk_weights->options()) :
+                    torch::empty(
+                        {static_cast<int64_t>(num_recv_tokens),
+                         topk_idx.size(1)}, topk_weights->options())) :
+                std::optional<torch::Tensor>();
+            source_metadata = torch::empty(
+                {static_cast<int64_t>(num_recv_tokens),
+                 topk_idx.size(1) + 2}, int_options);
+
+            arguments.recv_x = recv_x.data_ptr();
+            arguments.recv_scale_factors = nullptr;
+            arguments.recv_scale_factor_token_stride = 0;
+            arguments.recv_scale_factor_pack_stride = 0;
+            arguments.recv_topk_indices =
+                recv_topk_indices.data_ptr<std::int64_t>();
+            arguments.recv_topk_weights = recv_topk_weights.has_value() ?
+                recv_topk_weights->data_ptr<float>() : nullptr;
+            arguments.source_metadata =
+                source_metadata.data_ptr<std::int32_t>();
+            arguments.num_recv_tokens = static_cast<std::uint64_t>(
+                num_recv_tokens);
+            arguments.num_output_tokens = static_cast<std::uint64_t>(
+                output_tokens);
+
+            retain(source_metadata);
+            retain(recv_x);
+            retain(recv_sf);
+            retain(recv_topk_indices);
+            retain(recv_topk_weights);
+
+            completion = resources_->create_event();
+            if (!completion.status.ok())
+                raise_transport_status(completion.status, rank_idx_);
+#if DEEP_EP_ASCEND_TESTING
+            inject_testing_post_wait_failure("activation");
+#endif
+        }
         elastic::DispatchHandleDescriptor committed_descriptor{};
         if (allow_hybrid_mode_) {
             host_route_records.resize(
@@ -2153,16 +2225,57 @@ public:
                     hidden, experts, num_topk, alignment, capacity,
                     descriptor_mode_flags);
         }
-        status = resources_->copy_from_host(
-            descriptor_tensor.data_ptr(), &committed_descriptor,
-            sizeof(committed_descriptor));
-        if (!status.ok())
-            raise_transport_status(status, rank_idx_);
-        completion_resources_->commit_dispatch_descriptor(
-            generation, descriptor_tensor,
-            dispatch_descriptor_snapshot(
-                committed_descriptor, host_route_records));
-        lease.complete();
+        std::optional<EventHandle> event;
+        if (split_dispatch) {
+            completion_resources_->stage_dispatch_descriptor(
+                generation, descriptor_tensor, committed_descriptor,
+                dispatch_descriptor_snapshot(
+                    committed_descriptor, host_route_records));
+            const auto epilogue_status =
+                elastic::launch_internal_dispatch_epilogue(
+                    arguments, tiling, storage, stream.raw);
+            if (!epilogue_status.ok())
+                raise_launch_status(epilogue_status, rank_idx_);
+            if (use_comm_stream)
+                predecessor_guard.copy_to(predecessors.front());
+            const auto completion_offset =
+                tiling.symmetric_window_layout.control_offset +
+                offsetof(elastic::SymmetricControlHeader, dispatch_generation);
+            auto published = async_state_->publish(
+                std::move(lease), completion.event,
+                {elastic::BufferOperationKind::kDispatch, generation,
+                 completion_offset,
+                 tiling.workspace_layout.scratch_status_offset},
+                std::move(retained_tensors), std::move(predecessors));
+            if (!published.status.ok())
+                raise_transport_status(published.status, rank_idx_);
+            if (use_comm_stream)
+                predecessor_guard.dismiss();
+            status = completion.event->record(stream);
+            if (!status.ok()) {
+                (void)published.operation->finish(0);
+                raise_transport_status(status, rank_idx_);
+            }
+            if (async_with_compute_stream) {
+                event.emplace(
+                    completion.event, published.operation, async_state_);
+            } else {
+                status = published.operation->finish(5000);
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
+            }
+        } else {
+            status = resources_->copy_from_host(
+                descriptor_tensor.data_ptr(), &committed_descriptor,
+                sizeof(committed_descriptor));
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            completion_resources_->commit_dispatch_descriptor(
+                generation, descriptor_tensor,
+                dispatch_descriptor_snapshot(
+                    committed_descriptor, host_route_records));
+            lease.complete();
+        }
         const int output_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
         auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
         auto narrowed_sf = recv_sf.has_value() ?
@@ -2200,7 +2313,8 @@ public:
                 narrowed_topk_weights, copied_topk_idx, num_recv_tokens,
                 num_expanded_tokens, per_expert_list, rank_prefix,
                 expert_prefix, unaligned, narrowed_metadata,
-                destination_slots, handle_tensor, std::nullopt, std::nullopt};
+                destination_slots, handle_tensor, std::nullopt,
+                std::move(event)};
     }
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>,

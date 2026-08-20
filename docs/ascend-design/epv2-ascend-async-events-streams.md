@@ -7,22 +7,25 @@ It builds on the rank-parameterized, one-operation-per-buffer contract from
 Phase 3B and the synchronous BF16 dispatch/combine implementation. DeepEP V1,
 GPU execution, FP8, and performance parity with CUDA are outside this phase.
 
-Phase 3E is split into independently accepted vertical slices. The accepted
-3E.1 slice provides native event and communication-stream ownership plus real
+Phase 3E is split into independently accepted vertical slices. Phase 3E.1
+provides native event and communication-stream ownership plus real
 communication/computation overlap for cached BF16 pure-scale-up dispatch and
-combine. Later slices extend the same ownership model to dynamic-shape and
-hybrid paths; an interface or compile probe alone is not runtime support.
+combine. Phase 3E.2 extends that ownership model to normal and expanded
+non-cached BF16 dispatch with exact output extents and honest descriptor
+publication. Later slices cover pre-epilogue dependencies and multiflight;
+an interface or compile probe alone is not runtime support.
 
-The 3E.1 production gate is
+The Phase 3E production gate is
 `tests/ascend/production/run_async_overlap.py`. It reports cached BF16
-sub-operation coverage independently from the 144-row parity benchmark; no
-full functional benchmark row is credited by partial sub-operation coverage.
+coverage through `--suite full` and non-cached BF16 coverage through
+`--suite uncached`.
 
 ### Acceptance status (2026-08-20)
 
-Phase 3E.1 is accepted. The complete production-backed evidence is recorded
-after the qualification history below. Phase 3E overall remains incomplete;
-3E.2-3E.4 and FP8 Phase 3F retain their separate acceptance boundaries.
+Phase 3E.1 and Phase 3E.2 are accepted. The complete production-backed
+evidence is recorded below. Phase 3E overall remains incomplete; 3E.3 and
+3E.4 retain separate acceptance boundaries, and FP8 asynchronous functional
+rows remain outside Phase 3E.2.
 
 #### Qualification history
 
@@ -395,9 +398,9 @@ The final report SHA-256 is
 Rank 0 and rank 1 trace SHA-256 values are
 `0c079bbdc9bc5c722394079fb5bd14dba9e23ec0b369ce5479cc486e04a8b5f9`
 and `e9dc5c3c487a63ed3d0f8f70c75884171aa0a15e435f14bf80fcef5ef4882001`.
-Every fixed Phase 3E.1 gate passed, so Phase 3E.1 is accepted. This does not
-promote any of the 120 deferred full functional benchmark rows or change the
-3E.2-3E.4 and FP8 Phase 3F boundaries.
+Every fixed Phase 3E.1 gate passed, so Phase 3E.1 was accepted independently.
+At that checkpoint no full functional benchmark row was promoted; the later
+Phase 3E.2 qualification below changes that classification for BF16 only.
 
 Post-rebase qualification keeps every functional and performance gate above,
 but raises the external per-case process watchdog from 30 to 45 seconds. A
@@ -449,6 +452,52 @@ identity while Torch-NPU owns the underlying stream. Host regressions cover
 the fail-closed capture behavior and platform-specific binding policy.
 This post-rebase result is the integration qualification record for Phase
 3E.1; it does not expand the accepted feature boundary.
+
+#### Phase 3E.2 production acceptance
+
+Phase 3E.2 keeps BF16 non-cached dispatch honest by splitting it into two
+stream-ordered launches. The first launch performs producer/transport work and
+publishes exact counts. The host synchronizes only that stream stage, computes
+the exact output extents, allocates backing storage with exactly the required
+number of bytes, and stages the descriptor. A second epilogue launch copies the
+normal or expanded outputs and publishes the completion generation. Zero-token
+outputs retain zero-byte storage and null data pointers. Cached reuse carries
+the handle's logical receive and expanded counts into runtime validation, so a
+zero-token handle does not fabricate capacity-sized metadata requirements.
+The returned async event records the second launch; `AsyncBufferState` commits
+the descriptor only after event completion. Synchronous and asynchronous modes
+share the same finalizer and one-operation-per-buffer ownership.
+
+Final exact-source NPU8P task `task_20260820_135751_415979026646` ran on
+devices `0,1` with `--max-time 300`, built with
+`DEEP_EP_ASCEND_TESTING=1` against pinned HCOMM, and reached
+`completed (exit=0)`. The source archive SHA-256 is
+`f859207a0f02094fcf390f93583f779f70d7e4f54c2849b5e6514f9a25f0bf4b`.
+The `uncached` suite reported 15 selected, 15 executed, 15 passed, zero failed,
+and zero not-run cases. It covered normal and expanded sync/async dispatch with
+communication-stream allocation false/true, predecessor ordering, empty and
+asymmetric routing, ten generations, cached reuse of the newly published
+handle, completion mismatch, event drop, and retryable pending destruction.
+The report SHA-256 is
+`425733cd9951f4ba3389b5bd07a92f7b564ed6e2653e2260d317ac72efd86c06`.
+
+The benchmark driver now follows the upstream launch semantics: every
+operation captures a fresh predecessor when requested, propagates async and
+allocation modes through cached dispatch and combine, and waits the returned
+event before consuming outputs. Earlier TaskQueue task
+`task_20260820_130457_3701406158` qualified that driver plumbing with the
+3E.2 implementation and Python source archive SHA-256
+`301b8c2cbd0926f60ad5be7c999e21d60d026cbff4918f247d7eee1f8d29a7ac`.
+Its strongest BF16 functional row (`prev1/async1/alloc1`) passed normal,
+expanded, cached, combine, and reduced-combine operations. The smoke report
+SHA-256 is
+`410dbfc5c0bdb6c7a4f2b6168a937f71bcf1755cca83206731973384efd48b8a`.
+
+The 144-row benchmark inventory therefore contains 84 supported rows: 24
+existing synchronous performance rows and 60 BF16 functional rows. The 60 FP8
+functional rows remain deferred to FP8 async qualification. Phase 3E.2 does
+not enable `previous_event_before_epilogue`, same-buffer multiflight,
+hybrid/physical-scale-out async, mapped CPU async, or graph capture.
 
 ## Decisions
 
@@ -563,6 +612,23 @@ The first slice explicitly rejects before launch:
 `TransportCapability::kAsyncCompletion` and `CoreMode::kAsyncEvent` remain
 disabled in 3E.1. A host stream returning before a whole AICore kernel completes
 does not implement the device request lifecycle represented by those flags.
+
+## 3E.2 Supported Matrix
+
+The second production slice adds BF16 pure-scale-up normal and expanded
+non-cached dispatch with:
+
+- `do_cpu_sync=True` and exact output extents;
+- synchronous or asynchronous completion;
+- `allocate_on_comm_stream` false or true;
+- `previous_event` when communication-stream allocation is enabled;
+- descriptor publication only after the copy epilogue completes;
+- a real completion event for the second launch; and
+- empty, asymmetric, repeated-generation, event-drop, completion-mismatch,
+  retryable-destroy, and newly published cached-handle reuse coverage.
+
+FP8, hybrid/physical-scale-out async, `previous_event_before_epilogue`, and
+same-buffer multiflight remain outside this slice.
 
 ## Components
 
@@ -679,11 +745,8 @@ GPU tests and DeepEP V1 tests are not part of any acceptance layer.
 
 ## Later Phase 3E Slices
 
-- 3E.2 is the next planned slice. It splits or redesigns dynamic-shape BF16
-  normal and expanded non-cached dispatch so event return, communication-stream
-  allocation, asynchronous output extents, handle construction, and descriptor
-  publication remain honest. This direction does not expand the accepted 3E.1
-  production boundary above.
+- 3E.2 is accepted for dynamic-shape BF16 normal and expanded non-cached
+  dispatch with the matrix documented above.
 - 3E.3 remains a deferred design direction for introducing a real
   pre-epilogue dependency boundary and then enabling
   `previous_event_before_epilogue`.
@@ -693,5 +756,5 @@ GPU tests and DeepEP V1 tests are not part of any acceptance layer.
 - Hybrid/physical scale-out async is enabled only after its route attestation
   and mapped-memory lifetime move into the generation-bound finalizer.
 
-Each later slice requires its own design update, TDD plan, production build,
+Each remaining slice requires its own design update, TDD plan, production build,
 multi-NPU reference run, bounded failure tests, and teardown acceptance.

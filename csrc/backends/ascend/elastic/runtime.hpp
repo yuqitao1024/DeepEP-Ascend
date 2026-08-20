@@ -67,6 +67,10 @@ CoreRuntimeStatus launch_internal_dispatch(
     const DispatchArguments& arguments, const CoreTiling& tiling,
     const CoreLaunchStorage& storage, void* stream);
 
+CoreRuntimeStatus launch_internal_dispatch_epilogue(
+    const DispatchArguments& arguments, const CoreTiling& tiling,
+    const CoreLaunchStorage& storage, void* stream);
+
 CoreRuntimeStatus launch_internal_combine(
     const CombineArguments& arguments, const CoreTiling& tiling,
     const CoreLaunchStorage& storage, void* stream);

@@ -153,10 +153,12 @@ def test_shared_dispatch_arguments_cover_normal_expanded_and_cached_modes(
     )
     assert arguments.cached("normal-handle") == {
         "x": "payload",
-        "handle": "normal-handle",
-        "num_sms": 1,
-        "num_qps": 0,
-    }
+            "handle": "normal-handle",
+            "num_sms": 1,
+            "num_qps": 0,
+            "async_with_compute_stream": False,
+            "allocate_on_comm_stream": False,
+        }
     cached_expanded = arguments.cached_expanded("expanded-handle")
     assert (
         cached_expanded["use_tma_aligned_col_major_sf"]

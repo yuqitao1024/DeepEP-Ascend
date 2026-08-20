@@ -756,6 +756,14 @@ int main() {
     if (validate_internal_launch(unsupported, storage).code !=
         CoreRuntimeStatusCode::kUnsupportedMode)
         return 7;
+    auto cpu_sync_dispatch = dispatch_tiling;
+    cpu_sync_dispatch.mode_flags |= mode_bit(CoreMode::kCpuSync);
+    if (!validate_internal_launch(cpu_sync_dispatch, storage).ok())
+        return 86;
+    auto async_cpu_sync_dispatch = cpu_sync_dispatch;
+    async_cpu_sync_dispatch.mode_flags |= mode_bit(CoreMode::kAsyncEvent);
+    if (!validate_internal_launch(async_cpu_sync_dispatch, storage).ok())
+        return 87;
     unsupported = dispatch_tiling;
     unsupported.mode_flags |= mode_bit(CoreMode::kCpuSync) |
                               mode_bit(CoreMode::kHybrid) |
@@ -854,6 +862,18 @@ int main() {
         !trace_is(kDispatchLaunch) || dispatch_generation != 11 ||
         dispatch_timeout_cycles != 101)
         return 16;
+    reset_launches();
+    if (!launch_internal_dispatch(
+             dispatch, async_cpu_sync_dispatch, storage,
+             reinterpret_cast<void*>(0x6161)).ok() ||
+        !trace_is(kDispatchLaunch))
+        return 88;
+    reset_launches();
+    if (!launch_internal_dispatch_epilogue(
+             dispatch, async_cpu_sync_dispatch, storage,
+             reinterpret_cast<void*>(0x6161)).ok() ||
+        !trace_is(kDispatchEpilogueLaunch))
+        return 89;
     auto fp8_tiling = valid_tiling(
         OperationKind::kDispatch, ElementKind::kFloat8E4M3);
     const auto fp8_storage = required_core_launch_storage(fp8_tiling);

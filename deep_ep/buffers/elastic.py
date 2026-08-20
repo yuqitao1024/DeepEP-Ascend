@@ -582,7 +582,7 @@ class ElasticBuffer:
             num_experts, num_max_tokens_per_rank, expert_alignment,
             num_sms, num_qps, previous_event,
             previous_event_before_epilogue, async_with_compute_stream,
-            allocate_on_comm_stream, do_expand, do_zero_padding,
+            allocate_on_comm_stream, do_cpu_sync, do_expand, do_zero_padding,
             use_tma_aligned_col_major_sf):
         cached = handle is not None
         capturing = ascend_current_stream_is_capturing()
@@ -687,8 +687,9 @@ class ElasticBuffer:
             scalar_error = "unsupported_dispatch_mode"
         elif ((previous_event is not None or async_with_compute_stream or
                allocate_on_comm_stream) and
-              (not cached or fp8_dispatch or self.allow_hybrid_mode or
-               self.num_scaleout_ranks > 1)):
+              (fp8_dispatch or self.allow_hybrid_mode or
+               self.num_scaleout_ranks > 1 or
+               (not cached and do_cpu_sync is False))):
             scalar_error = "unsupported_dispatch_mode"
         elif use_tma_aligned_col_major_sf and not fp8_dispatch:
             scalar_error = "invalid_column_major_sf_mode"
@@ -721,6 +722,9 @@ class ElasticBuffer:
             "capacity": capacity,
             "expert_alignment": alignment,
             "expanded": do_expand,
+            "cpu_sync": int(
+                False if cached and do_cpu_sync is None else
+                True if do_cpu_sync is None else do_cpu_sync),
             "zero_padding": do_zero_padding,
             "topology_epoch": self._ascend_topology[2],
             "topology_kind": self._ascend_topology[0],
@@ -1468,7 +1472,7 @@ class ElasticBuffer:
                 num_max_tokens_per_rank, expert_alignment, num_sms, num_qps,
                 previous_event, previous_event_before_epilogue,
                 async_with_compute_stream, allocate_on_comm_stream,
-                do_expand, do_zero_padding,
+                do_cpu_sync, do_expand, do_zero_padding,
                 use_tma_aligned_col_major_sf)
             num_sms = 1
 

@@ -150,6 +150,7 @@ public:
     }
     const std::vector<std::int64_t>& sizes() const { return sizes_; }
     std::int64_t numel() const { std::int64_t result = 1; for (auto value : sizes_) result *= value; return result; }
+    std::size_t storage_nbytes() const { return storage_->size(); }
     TensorOptions options() const {
         return TensorOptions().dtype(type_).device(device_.index());
     }

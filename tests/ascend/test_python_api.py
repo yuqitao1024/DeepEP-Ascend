@@ -436,7 +436,8 @@ def _install_fake_extension(platform, events):
                         event._state.on_finish = commit_dispatch
                 else:
                     commit_dispatch()
-            return (args[0], args[1], args[2], args[3], cloned_topk_idx,
+            return (args[0], args[1], None if args[26] else args[2], args[3],
+                    cloned_topk_idx,
                     1, 1, [], _FakeTensor(device.type, device_index=device.index),
                     _FakeTensor(device.type, device_index=device.index),
                     _FakeTensor(device.type, device_index=device.index),
@@ -1476,6 +1477,11 @@ def _scenario_ascend_dispatch():
     assert recv_topk_weights is cached_topk_weights
     assert cached_handle is handle
     assert cached_event.event is None
+    cached_preflight = next(
+        event[1] for event in reversed(events)
+        if isinstance(event, tuple) and len(event) == 2 and
+        event[0] == "dist.all_gather_object" and event[1][0] == "dispatch")
+    assert _fixed_preflight_contract(cached_preflight)["cpu_sync"] == 0
 
     _, _, _, async_handle, async_event = buffer.dispatch(
         x, topk_weights=cached_topk_weights, handle=handle,
@@ -1613,16 +1619,49 @@ def _scenario_ascend_dispatch():
         buffer.allow_hybrid_mode = False
     assert len(runtime.dispatch_calls) == rejected_calls
 
+    for expanded in (False, True):
+        for async_mode in (False, True):
+            for allocate in (False, True):
+                _, recv_topk_idx, _, uncached_handle, uncached_event = \
+                    buffer.dispatch(
+                        x, topk_idx=topk_idx, num_experts=2,
+                        num_max_tokens_per_rank=1, do_cpu_sync=True,
+                        do_expand=expanded,
+                        async_with_compute_stream=async_mode,
+                        allocate_on_comm_stream=allocate)
+                uncached_args = runtime.dispatch_calls[-1]
+                assert uncached_args[22:27] == (
+                    async_mode, allocate, True, True, expanded)
+                assert (recv_topk_idx is None) == expanded
+                assert uncached_handle.do_expand == expanded
+                if async_mode:
+                    assert uncached_event.event is not None
+                    uncached_event.current_stream_wait()
+                else:
+                    assert uncached_event.event is None
+                assert uncached_handle._ascend_owner is buffer
+
+    predecessor = deep_ep.EventOverlap(extension.EventHandle())
+    _, _, _, predecessor_handle, predecessor_event = buffer.dispatch(
+        x, topk_idx=topk_idx, num_experts=2,
+        num_max_tokens_per_rank=1, do_cpu_sync=True,
+        previous_event=predecessor, async_with_compute_stream=True,
+        allocate_on_comm_stream=True)
+    predecessor_args = runtime.dispatch_calls[-1]
+    assert predecessor_args[20] is predecessor.event
+    assert predecessor_args[22:26] == (True, True, True, True)
+    predecessor_event.current_stream_wait()
+    assert predecessor_handle._ascend_owner is buffer
+
+    rejected_calls = len(runtime.dispatch_calls)
     for name, kwargs in (
-            ("uncached async", {
-                "topk_idx": topk_idx, "num_experts": 2,
-                "num_max_tokens_per_rank": 1,
-                "async_with_compute_stream": True}),
             ("previous without comm allocation", {
-                "topk_weights": cached_topk_weights, "handle": handle,
+                "topk_weights": cached_topk_weights,
+                "handle": predecessor_handle,
                 "previous_event": previous}),
             ("pre-epilogue predecessor", {
-                "topk_weights": cached_topk_weights, "handle": handle,
+                "topk_weights": cached_topk_weights,
+                "handle": predecessor_handle,
                 "previous_event_before_epilogue": previous,
                 "allocate_on_comm_stream": True})):
         try:

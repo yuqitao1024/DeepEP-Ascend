@@ -33,8 +33,6 @@ CoreRuntimeStatus launch_failure(int backend_code, const char* message) {
 
 bool has_deferred_mode(CoreModeFlags flags) {
     constexpr CoreModeFlags deferred =
-        mode_bit(CoreMode::kAsyncEvent) |
-        mode_bit(CoreMode::kCpuSync) |
         mode_bit(CoreMode::kPipeline) |
         mode_bit(CoreMode::kEngram);
     return (flags & deferred) != 0;
@@ -309,6 +307,19 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
     if (has_deferred_mode(tiling.mode_flags))
         return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
                 "requested mode is deferred until a real transport exists"};
+    const bool cpu_sync = has_mode(tiling.mode_flags, CoreMode::kCpuSync);
+    const bool async_event = has_mode(tiling.mode_flags, CoreMode::kAsyncEvent);
+    if (async_event && !cpu_sync)
+        return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
+                "async dispatch requires the CPU-count split"};
+    if ((cpu_sync || async_event) &&
+        (tiling.operation != OperationKind::kDispatch ||
+         tiling.element_kind != ElementKind::kBFloat16 ||
+         has_mode(tiling.mode_flags, CoreMode::kCached) ||
+         has_mode(tiling.mode_flags, CoreMode::kHybrid) ||
+         tiling.topology.scale_out_size != 1))
+        return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
+                "split dispatch supports uncached BF16 pure scale-up only"};
 
     constexpr CoreModeFlags known_modes =
         mode_bit(CoreMode::kCached) | mode_bit(CoreMode::kExpanded) |
@@ -328,6 +339,8 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
             operation_modes = mode_bit(CoreMode::kCached) |
                               mode_bit(CoreMode::kExpanded) |
                               mode_bit(CoreMode::kZeroPadding) |
+                              mode_bit(CoreMode::kAsyncEvent) |
+                              mode_bit(CoreMode::kCpuSync) |
                               mode_bit(CoreMode::kHybrid);
             break;
         case OperationKind::kCombine:
@@ -433,30 +446,49 @@ CoreRuntimeStatus launch_internal_dispatch(
         return invalid("dispatch generation must not be zero");
     if (arguments.timeout_cycles == 0)
         return invalid("dispatch timeout must not be zero");
-    if ((tiling.num_tokens != 0 &&
-         (arguments.x == nullptr || arguments.topk_indices == nullptr ||
-          arguments.destination_slots == nullptr)) ||
-        arguments.communication_buffer == nullptr ||
-        arguments.workspace == nullptr || arguments.recv_x == nullptr ||
-        arguments.recv_topk_indices == nullptr ||
-        arguments.prefix_per_rank == nullptr ||
-        arguments.prefix_per_expert == nullptr ||
-        arguments.unaligned_per_expert == nullptr ||
-        arguments.source_metadata == nullptr ||
-        (has_mode(tiling.mode_flags, CoreMode::kHybrid) &&
-         (arguments.route_records == nullptr ||
-          (!has_mode(tiling.mode_flags, CoreMode::kCached) &&
-           arguments.route_record_capacity <
-               tiling.hybrid_route_capacity))))
-        return invalid("dispatch required argument is null");
+    const bool count_only = has_mode(
+        tiling.mode_flags, CoreMode::kCpuSync);
+    if (tiling.num_tokens != 0 && arguments.x == nullptr)
+        return invalid("dispatch x is null for non-empty input");
+    if (tiling.num_tokens != 0 && arguments.topk_indices == nullptr)
+        return invalid("dispatch top-k indices are null for non-empty input");
+    if (tiling.num_tokens != 0 && arguments.destination_slots == nullptr)
+        return invalid("dispatch destination slots are null for non-empty input");
+    if (arguments.communication_buffer == nullptr)
+        return invalid("dispatch communication buffer is null");
+    if (arguments.workspace == nullptr)
+        return invalid("dispatch workspace is null");
+    if (!count_only && arguments.num_output_tokens != 0 &&
+        arguments.recv_x == nullptr)
+        return invalid("dispatch output is null for non-empty output");
+    if (!count_only && arguments.num_recv_tokens != 0 &&
+        arguments.recv_topk_indices == nullptr)
+        return invalid("dispatch received top-k indices are null");
+    if (!count_only && arguments.num_recv_tokens != 0 &&
+        arguments.source_metadata == nullptr)
+        return invalid("dispatch source metadata is null");
+    if (arguments.prefix_per_rank == nullptr)
+        return invalid("dispatch rank prefix is null");
+    if (arguments.prefix_per_expert == nullptr)
+        return invalid("dispatch expert prefix is null");
+    if (arguments.unaligned_per_expert == nullptr)
+        return invalid("dispatch unaligned counts are null");
+    if (has_mode(tiling.mode_flags, CoreMode::kHybrid) &&
+        arguments.route_records == nullptr)
+        return invalid("dispatch hybrid route records are null");
+    if (has_mode(tiling.mode_flags, CoreMode::kHybrid) &&
+        !has_mode(tiling.mode_flags, CoreMode::kCached) &&
+        arguments.route_record_capacity < tiling.hybrid_route_capacity)
+        return invalid("dispatch hybrid route capacity is insufficient");
     const bool fp8 = tiling.element_kind == ElementKind::kFloat8E4M3;
     if ((fp8 &&
          ((tiling.num_tokens != 0 && arguments.scale_factors == nullptr) ||
-          arguments.recv_scale_factors == nullptr ||
           arguments.scale_factor_token_stride == 0 ||
           arguments.scale_factor_pack_stride == 0 ||
-          arguments.recv_scale_factor_token_stride == 0 ||
-          arguments.recv_scale_factor_pack_stride == 0)) ||
+          (!count_only &&
+           (arguments.recv_scale_factors == nullptr ||
+            arguments.recv_scale_factor_token_stride == 0 ||
+            arguments.recv_scale_factor_pack_stride == 0)))) ||
         (!fp8 && (arguments.scale_factors != nullptr ||
                   arguments.recv_scale_factors != nullptr ||
                   arguments.scale_factor_token_stride != 0 ||
@@ -470,6 +502,40 @@ CoreRuntimeStatus launch_internal_dispatch(
     const int result = deep_ep_ascend_launch_dispatch(arguments, tiling, stream);
     return result == 0 ? CoreRuntimeStatus{} :
         launch_failure(result, "dispatch kernel launch failed");
+}
+
+CoreRuntimeStatus launch_internal_dispatch_epilogue(
+    const DispatchArguments& arguments, const CoreTiling& tiling,
+    const CoreLaunchStorage& storage, void* stream) {
+    const auto status = validate_internal_launch(tiling, storage);
+    if (!status.ok())
+        return status;
+    if (tiling.operation != OperationKind::kDispatch ||
+        !has_mode(tiling.mode_flags, CoreMode::kCpuSync))
+        return invalid("dispatch epilogue requires CPU-count split tiling");
+    if (stream == nullptr)
+        return invalid("dispatch epilogue stream must not be null");
+    if (arguments.generation == 0 || arguments.timeout_cycles == 0)
+        return invalid("dispatch epilogue requires generation and timeout");
+    const auto maximum_recv_tokens = tiling.num_max_tokens_per_rank *
+        static_cast<std::uint64_t>(tiling.topology.world_size);
+    if (arguments.num_recv_tokens > maximum_recv_tokens ||
+        arguments.num_output_tokens > tiling.dispatch_output_capacity)
+        return invalid("dispatch epilogue output count exceeds capacity");
+    if (arguments.communication_buffer == nullptr ||
+        arguments.workspace == nullptr ||
+        (arguments.num_output_tokens != 0 && arguments.recv_x == nullptr) ||
+        (arguments.num_recv_tokens != 0 &&
+         (arguments.recv_topk_indices == nullptr ||
+          arguments.source_metadata == nullptr)) ||
+        arguments.prefix_per_rank == nullptr ||
+        arguments.prefix_per_expert == nullptr ||
+        arguments.unaligned_per_expert == nullptr)
+        return invalid("dispatch epilogue required argument is null");
+    const int result = deep_ep_ascend_launch_dispatch_epilogue(
+        arguments, tiling, stream);
+    return result == 0 ? CoreRuntimeStatus{} :
+        launch_failure(result, "dispatch epilogue kernel launch failed");
 }
 
 CoreRuntimeStatus launch_internal_combine(

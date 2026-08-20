@@ -257,20 +257,20 @@ fail before resource publication.
 Phase 3E lands as separate runtime-accepted slices. Phase 3E.1 is limited to
 native event/stream ownership, cached BF16 pure-scale-up dispatch, BF16
 combine, previous-event ordering, communication-stream allocation, and one
-operation per buffer. Its coverage is recorded in the dedicated acceptance
-runner and does not promote the 120 full functional benchmark rows that also
-require normal and expanded non-cached dispatch.
+operation per buffer. Phase 3E.2 adds BF16 normal and expanded non-cached
+dispatch, exact output extents, second-stage completion events, and deferred
+descriptor publication. Together they promote all 60 BF16 functional
+benchmark rows.
 
-Phase 3E.2 is the next planned slice for BF16 normal/expanded non-cached
-dispatch event return, communication-stream allocation, and asynchronous
-publication. Phase 3E.3 (a real pre-epilogue dependency boundary) and Phase
+Phase 3E.3 (a real pre-epilogue dependency boundary) and Phase
 3E.4 (same-buffer multiflight resource slots) remain deferred design
-directions. FP8 remains Phase 3F and is not credited to any Phase 3E slice.
+directions. The 60 FP8 functional rows remain deferred to FP8 async
+qualification and are not credited to Phase 3E.2.
 
-Phase 3E.1 is accepted as of 2026-08-20. The production-backed final evidence
-appears after the qualification history below. Phase 3E overall remains
-incomplete; 3E.2 is the next planned development slice, while 3E.3, 3E.4, and
-FP8 Phase 3F remain outside this acceptance boundary.
+Phase 3E.1 and Phase 3E.2 are accepted as of 2026-08-20. The
+production-backed evidence appears below. Phase 3E overall remains incomplete;
+3E.3, 3E.4, and FP8 async functional coverage remain outside this acceptance
+boundary.
 
 #### Qualification history
 
@@ -512,8 +512,9 @@ Report SHA-256 is
 rank trace hashes are
 `0c079bbdc9bc5c722394079fb5bd14dba9e23ec0b369ce5479cc486e04a8b5f9`
 and `e9dc5c3c487a63ed3d0f8f70c75884171aa0a15e435f14bf80fcef5ef4882001`.
-Every Phase 3E.1 gate passed. All 120 full functional benchmark rows remain
-deferred to 3E.2, and 3E.3, 3E.4, and FP8 Phase 3F remain incomplete.
+Every Phase 3E.1 gate passed. At that checkpoint all 120 full functional
+benchmark rows remained deferred; the later Phase 3E.2 acceptance below
+promotes the BF16 half only.
 
 Post-rebase integration qualification used exact source commit
 `88829ba02a2b8a3f964fca8a27de2fa01c70a93a`. NPU8P build task
@@ -539,7 +540,40 @@ Final review regressions additionally require graph capture to fail closed when
 Torch-NPU cannot report capture state, release the Python GIL around bounded
 Ascend buffer destruction, and preserve Torch-NPU ownership of the underlying
 pool stream while DeepEP retains its checked identity.
-This closes Phase 3E.1 only and does not credit any deferred 3E.2-3E.4 work.
+This closes Phase 3E.1. Phase 3E.2 acceptance is recorded next; 3E.3 and 3E.4
+remain deferred.
+
+#### Phase 3E.2 production acceptance
+
+Phase 3E.2 implements a count stage followed by an exact-shape copy/publication
+epilogue for BF16 normal and expanded non-cached dispatch. The count stage uses
+zero-sized output placeholders; validated counts drive exact backing-storage
+allocation before the epilogue. Zero-token handles preserve zero-byte storage,
+and cached reuse passes logical output counts so null metadata pointers are
+valid only when their corresponding counts are zero. Descriptor commit is
+generation-bound and occurs only after the real second-stage event completes.
+The supported matrix covers sync/async, communication-stream allocation
+false/true, predecessor ordering with allocation, exact extents, empty and
+asymmetric routes, repeated generations, cached reuse, and bounded lifecycle
+failures. FP8, pre-epilogue events, same-buffer multiflight, hybrid/physical
+scale-out async, and mapped CPU async remain deferred.
+
+Final exact-source NPU8P task `task_20260820_135751_415979026646` ran on
+devices `0,1`, reached `completed (exit=0)`, and passed all 15 selected and
+executed `uncached` cases. The source archive and report SHA-256 values are
+`f859207a0f02094fcf390f93583f779f70d7e4f54c2849b5e6514f9a25f0bf4b` and
+`425733cd9951f4ba3389b5bd07a92f7b564ed6e2653e2260d317ac72efd86c06`.
+
+Earlier benchmark-driver task `task_20260820_130457_3701406158` reached
+`completed (exit=0)` on devices `0,1` and validated the strongest BF16
+functional combination,
+`prev1/async1/alloc1`, across dispatch, expanded dispatch, cached dispatch,
+combine, and reduced combine. Its Python source archive and report SHA-256
+values are
+`301b8c2cbd0926f60ad5be7c999e21d60d026cbff4918f247d7eee1f8d29a7ac` and
+`410dbfc5c0bdb6c7a4f2b6168a937f71bcf1755cca83206731973384efd48b8a`.
+The benchmark inventory now reports 84 supported rows and 60 deferred FP8
+functional rows.
 
 ### Deliverables
 

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +16,8 @@ namespace elastic = deep_ep::ascend::elastic;
 
 struct Trace {
     int launches = 0;
+    int epilogue_launches = 0;
+    int stream_syncs = 0;
     int d2h_copies = 0;
     int h2d_copies = 0;
     int device = 0;
@@ -27,13 +30,14 @@ struct Trace {
     bool fail_d2h = false;
     bool fail_h2d = false;
     bool fail_launch = false;
+    bool fail_epilogue_launch = false;
     bool fail_stream = false;
     bool fail_comm_records = false;
     bool event_ready = true;
     bool corrupt_fresh_route = false;
     bool masked_producer_failure = false;
     int masked_producer_world_rank = 0;
-    bool pending_diagnostic = false;
+    int pending_diagnostic_reads = 0;
     std::uint64_t preserved_scratch_status = 0;
     int world_size = 2;
     int event_creates = 0;
@@ -42,7 +46,11 @@ struct Trace {
     int frees = 0;
     int fail_event_create_on = 0;
     int fail_event_record_on = 0;
+    bool count_stage_outputs_null = true;
+    bool epilogue_outputs_ready = true;
+    bool zero_epilogue_outputs_null = true;
     std::vector<std::string> order;
+    std::vector<elastic::CoreModeFlags> modes;
 } trace;
 
 int compute_stream_token = 0;
@@ -99,7 +107,11 @@ int destroy_event(void*, void* event) {
     delete static_cast<int*>(event);
     return 0;
 }
-int sync(void*, void*) { return 0; }
+int sync(void*, void*) {
+    ++trace.stream_syncs;
+    trace.order.emplace_back("synchronize count stage");
+    return 0;
+}
 int sync_device(void*) { return 0; }
 int h2d(void*, void* d, const void* s, std::uint64_t n) {
     ++trace.h2d_copies;
@@ -109,9 +121,9 @@ int h2d(void*, void* d, const void* s, std::uint64_t n) {
 }
 int d2h(void*, void* d, const void* s, std::uint64_t n) {
     ++trace.d2h_copies;
-    if (trace.pending_diagnostic &&
+    if (trace.pending_diagnostic_reads > 0 &&
         n == sizeof(transport::DeviceTransportDiagnostic)) {
-        trace.pending_diagnostic = false;
+        --trace.pending_diagnostic_reads;
         auto* diagnostic = static_cast<transport::DeviceTransportDiagnostic*>(d);
         *diagnostic = {};
         diagnostic->abi_version = transport::kTransportCommandAbiVersion;
@@ -171,6 +183,7 @@ int noop1(void*, std::uintptr_t) { return 0; }
 
 std::unique_ptr<runtime::CannRuntimeResources> resources(
     int world_size = 2, bool hybrid = false) {
+    trace.world_size = world_size;
     auto result = std::make_unique<runtime::CannRuntimeResources>();
     runtime::CannRuntimeApi r{nullptr,alloc,zero,free_,sync,sync_device,h2d,d2h};
     runtime::StreamEventApi s{
@@ -191,17 +204,25 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
 extern "C" int deep_ep_ascend_launch_barrier(elastic::BarrierArguments, elastic::CoreTiling, void*) { return 0; }
 extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elastic::CoreTiling t, void*) {
     ++trace.launches;
+    trace.modes.push_back(t.mode_flags);
     trace.generation = a.generation;
     trace.generations.push_back(a.generation);
     trace.kernel_expert_prefixes.push_back(a.prefix_per_expert);
     trace.kernel_unaligned_counts.push_back(a.unaligned_per_expert);
     if (trace.fail_launch) return 73;
-    trace.pending_diagnostic = true;
-    trace.order.emplace_back("activate lease and launch cached dispatch on comm");
+    trace.pending_diagnostic_reads = elastic::has_mode(
+        t.mode_flags, elastic::CoreMode::kCpuSync) ? 2 : 1;
+    trace.order.emplace_back(
+        elastic::has_mode(t.mode_flags, elastic::CoreMode::kCpuSync) ?
+            "launch uncached count stage" :
+            "activate lease and launch cached dispatch on comm");
     auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(
         t.transport_context.local_window_base +
         t.symmetric_window_layout.control_offset);
-    control->dispatch_generation = a.generation;
+    const bool cpu_sync = elastic::has_mode(
+        t.mode_flags, elastic::CoreMode::kCpuSync);
+    if (!cpu_sync)
+        control->dispatch_generation = a.generation;
     const bool cached = elastic::has_mode(t.mode_flags, elastic::CoreMode::kCached);
     const bool expanded = elastic::has_mode(t.mode_flags, elastic::CoreMode::kExpanded);
     const bool hybrid = elastic::has_mode(t.mode_flags, elastic::CoreMode::kHybrid);
@@ -253,12 +274,17 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
     const std::array<std::int32_t, 3> private_expert_prefix{0, 4, 4};
     const std::array<std::int32_t, 2> private_unaligned{2, 0};
     if (t.num_tokens == 0) {
-        a.prefix_per_rank[0] = 0;
-        a.prefix_per_rank[1] = 0;
+        for (int rank = 0; rank < t.topology.world_size; ++rank)
+            a.prefix_per_rank[rank] = 0;
         std::memset(a.prefix_per_expert, 0,
                     private_expert_prefix.size() * sizeof(std::int32_t));
         std::memset(a.unaligned_per_expert, 0,
                     private_unaligned.size() * sizeof(std::int32_t));
+        if (cpu_sync) {
+            trace.count_stage_outputs_null =
+                a.recv_x == nullptr && a.recv_topk_indices == nullptr &&
+                a.recv_topk_weights == nullptr && a.source_metadata == nullptr;
+        }
         return 0;
     }
     if (cached &&
@@ -267,6 +293,19 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
          std::memcmp(a.unaligned_per_expert, private_unaligned.data(),
                      sizeof(private_unaligned)) != 0))
         trace.cached_private_contract = false;
+    if (cpu_sync) {
+        for (int rank = 0; rank < t.topology.world_size; ++rank)
+            a.prefix_per_rank[rank] = static_cast<std::int32_t>(
+                (rank + 1) * 2 / t.topology.world_size);
+        std::memcpy(a.prefix_per_expert, private_expert_prefix.data(),
+                    sizeof(private_expert_prefix));
+        std::memcpy(a.unaligned_per_expert, private_unaligned.data(),
+                    sizeof(private_unaligned));
+        trace.count_stage_outputs_null =
+            a.recv_x == nullptr && a.recv_topk_indices == nullptr &&
+            a.recv_topk_weights == nullptr && a.source_metadata == nullptr;
+        return 0;
+    }
     const std::array<std::uint16_t, 16> payload{
         0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108,
         0x0201, 0x0202, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207, 0x0208};
@@ -282,8 +321,9 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
         a.recv_topk_weights[2] = expanded ? 0.0F : 0.5F;
         a.recv_topk_weights[3] = expanded ? 0.0F : 1.0F;
     }
-    a.prefix_per_rank[0] = 1;
-    a.prefix_per_rank[1] = 2;
+    for (int rank = 0; rank < t.topology.world_size; ++rank)
+        a.prefix_per_rank[rank] = static_cast<std::int32_t>(
+            (rank + 1) * 2 / t.topology.world_size);
     std::memcpy(a.prefix_per_expert, private_expert_prefix.data(),
                 sizeof(private_expert_prefix));
     std::memcpy(a.unaligned_per_expert, private_unaligned.data(),
@@ -297,6 +337,53 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
     const auto& metadata = expanded ? expanded_metadata : normal_metadata;
     std::memcpy(
         a.source_metadata, metadata.data(), metadata.size() * sizeof(metadata[0]));
+    return 0;
+}
+extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
+    elastic::DispatchArguments a, elastic::CoreTiling t, void*) {
+    ++trace.epilogue_launches;
+    trace.order.emplace_back("launch uncached copy epilogue");
+    if (trace.fail_epilogue_launch)
+        return 79;
+    const bool expanded = elastic::has_mode(
+        t.mode_flags, elastic::CoreMode::kExpanded);
+    if (t.num_tokens == 0) {
+        trace.zero_epilogue_outputs_null =
+            a.recv_x == nullptr && a.recv_topk_indices == nullptr &&
+            a.recv_topk_weights == nullptr && a.source_metadata == nullptr;
+    } else {
+        trace.epilogue_outputs_ready =
+            a.recv_x != nullptr && a.recv_topk_indices != nullptr &&
+            a.source_metadata != nullptr;
+        const std::array<std::uint16_t, 16> payload{
+            0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108,
+            0x0201, 0x0202, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207, 0x0208};
+        std::memset(a.recv_x, 0,
+                    static_cast<std::size_t>(expanded ? 4 : 2) * 8 *
+                        sizeof(std::uint16_t));
+        std::memcpy(a.recv_x, payload.data(), payload.size() * sizeof(payload[0]));
+        a.recv_topk_indices[0] = 0;
+        a.recv_topk_indices[1] = -1;
+        a.recv_topk_indices[2] = 0;
+        a.recv_topk_indices[3] = -1;
+        if (a.recv_topk_weights != nullptr) {
+            a.recv_topk_weights[0] = 0.25F;
+            a.recv_topk_weights[1] = expanded ? 0.5F : 0.75F;
+            a.recv_topk_weights[2] = expanded ? 0.0F : 0.5F;
+            a.recv_topk_weights[3] = expanded ? 0.0F : 1.0F;
+        }
+        const std::array<std::int32_t, 8> normal_metadata{
+            1, 0, -1, -1, 7, 2, -1, -1};
+        const std::array<std::int32_t, 8> expanded_metadata{
+            1, 0, 0, -1, 7, 2, 1, -1};
+        const auto& metadata = expanded ? expanded_metadata : normal_metadata;
+        std::memcpy(a.source_metadata, metadata.data(),
+                    metadata.size() * sizeof(metadata[0]));
+    }
+    auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(
+        t.transport_context.local_window_base +
+        t.symmetric_window_layout.control_offset);
+    control->dispatch_generation = a.generation;
     return 0;
 }
 extern "C" int deep_ep_ascend_launch_combine(elastic::CombineArguments, elastic::CoreTiling, void*) { return 0; }
@@ -328,15 +415,19 @@ struct Inputs {
 auto uncached_dispatch(
     Buffer& buffer, const Inputs& inputs,
     const std::optional<Tensor>& weights, bool copy_handle = true,
-    bool expanded = false) {
+    bool expanded = false, bool async = false,
+    bool allocate_on_comm_stream = false,
+    const std::optional<deep_ep::ascend::EventHandle>& previous_event =
+        std::nullopt) {
     const std::optional<torch::Tensor> none;
     const std::optional<int> no_int;
     const std::optional<std::vector<int>> no_list;
     const std::optional<deep_ep::ascend::EventHandle> no_event;
     return buffer.dispatch(
         inputs.x, none, inputs.idx, weights, none, no_int, no_int, no_list,
-        none, none, none, none, none, none, none, 4, 2, 4, 1, 0, no_event, no_event,
-        false, false, copy_handle, true, expanded, false, false);
+        none, none, none, none, none, none, none, 4, 2, 4, 1, 0,
+        previous_event, no_event, async, allocate_on_comm_stream, copy_handle,
+        true, expanded, false, false);
 }
 
 auto uncached_hybrid_dispatch(
@@ -403,7 +494,7 @@ bool has_values(const Tensor& tensor, const std::array<Value, Size>& expected) {
 template <typename Result>
 bool has_exact_result(
     const Result& result, bool expect_weights, bool expect_copied_index,
-    bool expanded = false) {
+    bool expanded = false, bool expect_event = false) {
     const std::array<std::uint16_t, 16> payload{
         0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108,
         0x0201, 0x0202, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207, 0x0208};
@@ -424,6 +515,10 @@ bool has_exact_result(
     const std::array<std::int32_t, 8> expanded_metadata{
         1, 0, 0, -1, 7, 2, 1, -1};
     const std::array<std::int32_t, 2> slots{0, 0};
+    const auto exact_storage = [](const Tensor& tensor, std::size_t bytes) {
+        return tensor.storage_nbytes() ==
+            static_cast<std::size_t>(tensor.numel()) * bytes;
+    };
     if (!has_shape(std::get<0>(result), {expanded ? 4 : 2, 8}) ||
         std::get<0>(result).scalar_type() != torch::kBFloat16 ||
         (expanded ? !has_values(std::get<0>(result), expanded_payload) :
@@ -460,7 +555,13 @@ bool has_exact_result(
         !has_shape(*std::get<13>(result), {
             static_cast<std::int64_t>(sizeof(elastic::DispatchHandleDescriptor))}) ||
         std::get<13>(result)->scalar_type() != torch::kByte ||
-        std::get<14>(result).has_value() || std::get<15>(result).has_value())
+        std::get<14>(result).has_value() ||
+        std::get<15>(result).has_value() != expect_event ||
+        (expect_copied_index &&
+         (!exact_storage(std::get<0>(result), sizeof(std::uint16_t)) ||
+          (!expanded && !exact_storage(*std::get<2>(result), sizeof(std::int64_t))) ||
+          (expect_weights && !exact_storage(*std::get<3>(result), sizeof(float))) ||
+          !exact_storage(std::get<11>(result), sizeof(std::int32_t)))))
         return false;
 
     elastic::DispatchHandleDescriptor descriptor{};
@@ -889,8 +990,26 @@ bool empty_probe() {
     inputs.idx = torch::empty({0, 1}, inputs.idx.options());
     const std::optional<Tensor> no_weights;
     const auto result = uncached_dispatch(*buffer, inputs, no_weights);
+    const std::optional<Tensor> none;
+    const std::optional<deep_ep::ascend::EventHandle> no_event;
+    const auto cached = buffer->dispatch(
+        inputs.x, none, inputs.idx, no_weights, none,
+        std::get<5>(result), std::get<6>(result), std::get<7>(result),
+        std::get<8>(result), std::get<9>(result), std::get<10>(result),
+        std::get<12>(result), std::get<13>(result), std::get<11>(result), none,
+        4, 2, 4, 1, 0, no_event, no_event, false, false, false, false,
+        false, false, false);
     return has_shape(std::get<0>(result), {0, 8}) &&
-        std::get<5>(result) == 0 && std::get<6>(result) == 0;
+        std::get<0>(result).storage_nbytes() == 0 &&
+        std::get<2>(result)->storage_nbytes() == 0 &&
+        std::get<11>(result).storage_nbytes() == 0 &&
+        std::get<5>(result) == 0 && std::get<6>(result) == 0 &&
+        has_shape(std::get<0>(cached), {0, 8}) &&
+        has_shape(*std::get<2>(cached), {0, 1}) &&
+        has_shape(std::get<11>(cached), {0, 3}) &&
+        std::get<5>(cached) == 0 && std::get<6>(cached) == 0 &&
+        trace.launches == 2 && trace.epilogue_launches == 1 &&
+        trace.count_stage_outputs_null && trace.zero_epilogue_outputs_null;
 }
 
 bool testing_topology_mismatch_probe() {
@@ -962,7 +1081,7 @@ bool cached_async_order_and_commit_probe() {
 
     std::get<15>(pending)->current_stream_wait();
     std::get<15>(pending)->current_stream_wait();
-    return descriptor->generation == 2 && trace.event_destroys == 2 &&
+    return descriptor->generation == 2 && trace.event_destroys == 3 &&
         buffer->testing_operation_generation() == 2;
 }
 
@@ -1262,8 +1381,172 @@ bool completion_mismatch_fault_does_not_publish() {
         destroy_failure = error.what();
     }
     return destroy_failure.find("device completion generation mismatch") !=
-            std::string::npos && trace.event_destroys == 5 &&
+            std::string::npos && trace.event_destroys == 6 &&
         buffer->is_destroyed();
+}
+
+bool uncached_split_mode_matrix_probe() {
+    for (const bool expanded : {false, true}) {
+        for (const bool async : {false, true}) {
+            for (const bool allocate_on_comm_stream : {false, true}) {
+                trace = {};
+                auto runtime_resources = resources();
+                if (!runtime_resources)
+                    return false;
+                auto buffer = Buffer::make_testing_buffer(
+                    0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+                Inputs inputs;
+                const std::optional<Tensor> weights = inputs.weights;
+                auto result = uncached_dispatch(
+                    *buffer, inputs, weights, true, expanded, async,
+                    allocate_on_comm_stream);
+                if (trace.launches != 1 || trace.epilogue_launches != 1 ||
+                    trace.stream_syncs != 1 || trace.modes.size() != 1 ||
+                    !elastic::has_mode(
+                        trace.modes.front(), elastic::CoreMode::kCpuSync) ||
+                    elastic::has_mode(
+                        trace.modes.front(), elastic::CoreMode::kAsyncEvent) !=
+                        async ||
+                    std::get<15>(result).has_value() != async)
+                    return false;
+
+                const auto count_launch = std::find(
+                    trace.order.begin(), trace.order.end(),
+                    "launch uncached count stage");
+                const auto count_sync = std::find(
+                    trace.order.begin(), trace.order.end(),
+                    "synchronize count stage");
+                const auto copy_launch = std::find(
+                    trace.order.begin(), trace.order.end(),
+                    "launch uncached copy epilogue");
+                const auto completion_create = std::find(
+                    count_sync, trace.order.end(), "create event");
+                if (count_launch == trace.order.end() ||
+                    count_sync == trace.order.end() ||
+                    copy_launch == trace.order.end() ||
+                    completion_create == trace.order.end() ||
+                    !(count_launch < count_sync &&
+                      count_sync < completion_create &&
+                      completion_create < copy_launch) ||
+                    !trace.count_stage_outputs_null ||
+                    !trace.epilogue_outputs_ready)
+                    return false;
+
+                const auto& handle = *std::get<13>(result);
+                if (async && buffer->get_dispatch_handle_generation(handle) != 0)
+                    return false;
+                if (async)
+                    std::get<15>(result)->current_stream_wait();
+                if (!has_exact_result(
+                        result, true, true, expanded, async) ||
+                    buffer->get_dispatch_handle_generation(handle) != 1)
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool uncached_completion_create_failure_follows_count_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources)
+        return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> weights = inputs.weights;
+    trace.fail_event_create_on = 1;
+    try {
+        (void)uncached_dispatch(*buffer, inputs, weights);
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("backend error 95") ==
+                std::string::npos ||
+            trace.launches != 1 || trace.stream_syncs != 1 ||
+            trace.epilogue_launches != 0 ||
+            buffer->testing_operation_generation() != 1)
+            return false;
+    }
+    try {
+        (void)uncached_dispatch(*buffer, inputs, weights);
+        return false;
+    } catch (const std::runtime_error& error) {
+        return std::string(error.what()).find("cannot continue") !=
+            std::string::npos;
+    }
+}
+
+bool uncached_epilogue_failure_poisons_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources)
+        return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    Inputs inputs;
+    const std::optional<Tensor> weights = inputs.weights;
+    trace.fail_epilogue_launch = true;
+    try {
+        (void)uncached_dispatch(*buffer, inputs, weights);
+        return false;
+    } catch (const std::runtime_error& error) {
+        if (std::string(error.what()).find("backend error 79") ==
+                std::string::npos ||
+            trace.launches != 1 || trace.epilogue_launches != 1)
+            return false;
+    }
+    trace.fail_epilogue_launch = false;
+    try {
+        (void)uncached_dispatch(*buffer, inputs, weights);
+        return false;
+    } catch (const std::runtime_error& error) {
+        return std::string(error.what()).find("cannot continue") !=
+                std::string::npos && trace.launches == 1 &&
+            trace.epilogue_launches == 1;
+    }
+}
+
+bool uncached_previous_event_orders_epilogue_probe() {
+    trace = {};
+    auto source_resources = resources();
+    auto target_resources = resources();
+    if (!source_resources || !target_resources)
+        return false;
+    auto source = Buffer::make_testing_buffer(
+        0, std::move(source_resources), 2 * 1024 * 1024, 1);
+    auto target = Buffer::make_testing_buffer(
+        0, std::move(target_resources), 2 * 1024 * 1024, 1);
+    Inputs source_inputs;
+    Inputs target_inputs;
+    const std::optional<Tensor> source_weights = source_inputs.weights;
+    const std::optional<Tensor> target_weights = target_inputs.weights;
+    auto source_result = uncached_dispatch(
+        *source, source_inputs, source_weights, true, false, true, false);
+    if (!std::get<15>(source_result).has_value())
+        return false;
+    std::get<15>(source_result)->current_stream_wait();
+    const std::optional<deep_ep::ascend::EventHandle> predecessor =
+        std::get<15>(source_result);
+
+    trace.order.clear();
+    auto target_result = uncached_dispatch(
+        *target, target_inputs, target_weights, true, false, true, true,
+        predecessor);
+    const auto wait = std::find(
+        trace.order.begin(), trace.order.end(),
+        "comm waits dependency/previous event");
+    const auto count_launch = std::find(
+        trace.order.begin(), trace.order.end(),
+        "launch uncached count stage");
+    if (wait == trace.order.end() || count_launch == trace.order.end() ||
+        !(wait < count_launch) || !std::get<15>(target_result).has_value() ||
+        target->get_dispatch_handle_generation(*std::get<13>(target_result)) != 0)
+        return false;
+    std::get<15>(target_result)->current_stream_wait();
+    return target->get_dispatch_handle_generation(
+               *std::get<13>(target_result)) == 1 &&
+        trace.launches == 2 && trace.epilogue_launches == 2;
 }
 
 int main() {
@@ -1306,5 +1589,13 @@ int main() {
           "completion record failure retains launched dispatch");
     check(completion_mismatch_fault_does_not_publish(),
           "completion mismatch fault does not publish");
+    check(uncached_split_mode_matrix_probe(),
+          "uncached count and event epilogue mode matrix");
+    check(uncached_completion_create_failure_follows_count_probe(),
+          "uncached completion event creation follows count stage");
+    check(uncached_epilogue_failure_poisons_probe(),
+          "uncached epilogue failure poisoning");
+    check(uncached_previous_event_orders_epilogue_probe(),
+          "uncached previous event orders count and epilogue stages");
     return failures == 0 ? 0 : 1;
 }

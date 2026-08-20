@@ -168,6 +168,20 @@ class AscendRuntime:
             raise RuntimeError(f"{label} failed on a peer rank")
         return result
 
+    def _launch(
+        self,
+        case: EPModeCase,
+        operation: str,
+        arguments: dict[str, Any],
+    ) -> Any:
+        launch_arguments = dict(arguments)
+        if case.with_previous_event:
+            launch_arguments["previous_event"] = self.buffer.capture()
+        result = getattr(self.buffer, operation)(**launch_arguments)
+        if case.async_with_compute_stream:
+            result[-1].current_stream_wait()
+        return result
+
     def construct_buffer(self) -> None:
         spec = self.manifest.spec
         Buffer = self.deep_ep.ElasticBuffer
@@ -314,9 +328,10 @@ class AscendRuntime:
             num_sms=self.num_sms,
             num_qps=self.num_qps,
         )
-        normal = self.buffer.dispatch(**dispatch_arguments.normal)
+        normal = self._launch(case, "dispatch", dispatch_arguments.normal)
         recv_x, recv_topk_idx, recv_weights, handle, _ = normal
-        cached = self.buffer.dispatch(**dispatch_arguments.cached(handle))
+        cached = self._launch(
+            case, "dispatch", dispatch_arguments.cached(handle))
         handle = cached[3]
 
         num_recv_tokens = int(
@@ -339,13 +354,17 @@ class AscendRuntime:
             "handle": handle,
             "num_sms": self.num_sms,
             "num_qps": self.num_qps,
+            "async_with_compute_stream": case.async_with_compute_stream,
+            "allocate_on_comm_stream": case.allocate_on_comm_stream,
         }
-        combined = self.buffer.combine(**combine_args)
+        combined = self._launch(case, "combine", combine_args)
 
-        expanded = self.buffer.dispatch(**dispatch_arguments.expanded)
+        expanded = self._launch(case, "dispatch", dispatch_arguments.expanded)
         expanded_x, _, expanded_weights, expanded_handle, _ = expanded
-        cached_expanded = self.buffer.dispatch(
-            **dispatch_arguments.cached_expanded(expanded_handle)
+        cached_expanded = self._launch(
+            case,
+            "dispatch",
+            dispatch_arguments.cached_expanded(expanded_handle),
         )
         expanded_handle = cached_expanded[3]
         num_expanded_tokens = int(
@@ -379,10 +398,12 @@ class AscendRuntime:
             "handle": expanded_handle,
             "num_sms": self.num_sms,
             "num_qps": self.num_qps,
+            "async_with_compute_stream": case.async_with_compute_stream,
+            "allocate_on_comm_stream": case.allocate_on_comm_stream,
         }
         if self.args.allow_multiple_reduction:
             reduced_args["topk_weights"] = expanded_weights
-        reduced = self.buffer.combine(**reduced_args)
+        reduced = self._launch(case, "combine", reduced_args)
 
         if reference is not None:
             self._check_case(
@@ -406,24 +427,29 @@ class AscendRuntime:
         }
 
         def refresh_handle(operation_id: str, arguments: dict[str, Any]) -> None:
-            timing_handles[operation_id] = self.buffer.dispatch(**arguments)[3]
+            timing_handles[operation_id] = self._launch(
+                case, "dispatch", arguments)[3]
 
         launches = {
-            "dispatch": lambda: self.buffer.dispatch(
-                **dispatch_arguments.normal
+            "dispatch": lambda: self._launch(
+                case, "dispatch", dispatch_arguments.normal),
+            "expanded_dispatch": lambda: self._launch(
+                case, "dispatch", dispatch_arguments.expanded),
+            "cached_dispatch": lambda: self._launch(
+                case,
+                "dispatch",
+                dispatch_arguments.cached(timing_handles["cached_dispatch"]),
             ),
-            "expanded_dispatch": lambda: self.buffer.dispatch(
-                **dispatch_arguments.expanded
+            "combine": lambda: self._launch(
+                case,
+                "combine",
+                combine_args | {"handle": timing_handles["combine"]},
             ),
-            "cached_dispatch": lambda: self.buffer.dispatch(
-                **dispatch_arguments.cached(timing_handles["cached_dispatch"])
-            ),
-            "combine": lambda: self.buffer.combine(
-                **(combine_args | {"handle": timing_handles["combine"]})
-            ),
-            "reduced_combine": lambda: self.buffer.combine(
-                **(reduced_args | {
-                    "handle": timing_handles["reduced_combine"]})
+            "reduced_combine": lambda: self._launch(
+                case,
+                "combine",
+                reduced_args | {
+                    "handle": timing_handles["reduced_combine"]},
             ),
         }
         prepare_launches = {
@@ -478,7 +504,7 @@ class AscendRuntime:
         cached_x, cached_idx, _, cached_handle, _ = cached
         cached_expanded_x, _, cached_expanded_weights, _, _ = cached_expanded
 
-        assert event.event is None
+        assert (event.event is not None) == case.async_with_compute_stream
         assert expanded_idx is None
         assert (topk_idx.data_ptr() != handle.topk_idx.data_ptr()) == (
             case.do_handle_copy

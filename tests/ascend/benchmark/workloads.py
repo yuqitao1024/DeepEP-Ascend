@@ -23,7 +23,6 @@ def phase_3e1_acceptance_operations():
 
 def classify_ascend_case(case: EPModeCase) -> Capability:
     suite = case_suite(case)
-    if suite == "functional":
-        return Capability(
-            suite, False, "full_row_noncached_dispatch_deferred_3e2")
+    if suite == "functional" and case.use_fp8_dispatch:
+        return Capability(suite, False, "fp8_full_row_deferred_3f")
     return Capability(suite, True)

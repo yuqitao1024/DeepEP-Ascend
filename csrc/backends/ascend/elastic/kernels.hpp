@@ -135,6 +135,8 @@ struct DispatchArguments {
     std::int32_t* source_metadata = nullptr;
     HybridRouteRecord* route_records = nullptr;
     std::uint64_t route_record_capacity = 0;
+    std::uint64_t num_recv_tokens = 0;
+    std::uint64_t num_output_tokens = 0;
     std::uint64_t generation = 0;
     std::uint64_t timeout_cycles = 0;
 };

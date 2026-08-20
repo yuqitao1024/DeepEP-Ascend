@@ -31,6 +31,8 @@ class DispatchArguments:
     _num_sms: int
     _num_qps: int
     _use_column_major_scale_layout: bool
+    _async_with_compute_stream: bool
+    _allocate_on_comm_stream: bool
 
     def cached(self, handle: Any) -> dict[str, Any]:
         return {
@@ -38,6 +40,8 @@ class DispatchArguments:
             "handle": handle,
             "num_sms": self._num_sms,
             "num_qps": self._num_qps,
+            "async_with_compute_stream": self._async_with_compute_stream,
+            "allocate_on_comm_stream": self._allocate_on_comm_stream,
         }
 
     def cached_expanded(self, handle: Any) -> dict[str, Any]:
@@ -89,6 +93,8 @@ def build_dispatch_arguments(
         _num_sms=num_sms,
         _num_qps=num_qps,
         _use_column_major_scale_layout=case.use_fp8_dispatch,
+        _async_with_compute_stream=case.async_with_compute_stream,
+        _allocate_on_comm_stream=case.allocate_on_comm_stream,
     )
 
 

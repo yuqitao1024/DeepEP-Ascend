@@ -104,6 +104,21 @@ EVENT_CASES = (
     "event-timeout",
 )
 
+UNCACHED_CASE_NAMES = tuple(
+    f"uncached-{layout}-{mode}-allocate-{str(allocate).lower()}"
+    for layout in ("normal", "expanded")
+    for mode in ("sync", "async")
+    for allocate in (False, True)
+) + (
+    "uncached-previous-event-allocate-true",
+    "uncached-empty-route",
+    "uncached-asymmetric-route",
+    "uncached-10-generations",
+    "uncached-completion-mismatch",
+    "uncached-drop-event",
+    "uncached-destroy-pending-retry",
+)
+
 CASE_START_PREFIX = "PHASE3E_CASE_START"
 CASE_RESULT_PREFIX = "PHASE3E_CASE_RESULT"
 OVERLAP_DIAGNOSTIC_RESULT_PREFIX = "PHASE3E_OVERLAP_DIAGNOSTIC_RESULT"
@@ -124,6 +139,7 @@ STANDALONE_MEASUREMENT_FIELDS = {
 
 DISTRIBUTED_CASES = tuple(
     case for case in CASE_NAMES if case not in EVENT_CASES)
+ALL_DISTRIBUTED_CASES = DISTRIBUTED_CASES + UNCACHED_CASE_NAMES
 
 MATRIX_GROUPS = (
     "capture-current-stream",
@@ -1625,7 +1641,8 @@ def _run_distributed_batch(cases, trace_dir, record_result):
 
 
 def _run_suite(suite, output, trace_dir):
-    selected = EVENT_CASES if suite == "event" else CASE_NAMES
+    selected = (EVENT_CASES if suite == "event" else
+                UNCACHED_CASE_NAMES if suite == "uncached" else CASE_NAMES)
     results = []
     pathlib.Path(trace_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1675,10 +1692,10 @@ def _run_suite(suite, output, trace_dir):
         return result["status"] == "passed"
 
     distributed = tuple(case for case in selected
-                        if case in DISTRIBUTED_CASES)
+                        if case in ALL_DISTRIBUTED_CASES)
     batch_pending = bool(distributed)
     for case in selected:
-        if case in DISTRIBUTED_CASES:
+        if case in ALL_DISTRIBUTED_CASES:
             if batch_pending:
                 batch_pending = False
                 if not _run_distributed_batch(
@@ -1841,6 +1858,24 @@ def _literal_reference(torch, dist, group, rank, fixture):
     return expected_x, expected_routes
 
 
+def _literal_expanded_reference(torch, dist, group, rank, fixture):
+    local = {
+        "payloads": fixture["payloads"][rank],
+        "routes": fixture["routes"][rank],
+    }
+    gathered = [None] * WORLD_SIZE
+    dist.all_gather_object(gathered, local, group=group)
+    experts_per_rank = NUM_EXPERTS // WORLD_SIZE
+    first_expert = rank * experts_per_rank
+    rows = []
+    for expert in range(first_expert, first_expert + experts_per_rank):
+        for source in gathered:
+            for payload, route in zip(source["payloads"], source["routes"]):
+                rows.extend(payload for routed_expert in route
+                            if routed_expert == expert)
+    return torch.tensor(rows, dtype=torch.bfloat16).reshape(len(rows), HIDDEN)
+
+
 class AsyncOverlapWorker:
     def __init__(self, torch, torch_npu, dist, deep_ep, group, device,
                  trace_dir):
@@ -1902,6 +1937,13 @@ class AsyncOverlapWorker:
         _check(self.torch.equal(observed, expected),
                f"{label} differs: {observed.tolist()} != {expected.tolist()}")
 
+    @staticmethod
+    def _assert_exact_storage(tensor, label):
+        expected_bytes = tensor.numel() * tensor.element_size()
+        actual_bytes = tensor.untyped_storage().nbytes()
+        _check(actual_bytes == expected_bytes,
+               f"{label} backing storage {actual_bytes} != {expected_bytes}")
+
     def _seed(self, buffer, fixture=REGULAR_FIXTURE):
         expected_x, expected_routes = _literal_reference(
             self.torch, self.dist, self.group, self.rank, fixture)
@@ -1923,6 +1965,200 @@ class AsyncOverlapWorker:
         _check(recv_weights is None, "seed unexpectedly returned weights")
         _check(event.event is None, "seed dispatch returned an async event")
         return handle
+
+    def _uncached_dispatch(
+            self, buffer, fixture, *, expanded, async_mode, allocate,
+            previous=None, wait=True, verify_cached_reuse=True):
+        expected_x, expected_routes = _literal_reference(
+            self.torch, self.dist, self.group, self.rank, fixture)
+        if expanded:
+            expected_x = _literal_expanded_reference(
+                self.torch, self.dist, self.group, self.rank, fixture)
+        x, routes = self._materialize(fixture)
+        result = buffer.dispatch(
+            x,
+            topk_idx=routes,
+            num_experts=NUM_EXPERTS,
+            num_max_tokens_per_rank=CAPACITY,
+            expert_alignment=1,
+            num_sms=1,
+            num_qps=0,
+            previous_event=previous,
+            async_with_compute_stream=async_mode,
+            allocate_on_comm_stream=allocate,
+            do_handle_copy=True,
+            do_cpu_sync=True,
+            do_expand=expanded,
+        )
+        recv_x, recv_routes, recv_weights, handle, event = result
+        _check(tuple(recv_x.shape) == tuple(expected_x.shape),
+               "uncached dispatch did not publish exact output extent")
+        self._assert_exact_storage(recv_x, "uncached recv_x")
+        _check((recv_routes is None) == expanded,
+               "uncached expanded route surface is invalid")
+        if recv_routes is not None:
+            self._assert_exact_storage(
+                recv_routes, "uncached recv_topk_idx")
+        self._assert_exact_storage(
+            handle.recv_src_metadata, "uncached recv_src_metadata")
+        _check(recv_weights is None,
+               "weightless uncached dispatch returned weights")
+        if async_mode:
+            _check(event.event is not None,
+                   "async uncached dispatch did not return a native event")
+            if wait:
+                event.current_stream_wait()
+        else:
+            _check(event.event is None,
+                   "synchronous uncached dispatch returned a native event")
+        if wait:
+            self._assert_tensor(recv_x, expected_x, "uncached recv_x")
+            if not expanded:
+                self._assert_tensor(
+                    recv_routes, expected_routes, "uncached recv_topk_idx")
+        if wait and verify_cached_reuse:
+            cached = buffer.dispatch(
+                x,
+                handle=handle,
+                num_sms=1,
+                num_qps=0,
+                do_expand=expanded,
+            )
+            _check(cached[3] is handle,
+                   "cached dispatch replaced the uncached handle")
+            _check(cached[4].event is None,
+                   "cached reuse unexpectedly returned an event")
+            self._assert_tensor(
+                cached[0], expected_x, "cached reuse recv_x")
+            if not expanded:
+                self._assert_tensor(
+                    cached[1], expected_routes,
+                    "cached reuse recv_topk_idx")
+        return result, expected_x, expected_routes
+
+    def _run_uncached_matrix_case(self, case):
+        expanded = "-expanded-" in case
+        async_mode = "-async-" in case
+        allocate = case.endswith("-true")
+        buffer = self.new_buffer()
+        self._uncached_dispatch(
+            buffer, REGULAR_FIXTURE, expanded=expanded,
+            async_mode=async_mode, allocate=allocate)
+        return {
+            "expanded": expanded,
+            "async": async_mode,
+            "allocate_on_comm_stream": allocate,
+            "cached_reuse": True,
+            "exact_output_extent": True,
+        }
+
+    def _run_uncached_previous_event(self):
+        buffer = self.new_buffer()
+        previous = self.deep_ep.ElasticBuffer.capture()
+        self._uncached_dispatch(
+            buffer, REGULAR_FIXTURE, expanded=False, async_mode=True,
+            allocate=True, previous=previous)
+        return {"previous_event": True, "cached_reuse": True}
+
+    def _run_uncached_route_case(self, fixture):
+        buffer = self.new_buffer()
+        self._uncached_dispatch(
+            buffer, fixture, expanded=False, async_mode=True,
+            allocate=True)
+        return {
+            "local_tokens": len(fixture["payloads"][self.rank]),
+            "cached_reuse": True,
+        }
+
+    def _run_uncached_generations(self):
+        buffer = self.new_buffer()
+        for generation in range(10):
+            fixture = _offset_fixture(REGULAR_FIXTURE, generation)
+            self._uncached_dispatch(
+                buffer, fixture, expanded=bool(generation % 2),
+                async_mode=True, allocate=bool(generation % 2),
+                verify_cached_reuse=generation == 0)
+        return {"generations": 10, "cached_reuse": True}
+
+    def _run_uncached_completion_mismatch(self):
+        buffer = self.new_buffer()
+        result, _, _ = self._uncached_dispatch(
+            buffer, REGULAR_FIXTURE, expanded=False, async_mode=True,
+            allocate=True, wait=False, verify_cached_reuse=False)
+        event = result[4]
+        local_failure = None
+        if self.rank == 0:
+            os.environ["DEEP_EP_ASCEND_TEST_COMPLETION_FAULT"] = \
+                "completion_mismatch"
+        try:
+            try:
+                event.current_stream_wait()
+            except RuntimeError as error:
+                local_failure = str(error)
+        finally:
+            os.environ.pop("DEEP_EP_ASCEND_TEST_COMPLETION_FAULT", None)
+        reports = [None] * WORLD_SIZE
+        self.dist.all_gather_object(
+            reports, {"rank": self.rank, "failure": local_failure},
+            group=self.group)
+        aggregate = _aggregate_rank_failures(reports)
+        _check(reports[0]["failure"] is not None and
+               "device completion generation mismatch" in
+               reports[0]["failure"],
+               f"uncached completion mismatch is missing: {aggregate}")
+        _check(reports[1]["failure"] is None,
+               f"healthy uncached rank failed: {aggregate}")
+        destroy_failure = None
+        try:
+            buffer.destroy()
+        except RuntimeError as error:
+            destroy_failure = str(error)
+        _check(buffer.runtime is None,
+               "uncached completion mismatch retained runtime")
+        self.buffers.remove(buffer)
+        return {"aggregated_failure": aggregate,
+                "destroy_failure": destroy_failure}
+
+    def _run_uncached_drop_event(self):
+        buffer = self.new_buffer()
+        result, _, _ = self._uncached_dispatch(
+            buffer, REGULAR_FIXTURE, expanded=False, async_mode=True,
+            allocate=True, wait=False, verify_cached_reuse=False)
+        del result
+        gc.collect()
+        self._uncached_dispatch(
+            buffer, _offset_fixture(REGULAR_FIXTURE, 100), expanded=False,
+            async_mode=False, allocate=False)
+        return {"event_dropped_without_wait": True, "buffer_reused": True}
+
+    def _run_uncached_destroy_pending_retry(self):
+        buffer = self.new_buffer()
+        result, _, _ = self._uncached_dispatch(
+            buffer, REGULAR_FIXTURE, expanded=False, async_mode=True,
+            allocate=True, wait=False, verify_cached_reuse=False)
+        event = result[4]
+        first_failure = None
+        os.environ["DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT"] = \
+            "destroy_failure"
+        try:
+            try:
+                buffer.destroy()
+            except RuntimeError as error:
+                first_failure = str(error)
+        finally:
+            os.environ.pop("DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT", None)
+        _check(first_failure is not None and "destroy_event" in first_failure,
+               f"uncached pending destroy failure missing: {first_failure}")
+        _check(buffer.runtime is not None,
+               "uncached failed destroy released runtime")
+        buffer.destroy()
+        _check(buffer.runtime is None,
+               "uncached destroy retry retained runtime")
+        self.buffers.remove(buffer)
+        del result, event
+        gc.collect()
+        return {"first_destroy_failure": first_failure,
+                "runtime_released_after_retry": True}
 
     def _cached_dispatch(self, buffer, handle, fixture, *, async_mode,
                          allocate, previous=None, wait=True):
@@ -3042,6 +3278,23 @@ class AsyncOverlapWorker:
 
     def run(self, case):
         with _forbid_global_sync(self.torch):
+            if (case.startswith("uncached-normal-") or
+                    case.startswith("uncached-expanded-")):
+                return self._run_uncached_matrix_case(case)
+            if case == "uncached-previous-event-allocate-true":
+                return self._run_uncached_previous_event()
+            if case == "uncached-empty-route":
+                return self._run_uncached_route_case(EMPTY_FIXTURE)
+            if case == "uncached-asymmetric-route":
+                return self._run_uncached_route_case(ASYMMETRIC_FIXTURE)
+            if case == "uncached-10-generations":
+                return self._run_uncached_generations()
+            if case == "uncached-completion-mismatch":
+                return self._run_uncached_completion_mismatch()
+            if case == "uncached-drop-event":
+                return self._run_uncached_drop_event()
+            if case == "uncached-destroy-pending-retry":
+                return self._run_uncached_destroy_pending_retry()
             if case.startswith("cached-dispatch-"):
                 return self._run_cached_case(case)
             if case.startswith("combine-"):
@@ -3435,10 +3688,10 @@ def _run_worker(case, trace_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--contract", action="store_true")
-    parser.add_argument("--suite", choices=("event", "full"))
-    parser.add_argument("--worker", choices=CASE_NAMES)
+    parser.add_argument("--suite", choices=("event", "full", "uncached"))
+    parser.add_argument("--worker", choices=CASE_NAMES + UNCACHED_CASE_NAMES)
     parser.add_argument(
-        "--batch-worker", nargs="+", choices=DISTRIBUTED_CASES,
+        "--batch-worker", nargs="+", choices=ALL_DISTRIBUTED_CASES,
         metavar="CASE")
     parser.add_argument("--overlap-diagnostic", action="store_true")
     parser.add_argument("--overlap-diagnostic-worker", action="store_true")

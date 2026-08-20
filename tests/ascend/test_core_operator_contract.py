@@ -1573,6 +1573,38 @@ int main() {
                        "deep_ep_ascend_launch_combine_epilogue"):
             self.assertIn(launch, surface)
 
+    def test_uncached_dispatch_has_count_and_event_epilogue_stages(self):
+        source = (ELASTIC / "dispatch.asc").read_text()
+        runtime = (ELASTIC / "runtime.cpp").read_text()
+        buffer = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+
+        self.assertIn("std::uint32_t copy_outputs", source)
+        self.assertIn("if (copy_outputs == 0)\n        return;", source)
+        self.assertIn("void dispatch_copy_kernel(", source)
+        producer_call = source[
+            source.index("asc_vf_call<dispatch_producer_vf>"):
+            source.index("transport::service::execute", source.index(
+                "asc_vf_call<dispatch_producer_vf>"))]
+        self.assertNotIn("cpu_sync ? 0U : 1U", producer_call)
+        dispatch_epilogue_call = source[
+            source.index("asc_vf_call<dispatch_epilogue_vf>"):
+            source.index("if (hybrid)", source.index(
+                "asc_vf_call<dispatch_epilogue_vf>"))]
+        self.assertIn("cpu_sync ? 0U : 1U", dispatch_epilogue_call)
+        epilogue = source[source.index(
+            'extern "C" int deep_ep_ascend_launch_dispatch_epilogue'):]
+        self.assertIn("dispatch_copy_kernel<<<", epilogue)
+        self.assertIn("aclrtGetLastError(ACL_RT_THREAD_LEVEL)", epilogue)
+        self.assertNotIn("return 0;", epilogue)
+
+        self.assertIn("launch_internal_dispatch_epilogue(", runtime)
+        self.assertIn("CoreMode::kCpuSync", buffer)
+        self.assertIn("CoreMode::kAsyncEvent", buffer)
+        self.assertIn("elastic::launch_internal_dispatch_epilogue(", buffer)
+        self.assertIn("completion_resources_->stage_dispatch_descriptor(",
+                      buffer)
+        self.assertIn("async_state_->publish(", buffer)
+
         cmake_path = CORE_OPS / "CMakeLists.txt"
         probe_path = CORE_OPS / "core_operator_compile_probe.asc"
         self.assertTrue(cmake_path.is_file(), str(cmake_path))
@@ -2089,6 +2121,16 @@ int main() {
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
+    def test_single_rank_dispatch_epilogue_publishes_generation(self):
+        dispatch = (ELASTIC / "dispatch.asc").read_text()
+        epilogue = dispatch[
+            dispatch.index("__simt_vf__ inline void dispatch_epilogue_vf"):
+            dispatch.index("__global__ __vector__ void dispatch_kernel")]
+        self.assertIn(
+            "__gm__ std::uint8_t* control_base = transport_world_size == 1 ?",
+            epilogue)
+        self.assertIn("communication_buffer :", epilogue)
+
     def test_public_combine_async_probe_executes(self):
         probe = ROOT / "tests/ascend/production_combine_probe.cpp"
         self.assertTrue(probe.is_file(), str(probe))
@@ -2241,6 +2283,38 @@ int main() {
                 "watchdog_seconds": 45,
                 "world_size": 2,
             })
+
+    def test_uncached_async_acceptance_matrix_contract(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_uncached_async_contract", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        expected = tuple(
+            f"uncached-{layout}-{mode}-allocate-{str(allocate).lower()}"
+            for layout in ("normal", "expanded")
+            for mode in ("sync", "async")
+            for allocate in (False, True)
+        ) + (
+            "uncached-previous-event-allocate-true",
+            "uncached-empty-route",
+            "uncached-asymmetric-route",
+            "uncached-10-generations",
+            "uncached-completion-mismatch",
+            "uncached-drop-event",
+            "uncached-destroy-pending-retry",
+        )
+        self.assertEqual(module.UNCACHED_CASE_NAMES, expected)
+        self.assertTrue(set(expected).issubset(module.ALL_DISTRIBUTED_CASES))
+        source = ASYNC_OVERLAP.read_text()
+        for marker in (
+                "def _uncached_dispatch(",
+                "do_cpu_sync=True",
+                "do_expand=expanded",
+                "async_with_compute_stream=async_mode",
+                "allocate_on_comm_stream=allocate",
+                "previous_event=previous",
+                'suite == "uncached"'):
+            self.assertIn(marker, source)
 
     def test_async_overlap_formal_workload_has_static_watchdog_margin(self):
         spec = importlib.util.spec_from_file_location(
@@ -4218,6 +4292,46 @@ int main() {
         self.assertEqual(exit_code, 0)
         self.assertEqual(batch_calls, [distributed])
         self.assertEqual(len(bounded_calls), 1)
+
+    def test_async_overlap_uncached_suite_uses_one_distributed_launcher(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_uncached_async_batch_launch", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        selected = module.UNCACHED_CASE_NAMES[:3]
+        batch_calls = []
+
+        def run_distributed_batch(cases, _trace_dir, record_result):
+            batch_calls.append(tuple(cases))
+            for case in cases:
+                record_result({
+                    "case": case,
+                    "status": "passed",
+                    "duration_seconds": 0.25,
+                    "exit_code": 0,
+                    "failure": None,
+                    "measurements": {},
+                })
+            return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "report.json"
+            with mock.patch.object(
+                    module, "UNCACHED_CASE_NAMES", selected), \
+                    mock.patch.object(
+                        module, "_run_distributed_batch",
+                        run_distributed_batch), \
+                    mock.patch.object(
+                        module, "_run_bounded",
+                        side_effect=AssertionError(
+                            "uncached case used standalone launcher")), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                exit_code = module._run_suite(
+                    "uncached", output, pathlib.Path(directory) / "traces")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(batch_calls, [selected])
 
     def test_async_overlap_distributed_batch_checkpoints_each_case(self):
         spec = importlib.util.spec_from_file_location(

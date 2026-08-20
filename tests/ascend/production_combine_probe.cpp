@@ -230,10 +230,12 @@ extern "C" int deep_ep_ascend_launch_barrier(
 extern "C" int deep_ep_ascend_launch_dispatch(
     elastic::DispatchArguments arguments, elastic::CoreTiling tiling, void*) {
     trace.generation = arguments.generation;
-    auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(
-        tiling.transport_context.local_window_base +
-        tiling.symmetric_window_layout.control_offset);
-    control->dispatch_generation = arguments.generation;
+    if (!elastic::has_mode(tiling.mode_flags, elastic::CoreMode::kCpuSync)) {
+        auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(
+            static_cast<std::uint8_t*>(arguments.communication_buffer) +
+            tiling.symmetric_window_layout.control_offset);
+        control->dispatch_generation = arguments.generation;
+    }
     arguments.prefix_per_rank[0] = 1;
     arguments.prefix_per_rank[1] = 2;
     const auto aligned = static_cast<std::int32_t>(
@@ -246,6 +248,14 @@ extern "C" int deep_ep_ascend_launch_dispatch(
     arguments.unaligned_per_expert[1] = 0;
     arguments.destination_slots[0] = 0;
     arguments.destination_slots[1] = 0;
+    return 0;
+}
+extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
+    elastic::DispatchArguments arguments, elastic::CoreTiling tiling, void*) {
+    auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(
+        static_cast<std::uint8_t*>(arguments.communication_buffer) +
+        tiling.symmetric_window_layout.control_offset);
+    control->dispatch_generation = arguments.generation;
     const std::array<std::int32_t, 8> metadata{
         0, 0, -1, -1,
         static_cast<std::int32_t>(tiling.num_max_tokens_per_rank),
@@ -253,8 +263,6 @@ extern "C" int deep_ep_ascend_launch_dispatch(
     std::memcpy(arguments.source_metadata, metadata.data(), sizeof(metadata));
     return 0;
 }
-extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
-    elastic::DispatchArguments, elastic::CoreTiling, void*) { return 0; }
 extern "C" int deep_ep_ascend_launch_combine(
     elastic::CombineArguments arguments, elastic::CoreTiling tiling,
     void* stream_value) {
