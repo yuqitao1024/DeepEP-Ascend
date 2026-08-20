@@ -1,8 +1,8 @@
 # Ascend EPv2 benchmark
 
-This suite covers the supported BF16 and FP8 performance intersection plus the
-accepted BF16 functional modes from `tests/elastic/test_ep.py` on Ascend 950.
-Both profiles use the same
+This suite covers the supported BF16 and FP8 performance intersection from
+`tests/elastic/test_ep.py` on Ascend 950, including synchronous baseline and
+BF16 event/stream modes. Both profiles use the same
 144-case enumeration, deterministic routing manifest, operation preparation,
 correctness references, warmup/sample counts, rank aggregation, and logical
 byte formulas.
@@ -14,9 +14,9 @@ The exhaustive case table and the statistical definitions are in
 
 | Classification | Cases | Ascend behavior | Reason |
 | --- | ---: | --- | --- |
-| Current BF16 performance | 12 | Correctness preflight and timing | |
-| Current FP8 performance | 12 | Correctness preflight and timing | |
-| Current BF16 functional | 60 | Correctness preflight and timing | |
+| Synchronous BF16 performance | 12 | Correctness preflight and timing | |
+| Synchronous FP8 performance | 12 | Correctness preflight and timing | |
+| BF16 async/event performance | 60 | Correctness preflight and timing | |
 | Deferred FP8 functional | 60 | Listed, not executed | `fp8_full_row_deferred_3f` |
 | Total inventory | 144 | 84 supported, 60 deferred | |
 
@@ -30,9 +30,9 @@ Phase 3E.1 cached coverage and Phase 3E.2 non-cached coverage are recorded by
 `tests/ascend/production/run_async_overlap.py`. Its intended matrix covers
 normal, expanded, and cached BF16 dispatch plus BF16 combine in synchronous
 and asynchronous modes, previous-event ordering, and communication-stream
-allocation. Phase 3E.2 promotes the 60 BF16 functional rows. The 60 FP8
-functional rows remain deferred because Phase 3E.2 does not add FP8 async
-non-cached dispatch.
+allocation. Phase 3E.2 makes the 60 BF16 async/event rows eligible for the
+performance suite. The 60 FP8 functional rows remain deferred because Phase
+3E.2 does not add FP8 async non-cached dispatch.
 
 List cases without importing torch or torch_npu:
 
@@ -44,8 +44,9 @@ python3 tests/ascend/benchmark/bench_ep.py \
   --list-cases --suite functional --format json
 ```
 
-The inventory has 84 supported rows: 24 synchronous performance rows and 60
-BF16 functional rows. The 60 FP8 functional rows remain listed but deferred.
+The inventory has 84 supported performance rows: 24 synchronous baseline rows
+and 60 BF16 async/event rows. The 60 FP8 functional rows remain listed but
+deferred.
 
 ## Ascend environment
 

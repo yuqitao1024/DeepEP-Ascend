@@ -25,4 +25,4 @@ def classify_ascend_case(case: EPModeCase) -> Capability:
     suite = case_suite(case)
     if suite == "functional" and case.use_fp8_dispatch:
         return Capability(suite, False, "fp8_full_row_deferred_3f")
-    return Capability(suite, True)
+    return Capability("performance", True)

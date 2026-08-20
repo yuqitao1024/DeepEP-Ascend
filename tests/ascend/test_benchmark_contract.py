@@ -58,8 +58,7 @@ def test_case_suite_counts_are_exhaustive():
         (classification.suite, classification.supported)
         for classification in classified
     ) == {
-        ("performance", True): 24,
-        ("functional", True): 60,
+        ("performance", True): 84,
         ("functional", False): 60,
     }
     assert Counter(
@@ -97,7 +96,7 @@ def test_exhaustive_spec_table_matches_runtime_classification():
         )
 
 
-def test_phase_3e2_promotes_only_bf16_full_rows():
+def test_phase_3e2_promotes_only_bf16_full_rows_to_performance():
     assert workloads.phase_3e1_acceptance_operations() == (
         "cached-bf16-dispatch-sync",
         "cached-bf16-dispatch-async",
@@ -108,7 +107,7 @@ def test_phase_3e2_promotes_only_bf16_full_rows():
     )
     full_functional_rows = [
         case for case in enumerate_ep_mode_cases()
-        if classify_ascend_case(case).suite == "functional"
+        if case_suite(case) == "functional"
     ]
     assert len(full_functional_rows) == 120
     assert sum(
@@ -118,6 +117,12 @@ def test_phase_3e2_promotes_only_bf16_full_rows():
     assert all(
         classify_ascend_case(case).supported ==
         (not case.use_fp8_dispatch)
+        for case in full_functional_rows
+    )
+    assert all(
+        classify_ascend_case(case).suite == (
+            "functional" if case.use_fp8_dispatch else "performance"
+        )
         for case in full_functional_rows
     )
 
@@ -498,11 +503,15 @@ def test_default_selection_contains_all_current_supported_cases():
 
 
 @pytest.mark.parametrize(
-    ("suite", "expected_count"),
-    (("all", 144), ("performance", 24), ("functional", 120)),
+    ("suite", "expected_count", "expected_statuses"),
+    (
+        ("all", 144, {"supported": 84, "deferred": 60}),
+        ("performance", 84, {"supported": 84}),
+        ("functional", 60, {"deferred": 60}),
+    ),
 )
 def test_list_cases_filters_by_suite_without_runtime_imports(
-    suite, expected_count,
+    suite, expected_count, expected_statuses,
 ):
     result = subprocess.run(
         [
@@ -522,6 +531,9 @@ def test_list_cases_filters_by_suite_without_runtime_imports(
     payload = json.loads(result.stdout)
 
     assert len(payload["cases"]) == expected_count
+    assert Counter(case["status"] for case in payload["cases"]) == (
+        expected_statuses
+    )
     assert all(
         case["reason"]
         for case in payload["cases"]
