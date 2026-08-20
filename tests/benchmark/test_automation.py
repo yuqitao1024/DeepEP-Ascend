@@ -838,3 +838,130 @@ def test_generated_manifest_is_deterministic_and_child_consumes_output_copy(tmp_
         )
 
     assert generated[0] == generated[1]
+
+
+@pytest.mark.parametrize("failure_site", ("output", "git", "log"))
+def test_run_cli_reports_setup_os_errors_without_traceback(
+    tmp_path, monkeypatch, capsys, failure_site
+):
+    def fail_setup(*args, **kwargs):
+        raise PermissionError("setup denied")
+
+    if failure_site == "output":
+        monkeypatch.setattr(run_ep, "_prepare_output_directory", fail_setup)
+    elif failure_site == "git":
+        monkeypatch.setattr(run_ep, "_git_commit", fail_setup)
+    else:
+        original_open = Path.open
+
+        def fail_log_open(path, *args, **kwargs):
+            if path.name == "run.log":
+                fail_setup()
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fail_log_open)
+
+    exit_code = run_ep.main([
+        "--backend", "cuda",
+        "--output-dir", str(tmp_path / failure_site),
+    ])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err == "run_ep.py: error: PermissionError: setup denied\n"
+    assert "Traceback" not in captured.err
+
+
+def test_run_cli_prints_spawn_diagnostic_and_retains_it_in_log(
+    tmp_path, monkeypatch, capsys
+):
+    output_dir = tmp_path / "spawn-failure"
+    monkeypatch.setattr(run_ep, "_git_commit", lambda: "a" * 40)
+
+    def fail_spawn(*args, **kwargs):
+        raise FileNotFoundError("backend executable missing")
+
+    monkeypatch.setattr(run_ep.subprocess, "Popen", fail_spawn)
+
+    exit_code = run_ep.main([
+        "--backend", "cuda", "--output-dir", str(output_dir),
+    ])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err == (
+        "run_ep.py: error: FileNotFoundError: backend executable missing\n"
+    )
+    assert "Traceback" not in captured.err
+    log = (output_dir / "run.log").read_text(encoding="utf-8")
+    assert "FileNotFoundError: backend executable missing" in log
+
+
+class _TeeFailureStdout:
+    def __init__(self):
+        self.closed = False
+
+    def __iter__(self):
+        yield "child output before tee failure\n"
+
+    def close(self):
+        self.closed = True
+
+
+class _LaunchedProcessDouble:
+    def __init__(self, fail_first_wait=False):
+        self.stdout = _TeeFailureStdout()
+        self.terminate_called = False
+        self.kill_called = False
+        self.wait_calls = []
+        self.fail_first_wait = fail_first_wait
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        self.terminate_called = True
+        raise OSError("terminate failed")
+
+    def kill(self):
+        self.kill_called = True
+
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        if self.fail_first_wait and len(self.wait_calls) == 1:
+            raise OSError("first wait failed")
+        return -9
+
+
+class _FailingLogTee:
+    def write(self, content):
+        raise OSError("run log write failed")
+
+    def flush(self):
+        raise AssertionError("flush must follow a successful write")
+
+
+def test_run_logged_command_kills_and_reaps_child_when_log_tee_fails(monkeypatch):
+    process = _LaunchedProcessDouble()
+    monkeypatch.setattr(run_ep.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    with pytest.raises(OSError, match="run log write failed"):
+        run_ep.run_logged_command(("harmless-child",), _FailingLogTee())
+
+    assert process.stdout.closed
+    assert process.terminate_called
+    assert process.kill_called
+    assert process.wait_calls
+
+
+def test_run_logged_command_retries_reaping_without_masking_tee_error(monkeypatch):
+    process = _LaunchedProcessDouble(fail_first_wait=True)
+    monkeypatch.setattr(run_ep.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    with pytest.raises(OSError, match="run log write failed"):
+        run_ep.run_logged_command(("harmless-child",), _FailingLogTee())
+
+    assert process.kill_called
+    assert len(process.wait_calls) == 2

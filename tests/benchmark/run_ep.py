@@ -132,12 +132,56 @@ def run_logged_command(
     )
     output = []
     assert process.stdout is not None
-    for line in process.stdout:
-        output.append(line)
-        log_handle.write(line)
-        log_handle.flush()
-        print(line, end="", flush=True)
-    return process.wait(), "".join(output)
+    try:
+        for line in process.stdout:
+            output.append(line)
+            log_handle.write(line)
+            log_handle.flush()
+            print(line, end="", flush=True)
+        process.stdout.close()
+        return process.wait(), "".join(output)
+    except BaseException:
+        _stop_and_reap_child(process)
+        raise
+
+
+def _stop_and_reap_child(process) -> None:
+    try:
+        process.stdout.close()
+    except BaseException:
+        pass
+
+    try:
+        running = process.poll() is None
+    except BaseException:
+        running = True
+    if running:
+        try:
+            process.terminate()
+        except BaseException:
+            try:
+                process.kill()
+            except BaseException:
+                pass
+
+    try:
+        process.wait(timeout=5.0 if running else None)
+        return
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            process.kill()
+        except BaseException:
+            pass
+    except BaseException:
+        try:
+            process.kill()
+        except BaseException:
+            pass
+
+    try:
+        process.wait()
+    except BaseException:
+        pass
 
 
 def _utc_now() -> str:
@@ -160,6 +204,13 @@ def _git_commit() -> str:
 def _log_event(log_handle: TextIO, **payload) -> None:
     log_handle.write(json.dumps(payload, sort_keys=True) + "\n")
     log_handle.flush()
+
+
+def _print_diagnostic(error: BaseException) -> None:
+    print(
+        f"run_ep.py: error: {type(error).__name__}: {error}",
+        file=sys.stderr,
+    )
 
 
 def _normalize_command_result(result) -> tuple[int, str]:
@@ -335,6 +386,7 @@ def execute_run(config: RunConfig, command_runner=run_logged_command) -> int:
                 exit_code=1,
                 timestamp_utc=_utc_now(),
             )
+            _print_diagnostic(error)
             return 1
         finally:
             if pending_markdown is not None:
@@ -360,8 +412,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return execute_run(config)
     except ValueError as error:
-        print(f"run_ep.py: error: {error}", file=sys.stderr)
+        _print_diagnostic(error)
         return 2
+    except (OSError, subprocess.SubprocessError) as error:
+        _print_diagnostic(error)
+        return 1
 
 
 if __name__ == "__main__":
