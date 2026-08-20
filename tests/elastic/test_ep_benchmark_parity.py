@@ -94,10 +94,22 @@ def test_cuda_parity_rejects_unsupported_case_before_torch_import(case_id):
 def test_parity_case_selection_defaults_to_common_supported_intersection():
     selected = selected_parity_case_ids("")
 
-    assert len(selected) == 24
-    assert sum("-bf16-" in case_id for case_id in selected) == 12
+    assert len(selected) == 84
+    assert sum("-bf16-" in case_id for case_id in selected) == 72
     assert sum("-fp8-" in case_id for case_id in selected) == 12
-    assert all("-prev0-async0-alloc0" in case_id for case_id in selected)
+    assert sum(
+        "-prev0-async0-alloc0" in case_id for case_id in selected
+    ) == 24
+    assert any(
+        case_id ==
+        "ep-bf16-align128-bias0-hcopy1-prev1-async1-alloc1"
+        for case_id in selected
+    )
+    assert all(
+        "-prev0-async0-alloc0" in case_id
+        for case_id in selected
+        if "-fp8-" in case_id
+    )
 
     with pytest.raises(ValueError, match="not a common supported case"):
         selected_parity_case_ids(

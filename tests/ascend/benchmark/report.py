@@ -60,7 +60,7 @@ class BenchmarkReport:
             if not capability.supported:
                 raise ValueError(
                     f"cannot add deferred case {case.case_id} to a "
-                    f"performance report: {capability.reason}"
+                    f"benchmark report: {capability.reason}"
                 )
             records.append({
                 "case_id": case.case_id,

@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import json
 import subprocess
 import sys
@@ -36,9 +37,13 @@ COMPARE = ROOT / "tests/ascend/benchmark/compare.py"
 
 def test_case_matrix_matches_upstream_order_and_size():
     cases = enumerate_ep_mode_cases()
+    case_id_sequence = "\n".join(case.case_id for case in cases)
 
     assert len(cases) == 144
     assert len({case.case_id for case in cases}) == 144
+    assert hashlib.sha256(case_id_sequence.encode("ascii")).hexdigest() == (
+        "eaf24b66d22f6f7ee6e293b5635006343d88c206d764b0a6cc6d21f826594c96"
+    )
     assert cases[0].case_id == (
         "ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0")
     assert cases[-1].case_id == (
@@ -65,6 +70,31 @@ def test_case_suite_counts_are_exhaustive():
     ) == {
         "fp8_full_row_deferred_3f": 60,
     }
+
+
+def test_exhaustive_spec_table_matches_runtime_classification():
+    spec = ROOT / (
+        "docs/superpowers/specs/"
+        "2026-08-18-ascend-epv2-benchmark-parity-design.md"
+    )
+    rows = []
+    for line in spec.read_text(encoding="utf-8").splitlines():
+        columns = [column.strip() for column in line.split("|")[1:-1]]
+        if len(columns) == 5 and columns[0].isdigit():
+            rows.append(tuple(column.strip("`") for column in columns))
+
+    assert len(rows) == 144
+    for index, (case, row) in enumerate(
+        zip(enumerate_ep_mode_cases(), rows, strict=True), start=1
+    ):
+        capability = classify_ascend_case(case)
+        assert row == (
+            str(index),
+            case.case_id,
+            capability.suite.title(),
+            "Supported" if capability.supported else "Deferred",
+            capability.reason,
+        )
 
 
 def test_phase_3e2_promotes_only_bf16_full_rows():
@@ -399,14 +429,17 @@ def test_default_report_contains_all_current_cases(tmp_path):
     }
 
 
-def test_performance_report_rejects_deferred_case():
+def test_benchmark_report_rejects_deferred_case():
     deferred = next(
         case
         for case in enumerate_ep_mode_cases()
         if not classify_ascend_case(case).supported
     )
 
-    with pytest.raises(ValueError, match="cannot add deferred case"):
+    with pytest.raises(
+        ValueError,
+        match=r"cannot add deferred case .* to a benchmark report",
+    ):
         BenchmarkReport.empty_for_cases(
             platform="ascend",
             cases=(deferred,),

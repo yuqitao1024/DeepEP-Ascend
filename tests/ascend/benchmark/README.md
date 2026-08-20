@@ -168,7 +168,7 @@ torchrun --standalone --nproc-per-node=8 \
   --warmups 1 --iterations 1 --output /tmp/ascend-ep8-smoke.json
 ```
 
-These short runs qualify launch and current-performance case coverage only.
+These short runs qualify launch and current-supported case coverage only.
 They are not full topology performance qualification.
 
 ## CUDA parity and manifests
