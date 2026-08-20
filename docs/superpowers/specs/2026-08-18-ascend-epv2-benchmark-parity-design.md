@@ -416,6 +416,196 @@ Dispatch and combine byte calculations reuse the formulas in
 Only records with matching workload fingerprint, case ID, operation ID,
 logical-byte formula version, and world size may be compared.
 
+## Eight-Rank Offline Automation
+
+### Purpose And Scope
+
+The automation layer runs the existing parity benchmark without changing its
+case generation, operation sequence, correctness checks, timing protocol, or
+logical-byte formulas. It supports exactly two single-host backends:
+
+- eight NVIDIA H800 GPUs using the CUDA parity runner; and
+- eight Ascend 950 NPUs using the Ascend parity runner.
+
+It does not submit cluster jobs, install dependencies, build DeepEP, transfer
+files between hosts, call an AI model, or require network access. The caller
+prepares the backend environment and transfers the workload manifest and JSON
+reports when the two runs occur on different hosts. Scale-out and hybrid
+routing remain outside this automation profile.
+
+The target automation inventory is all 144 case IDs on both backends. CUDA must
+not inherit the narrower Ascend capability filter. Until the separate Ascend
+FP8 async/event implementation qualifies its remaining 60 rows, the Ascend
+launcher must fail its 144-case readiness preflight rather than emit a partial
+canonical result or claim unsupported performance.
+
+### Profiles
+
+The automation exposes only `canonical` and `smoke`; individual workload-size
+overrides are intentionally absent from this entry point.
+
+| Setting | `canonical` | `smoke` |
+| --- | ---: | ---: |
+| Local ranks | 8 | 8 |
+| Maximum tokens per rank | 4096 | 16 |
+| Hidden width | 7168 | 128 |
+| Top-k | 6 | 2 |
+| Experts | 256 | 8 |
+| Seed | 0 | 0 |
+| Unbalanced ratio | 1.0 | 1.0 |
+| Precise unbalanced ratio | false | false |
+| Masked ratio | 0.0 | 0.0 |
+| Allow multiple reduction | true | true |
+| Warmups per operation | 30 | 1 |
+| Measured iterations per operation | 30 | 1 |
+| Selected cases | all 144 | all 144 |
+| Intended use | Formal H800/Ascend comparison | Automation validation only |
+
+`canonical` copies the original `tests/elastic/test_ep.py` performance
+defaults. Neither backend may reduce its data size dynamically. `smoke` keeps
+the complete case and operation matrix but uses bounded data and timing counts
+to validate launching, JSON collection, comparison, and Markdown generation.
+Every smoke artifact and Markdown report is labeled non-canonical and must not
+be presented as formal performance evidence.
+
+### Run Interface
+
+The cross-platform entry point is:
+
+```bash
+python3 tests/benchmark/run_ep.py \
+  --backend cuda \
+  --profile canonical \
+  --output-dir results/h800-canonical
+```
+
+The first run writes a deterministic workload manifest. A run on the other
+backend consumes that exact file:
+
+```bash
+python3 tests/benchmark/run_ep.py \
+  --backend ascend \
+  --profile canonical \
+  --workload-manifest results/h800-canonical/workload.json \
+  --output-dir results/ascend-canonical
+```
+
+`--backend` accepts only `cuda` or `ascend`; `--profile` accepts only
+`canonical` or `smoke`. The default profile is `smoke` so an omitted profile
+cannot accidentally start a formal, long-running benchmark. The output
+directory must not be the repository root and must contain no completed
+benchmark artifacts unless the caller explicitly selects a new directory.
+
+The CUDA adapter launches `tests/elastic/test_ep.py` with parity mode and
+`--num-processes 8`. It passes all 144 canonical case IDs, retains automatic
+SM/QP selection, and validates that the emitted report has platform `cuda`,
+world size eight, and an H800 device name. The existing upstream profile and
+its defaults remain unchanged.
+
+The Ascend adapter launches `tests/ascend/benchmark/bench_ep.py` through
+`torchrun --standalone --nproc-per-node=8`. Before importing runtime libraries
+or reserving benchmark output, it requires the Ascend inventory to contain 144
+supported rows. It retains the Ascend fixed `num_sms=1`, `num_qps=0`, and
+single-host pure-scale-up behavior.
+
+Both adapters use argument arrays rather than interpolated shell commands,
+inherit the prepared environment, and stream combined stdout/stderr to the
+terminal and `run.log`. A nonzero child exit code is the automation exit code.
+
+### Run Artifacts
+
+Each successful run completes this directory:
+
+```text
+output-dir/
+|-- workload.json
+|-- benchmark.json
+|-- benchmark.md
+`-- run.log
+```
+
+`workload.json` is the exact shared manifest. When `--workload-manifest` is
+provided, the automation validates its profile values and copies its bytes to
+the output directory. The backend writes to a staging JSON path. Only after
+validation does the automation atomically publish it as `benchmark.json`, the
+machine-readable source of truth. `benchmark.md` is atomically generated from
+that JSON; it is never parsed as comparison input. `run.log` records the exact
+argument vector, selected profile, inherited Git commit, start/end timestamps,
+and child output without serializing environment secrets.
+
+After the backend exits successfully, the automation rejects the run unless:
+
+- the report schema and formula versions are supported;
+- platform, eight-rank world size, workload, fingerprint, warmups, iterations,
+  and aggregation rules match the selected profile and manifest;
+- all 144 expected case IDs appear once in canonical enumeration order;
+- all cases passed with no failures; and
+- every case contains the same five expected timed operation IDs with positive
+  finite latency and logical-bandwidth metrics.
+
+Failure preserves `run.log`, `workload.json`, the staging report if one was
+produced, and child diagnostics, but it never publishes `benchmark.json` or
+`benchmark.md`.
+
+### Offline Comparison
+
+Comparison consumes the two first-stage JSON reports, not their Markdown:
+
+```bash
+python3 tests/benchmark/compare_ep.py \
+  --cuda results/h800-canonical/benchmark.json \
+  --ascend results/ascend-canonical/benchmark.json \
+  --output comparison.md
+```
+
+The command runs on a machine with only Python and the repository. It does not
+import CUDA, Torch-NPU, DeepEP runtime modules, or model services. It rejects
+reports unless both are the same profile and match on schema/formula version,
+world size, workload fingerprint, timing counts and aggregation, complete
+144-case sequence, five operation IDs per case, and logical bytes for every
+matched operation. Profile identity is derived from the exact workload and
+timing tuple in each JSON report, not from its filename or Markdown text.
+
+The comparison Markdown starts with provenance and workload tables, followed
+by exactly 720 detail rows in canonical case order and fixed operation order.
+Each row represents one operation from one case:
+
+| Column | Definition |
+| --- | --- |
+| Case | Stable case ID |
+| Operation | Stable operation ID |
+| H800 mean/p50/p95 | Device latency statistics in microseconds |
+| H800 logical GB/s | Logical bytes divided by H800 mean device latency |
+| Ascend mean/p50/p95 | Device latency statistics in microseconds |
+| Ascend logical GB/s | Logical bytes divided by Ascend mean device latency |
+| Latency Ascend/H800 | Ascend mean divided by H800 mean; lower is better |
+| Bandwidth Ascend/H800 | Ascend GB/s divided by H800 GB/s; higher is better |
+
+The per-backend `benchmark.md` uses the same case and operation ordering but
+contains only that backend's mean, p50, p95, and logical GB/s. Values use three
+decimal places, Markdown-sensitive text is escaped, and non-finite or
+nonpositive metrics are rejected rather than rendered.
+
+### Automation Testing And Acceptance
+
+Host-only tests use small complete JSON fixtures and a fake child launcher;
+they do not require a GPU or NPU. They prove profile argument expansion,
+manifest copying, safe subprocess arguments, H800 and Ascend readiness gates,
+atomic artifact behavior, report validation, Markdown escaping and ordering,
+ratio calculations, and rejection of every comparison identity mismatch.
+
+Hardware acceptance is separate and serialized per environment:
+
+1. An eight-rank H800 smoke run passes all 144 cases and writes 720 operation
+   records plus all four artifacts.
+2. After FP8 async/event support lands, an eight-rank Ascend smoke run passes
+   the same 144 cases and writes the same operation-key sequence.
+3. Offline smoke comparison produces 720 rows and is labeled non-canonical.
+4. Formal H800 and Ascend canonical runs reuse one manifest and each pass all
+   144 cases with 720 operation records.
+5. Canonical comparison validates every identity field before atomically
+   writing the final Markdown report.
+
 ## Components
 
 | File | Responsibility |
@@ -430,6 +620,10 @@ logical-byte formula version, and world size may be compared.
 | `tests/ascend/benchmark/README.md` | Build, TaskQueue, torchrun, output, limitations |
 | `tests/ascend/test_benchmark_contract.py` | Host-only matrix, manifest, report, statistics, CLI tests |
 | `tests/elastic/test_ep.py` | Opt-in parity manifest/profile; existing default remains unchanged |
+| `tests/benchmark/run_ep.py` | Backend-neutral eight-rank profile expansion, launch, validation, and artifact orchestration |
+| `tests/benchmark/report_markdown.py` | Deterministic single-backend and comparison Markdown rendering |
+| `tests/benchmark/compare_ep.py` | Runtime-free offline comparison CLI |
+| `tests/benchmark/test_automation.py` | Host-only automation, validation, and Markdown contracts |
 
 The shared core and manifest modules live under `tests/utils`. The CUDA parity
 profile imports those modules and currently reuses the Ascend report, timing,
