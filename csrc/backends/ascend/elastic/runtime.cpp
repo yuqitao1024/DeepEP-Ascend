@@ -98,6 +98,10 @@ bool same_workspace_layout(
                rhs.dispatch_expert_bitmap_offset &&
            lhs.dispatch_expert_bitmap_bytes ==
                rhs.dispatch_expert_bitmap_bytes &&
+           lhs.combine_record_slots_offset ==
+               rhs.combine_record_slots_offset &&
+           lhs.combine_record_slots_bytes ==
+               rhs.combine_record_slots_bytes &&
            lhs.total_bytes == rhs.total_bytes;
 }
 

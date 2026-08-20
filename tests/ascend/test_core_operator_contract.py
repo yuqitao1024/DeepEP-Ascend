@@ -225,6 +225,58 @@ def _valid_component_rank(rank):
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
+    def test_direct_combine_uses_staged_simt_data_paths(self):
+        """Catches restoring canonical direct combine to one-thread data paths."""
+        source = (ELASTIC / "combine.asc").read_text()
+        kernel = source[source.index(
+            "__global__ __vector__ void combine_kernel"):]
+        markers = (
+            "asc_vf_call<direct_combine_producer_control_vf>",
+            "asc_vf_call<direct_combine_producer_plan_vf>",
+            "asc_vf_call<direct_combine_producer_reduce_errors_vf>",
+            "asc_vf_call<direct_combine_producer_record_vf>",
+            "asc_vf_call<direct_combine_producer_local_copy_vf>",
+            "asc_vf_call<direct_combine_producer_release_vf>",
+            "transport::service::execute",
+            "asc_vf_call<direct_combine_epilogue_acquire_vf>",
+            "asc_vf_call<direct_combine_epilogue_clear_index_vf>",
+            "asc_vf_call<direct_combine_epilogue_validate_vf>",
+            "asc_vf_call<direct_combine_epilogue_reduce_errors_vf>",
+            "asc_vf_call<direct_combine_epilogue_reduce_vf>",
+            "asc_vf_call<direct_combine_epilogue_weights_vf>",
+            "asc_vf_call<direct_combine_epilogue_complete_vf>",
+        )
+        positions = [kernel.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions))
+
+        record = source[source.index(
+            "__simt_vf__ inline void direct_combine_producer_record_vf"):
+            source.index(
+                "__simt_vf__ inline void direct_combine_producer_local_copy_vf")]
+        reduction = source[source.index(
+            "__simt_vf__ inline void direct_combine_epilogue_reduce_vf"):
+            source.index(
+                "__simt_vf__ inline void direct_combine_epilogue_weights_vf")]
+        for stage in (record, reduction):
+            self.assertIn("threadIdx.x", stage)
+            self.assertIn("blockDim.x", stage)
+        self.assertIn("workspace_slot_offset", reduction)
+        self.assertNotIn("combine_reduce_origin_records(", reduction)
+
+        plan = source[source.index(
+            "__simt_vf__ inline void direct_combine_producer_plan_vf"):
+            source.index(
+                "__simt_vf__ inline void direct_combine_producer_reduce_errors_vf")]
+        self.assertIn("destination_rank = static_cast<int>(threadIdx.x)", plan)
+        self.assertIn("destination_rank += static_cast<int>(blockDim.x)", plan)
+        self.assertIn("combine_direct_status_is_clean(", record)
+
+        producer_branch = kernel[kernel.index("if (direct_parallel)"):
+                                 kernel.index("transport::service::execute")]
+        direct_branch, hybrid_branch = producer_branch.split("} else {", 1)
+        self.assertNotIn("asc_vf_call<combine_producer_vf>", direct_branch)
+        self.assertIn("asc_vf_call<combine_producer_vf>", hybrid_branch)
+
     def test_async_runtime_stream_event_contract(self):
         runtime = ROOT / "csrc/backends/ascend/runtime/stream_event.cpp"
         with tempfile.TemporaryDirectory() as directory:
@@ -365,7 +417,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         release = (ELASTIC / "release_protocol.hpp").read_text()
         for source_name, signal_name, barrier_calls in (
                 ("dispatch.asc", "kDispatchReleaseSignalIndex", 3),
-                ("combine.asc", "kCombineReleaseSignalIndex", 2)):
+                ("combine.asc", "kCombineReleaseSignalIndex", 3)):
             source = (ELASTIC / source_name).read_text()
             self.assertIn("checked_device_team_peer_for_world_rank(", source,
                           source_name)
@@ -793,7 +845,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         producer_begin = sources["combine.asc"].index(
             "__simt_vf__ inline void combine_producer_vf")
         producer_end = sources["combine.asc"].index(
-            "__simt_vf__ inline void combine_epilogue_vf", producer_begin)
+            "make_hybrid_combine_context", producer_begin)
         producer = sources["combine.asc"][producer_begin:producer_end]
         fill_calls = re.findall(
             r"combine_fill_normal_record_routing_weights\s*"

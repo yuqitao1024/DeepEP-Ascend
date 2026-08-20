@@ -385,9 +385,9 @@ bool combine_runner_allocation_contract_matches() {
     return dispatch.communication_buffer_bytes == 3584 &&
            dispatch.workspace_bytes == 512 &&
            combine.communication_buffer_bytes == 2097152 &&
-           combine.workspace_bytes == 448 &&
+           combine.workspace_bytes == 736 &&
            allocation.communication_buffer_bytes == 2097152 &&
-           allocation.workspace_bytes == 512 &&
+           allocation.workspace_bytes == 736 &&
            combine.topology.world_size == 2;
 }
 
@@ -437,7 +437,7 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 }
 
 int main() {
-    static_assert(kCoreTilingAbiVersion == 13);
+    static_assert(kCoreTilingAbiVersion == 14);
     auto hybrid_tiling = valid_two_dimensional_tiling(
         OperationKind::kDispatch, 0,
         transport::TransportTopologyKind::kLogicalSimulation,
@@ -1010,6 +1010,14 @@ int main() {
             CoreRuntimeStatusCode::kInvalidArgument ||
         launch_trace_size != 0)
         return 82;
+
+    auto malformed_combine_slots = two_rank_combine;
+    ++malformed_combine_slots.workspace_layout.combine_record_slots_offset;
+    if (validate_internal_launch(
+            malformed_combine_slots,
+            required_core_launch_storage(malformed_combine_slots)).code !=
+            CoreRuntimeStatusCode::kInvalidArgument)
+        return 95;
     fp8_dispatch.scale_factors = bytes;
     fp8_dispatch.recv_scale_factors = nullptr;
     if (launch_internal_dispatch(

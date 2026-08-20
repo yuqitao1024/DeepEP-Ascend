@@ -3,6 +3,7 @@
 #include <limits>
 #include <type_traits>
 
+#include "csrc/backends/ascend/elastic/combine_parallel.hpp"
 #include "csrc/backends/ascend/elastic/dispatch_parallel.hpp"
 #include "csrc/backends/ascend/elastic/layout.hpp"
 #include "csrc/backends/ascend/elastic/tiling.hpp"
@@ -46,6 +47,20 @@ bool aligned(std::uint64_t value) {
 }  // namespace
 
 int main() {
+    std::uint64_t combine_slot = 0;
+    if (!combine_record_slot_index(0, 0, 4, 6, &combine_slot) ||
+        combine_slot != 0 ||
+        !combine_record_slot_index(3, 5, 4, 6, &combine_slot) ||
+        combine_slot != 23 ||
+        combine_record_slot_index(4, 0, 4, 6, &combine_slot) ||
+        combine_record_slot_index(0, 6, 4, 6, &combine_slot) ||
+        combine_record_slot_index(0, 0, 4, 6, nullptr) ||
+        combine_record_slot_index(
+            std::numeric_limits<std::uint64_t>::max() - 1, 1,
+            std::numeric_limits<std::uint64_t>::max(), 2,
+            &combine_slot))
+        return 34;
+
     std::uint64_t bitmap_words = 0;
     if (!dispatch_bitmap_words(0, &bitmap_words) || bitmap_words != 0 ||
         !dispatch_bitmap_words(1, &bitmap_words) || bitmap_words != 1 ||
@@ -264,9 +279,9 @@ int main() {
         std::uint64_t combine_bytes;
     };
     for (const auto fixture : {
-             ScratchFixture{2, 160, 4, 16, 32, 64},
-             ScratchFixture{4, 256, 6, 32, 48, 128},
-             ScratchFixture{8, 416, 10, 64, 80, 192}}) {
+             ScratchFixture{2, 160, 4, 16, 32, 352},
+             ScratchFixture{4, 256, 6, 32, 48, 672},
+             ScratchFixture{8, 416, 10, 64, 80, 1248}}) {
         for (const auto operation : {
                  OperationKind::kDispatch, OperationKind::kCombine}) {
             input = valid_input();
@@ -332,9 +347,21 @@ int main() {
                     rank_scratch.dispatch_expert_bitmap_offset +
                             rank_scratch.dispatch_expert_bitmap_bytes >
                         rank_scratch.scratch_offset +
-                            rank_scratch.scratch_bytes)
+                            rank_scratch.scratch_bytes ||
+                    rank_scratch.combine_record_slots_offset != 0 ||
+                    rank_scratch.combine_record_slots_bytes != 0)
                     return 30;
-            } else if (rank_scratch.dispatch_error_offset != 0 ||
+            } else if (rank_scratch.combine_record_slots_offset == 0 ||
+                       rank_scratch.combine_record_slots_offset %
+                               alignof(std::int32_t) != 0 ||
+                       rank_scratch.combine_record_slots_bytes !=
+                           tiling.dispatch_output_capacity *
+                               sizeof(std::int32_t) ||
+                       rank_scratch.combine_record_slots_offset +
+                               rank_scratch.combine_record_slots_bytes >
+                           rank_scratch.scratch_offset +
+                               rank_scratch.scratch_bytes ||
+                       rank_scratch.dispatch_error_offset != 0 ||
                        rank_scratch.dispatch_error_count != 0 ||
                        rank_scratch.dispatch_rank_bitmap_offset != 0 ||
                        rank_scratch.dispatch_rank_bitmap_bytes != 0 ||

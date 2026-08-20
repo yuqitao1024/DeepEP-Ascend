@@ -43,7 +43,7 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 13;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 14;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -199,6 +199,9 @@ inline bool build_workspace_layout(
     const bool parallel_dispatch =
         input.operation == OperationKind::kDispatch &&
         !has_mode(input.mode_flags, CoreMode::kHybrid);
+    const bool parallel_combine =
+        input.operation == OperationKind::kCombine &&
+        !has_mode(input.mode_flags, CoreMode::kHybrid);
     const std::uint64_t local_experts = parallel_dispatch ?
         input.num_experts /
             static_cast<std::uint64_t>(input.topology.world_size) : 0;
@@ -213,6 +216,11 @@ inline bool build_workspace_layout(
     std::uint64_t dispatch_error_bytes = 0;
     std::uint64_t dispatch_rank_bitmap_words = 0;
     std::uint64_t dispatch_expert_bitmap_words = 0;
+    if (parallel_combine &&
+        !checked_multiply(
+            dispatch_output_capacity, sizeof(std::int32_t),
+            &layout.combine_record_slots_bytes))
+        return false;
     std::uint64_t scratch_cursor = 0;
     if (!checked_multiply(
             layout.scratch_rank_count, sizeof(std::uint64_t),
@@ -285,6 +293,16 @@ inline bool build_workspace_layout(
                 &scratch_cursor))
             return false;
     }
+    if (parallel_combine) {
+        if (!checked_align(
+                scratch_cursor, alignof(std::int32_t), &scratch_cursor))
+            return false;
+        layout.combine_record_slots_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, layout.combine_record_slots_bytes,
+                &scratch_cursor))
+            return false;
+    }
     if (
         !checked_align(
             scratch_cursor, kAscendElasticAlignment,
@@ -331,7 +349,11 @@ inline bool build_workspace_layout(
               &layout.dispatch_rank_bitmap_offset) ||
           !checked_add(
               layout.scratch_offset, layout.dispatch_expert_bitmap_offset,
-              &layout.dispatch_expert_bitmap_offset))))
+              &layout.dispatch_expert_bitmap_offset))) ||
+        (parallel_combine &&
+         !checked_add(
+             layout.scratch_offset, layout.combine_record_slots_offset,
+             &layout.combine_record_slots_offset)))
         return false;
     *output = layout;
     return true;

@@ -161,6 +161,8 @@ struct WorkspaceLayout {
     std::uint64_t dispatch_rank_bitmap_bytes = 0;
     std::uint64_t dispatch_expert_bitmap_offset = 0;
     std::uint64_t dispatch_expert_bitmap_bytes = 0;
+    std::uint64_t combine_record_slots_offset = 0;
+    std::uint64_t combine_record_slots_bytes = 0;
     std::uint64_t total_bytes = 0;
 };
 
