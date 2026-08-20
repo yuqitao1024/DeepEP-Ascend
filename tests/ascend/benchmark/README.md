@@ -280,11 +280,11 @@ profile. Once the matching resource allocation is approved, the benchmark
 commands are:
 
 ```bash
-torchrun --standalone --nproc-per-node=4 \
+python -m torch.distributed.run --standalone --nproc-per-node=4 \
   tests/ascend/benchmark/bench_ep.py \
   --warmups 1 --iterations 1 --output /tmp/ascend-ep4-smoke.json
 
-torchrun --standalone --nproc-per-node=8 \
+python -m torch.distributed.run --standalone --nproc-per-node=8 \
   tests/ascend/benchmark/bench_ep.py \
   --warmups 1 --iterations 1 --output /tmp/ascend-ep8-smoke.json
 ```

@@ -842,7 +842,9 @@ def test_cuda_command_expands_canonical_profile_and_all_cases(tmp_path):
     assert "--num-qps" not in command
 
 
-def test_ascend_command_uses_eight_rank_torchrun_and_staging_only(tmp_path):
+def test_ascend_command_uses_current_python_distributed_launcher_and_staging_only(
+    tmp_path,
+):
     staging = tmp_path / "benchmark.staging.json"
     manifest = tmp_path / "workload.json"
     command = build_backend_command(
@@ -850,9 +852,9 @@ def test_ascend_command_uses_eight_rank_torchrun_and_staging_only(tmp_path):
     )
 
     assert isinstance(command, tuple)
-    assert command[:4] == (
-        "torchrun", "--standalone", "--nproc-per-node=8",
-        "tests/ascend/benchmark/bench_ep.py",
+    assert command[:6] == (
+        sys.executable, "-m", "torch.distributed.run", "--standalone",
+        "--nproc-per-node=8", "tests/ascend/benchmark/bench_ep.py",
     )
     pairs = _adjacent_pairs(command)
     assert ("--num-tokens", "16") in pairs

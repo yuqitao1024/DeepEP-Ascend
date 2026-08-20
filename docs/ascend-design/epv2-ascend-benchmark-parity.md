@@ -500,11 +500,12 @@ SM/QP selection, and validates that the emitted report has platform `cuda`,
 world size eight, and an H800 device name. The existing upstream profile and
 its defaults remain unchanged.
 
-The Ascend adapter launches `tests/ascend/benchmark/bench_ep.py` through
-`torchrun --standalone --nproc-per-node=8`. Before importing runtime libraries
-or reserving benchmark output, it requires the Ascend inventory to contain 144
-supported rows. It retains the Ascend fixed `num_sms=1`, `num_qps=0`, and
-single-host pure-scale-up behavior.
+The Ascend adapter launches `tests/ascend/benchmark/bench_ep.py` through the
+current interpreter's `torch.distributed.run` module with `--standalone` and
+`--nproc-per-node=8`. Before importing runtime libraries or reserving benchmark
+output, it requires the Ascend inventory to contain 144 supported rows. It
+retains the Ascend fixed `num_sms=1`, `num_qps=0`, and single-host pure-scale-up
+behavior.
 
 Both adapters use argument arrays rather than interpolated shell commands,
 inherit the prepared environment, and stream combined stdout/stderr to the

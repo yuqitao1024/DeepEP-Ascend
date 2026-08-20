@@ -110,7 +110,9 @@ def build_backend_command(
             "--benchmark-json", str(Path(staging_report)),
         )
     return (
-        "torchrun",
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
         "--standalone",
         f"--nproc-per-node={profile.world_size}",
         "tests/ascend/benchmark/bench_ep.py",
