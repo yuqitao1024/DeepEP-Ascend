@@ -353,6 +353,7 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
             operation_modes = mode_bit(CoreMode::kCached) |
                               mode_bit(CoreMode::kExpanded) |
                               mode_bit(CoreMode::kZeroPadding) |
+                              mode_bit(CoreMode::kAllowMultipleReduction) |
                               mode_bit(CoreMode::kAsyncEvent) |
                               mode_bit(CoreMode::kCpuSync) |
                               mode_bit(CoreMode::kHybrid);

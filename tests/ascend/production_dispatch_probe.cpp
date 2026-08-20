@@ -774,13 +774,18 @@ bool expanded_public_contract_probe() {
     const std::optional<Tensor> weights = inputs.weights;
     auto result = uncached_dispatch(*buffer, inputs, weights, true, true);
     if (!has_exact_result(result, true, true, true) || trace.launches != 1 ||
+        !elastic::has_mode(
+            trace.modes[0], elastic::CoreMode::kAllowMultipleReduction) ||
         trace.kernel_expert_prefixes[0] == std::get<9>(result).data_ptr() ||
         trace.kernel_unaligned_counts[0] == std::get<10>(result).data_ptr())
         return false;
     auto cached = cached_dispatch(
         *buffer, inputs, result, std::get<8>(result), true);
     return has_exact_result(cached, true, false, true) &&
-        trace.launches == 2 && trace.cached_private_contract &&
+        trace.launches == 2 &&
+        elastic::has_mode(
+            trace.modes[1], elastic::CoreMode::kAllowMultipleReduction) &&
+        trace.cached_private_contract &&
         trace.kernel_expert_prefixes[1] != std::get<9>(result).data_ptr() &&
         trace.kernel_unaligned_counts[1] != std::get<10>(result).data_ptr();
 }

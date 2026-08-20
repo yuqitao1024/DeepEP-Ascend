@@ -1434,6 +1434,9 @@ public:
             mode_flags |= elastic::mode_bit(elastic::CoreMode::kExpanded);
         if (do_zero_padding)
             mode_flags |= elastic::mode_bit(elastic::CoreMode::kZeroPadding);
+        if (allow_multiple_reduction_)
+            mode_flags |= elastic::mode_bit(
+                elastic::CoreMode::kAllowMultipleReduction);
         if (allow_hybrid_mode_)
             mode_flags |= elastic::mode_bit(elastic::CoreMode::kHybrid);
         if (split_dispatch)
@@ -1459,6 +1462,8 @@ public:
 
         const auto descriptor_mode_flags = mode_flags &
             ~(elastic::mode_bit(elastic::CoreMode::kCached) |
+              elastic::mode_bit(
+                  elastic::CoreMode::kAllowMultipleReduction) |
               elastic::mode_bit(elastic::CoreMode::kCpuSync) |
               elastic::mode_bit(elastic::CoreMode::kAsyncEvent));
         const auto routing_mode = allow_hybrid_mode_ ?
