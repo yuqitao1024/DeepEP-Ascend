@@ -87,3 +87,54 @@ Output: exit code 0 with no output.
 This task deliberately stops at admission and mode selection. Exact FP8 split
 `recv_sf` allocation and return behavior remains Task 3 work and is not
 qualified by this change.
+
+## Review Fix Round 1
+
+Added observable FP8-specific rejection characterization in
+`_scenario_ascend_fp8_dispatch`:
+
+- E5M2 payloads paired with valid scale factors fail preflight with
+  `invalid_fp8_pairing` and do not reach `runtime.dispatch_calls`.
+- Non-contiguous E4M3 payloads paired with valid scale factors fail preflight
+  with `invalid_x_tensor` and do not reach `runtime.dispatch_calls`.
+- Cached and CPU-sync non-cached FP8 dispatches during NPU stream capture
+  report `unsupported_graph_capture` and do not reach the runtime.
+- FP8 dispatch with `previous_event` but without
+  `allocate_on_comm_stream=True` reports `unsupported_dispatch_mode` and does
+  not reach the runtime.
+
+The fake Torch fixture now supplies `torch.float8_e5m2` solely to characterize
+the unsupported payload case. No production code changed. Per controller
+ruling, pending-operation rejection and direct native C++ execution remain
+deferred to Task 3's compiled public dispatch probe.
+
+Focused characterization command:
+
+```bash
+python3 -m pytest -q tests/ascend/test_python_api.py::PythonApiIsolationTest::test_fp8_dispatch_collectively_validates_scale_factor_contract
+```
+
+Focused result:
+
+```text
+1 passed in 0.20s
+```
+
+Full Python API command:
+
+```bash
+python3 -m pytest -q tests/ascend/test_python_api.py
+```
+
+Full-suite result:
+
+```text
+29 passed, 2 skipped, 19 subtests passed in 1.71s
+```
+
+Review self-check:
+
+- The added cases assert preflight errors and unchanged runtime call counts.
+- Capture coverage includes both cached and non-cached FP8 paths.
+- The only implementation-support change is the test fake's E5M2 dtype.
+- No Task 3 lifetime/allocation behavior or native C++ execution was added.

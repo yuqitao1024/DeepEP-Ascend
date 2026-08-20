@@ -182,6 +182,7 @@ def _install_fake_torch(platform, events):
     torch.dtype = _FakeDType
     torch.bfloat16 = _FakeDType(2)
     torch.float8_e4m3fn = _FakeDType(1)
+    torch.float8_e5m2 = _FakeDType(1)
     torch.float32 = torch.float = _FakeDType(4)
     torch.int64 = torch.long = _FakeDType(8)
     torch.int32 = torch.int = _FakeDType(4)
@@ -1875,6 +1876,56 @@ def _scenario_ascend_fp8_dispatch():
         buffer._ascend_topology = saved_topology
         buffer.num_scaleout_ranks = saved_scaleout_ranks
     assert len(runtime.dispatch_calls) == rejected_stream_calls
+
+    unsupported_fp8_payloads = (
+        ("E5M2", _FakeTensor("npu", (2, 64), torch.float8_e5m2),
+         "invalid_fp8_pairing"),
+        ("non-contiguous E4M3", _FakeTensor(
+            "npu", (2, 64), torch.float8_e4m3fn, contiguous=False),
+         "invalid_x_tensor"),
+    )
+    for name, invalid_x, error_code in unsupported_fp8_payloads:
+        try:
+            buffer.dispatch(
+                (invalid_x, sf), topk_idx=topk_idx, num_experts=2,
+                num_max_tokens_per_rank=2)
+        except RuntimeError as error:
+            assert error_code in str(error), (name, error)
+        else:
+            raise AssertionError(f"FP8 dispatch accepted {name} payload")
+        assert len(runtime.dispatch_calls) == rejected_stream_calls
+
+    try:
+        buffer.dispatch(
+            (x, sf), handle=handle, previous_event=previous,
+            async_with_compute_stream=True)
+    except RuntimeError as error:
+        assert "unsupported_dispatch_mode" in str(error), error
+    else:
+        raise AssertionError("FP8 dispatch accepted a predecessor without allocation")
+    assert len(runtime.dispatch_calls) == rejected_stream_calls
+
+    torch.npu.capturing = True
+    try:
+        capture_modes = (
+            ("cached", {"handle": handle}),
+            ("non-cached", {
+                "topk_idx": topk_idx,
+                "num_experts": 2,
+                "num_max_tokens_per_rank": 2,
+                "do_cpu_sync": True,
+            }),
+        )
+        for name, kwargs in capture_modes:
+            try:
+                buffer.dispatch((x, sf), **kwargs)
+            except RuntimeError as error:
+                assert "unsupported_graph_capture" in str(error), (name, error)
+            else:
+                raise AssertionError(f"FP8 dispatch accepted graph capture for {name}")
+            assert len(runtime.dispatch_calls) == rejected_stream_calls
+    finally:
+        torch.npu.capturing = False
 
     invalid_cases = (
         (x, None),
