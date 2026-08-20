@@ -1765,6 +1765,117 @@ def _scenario_ascend_fp8_dispatch():
     assert recv_x == (x, packed_sf), recv_x
     assert runtime.dispatch_calls[-1][28] is True
 
+    group.gathered_objects = gather_valid
+    _, _, _, cached_handle, cached_event = buffer.dispatch(
+        (x, sf), handle=handle, async_with_compute_stream=True,
+        allocate_on_comm_stream=True)
+    assert cached_handle is handle
+    assert runtime.dispatch_calls[-1][1] is sf
+    assert runtime.dispatch_calls[-1][22:24] == (True, True)
+    assert cached_event.event is not None
+    cached_event.current_stream_wait()
+
+    previous = deep_ep.ElasticBuffer.capture()
+    group.gathered_objects = gather_column_major
+    _, _, _, predecessor_handle, predecessor_event = buffer.dispatch(
+        (x, packed_sf), handle=handle, previous_event=previous,
+        async_with_compute_stream=True, allocate_on_comm_stream=True,
+        use_tma_aligned_col_major_sf=True)
+    assert predecessor_handle is handle
+    assert runtime.dispatch_calls[-1][1] is packed_sf
+    assert runtime.dispatch_calls[-1][20] is previous
+    assert runtime.dispatch_calls[-1][22:24] == (True, True)
+    assert runtime.dispatch_calls[-1][28] is True
+    assert predecessor_event.event is not None
+    predecessor_event.current_stream_wait()
+
+    group.gathered_objects = gather_valid
+    _, _, _, uncached_handle, uncached_event = buffer.dispatch(
+        (x, sf), topk_idx=topk_idx, num_experts=2,
+        num_max_tokens_per_rank=2, do_cpu_sync=True,
+        async_with_compute_stream=True, allocate_on_comm_stream=True)
+    assert uncached_handle is not handle
+    assert runtime.dispatch_calls[-1][1] is sf
+    assert runtime.dispatch_calls[-1][22:27] == (True, True, True, True, False)
+    assert uncached_event.event is not None
+    uncached_event.current_stream_wait()
+
+    group.gathered_objects = gather_column_major
+    _, _, _, predecessor_uncached_handle, predecessor_uncached_event = \
+        buffer.dispatch(
+            (x, packed_sf), topk_idx=topk_idx, num_experts=2,
+            num_max_tokens_per_rank=2, do_cpu_sync=True,
+            previous_event=previous, async_with_compute_stream=True,
+            allocate_on_comm_stream=True,
+            use_tma_aligned_col_major_sf=True)
+    assert predecessor_uncached_handle is not uncached_handle
+    assert runtime.dispatch_calls[-1][1] is packed_sf
+    assert runtime.dispatch_calls[-1][20] is previous
+    assert runtime.dispatch_calls[-1][22:27] == (True, True, True, True, False)
+    assert runtime.dispatch_calls[-1][28] is True
+    assert predecessor_uncached_event.event is not None
+    predecessor_uncached_event.current_stream_wait()
+
+    handle = predecessor_uncached_handle
+    group.gathered_objects = None
+    rejected_stream_calls = len(runtime.dispatch_calls)
+    deferred_modes = (
+        ("previous_event_before_epilogue", {
+            "handle": handle,
+            "previous_event_before_epilogue": previous,
+            "allocate_on_comm_stream": True,
+        }),
+        ("non_cached_without_cpu_sync", {
+            "topk_idx": topk_idx,
+            "num_experts": 2,
+            "num_max_tokens_per_rank": 2,
+            "do_cpu_sync": False,
+            "async_with_compute_stream": True,
+            "allocate_on_comm_stream": True,
+        }),
+    )
+    for name, kwargs in deferred_modes:
+        try:
+            buffer.dispatch((x, sf), **kwargs)
+        except RuntimeError as error:
+            assert "unsupported_dispatch_mode" in str(error), (name, error)
+        else:
+            raise AssertionError(f"FP8 dispatch accepted {name}")
+        assert len(runtime.dispatch_calls) == rejected_stream_calls
+
+    saved_hybrid = buffer.allow_hybrid_mode
+    buffer.allow_hybrid_mode = True
+    try:
+        buffer.dispatch(
+            (x, sf), handle=handle, async_with_compute_stream=True,
+            allocate_on_comm_stream=True)
+    except RuntimeError as error:
+        assert "unsupported_dispatch_mode" in str(error), error
+    else:
+        raise AssertionError("FP8 dispatch accepted hybrid stream mode")
+    finally:
+        buffer.allow_hybrid_mode = saved_hybrid
+    assert len(runtime.dispatch_calls) == rejected_stream_calls
+
+    saved_topology = buffer._ascend_topology
+    saved_scaleout_ranks = buffer.num_scaleout_ranks
+    buffer._ascend_topology = (
+        saved_topology[0], saved_topology[1], saved_topology[2],
+        saved_topology[1] * 2)
+    buffer.num_scaleout_ranks = 2
+    try:
+        buffer.dispatch(
+            (x, sf), handle=handle, async_with_compute_stream=True,
+            allocate_on_comm_stream=True)
+    except RuntimeError as error:
+        assert "unsupported_dispatch_mode" in str(error), error
+    else:
+        raise AssertionError("FP8 dispatch accepted scale-out stream mode")
+    finally:
+        buffer._ascend_topology = saved_topology
+        buffer.num_scaleout_ranks = saved_scaleout_ranks
+    assert len(runtime.dispatch_calls) == rejected_stream_calls
+
     invalid_cases = (
         (x, None),
         (_FakeTensor("npu", (2, 64), torch.bfloat16), sf),

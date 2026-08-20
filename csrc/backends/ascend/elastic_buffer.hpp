@@ -1337,14 +1337,14 @@ public:
                     "DeepEP Ascend backend: dispatch previous_event requires "
                     "allocate_on_comm_stream=True");
         const bool split_dispatch = !cached_mode && do_cpu_sync &&
-            !sf.has_value() && !allow_hybrid_mode_;
+            !allow_hybrid_mode_;
         const bool stream_mode = previous_event.has_value() ||
             async_with_compute_stream || allocate_on_comm_stream;
         TORCH_CHECK(!stream_mode ||
                         ((cached_mode || split_dispatch) &&
-                         !sf.has_value() && !allow_hybrid_mode_),
+                         !allow_hybrid_mode_),
                     "DeepEP Ascend backend: dispatch stream overlap requires "
-                    "BF16 pure-scale-up mode with cached metadata or CPU sync");
+                    "pure-scale-up mode with cached metadata or CPU sync");
         TORCH_CHECK(do_cpu_sync || cached_mode,
                     "DeepEP Ascend backend: dispatch requires do_cpu_sync unless cached");
         TORCH_CHECK(num_sms == 1 && num_qps == 0,

@@ -687,8 +687,7 @@ class ElasticBuffer:
             scalar_error = "unsupported_dispatch_mode"
         elif ((previous_event is not None or async_with_compute_stream or
                allocate_on_comm_stream) and
-              (fp8_dispatch or self.allow_hybrid_mode or
-               self.num_scaleout_ranks > 1 or
+              (self.allow_hybrid_mode or self.num_scaleout_ranks > 1 or
                (not cached and do_cpu_sync is False))):
             scalar_error = "unsupported_dispatch_mode"
         elif use_tma_aligned_col_major_sf and not fp8_dispatch:
