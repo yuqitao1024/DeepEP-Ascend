@@ -759,13 +759,14 @@ def run_supported_matrix(
     runtime: AscendRuntime,
     selected_case_ids: tuple[str, ...],
     report: BenchmarkReport,
+    classify=classify_ascend_case,
 ) -> None:
     cases_by_id = {case.case_id: case for case in enumerate_ep_mode_cases()}
     records_by_id = {record["case_id"]: record for record in report.cases}
     for case_id in selected_case_ids:
         case = cases_by_id[case_id]
         record = records_by_id[case_id]
-        capability = classify_ascend_case(case)
+        capability = classify(case)
         if not capability.supported:
             raise ValueError(
                 f"cannot benchmark {capability.suite} case {case_id}: "

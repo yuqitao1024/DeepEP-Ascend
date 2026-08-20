@@ -5,8 +5,6 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from tests.ascend.benchmark.runtime import AscendRuntime
 from tests.elastic.test_ep import (
     build_parser,
@@ -63,15 +61,7 @@ def test_cuda_help_is_host_only_when_run_as_a_script():
     assert "--benchmark-profile {upstream,parity}" in result.stdout
 
 
-@pytest.mark.parametrize(
-    "case_id",
-    (
-        "ep-fp8-align128-bias0-hcopy1-prev1-async0-alloc1",
-        "ep-fp8-align128-bias0-hcopy1-prev0-async1-alloc0",
-        "ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc1",
-    ),
-)
-def test_cuda_parity_rejects_unsupported_case_before_torch_import(case_id):
+def test_cuda_parity_accepts_fp8_async_case_before_torch_import():
     result = subprocess.run(
         [
             sys.executable,
@@ -79,7 +69,9 @@ def test_cuda_parity_rejects_unsupported_case_before_torch_import(case_id):
             "--benchmark-profile",
             "parity",
             "--cases",
-            case_id,
+            "ep-fp8-align128-bias0-hcopy1-prev1-async0-alloc1",
+            "--iterations",
+            "0",
         ],
         capture_output=True,
         text=True,
@@ -87,34 +79,19 @@ def test_cuda_parity_rejects_unsupported_case_before_torch_import(case_id):
     )
 
     assert result.returncode == 2
-    assert "not a common supported case" in result.stderr
+    assert "--warmups must be nonnegative and --iterations positive" in result.stderr
+    assert "not a common supported case" not in result.stderr
     assert "No module named 'torch'" not in result.stderr
 
 
-def test_parity_case_selection_defaults_to_common_supported_intersection():
+def test_parity_case_selection_defaults_to_all_cuda_cases():
     selected = selected_parity_case_ids("")
 
-    assert len(selected) == 84
+    assert len(selected) == 144
     assert sum("-bf16-" in case_id for case_id in selected) == 72
-    assert sum("-fp8-" in case_id for case_id in selected) == 12
-    assert sum(
-        "-prev0-async0-alloc0" in case_id for case_id in selected
-    ) == 24
-    assert any(
-        case_id ==
-        "ep-bf16-align128-bias0-hcopy1-prev1-async1-alloc1"
-        for case_id in selected
-    )
-    assert all(
-        "-prev0-async0-alloc0" in case_id
-        for case_id in selected
-        if "-fp8-" in case_id
-    )
-
-    with pytest.raises(ValueError, match="not a common supported case"):
-        selected_parity_case_ids(
-            "ep-fp8-align128-bias0-hcopy1-prev1-async0-alloc1"
-        )
+    assert sum("-fp8-" in case_id for case_id in selected) == 72
+    assert selected[0] == "ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0"
+    assert selected[-1] == "ep-bf16-align1-bias2-hcopy0-prev1-async1-alloc1"
 
 
 def test_shared_runtime_accepts_cuda_selected_sm_and_qp_counts():

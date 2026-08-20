@@ -16,8 +16,8 @@ from tests.utils.ep_benchmark_core import (
     calculate_dispatch_traffic,
     expanded_dispatch_copy_bytes,
 )
-from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
-from tests.ascend.benchmark.workloads import classify_ascend_case
+from tests.utils.ep_benchmark_manifest import EPModeCase, enumerate_ep_mode_cases
+from tests.ascend.benchmark.workloads import Capability, classify_ascend_case
 
 
 torch = None
@@ -82,12 +82,12 @@ def enumerate_ep_modes():
         )
 
 
+def classify_cuda_case(_case: EPModeCase) -> Capability:
+    return Capability("performance", True)
+
+
 def selected_parity_case_ids(value: str) -> tuple[str, ...]:
-    supported = tuple(
-        case.case_id
-        for case in enumerate_ep_mode_cases()
-        if classify_ascend_case(case).supported
-    )
+    supported = tuple(case.case_id for case in enumerate_ep_mode_cases())
     if not value:
         return supported
     selected = tuple(
@@ -187,7 +187,7 @@ def run_cuda_parity(buffer, args):
             for case in enumerate_ep_mode_cases()
             if case.case_id in args.selected_parity_case_ids
         ),
-        classify=classify_ascend_case,
+        classify=classify_cuda_case,
         workload_fingerprint=manifest.fingerprint,
         world_size=world_size,
     )
@@ -206,7 +206,10 @@ def run_cuda_parity(buffer, args):
         'logical_byte_aggregation': 'sum',
     }
     run_supported_matrix(
-        runtime, args.selected_parity_case_ids, report
+        runtime,
+        args.selected_parity_case_ids,
+        report,
+        classify=classify_cuda_case,
     )
     if rank == 0:
         write_report_atomic(args.benchmark_json, report)
