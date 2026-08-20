@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from tests.utils.ep_benchmark_manifest import EPModeCase, case_suite
+from tests.utils.ep_benchmark_manifest import EPModeCase
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,4 @@ def phase_3e1_acceptance_operations():
 
 
 def classify_ascend_case(case: EPModeCase) -> Capability:
-    suite = case_suite(case)
-    if suite == "functional" and case.use_fp8_dispatch:
-        return Capability(suite, False, "fp8_full_row_deferred_3f")
     return Capability("performance", True)

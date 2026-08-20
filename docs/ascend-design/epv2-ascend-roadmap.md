@@ -264,8 +264,10 @@ benchmark rows.
 
 Phase 3E.3 (a real pre-epilogue dependency boundary) and Phase
 3E.4 (same-buffer multiflight resource slots) remain deferred design
-directions. The 60 FP8 functional rows remain deferred to FP8 async
-qualification and are not credited to Phase 3E.2.
+directions. The public FP8 async matrix and all 60 FP8 functional benchmark
+rows are now implemented and runnable, but they are not credited to Phase
+3E.2 and carry no production-qualification claim before Phase 3F async
+qualification completes.
 
 Phase 3E.1 and Phase 3E.2 are accepted as of 2026-08-20. The
 production-backed evidence appears below. Phase 3E overall remains incomplete;
@@ -602,6 +604,15 @@ Status: synchronous E4M3 dispatch with FP32 or packed UE8M0x4 scale-factor
 transport is implemented; BF16 combine remains the selected upstream-compatible
 combine path. The synchronous Phase 3F scope is complete for single-host 2-,
 4-, and 8-rank execution.
+
+The public two-rank FP8 async production matrix is implemented and runnable.
+It covers cached and non-cached normal/expanded dispatch, FP32 row-major and
+packed UE8M0x4 column-major scale-factor output, communication-stream
+allocation, predecessor ordering, empty/asymmetric routing, representation
+changes, repeated generations, event drop, completion mismatch, and retryable
+pending destruction. The benchmark inventory consequently exposes all 144
+rows as runnable. This is implementation status only: async 2-, 4-, and
+8-rank production qualification and its evidence remain open.
 
 TaskQueue run `task_20260819_171408_412650329832` established the clean
 `DEEP_EP_ASCEND_TESTING=0` CANN 9.2.0 production build/import and dependency

@@ -2,37 +2,39 @@
 
 This suite covers the supported BF16 and FP8 performance intersection from
 `tests/elastic/test_ep.py` on Ascend 950, including synchronous baseline and
-BF16 event/stream modes. Both profiles use the same
+BF16 and FP8 event/stream modes. Both profiles use the same
 144-case enumeration, deterministic routing manifest, operation preparation,
 correctness references, warmup/sample counts, rank aggregation, and logical
 byte formulas.
 
-The exhaustive case table and the statistical definitions are in
-[`docs/superpowers/specs/2026-08-18-ascend-epv2-benchmark-parity-design.md`](../../../docs/superpowers/specs/2026-08-18-ascend-epv2-benchmark-parity-design.md).
+The deterministic case enumeration is defined in
+`tests/utils/ep_benchmark_manifest.py`.
 
 ## Suite classification
 
 | Classification | Cases | Ascend behavior | Reason |
 | --- | ---: | --- | --- |
-| Synchronous BF16 performance | 12 | Correctness preflight and timing | |
-| Synchronous FP8 performance | 12 | Correctness preflight and timing | |
+| Synchronous baseline performance | 24 | Correctness preflight and timing | |
 | BF16 async/event performance | 60 | Correctness preflight and timing | |
-| Deferred FP8 functional | 60 | Listed, not executed | `fp8_full_row_deferred_3f` |
-| Total inventory | 144 | 84 supported, 60 deferred | |
+| FP8 async/event performance | 60 | Correctness preflight and timing | |
+| Total inventory | 144 | 144 supported | |
 
 Each supported case checks normal dispatch, expanded dispatch, cached dispatch,
 cached expanded dispatch with zero padding, combine, and reduced/expanded
 combine. Correctness is a preflight gate for each supported case. The five
-operations other than cached expanded padding are timed, producing 420
+operations other than cached expanded padding are timed, producing 720
 operation records per complete supported run.
 
 Phase 3E.1 cached coverage and Phase 3E.2 non-cached coverage are recorded by
 `tests/ascend/production/run_async_overlap.py`. Its intended matrix covers
 normal, expanded, and cached BF16 dispatch plus BF16 combine in synchronous
 and asynchronous modes, previous-event ordering, and communication-stream
-allocation. Phase 3E.2 makes the 60 BF16 async/event rows eligible for the
-performance suite. The 60 FP8 functional rows remain deferred because Phase
-3E.2 does not add FP8 async non-cached dispatch.
+allocation. The runner also provides a public FP8 async suite for cached and
+non-cached normal/expanded dispatch, both supported scale-factor
+representations and output layouts, predecessor ordering, exact storage, and
+lifecycle recovery. Phase 3E.2 promotes the 60 BF16 async/event rows and Phase
+3F promotes the 60 FP8 async/event rows into the performance suite. Hardware
+qualification remains a separate step.
 
 List cases without importing torch or torch_npu:
 
@@ -44,9 +46,8 @@ python3 tests/ascend/benchmark/bench_ep.py \
   --list-cases --suite functional --format json
 ```
 
-The inventory has 84 supported performance rows: 24 synchronous baseline rows
-and 60 BF16 async/event rows. The 60 FP8 functional rows remain listed but
-deferred.
+The inventory has 144 supported performance rows: 24 synchronous baseline
+rows, 60 BF16 async/event rows, and 60 FP8 async/event rows.
 
 ## Ascend environment
 
@@ -120,6 +121,9 @@ python3 tests/ascend/production/run_async_overlap.py \
 python3 tests/ascend/production/run_async_overlap.py \
   --suite uncached --output /tmp/phase3e2-uncached.json \
   --trace-dir /tmp/phase3e2-uncached-traces
+python3 tests/ascend/production/run_async_overlap.py \
+  --suite fp8 --output /tmp/phase3f-fp8-async.json \
+  --trace-dir /tmp/phase3f-fp8-async-traces
 ```
 
 Every runner case has a 45-second child-process bound. The complete TaskQueue
@@ -217,7 +221,7 @@ to differ and are not a rejection condition.
 
 ## JSON interpretation
 
-The default report contains exactly 84 supported cases and 420 operation
+The default report contains exactly 144 supported cases and 720 operation
 records; the 144-row inventory is available separately through
 `--list-cases`. Top-level identity and provenance fields include
 `schema_version`, `formula_version`, `git_commit`, `platform`, `world_size`,

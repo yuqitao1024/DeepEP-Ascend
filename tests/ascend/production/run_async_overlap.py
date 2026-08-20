@@ -17,6 +17,14 @@ from datetime import timedelta
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tests.ascend.production.run_fp8_dispatch_combine import (  # noqa: E402
+    CaseSpec as FP8CaseSpec,
+    FP8RuntimeMatrix as FP8ReferenceMatrix,
+)
+
 CASE_TIMEOUT_SECONDS = 45
 WORLD_SIZE = 2
 NUM_EXPERTS = 4
@@ -119,6 +127,25 @@ UNCACHED_CASE_NAMES = tuple(
     "uncached-destroy-pending-retry",
 )
 
+FP8_ASYNC_CASE_NAMES = (
+    "fp8-cached-normal-fp32-row-async-allocate-false",
+    "fp8-cached-normal-packed-column-async-allocate-true",
+    "fp8-cached-expanded-fp32-row-async-allocate-false",
+    "fp8-cached-expanded-packed-column-async-allocate-true",
+    "fp8-uncached-normal-fp32-row-async-allocate-false",
+    "fp8-uncached-normal-packed-column-async-allocate-true",
+    "fp8-uncached-expanded-fp32-row-async-allocate-false",
+    "fp8-uncached-expanded-packed-column-async-allocate-true",
+    "fp8-previous-event-allocate-true",
+    "fp8-empty-route",
+    "fp8-asymmetric-route",
+    "fp8-10-generations",
+    "fp8-cached-representation-changes",
+    "fp8-completion-mismatch",
+    "fp8-drop-event",
+    "fp8-destroy-pending-retry",
+)
+
 CASE_START_PREFIX = "PHASE3E_CASE_START"
 CASE_RESULT_PREFIX = "PHASE3E_CASE_RESULT"
 OVERLAP_DIAGNOSTIC_RESULT_PREFIX = "PHASE3E_OVERLAP_DIAGNOSTIC_RESULT"
@@ -139,7 +166,8 @@ STANDALONE_MEASUREMENT_FIELDS = {
 
 DISTRIBUTED_CASES = tuple(
     case for case in CASE_NAMES if case not in EVENT_CASES)
-ALL_DISTRIBUTED_CASES = DISTRIBUTED_CASES + UNCACHED_CASE_NAMES
+ALL_DISTRIBUTED_CASES = (
+    DISTRIBUTED_CASES + UNCACHED_CASE_NAMES + FP8_ASYNC_CASE_NAMES)
 
 MATRIX_GROUPS = (
     "capture-current-stream",
@@ -258,6 +286,15 @@ def _contract():
         ],
         "distributed_launches_per_full_suite": 1,
         "event_cases": list(EVENT_CASES),
+        "fp8_async": {
+            "case_names": list(FP8_ASYNC_CASE_NAMES),
+            "payload_dtype": "float8_e4m3fn",
+            "scale_factor_dtypes": ["float32", "int32"],
+            "output_scale_layouts": ["row-major", "column-major"],
+            "dispatch_modes": ["cached", "non-cached"],
+            "completion": "native-event",
+            "combine": "bf16-only",
+        },
         "full_cases": list(CASE_NAMES),
         "matrix_groups": list(MATRIX_GROUPS),
         "overlap": {
@@ -387,6 +424,8 @@ def _case_measurements(case, reports):
     ordered = sorted(reports, key=lambda value: value["rank"])
     if case in {
             "completion-mismatch", "drop-event", "destroy-pending-retry",
+            "fp8-completion-mismatch", "fp8-drop-event",
+            "fp8-destroy-pending-retry",
             "overlap-vs-serialized"}:
         return {
             "ranks": [
@@ -1642,7 +1681,8 @@ def _run_distributed_batch(cases, trace_dir, record_result):
 
 def _run_suite(suite, output, trace_dir):
     selected = (EVENT_CASES if suite == "event" else
-                UNCACHED_CASE_NAMES if suite == "uncached" else CASE_NAMES)
+                UNCACHED_CASE_NAMES if suite == "uncached" else
+                FP8_ASYNC_CASE_NAMES if suite == "fp8" else CASE_NAMES)
     results = []
     pathlib.Path(trace_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1888,6 +1928,8 @@ class AsyncOverlapWorker:
         self.rank = dist.get_rank(group)
         self.trace_dir = pathlib.Path(trace_dir)
         self.buffers = []
+        self.fp8_reference = FP8ReferenceMatrix(
+            torch, dist, deep_ep, group, device)
 
     def new_buffer(self, num_bytes=8 * 1024 * 1024):
         with _allow_buffer_construction_sync(self.torch):
@@ -1943,6 +1985,155 @@ class AsyncOverlapWorker:
         actual_bytes = tensor.untyped_storage().nbytes()
         _check(actual_bytes == expected_bytes,
                f"{label} backing storage {actual_bytes} != {expected_bytes}")
+
+    @staticmethod
+    def _assert_exact_strided_storage(tensor, label):
+        if tensor.numel() == 0:
+            expected_bytes = 0
+        else:
+            last_offset = sum(
+                (size - 1) * stride
+                for size, stride in zip(tensor.shape, tensor.stride()))
+            expected_bytes = (last_offset + 1) * tensor.element_size()
+        actual_bytes = tensor.untyped_storage().nbytes()
+        _check(actual_bytes == expected_bytes,
+               f"{label} backing storage {actual_bytes} != {expected_bytes}")
+
+    def _assert_fp8_outputs(self, result, reference, spec, label,
+                            expected_handle=None, exact_storage=False):
+        recv, recv_topk, recv_weights, handle, _ = result
+        _check(isinstance(recv, tuple) and len(recv) == 2,
+               f"{label} did not return FP8 payload and scale factors")
+        recv_x, recv_sf = recv
+        self.fp8_reference._assert_exact(
+            recv_x.view(self.torch.uint8), reference["payload"],
+            f"{label} payload bytes")
+        self.fp8_reference._assert_exact(
+            recv_sf.view(self.torch.int32), reference["sf"],
+            f"{label} scale-factor packs")
+        _check(recv_x.dtype == self.torch.float8_e4m3fn,
+               f"{label} payload dtype {recv_x.dtype} is not E4M3")
+        expected_sf_dtype = (
+            self.torch.int32 if spec.packed_sf else self.torch.float32)
+        _check(recv_sf.dtype == expected_sf_dtype,
+               f"{label} SF dtype {recv_sf.dtype} != {expected_sf_dtype}")
+        _check(tuple(recv_sf.shape) == tuple(reference["sf"].shape),
+               f"{label} SF shape {tuple(recv_sf.shape)} != "
+               f"{tuple(reference['sf'].shape)}")
+        expected_stride = (
+            (1, self.fp8_reference._align(recv_sf.shape[0], 4))
+            if spec.column_major_output else
+            (reference["sf"].shape[1], 1))
+        _check(recv_sf.stride() == expected_stride,
+               f"{label} SF stride {recv_sf.stride()} != {expected_stride}")
+        if reference["topk"] is None:
+            _check(recv_topk is None,
+                   f"{label} expanded dispatch returned top-k")
+        else:
+            self.fp8_reference._assert_exact(
+                recv_topk, reference["topk"], f"{label} top-k")
+        _check(recv_weights is None,
+               f"{label} weightless dispatch returned weights")
+        if expected_handle is not None:
+            _check(handle is expected_handle,
+                   f"{label} cached dispatch replaced its handle")
+        if exact_storage:
+            self._assert_exact_storage(recv_x, f"{label} recv_x")
+            self._assert_exact_strided_storage(recv_sf, f"{label} recv_sf")
+            if recv_topk is not None:
+                self._assert_exact_storage(recv_topk, f"{label} recv_topk")
+            self._assert_exact_storage(
+                handle.recv_src_metadata, f"{label} recv_src_metadata")
+        return recv, handle
+
+    def _verify_fp8_dispatch(self, result, reference, spec, label,
+                             expected_handle=None, async_mode=True,
+                             wait=True, exact_storage=False):
+        event = result[4]
+        if async_mode:
+            _check(event.event is not None,
+                   f"{label} async dispatch did not return a native event")
+            if wait:
+                event.current_stream_wait()
+        else:
+            _check(event.event is None,
+                   f"{label} synchronous dispatch returned a native event")
+        if wait:
+            self._assert_fp8_outputs(
+                result, reference, spec, label,
+                expected_handle=expected_handle,
+                exact_storage=exact_storage)
+
+    def _fp8_inputs_and_reference(self, spec, salt=0):
+        x, sf, routes, weights = self.fp8_reference._materialize(
+            spec, salt=salt, fp8=True)
+        gathered, fp8 = self.fp8_reference._all_gather(
+            x, sf, routes, weights)
+        _check(fp8, "FP8 reference unexpectedly classified input as BF16")
+        reference = self.fp8_reference._reference(gathered, spec, fp8)
+        return x, sf, routes, reference
+
+    def _fp8_uncached_dispatch(
+            self, buffer, spec, *, salt=0, async_mode=True, allocate=False,
+            previous=None, wait=True):
+        x, sf, routes, reference = self._fp8_inputs_and_reference(spec, salt)
+        result = buffer.dispatch(
+            (x, sf),
+            topk_idx=routes,
+            num_experts=NUM_EXPERTS,
+            num_max_tokens_per_rank=CAPACITY,
+            expert_alignment=spec.expert_alignment,
+            num_sms=1,
+            num_qps=0,
+            previous_event=previous,
+            async_with_compute_stream=async_mode,
+            allocate_on_comm_stream=allocate,
+            do_handle_copy=True,
+            do_cpu_sync=True,
+            do_expand=spec.expanded,
+            do_zero_padding=spec.zero_padding,
+            use_tma_aligned_col_major_sf=spec.column_major_output,
+        )
+        _check(tuple(result[0][0].shape) == tuple(reference["payload"].shape),
+               "FP8 uncached dispatch did not publish exact output extent")
+        _check(tuple(result[0][1].shape) == tuple(reference["sf"].shape),
+               "FP8 uncached dispatch did not publish exact SF extent")
+        if wait:
+            self._verify_fp8_dispatch(
+                result, reference, spec, "FP8 uncached",
+                async_mode=async_mode, exact_storage=True)
+        else:
+            event = result[4]
+            _check(event.event is not None,
+                   "FP8 async uncached dispatch did not return a native event")
+            self._assert_exact_storage(result[0][0], "FP8 uncached recv_x")
+            self._assert_exact_strided_storage(
+                result[0][1], "FP8 uncached recv_sf")
+            self._assert_exact_storage(
+                result[3].recv_src_metadata,
+                "FP8 uncached recv_src_metadata")
+        return result, reference
+
+    def _fp8_cached_dispatch(
+            self, buffer, handle, spec, *, salt=0, allocate=False,
+            previous=None, wait=True):
+        x, sf, _, reference = self._fp8_inputs_and_reference(spec, salt)
+        result = buffer.dispatch(
+            (x, sf),
+            handle=handle,
+            num_sms=1,
+            num_qps=0,
+            previous_event=previous,
+            async_with_compute_stream=True,
+            allocate_on_comm_stream=allocate,
+            do_expand=spec.expanded,
+            do_zero_padding=spec.zero_padding,
+            use_tma_aligned_col_major_sf=spec.column_major_output,
+        )
+        self._verify_fp8_dispatch(
+            result, reference, spec, "FP8 cached",
+            expected_handle=handle, wait=wait)
+        return result, reference
 
     def _seed(self, buffer, fixture=REGULAR_FIXTURE):
         expected_x, expected_routes = _literal_reference(
@@ -2159,6 +2350,275 @@ class AsyncOverlapWorker:
         gc.collect()
         return {"first_destroy_failure": first_failure,
                 "runtime_released_after_retry": True}
+
+    @staticmethod
+    def _fp8_matrix_spec(case):
+        return FP8CaseSpec(
+            case,
+            packed_sf="-packed-" in case,
+            expanded="-expanded-" in case,
+            column_major_output="-column-" in case,
+        )
+
+    def _run_fp8_matrix_case(self, case):
+        cached = case.startswith("fp8-cached-")
+        allocate = case.endswith("-true")
+        spec = self._fp8_matrix_spec(case)
+        buffer = self.new_buffer()
+        if cached:
+            seed, _ = self._fp8_uncached_dispatch(
+                buffer, spec, async_mode=False, allocate=False)
+            self._fp8_cached_dispatch(
+                buffer, seed[3], spec, salt=17, allocate=allocate)
+        else:
+            self._fp8_uncached_dispatch(
+                buffer, spec, async_mode=True, allocate=allocate)
+        return {
+            "cached": cached,
+            "expanded": spec.expanded,
+            "scale_factor_dtype": "int32" if spec.packed_sf else "float32",
+            "scale_factor_layout": (
+                "column-major" if spec.column_major_output else "row-major"),
+            "async": True,
+            "allocate_on_comm_stream": allocate,
+            "exact_payload_bytes": True,
+            "exact_scale_factor_packs": True,
+        }
+
+    def _run_fp8_previous_event(self):
+        buffer = self.new_buffer()
+        spec = FP8CaseSpec("fp8-previous-event")
+        next_x, next_sf, routes, reference = \
+            self._fp8_inputs_and_reference(spec, salt=23)
+        x, sf, _, _ = self._fp8_inputs_and_reference(spec, salt=0)
+        x.copy_(next_x)
+        sf.copy_(next_sf)
+        previous = self.deep_ep.ElasticBuffer.capture()
+        result = buffer.dispatch(
+            (x, sf),
+            topk_idx=routes,
+            num_experts=NUM_EXPERTS,
+            num_max_tokens_per_rank=CAPACITY,
+            expert_alignment=1,
+            num_sms=1,
+            num_qps=0,
+            previous_event=previous,
+            async_with_compute_stream=True,
+            allocate_on_comm_stream=True,
+            do_handle_copy=True,
+            do_cpu_sync=True,
+        )
+        self._verify_fp8_dispatch(
+            result, reference, spec, "FP8 previous-event",
+            exact_storage=True)
+        return {
+            "previous_event": True,
+            "allocate_on_comm_stream": True,
+            "queued_payload_and_sf_visible": True,
+        }
+
+    def _run_fp8_route_case(self, name):
+        spec = FP8CaseSpec(
+            name,
+            packed_sf=name == "empty-input",
+            column_major_output=name == "empty-input",
+        )
+        buffer = self.new_buffer()
+        result, _ = self._fp8_uncached_dispatch(
+            buffer, spec, async_mode=True, allocate=True)
+        return {
+            "local_tokens": int(result[0][0].shape[0]),
+            "column_major_empty": name == "empty-input",
+        }
+
+    def _run_fp8_generations(self):
+        buffer = self.new_buffer()
+        for generation in range(10):
+            packed = bool(generation % 2)
+            expanded = bool((generation // 2) % 2)
+            spec = FP8CaseSpec(
+                f"fp8-generation-{generation}",
+                packed_sf=packed,
+                expanded=expanded,
+                column_major_output=packed,
+            )
+            self._fp8_uncached_dispatch(
+                buffer, spec, salt=generation,
+                async_mode=True, allocate=packed)
+        return {
+            "generations": 10,
+            "representation_changes": True,
+            "normal_and_expanded": True,
+        }
+
+    def _seed_bf16_for_fp8(self, buffer, spec):
+        fp8_x, _, routes, _ = self._fp8_inputs_and_reference(spec)
+        x = fp8_x.to(self.torch.float32).to(
+            self.torch.bfloat16).contiguous()
+        result = buffer.dispatch(
+            x,
+            topk_idx=routes,
+            num_experts=NUM_EXPERTS,
+            num_max_tokens_per_rank=CAPACITY,
+            expert_alignment=1,
+            num_sms=1,
+            num_qps=0,
+            do_handle_copy=True,
+            do_cpu_sync=True,
+        )
+        _check(result[4].event is None,
+               "BF16 representation seed returned an async event")
+        return result[3]
+
+    def _cached_bf16_from_fp8(self, buffer, handle, spec, salt):
+        fp8_x, _, routes, _ = self._fp8_inputs_and_reference(spec, salt)
+        x = fp8_x.to(self.torch.float32).to(
+            self.torch.bfloat16).contiguous()
+        gathered, fp8 = self.fp8_reference._all_gather(
+            x, None, routes, None)
+        _check(not fp8, "BF16 reference unexpectedly classified input as FP8")
+        reference = self.fp8_reference._reference(gathered, spec, fp8)
+        result = buffer.dispatch(
+            x,
+            handle=handle,
+            num_sms=1,
+            num_qps=0,
+            async_with_compute_stream=True,
+            allocate_on_comm_stream=True,
+        )
+        _check(result[3] is handle,
+               "cached FP8-to-BF16 dispatch replaced its handle")
+        _check(result[4].event is not None,
+               "cached FP8-to-BF16 dispatch omitted its native event")
+        result[4].current_stream_wait()
+        _check(not isinstance(result[0], tuple),
+               "cached FP8-to-BF16 dispatch returned scale factors")
+        self.fp8_reference._assert_exact(
+            result[0], reference["payload"], "cached FP8-to-BF16 payload")
+
+    def _run_fp8_representation_changes(self):
+        fp32 = FP8CaseSpec("fp8-representation-fp32")
+        packed = FP8CaseSpec(
+            "fp8-representation-packed", packed_sf=True,
+            column_major_output=True)
+
+        bf16_buffer = self.new_buffer()
+        bf16_handle = self._seed_bf16_for_fp8(bf16_buffer, fp32)
+        self._fp8_cached_dispatch(
+            bf16_buffer, bf16_handle, fp32, salt=3, allocate=True)
+        self._fp8_cached_dispatch(
+            bf16_buffer, bf16_handle, packed, salt=5, allocate=True)
+
+        fp8_buffer = self.new_buffer()
+        seed, _ = self._fp8_uncached_dispatch(
+            fp8_buffer, packed, async_mode=False)
+        self._cached_bf16_from_fp8(
+            fp8_buffer, seed[3], packed, salt=7)
+        return {
+            "bf16_to_fp8": True,
+            "fp32_to_packed": True,
+            "fp8_to_bf16": True,
+        }
+
+    def _run_fp8_completion_mismatch(self):
+        buffer = self.new_buffer()
+        spec = FP8CaseSpec(
+            "fp8-completion-mismatch", packed_sf=True,
+            column_major_output=True)
+        result, reference = self._fp8_uncached_dispatch(
+            buffer, spec, async_mode=True, allocate=True, wait=False)
+        event = result[4]
+        local_failure = None
+        if self.rank == 0:
+            os.environ["DEEP_EP_ASCEND_TEST_COMPLETION_FAULT"] = \
+                "completion_mismatch"
+        try:
+            try:
+                event.current_stream_wait()
+            except RuntimeError as error:
+                local_failure = str(error)
+        finally:
+            os.environ.pop("DEEP_EP_ASCEND_TEST_COMPLETION_FAULT", None)
+        reports = [None] * WORLD_SIZE
+        self.dist.all_gather_object(
+            reports, {"rank": self.rank, "failure": local_failure},
+            group=self.group)
+        aggregate = _aggregate_rank_failures(reports)
+        _check(reports[0]["failure"] is not None and
+               "device completion generation mismatch" in
+               reports[0]["failure"],
+               f"FP8 completion mismatch is missing: {aggregate}")
+        _check(reports[1]["failure"] is None,
+               f"healthy FP8 rank failed: {aggregate}")
+        if self.rank != 0:
+            self._assert_fp8_outputs(
+                result, reference, spec, "healthy FP8 completion")
+        destroy_failure = None
+        try:
+            buffer.destroy()
+        except RuntimeError as error:
+            destroy_failure = str(error)
+        _check(buffer.runtime is None,
+               "FP8 completion mismatch retained runtime")
+        self.buffers.remove(buffer)
+        return {
+            "aggregated_failure": aggregate,
+            "destroy_failure": destroy_failure,
+            "runtime_released": True,
+        }
+
+    def _run_fp8_drop_event(self):
+        buffer = self.new_buffer()
+        spec = FP8CaseSpec(
+            "fp8-drop-event", packed_sf=True,
+            column_major_output=True)
+        result, reference = self._fp8_uncached_dispatch(
+            buffer, spec, async_mode=True, allocate=True, wait=False)
+        recv, recv_topk, recv_weights, handle, dropped_event = result
+        del result, dropped_event
+        gc.collect()
+        self._assert_fp8_outputs(
+            (recv, recv_topk, recv_weights, handle, None),
+            reference, spec, "dropped-event FP8")
+        self._fp8_uncached_dispatch(
+            buffer, spec, salt=19, async_mode=True, allocate=True)
+        return {
+            "event_dropped_without_wait": True,
+            "garbage_collection_completed": True,
+            "buffer_reused": True,
+        }
+
+    def _run_fp8_destroy_pending_retry(self):
+        buffer = self.new_buffer()
+        spec = FP8CaseSpec("fp8-destroy-pending")
+        result, _ = self._fp8_uncached_dispatch(
+            buffer, spec, async_mode=True, allocate=True, wait=False)
+        event = result[4]
+        first_failure = None
+        os.environ["DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT"] = \
+            "destroy_failure"
+        try:
+            try:
+                buffer.destroy()
+            except RuntimeError as error:
+                first_failure = str(error)
+        finally:
+            os.environ.pop("DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT", None)
+        _check(first_failure is not None and "destroy_event" in first_failure,
+               f"FP8 pending destroy failure missing: {first_failure}")
+        _check(buffer.runtime is not None,
+               "FP8 failed destroy released runtime")
+        buffer.destroy()
+        _check(buffer.runtime is None,
+               "FP8 destroy retry retained runtime")
+        self.buffers.remove(buffer)
+        del result, event
+        gc.collect()
+        return {
+            "first_destroy_failure": first_failure,
+            "runtime_retained_after_first_failure": True,
+            "runtime_released_after_retry": True,
+        }
 
     def _cached_dispatch(self, buffer, handle, fixture, *, async_mode,
                          allocate, previous=None, wait=True):
@@ -3278,6 +3738,27 @@ class AsyncOverlapWorker:
 
     def run(self, case):
         with _forbid_global_sync(self.torch):
+            if (case.startswith("fp8-cached-normal-") or
+                    case.startswith("fp8-cached-expanded-") or
+                    case.startswith("fp8-uncached-normal-") or
+                    case.startswith("fp8-uncached-expanded-")):
+                return self._run_fp8_matrix_case(case)
+            if case == "fp8-previous-event-allocate-true":
+                return self._run_fp8_previous_event()
+            if case == "fp8-empty-route":
+                return self._run_fp8_route_case("empty-input")
+            if case == "fp8-asymmetric-route":
+                return self._run_fp8_route_case("asymmetric-routing")
+            if case == "fp8-10-generations":
+                return self._run_fp8_generations()
+            if case == "fp8-cached-representation-changes":
+                return self._run_fp8_representation_changes()
+            if case == "fp8-completion-mismatch":
+                return self._run_fp8_completion_mismatch()
+            if case == "fp8-drop-event":
+                return self._run_fp8_drop_event()
+            if case == "fp8-destroy-pending-retry":
+                return self._run_fp8_destroy_pending_retry()
             if (case.startswith("uncached-normal-") or
                     case.startswith("uncached-expanded-")):
                 return self._run_uncached_matrix_case(case)
@@ -3688,8 +4169,11 @@ def _run_worker(case, trace_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--contract", action="store_true")
-    parser.add_argument("--suite", choices=("event", "full", "uncached"))
-    parser.add_argument("--worker", choices=CASE_NAMES + UNCACHED_CASE_NAMES)
+    parser.add_argument(
+        "--suite", choices=("event", "full", "uncached", "fp8"))
+    parser.add_argument(
+        "--worker",
+        choices=CASE_NAMES + UNCACHED_CASE_NAMES + FP8_ASYNC_CASE_NAMES)
     parser.add_argument(
         "--batch-worker", nargs="+", choices=ALL_DISTRIBUTED_CASES,
         metavar="CASE")

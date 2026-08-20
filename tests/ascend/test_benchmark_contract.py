@@ -33,6 +33,26 @@ ROOT = Path(__file__).resolve().parents[2]
 BENCH_EP = ROOT / "tests/ascend/benchmark/bench_ep.py"
 RUNTIME = ROOT / "tests/ascend/benchmark/runtime.py"
 COMPARE = ROOT / "tests/ascend/benchmark/compare.py"
+ASYNC_OVERLAP = ROOT / "tests/ascend/production/run_async_overlap.py"
+
+FP8_ASYNC_CASES = (
+    "fp8-cached-normal-fp32-row-async-allocate-false",
+    "fp8-cached-normal-packed-column-async-allocate-true",
+    "fp8-cached-expanded-fp32-row-async-allocate-false",
+    "fp8-cached-expanded-packed-column-async-allocate-true",
+    "fp8-uncached-normal-fp32-row-async-allocate-false",
+    "fp8-uncached-normal-packed-column-async-allocate-true",
+    "fp8-uncached-expanded-fp32-row-async-allocate-false",
+    "fp8-uncached-expanded-packed-column-async-allocate-true",
+    "fp8-previous-event-allocate-true",
+    "fp8-empty-route",
+    "fp8-asymmetric-route",
+    "fp8-10-generations",
+    "fp8-cached-representation-changes",
+    "fp8-completion-mismatch",
+    "fp8-drop-event",
+    "fp8-destroy-pending-retry",
+)
 
 
 def test_case_matrix_matches_upstream_order_and_size():
@@ -58,45 +78,12 @@ def test_case_suite_counts_are_exhaustive():
         (classification.suite, classification.supported)
         for classification in classified
     ) == {
-        ("performance", True): 84,
-        ("functional", False): 60,
+        ("performance", True): 144,
     }
-    assert Counter(
-        classification.reason
-        for classification in classified
-        if (classification.suite == "functional" and
-            not classification.supported)
-    ) == {
-        "fp8_full_row_deferred_3f": 60,
-    }
+    assert all(not classification.reason for classification in classified)
 
 
-def test_exhaustive_spec_table_matches_runtime_classification():
-    spec = ROOT / (
-        "docs/superpowers/specs/"
-        "2026-08-18-ascend-epv2-benchmark-parity-design.md"
-    )
-    rows = []
-    for line in spec.read_text(encoding="utf-8").splitlines():
-        columns = [column.strip() for column in line.split("|")[1:-1]]
-        if len(columns) == 5 and columns[0].isdigit():
-            rows.append(tuple(column.strip("`") for column in columns))
-
-    assert len(rows) == 144
-    for index, (case, row) in enumerate(
-        zip(enumerate_ep_mode_cases(), rows, strict=True), start=1
-    ):
-        capability = classify_ascend_case(case)
-        assert row == (
-            str(index),
-            case.case_id,
-            capability.suite.title(),
-            "Supported" if capability.supported else "Deferred",
-            capability.reason,
-        )
-
-
-def test_phase_3e2_promotes_only_bf16_full_rows_to_performance():
+def test_fp8_async_matrix_promotes_all_full_rows():
     assert workloads.phase_3e1_acceptance_operations() == (
         "cached-bf16-dispatch-sync",
         "cached-bf16-dispatch-async",
@@ -113,32 +100,28 @@ def test_phase_3e2_promotes_only_bf16_full_rows_to_performance():
     assert sum(
         classify_ascend_case(case).supported
         for case in full_functional_rows
-    ) == 60
+    ) == 120
+    assert {case.use_fp8_dispatch for case in full_functional_rows} == {
+        False, True,
+    }
     assert all(
-        classify_ascend_case(case).supported ==
-        (not case.use_fp8_dispatch)
-        for case in full_functional_rows
-    )
-    assert all(
-        classify_ascend_case(case).suite == (
-            "functional" if case.use_fp8_dispatch else "performance"
-        )
+        classify_ascend_case(case).suite == "performance"
         for case in full_functional_rows
     )
 
 
-def test_supported_ascend_cases_include_phase_3e2_bf16_modes():
+def test_supported_ascend_cases_include_all_functional_modes():
     supported = [
         case
         for case in enumerate_ep_mode_cases()
         if classify_ascend_case(case).supported
     ]
 
-    assert len(supported) == 84
+    assert len(supported) == 144
     assert {case.use_fp8_dispatch for case in supported} == {False, True}
     functional = [case for case in supported if case_suite(case) == "functional"]
-    assert len(functional) == 60
-    assert all(not case.use_fp8_dispatch for case in functional)
+    assert len(functional) == 120
+    assert {case.use_fp8_dispatch for case in functional} == {False, True}
     assert {case.with_previous_event for case in functional} == {False, True}
     assert {case.async_with_compute_stream for case in functional} == {False, True}
     assert {case.allocate_on_comm_stream for case in functional} == {False, True}
@@ -151,6 +134,32 @@ def test_supported_ascend_cases_include_phase_3e2_bf16_modes():
         for num_bias in (0, 1, 2)
         for do_handle_copy in (True, False)
     }
+
+
+def test_public_async_runner_declares_fp8_production_matrix():
+    result = subprocess.run(
+        [sys.executable, str(ASYNC_OVERLAP), "--contract"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    contract = json.loads(result.stdout)
+    assert tuple(contract["fp8_async"]["case_names"]) == FP8_ASYNC_CASES
+    assert contract["fp8_async"]["payload_dtype"] == "float8_e4m3fn"
+    assert contract["fp8_async"]["scale_factor_dtypes"] == [
+        "float32", "int32",
+    ]
+    assert contract["fp8_async"]["output_scale_layouts"] == [
+        "row-major", "column-major",
+    ]
+    assert contract["fp8_async"]["dispatch_modes"] == [
+        "cached", "non-cached",
+    ]
+    assert contract["fp8_async"]["completion"] == "native-event"
+    assert contract["fp8_async"]["combine"] == "bf16-only"
 
 
 def test_runtime_launch_applies_predecessor_and_waits_async_event():
@@ -425,33 +434,25 @@ def test_default_report_contains_all_current_cases(tmp_path):
         capture_output=True,
         text=True,
     ).stdout.strip()
-    assert len(payload["cases"]) == 84
+    assert len(payload["cases"]) == 144
     assert payload["case_summary"] == {
-        "total": 84,
-        "pending": 84,
+        "total": 144,
+        "pending": 144,
         "passed": 0,
         "failed": 0,
     }
 
 
-def test_benchmark_report_rejects_deferred_case():
-    deferred = next(
-        case
-        for case in enumerate_ep_mode_cases()
-        if not classify_ascend_case(case).supported
+def test_performance_report_accepts_every_inventory_case():
+    report = BenchmarkReport.empty_for_cases(
+        platform="ascend",
+        cases=tuple(enumerate_ep_mode_cases()),
+        classify=classify_ascend_case,
+        workload_fingerprint="a" * 64,
+        world_size=2,
     )
 
-    with pytest.raises(
-        ValueError,
-        match=r"cannot add deferred case .* to a benchmark report",
-    ):
-        BenchmarkReport.empty_for_cases(
-            platform="ascend",
-            cases=(deferred,),
-            classify=classify_ascend_case,
-            workload_fingerprint="a" * 64,
-            world_size=2,
-        )
+    assert len(report.cases) == 144
 
 
 def test_comparison_rejects_incompatible_report_identity():
@@ -494,7 +495,7 @@ def test_benchmark_parser_preserves_production_size_defaults():
 def test_default_selection_contains_all_current_supported_cases():
     selected = _selected_case_ids(build_parser(), None)
 
-    assert len(selected) == 84
+    assert len(selected) == 144
     assert any("-fp8-" in case_id for case_id in selected)
     assert any("-bf16-" in case_id for case_id in selected)
     assert any("-prev1-" in case_id for case_id in selected)
@@ -503,15 +504,15 @@ def test_default_selection_contains_all_current_supported_cases():
 
 
 @pytest.mark.parametrize(
-    ("suite", "expected_count", "expected_statuses"),
+    ("suite", "expected_count"),
     (
-        ("all", 144, {"supported": 84, "deferred": 60}),
-        ("performance", 84, {"supported": 84}),
-        ("functional", 60, {"deferred": 60}),
+        ("all", 144),
+        ("performance", 144),
+        ("functional", 0),
     ),
 )
 def test_list_cases_filters_by_suite_without_runtime_imports(
-    suite, expected_count, expected_statuses,
+    suite, expected_count,
 ):
     result = subprocess.run(
         [
@@ -531,14 +532,8 @@ def test_list_cases_filters_by_suite_without_runtime_imports(
     payload = json.loads(result.stdout)
 
     assert len(payload["cases"]) == expected_count
-    assert Counter(case["status"] for case in payload["cases"]) == (
-        expected_statuses
-    )
-    assert all(
-        case["reason"]
-        for case in payload["cases"]
-        if case["status"] == "deferred"
-    )
+    assert all(case["status"] == "supported" for case in payload["cases"])
+    assert all(not case["reason"] for case in payload["cases"])
 
 
 def test_cli_rejects_unknown_case_before_runtime_import():
@@ -554,29 +549,27 @@ def test_cli_rejects_unknown_case_before_runtime_import():
     assert "torch_npu" not in result.stderr
 
 
-@pytest.mark.parametrize(
-    ("case_id", "suite", "reason"),
-    (
-        (
-            "ep-fp8-align128-bias0-hcopy1-prev1-async0-alloc1",
-            "functional",
-            "fp8_full_row_deferred_3f",
-        ),
-    ),
-)
-def test_cli_rejects_noncurrent_performance_case_before_runtime_import(
-    case_id, suite, reason,
-):
+def test_cli_lists_fp8_async_case_as_performance_without_runtime_import():
+    case_id = "ep-fp8-align128-bias0-hcopy1-prev1-async0-alloc1"
     result = subprocess.run(
-        [sys.executable, str(BENCH_EP), "--cases", case_id],
+        [
+            sys.executable,
+            str(BENCH_EP),
+            "--list-cases",
+            "--suite",
+            "performance",
+            "--format",
+            "json",
+        ],
         capture_output=True,
         text=True,
         env={},
     )
 
-    assert result.returncode == 2
-    assert suite in result.stderr
-    assert reason in result.stderr
+    assert result.returncode == 0, result.stderr
+    cases = {case["case_id"]: case for case in json.loads(result.stdout)["cases"]}
+    assert cases[case_id]["status"] == "supported"
+    assert cases[case_id]["reason"] == ""
     assert "torch_npu" not in result.stderr
 
 
