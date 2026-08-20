@@ -110,6 +110,13 @@ def validate_complete_report(
     profile: BenchmarkProfile,
     require_h800: bool = False,
 ) -> None:
+    if (
+        not isinstance(profile, BenchmarkProfile)
+        or PROFILES.get(profile.name) is not profile
+    ):
+        raise ValueError("profile")
+    if platform not in ("cuda", "ascend"):
+        raise ValueError("platform")
     if not isinstance(report, dict):
         raise ValueError("report")
     _require_equal(report.get("schema_version"), 1, "schema_version")

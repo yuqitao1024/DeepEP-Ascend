@@ -5,7 +5,7 @@ import re
 
 import pytest
 
-from tests.benchmark.profiles import PROFILES, profile_manifest
+from tests.benchmark.profiles import BenchmarkProfile, PROFILES, profile_manifest
 from tests.benchmark.report_markdown import (
     identify_profile,
     operation_records,
@@ -125,6 +125,41 @@ def test_complete_report_requires_144_cases_and_720_operations():
         report, platform="cuda", profile=PROFILES["smoke"], require_h800=True
     )
     assert len(operation_records(report)) == 720
+
+
+def test_complete_report_rejects_fabricated_profile():
+    fabricated = BenchmarkProfile(
+        name="fabricated",
+        world_size=4,
+        num_tokens=16,
+        hidden=128,
+        num_topk=2,
+        num_experts=8,
+        seed=0,
+        warmups=1,
+        iterations=1,
+    )
+    report = complete_report("cuda", "smoke", device_name="NVIDIA H800")
+    manifest = profile_manifest(fabricated)
+    report["world_size"] = fabricated.world_size
+    report["workload"] = asdict(manifest.spec)
+    report["workload_fingerprint"] = manifest.fingerprint
+
+    with pytest.raises(ValueError, match="profile"):
+        validate_complete_report(
+            report, platform="cuda", profile=fabricated, require_h800=True
+        )
+
+
+def test_complete_report_rejects_unknown_platform():
+    report = complete_report("cuda", "smoke", device_name="NVIDIA H800")
+    report["platform"] = "other"
+    report["timing_protocol"]["timer"] = "npu_event"
+
+    with pytest.raises(ValueError, match="platform"):
+        validate_complete_report(
+            report, platform="other", profile=PROFILES["smoke"], require_h800=True
+        )
 
 
 def test_identify_profile_matches_exact_workload_and_timing_tuple():
