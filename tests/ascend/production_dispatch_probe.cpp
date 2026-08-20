@@ -14,6 +14,16 @@ namespace runtime = deep_ep::ascend::runtime;
 namespace transport = deep_ep::ascend::transport;
 namespace elastic = deep_ep::ascend::elastic;
 
+struct SfObservation {
+    bool epilogue = false;
+    bool cached = false;
+    bool cpu_sync = false;
+    void* output = nullptr;
+    std::uint64_t token_stride = 0;
+    std::uint64_t pack_stride = 0;
+    std::uint64_t output_tokens = 0;
+};
+
 struct Trace {
     int launches = 0;
     int epilogue_launches = 0;
@@ -51,6 +61,7 @@ struct Trace {
     bool zero_epilogue_outputs_null = true;
     std::vector<std::string> order;
     std::vector<elastic::CoreModeFlags> modes;
+    std::vector<SfObservation> sf_observations;
 } trace;
 
 int compute_stream_token = 0;
@@ -226,6 +237,13 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
     const bool cached = elastic::has_mode(t.mode_flags, elastic::CoreMode::kCached);
     const bool expanded = elastic::has_mode(t.mode_flags, elastic::CoreMode::kExpanded);
     const bool hybrid = elastic::has_mode(t.mode_flags, elastic::CoreMode::kHybrid);
+    const bool fp8 = t.element_kind == elastic::ElementKind::kFloat8E4M3;
+    if (fp8) {
+        trace.sf_observations.push_back({
+            false, cached, cpu_sync, a.recv_scale_factors,
+            a.recv_scale_factor_token_stride,
+            a.recv_scale_factor_pack_stride, a.num_output_tokens});
+    }
     if (hybrid) {
         if (trace.masked_producer_failure) {
             trace.preserved_scratch_status =
@@ -309,8 +327,14 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
     const std::array<std::uint16_t, 16> payload{
         0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108,
         0x0201, 0x0202, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207, 0x0208};
-    std::memset(a.recv_x, 0, (expanded ? 4 : 2) * 8 * sizeof(std::uint16_t));
-    std::memcpy(a.recv_x, payload.data(), payload.size() * sizeof(payload[0]));
+    if (fp8) {
+        std::memset(a.recv_x, 0,
+                    static_cast<std::size_t>(a.num_output_tokens * t.hidden));
+    } else {
+        std::memset(a.recv_x, 0,
+                    (expanded ? 4 : 2) * 8 * sizeof(std::uint16_t));
+        std::memcpy(a.recv_x, payload.data(), payload.size() * sizeof(payload[0]));
+    }
     a.recv_topk_indices[0] = 0;
     a.recv_topk_indices[1] = -1;
     a.recv_topk_indices[2] = 0;
@@ -337,6 +361,20 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
     const auto& metadata = expanded ? expanded_metadata : normal_metadata;
     std::memcpy(
         a.source_metadata, metadata.data(), metadata.size() * sizeof(metadata[0]));
+    if (fp8 && a.recv_scale_factors != nullptr) {
+        auto* output = static_cast<std::uint8_t*>(a.recv_scale_factors);
+        for (std::uint64_t token = 0; token < a.num_output_tokens; ++token) {
+            for (std::uint64_t pack = 0; pack < t.num_scale_factor_packs; ++pack) {
+                const std::uint32_t value =
+                    static_cast<std::uint32_t>(100 + token * 10 + pack);
+                std::memcpy(
+                    output + (token * a.recv_scale_factor_token_stride +
+                              pack * a.recv_scale_factor_pack_stride) *
+                                 sizeof(value),
+                    &value, sizeof(value));
+            }
+        }
+    }
     return 0;
 }
 extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
@@ -347,6 +385,13 @@ extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
         return 79;
     const bool expanded = elastic::has_mode(
         t.mode_flags, elastic::CoreMode::kExpanded);
+    const bool fp8 = t.element_kind == elastic::ElementKind::kFloat8E4M3;
+    if (fp8) {
+        trace.sf_observations.push_back({
+            true, false, true, a.recv_scale_factors,
+            a.recv_scale_factor_token_stride,
+            a.recv_scale_factor_pack_stride, a.num_output_tokens});
+    }
     if (t.num_tokens == 0) {
         trace.zero_epilogue_outputs_null =
             a.recv_x == nullptr && a.recv_topk_indices == nullptr &&
@@ -358,10 +403,16 @@ extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
         const std::array<std::uint16_t, 16> payload{
             0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108,
             0x0201, 0x0202, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207, 0x0208};
-        std::memset(a.recv_x, 0,
-                    static_cast<std::size_t>(expanded ? 4 : 2) * 8 *
-                        sizeof(std::uint16_t));
-        std::memcpy(a.recv_x, payload.data(), payload.size() * sizeof(payload[0]));
+        if (fp8) {
+            std::memset(a.recv_x, 0,
+                        static_cast<std::size_t>(a.num_output_tokens * t.hidden));
+        } else {
+            std::memset(a.recv_x, 0,
+                        static_cast<std::size_t>(expanded ? 4 : 2) * 8 *
+                            sizeof(std::uint16_t));
+            std::memcpy(
+                a.recv_x, payload.data(), payload.size() * sizeof(payload[0]));
+        }
         a.recv_topk_indices[0] = 0;
         a.recv_topk_indices[1] = -1;
         a.recv_topk_indices[2] = 0;
@@ -379,6 +430,22 @@ extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
         const auto& metadata = expanded ? expanded_metadata : normal_metadata;
         std::memcpy(a.source_metadata, metadata.data(),
                     metadata.size() * sizeof(metadata[0]));
+        if (fp8 && a.recv_scale_factors != nullptr) {
+            auto* output = static_cast<std::uint8_t*>(a.recv_scale_factors);
+            for (std::uint64_t token = 0; token < a.num_output_tokens; ++token) {
+                for (std::uint64_t pack = 0;
+                     pack < t.num_scale_factor_packs; ++pack) {
+                    const std::uint32_t value =
+                        static_cast<std::uint32_t>(100 + token * 10 + pack);
+                    std::memcpy(
+                        output +
+                            (token * a.recv_scale_factor_token_stride +
+                             pack * a.recv_scale_factor_pack_stride) *
+                                sizeof(value),
+                        &value, sizeof(value));
+                }
+            }
+        }
     }
     auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(
         t.transport_context.local_window_base +
@@ -399,6 +466,7 @@ struct Inputs {
         {1, 2}, torch::TensorOptions().dtype(torch::kLong));
     Tensor weights = torch::empty(
         {1, 2}, torch::TensorOptions().dtype(torch::kFloat));
+    std::optional<Tensor> sf;
 
     Inputs() {
         const std::array<std::uint16_t, 8> payload{
@@ -418,16 +486,17 @@ auto uncached_dispatch(
     bool expanded = false, bool async = false,
     bool allocate_on_comm_stream = false,
     const std::optional<deep_ep::ascend::EventHandle>& previous_event =
-        std::nullopt) {
+        std::nullopt,
+    bool column_major_sf = false) {
     const std::optional<torch::Tensor> none;
     const std::optional<int> no_int;
     const std::optional<std::vector<int>> no_list;
     const std::optional<deep_ep::ascend::EventHandle> no_event;
     return buffer.dispatch(
-        inputs.x, none, inputs.idx, weights, none, no_int, no_int, no_list,
+        inputs.x, inputs.sf, inputs.idx, weights, none, no_int, no_int, no_list,
         none, none, none, none, none, none, none, 4, 2, 4, 1, 0,
         previous_event, no_event, async, allocate_on_comm_stream, copy_handle,
-        true, expanded, false, false);
+        true, expanded, false, column_major_sf);
 }
 
 auto uncached_hybrid_dispatch(
@@ -466,16 +535,18 @@ auto cached_dispatch(
     const std::optional<deep_ep::ascend::EventHandle>& previous_event =
         std::nullopt,
     const std::optional<deep_ep::ascend::EventHandle>&
-        previous_event_before_epilogue = std::nullopt) {
+        previous_event_before_epilogue = std::nullopt,
+    bool column_major_sf = false) {
     const std::optional<Tensor> none;
     return buffer.dispatch(
-        inputs.x, none, inputs.idx, inputs.weights, none,
+        inputs.x, inputs.sf, inputs.idx, inputs.weights, none,
         std::get<5>(handle), std::get<6>(handle),
         per_expert.has_value() ? *per_expert : std::get<7>(handle),
         rank_prefix, std::get<9>(handle), std::get<10>(handle),
         std::get<12>(handle), std::get<13>(handle), std::get<11>(handle), none,
         4, 2, 4, 1, 0, previous_event, previous_event_before_epilogue,
-        async, allocate_on_comm_stream, false, false, expanded, false, false);
+        async, allocate_on_comm_stream, false, false, expanded, false,
+        column_major_sf);
 }
 
 bool has_shape(const Tensor& tensor, std::initializer_list<std::int64_t> shape) {
@@ -1549,6 +1620,171 @@ bool uncached_previous_event_orders_epilogue_probe() {
         trace.launches == 2 && trace.epilogue_launches == 2;
 }
 
+Inputs fp8_inputs(torch::ScalarType scale_type, std::int64_t tokens = 1) {
+    Inputs inputs;
+    inputs.x = torch::empty(
+        {tokens, 64}, torch::TensorOptions().dtype(torch::kFloat8_e4m3fn));
+    inputs.sf = torch::empty(
+        {tokens, 2}, torch::TensorOptions().dtype(scale_type));
+    inputs.idx = torch::empty(
+        {tokens, 2}, torch::TensorOptions().dtype(torch::kLong));
+    inputs.weights = torch::empty(
+        {tokens, 2}, torch::TensorOptions().dtype(torch::kFloat));
+    if (tokens != 0) {
+        inputs.idx.data_ptr<std::int64_t>()[0] = 0;
+        inputs.idx.data_ptr<std::int64_t>()[1] = 1;
+        inputs.weights.data_ptr<float>()[0] = 0.5F;
+        inputs.weights.data_ptr<float>()[1] = 0.75F;
+    }
+    return inputs;
+}
+
+bool has_exact_sf(
+    const Tensor& sf, std::int64_t tokens, torch::ScalarType type,
+    bool column_major) {
+    constexpr std::int64_t packs = 2;
+    const auto aligned_tokens = tokens == 0 ? 0 : ((tokens + 3) / 4) * 4;
+    const auto expected_token_stride = column_major ? 1 : packs;
+    const auto expected_pack_stride = column_major ? aligned_tokens : 1;
+    const auto storage_elements = tokens == 0 ? 0 :
+        (column_major ? aligned_tokens * (packs - 1) + tokens : tokens * packs);
+    if (!has_shape(sf, {tokens, packs}) || sf.scalar_type() != type ||
+        sf.stride(0) != expected_token_stride ||
+        sf.stride(1) != expected_pack_stride ||
+        sf.storage_nbytes() != static_cast<std::size_t>(storage_elements * 4))
+        return false;
+    for (std::int64_t token = 0; token < tokens; ++token) {
+        for (std::int64_t pack = 0; pack < packs; ++pack) {
+            std::uint32_t value = 0;
+            const auto* storage = static_cast<const std::uint8_t*>(sf.data_ptr());
+            std::memcpy(
+                &value,
+                storage + (token * sf.stride(0) + pack * sf.stride(1)) *
+                    static_cast<std::int64_t>(sizeof(value)),
+                sizeof(value));
+            if (value != static_cast<std::uint32_t>(100 + token * 10 + pack))
+                return false;
+        }
+    }
+    return true;
+}
+
+bool fp8_exact_sf_case(
+    torch::ScalarType scale_type, bool column_major, bool expanded,
+    bool cached, bool empty) {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources)
+        return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    auto inputs = fp8_inputs(scale_type, empty ? 0 : 1);
+    const std::optional<Tensor> weights = inputs.weights;
+    auto fresh = uncached_dispatch(
+        *buffer, inputs, weights, true, expanded, false, false, std::nullopt,
+        column_major);
+    auto result = cached ?
+        cached_dispatch(
+            *buffer, inputs, fresh, std::get<8>(fresh), expanded,
+            std::nullopt, false, false, std::nullopt, std::nullopt,
+            column_major) :
+        std::move(fresh);
+    const std::int64_t output_tokens = empty ? 0 : (expanded ? 4 : 2);
+    if (!std::get<1>(result).has_value() ||
+        !has_exact_sf(
+            *std::get<1>(result), output_tokens, scale_type, column_major) ||
+        std::get<15>(result).has_value() || trace.sf_observations.empty())
+        return false;
+    const auto& observed = trace.sf_observations.back();
+    return observed.epilogue == !cached && observed.cached == cached &&
+        observed.output == std::get<1>(result)->data_ptr() &&
+        observed.token_stride == static_cast<std::uint64_t>(
+            std::get<1>(result)->stride(0)) &&
+        observed.pack_stride == static_cast<std::uint64_t>(
+            std::get<1>(result)->stride(1)) &&
+        observed.output_tokens == static_cast<std::uint64_t>(output_tokens);
+}
+
+bool fp8_exact_sf_matrix_probe() {
+    for (const auto scale_type : {torch::kFloat, torch::kInt}) {
+        for (const bool column_major : {false, true}) {
+            for (const bool expanded : {false, true}) {
+                for (const bool cached : {false, true}) {
+                    if (!fp8_exact_sf_case(
+                            scale_type, column_major, expanded, cached, false))
+                        return false;
+                }
+            }
+        }
+        if (!fp8_exact_sf_case(
+                scale_type, true, false, false, true))
+            return false;
+    }
+    return true;
+}
+
+bool fp8_async_sf_lifetime_and_busy_probe(bool cached) {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources)
+        return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    std::optional<deep_ep::ascend::EventHandle> completion;
+    std::weak_ptr<std::vector<std::uint8_t>> input_x_storage;
+    std::weak_ptr<std::vector<std::uint8_t>> input_sf_storage;
+    std::weak_ptr<std::vector<std::uint8_t>> output_sf_storage;
+    {
+        auto inputs = fp8_inputs(torch::kInt);
+        const std::optional<Tensor> weights = inputs.weights;
+        auto handle = uncached_dispatch(
+            *buffer, inputs, weights, true, true, false, false, std::nullopt,
+            true);
+        trace.event_ready = false;
+        auto pending = cached ?
+            cached_dispatch(
+                *buffer, inputs, handle, std::get<8>(handle), true,
+                std::nullopt, true, false, std::nullopt, std::nullopt, true) :
+            uncached_dispatch(
+                *buffer, inputs, weights, true, true, true, false,
+                std::nullopt, true);
+        if (!std::get<1>(pending).has_value() ||
+            !has_exact_sf(*std::get<1>(pending), 4, torch::kInt, true) ||
+            !std::get<15>(pending).has_value())
+            return false;
+        const auto launches_before_retry = trace.launches;
+        bool busy = false;
+        try {
+            if (cached) {
+                (void)cached_dispatch(
+                    *buffer, inputs, handle, std::get<8>(handle), true,
+                    std::nullopt, true, false, std::nullopt, std::nullopt,
+                    true);
+            } else {
+                (void)uncached_dispatch(
+                    *buffer, inputs, weights, true, true, true, false,
+                    std::nullopt, true);
+            }
+        } catch (const std::runtime_error& error) {
+            busy = std::string(error.what()).find("busy on this buffer") !=
+                std::string::npos;
+        }
+        if (!busy || trace.launches != launches_before_retry)
+            return false;
+        completion = std::get<15>(pending);
+        input_x_storage = inputs.x.weak_storage();
+        input_sf_storage = inputs.sf->weak_storage();
+        output_sf_storage = std::get<1>(pending)->weak_storage();
+    }
+    if (input_x_storage.expired() || input_sf_storage.expired() ||
+        output_sf_storage.expired() || !completion.has_value())
+        return false;
+    trace.event_ready = true;
+    completion->current_stream_wait();
+    return input_x_storage.expired() && input_sf_storage.expired() &&
+        output_sf_storage.expired();
+}
+
 int main() {
     int failures = 0;
     const auto check = [&failures](bool passed, const char* name) {
@@ -1597,5 +1833,11 @@ int main() {
           "uncached epilogue failure poisoning");
     check(uncached_previous_event_orders_epilogue_probe(),
           "uncached previous event orders count and epilogue stages");
+    check(fp8_exact_sf_matrix_probe(),
+          "FP8 exact scale-factor allocation and binding matrix");
+    check(fp8_async_sf_lifetime_and_busy_probe(false),
+          "FP8 uncached async scale-factor lifetime and busy rejection");
+    check(fp8_async_sf_lifetime_and_busy_probe(true),
+          "FP8 cached async scale-factor lifetime and busy rejection");
     return failures == 0 ? 0 : 1;
 }

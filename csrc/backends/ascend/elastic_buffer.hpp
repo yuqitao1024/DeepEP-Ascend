@@ -1783,25 +1783,29 @@ public:
             (do_expand ? expanded_records : max_recv_tokens));
         auto recv_x = torch::empty(
             {initial_output_tokens, x.size(1)}, x.options());
-        auto recv_sf = std::optional<torch::Tensor>();
-        if (sf.has_value()) {
-            const auto allocated_tokens = initial_output_tokens;
+        const auto allocate_recv_sf = [&](int64_t output_tokens) {
+            if (!sf.has_value())
+                return std::optional<torch::Tensor>();
             const auto sf_token_stride = use_tma_aligned_col_major_sf ?
                 int64_t{1} : static_cast<int64_t>(num_scale_factor_packs);
             std::uint64_t aligned_tokens = 0;
             TORCH_CHECK(
                 !use_tma_aligned_col_major_sf ||
                     align_without_overflow(
-                        static_cast<std::uint64_t>(allocated_tokens), 4,
+                        static_cast<std::uint64_t>(output_tokens), 4,
                         &aligned_tokens),
                 "DeepEP Ascend backend: dispatch scale factor output stride overflow");
             const auto sf_pack_stride = use_tma_aligned_col_major_sf ?
                 static_cast<int64_t>(aligned_tokens) : int64_t{1};
-            recv_sf = torch::empty_strided(
-                {allocated_tokens,
-                 static_cast<int64_t>(num_scale_factor_packs)},
-                {sf_token_stride, sf_pack_stride}, sf->options());
-        }
+            return std::optional<torch::Tensor>(torch::empty_strided(
+                {output_tokens, static_cast<int64_t>(num_scale_factor_packs)},
+                {sf_token_stride, sf_pack_stride}, sf->options()));
+        };
+        const auto initial_sf_tokens = cached_mode ?
+            static_cast<int64_t>(do_expand ? *cached_num_expanded_tokens :
+                                             *cached_num_recv_tokens) :
+            initial_output_tokens;
+        auto recv_sf = allocate_recv_sf(initial_sf_tokens);
         auto recv_topk_indices = torch::empty(
             {initial_recv_tokens, topk_idx.size(1)},
             topk_idx.options());
@@ -1999,6 +2003,10 @@ public:
             const int output_tokens = do_expand ?
                 *cached_num_expanded_tokens : num_recv_tokens;
             auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
+            auto narrowed_sf = recv_sf.has_value() ?
+                std::optional<torch::Tensor>(
+                    recv_sf->narrow(0, 0, output_tokens)) :
+                std::optional<torch::Tensor>();
             auto narrowed_topk_idx = do_expand ?
                 std::optional<torch::Tensor>() :
                 std::optional<torch::Tensor>(
@@ -2009,7 +2017,7 @@ public:
                 std::optional<torch::Tensor>();
             auto narrowed_metadata = source_metadata.narrow(
                 0, 0, num_recv_tokens);
-            return {narrowed_x, std::nullopt, narrowed_topk_idx,
+            return {narrowed_x, narrowed_sf, narrowed_topk_idx,
                     narrowed_topk_weights, copied_topk_idx, num_recv_tokens,
                     *cached_num_expanded_tokens, per_expert_list, rank_prefix,
                     expert_prefix, unaligned, narrowed_metadata,
@@ -2108,6 +2116,7 @@ public:
             const auto output_tokens = static_cast<int64_t>(
                 do_expand ? num_expanded_tokens : num_recv_tokens);
             recv_x = torch::empty({output_tokens, x.size(1)}, x.options());
+            recv_sf = allocate_recv_sf(output_tokens);
             recv_topk_indices = torch::empty(
                 {static_cast<int64_t>(num_recv_tokens), topk_idx.size(1)},
                 topk_idx.options());
@@ -2123,9 +2132,12 @@ public:
                  topk_idx.size(1) + 2}, int_options);
 
             arguments.recv_x = recv_x.data_ptr();
-            arguments.recv_scale_factors = nullptr;
-            arguments.recv_scale_factor_token_stride = 0;
-            arguments.recv_scale_factor_pack_stride = 0;
+            arguments.recv_scale_factors = recv_sf.has_value() ?
+                recv_sf->data_ptr() : nullptr;
+            arguments.recv_scale_factor_token_stride = recv_sf.has_value() ?
+                static_cast<std::uint64_t>(recv_sf->stride(0)) : 0;
+            arguments.recv_scale_factor_pack_stride = recv_sf.has_value() ?
+                static_cast<std::uint64_t>(recv_sf->stride(1)) : 0;
             arguments.recv_topk_indices =
                 recv_topk_indices.data_ptr<std::int64_t>();
             arguments.recv_topk_weights = recv_topk_weights.has_value() ?
@@ -2281,7 +2293,8 @@ public:
         auto narrowed_sf = recv_sf.has_value() ?
             std::optional<torch::Tensor>(recv_sf->narrow(0, 0, output_tokens)) :
             std::optional<torch::Tensor>();
-        if (narrowed_sf.has_value() && use_tma_aligned_col_major_sf) {
+        if (narrowed_sf.has_value() && use_tma_aligned_col_major_sf &&
+            !split_dispatch) {
             std::uint64_t aligned_output_tokens = 0;
             TORCH_CHECK(
                 align_without_overflow(

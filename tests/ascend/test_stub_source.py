@@ -127,6 +127,7 @@ public:
 
 class Tensor {
     std::vector<std::int64_t> sizes_{1, 1};
+    std::vector<std::int64_t> strides_{1, 1};
     ScalarType type_ = kBFloat16;
     Device device_{};
     std::shared_ptr<std::vector<std::uint8_t>> storage_ =
@@ -134,23 +135,34 @@ class Tensor {
 public:
     Tensor() = default;
     Tensor(std::initializer_list<std::int64_t> sizes, TensorOptions options)
-        : sizes_(sizes), type_(options.dtype()), device_(options.device_index()),
-          storage_(std::make_shared<std::vector<std::uint8_t>>(numel() * bytes())) {}
+        : sizes_(sizes), strides_(contiguous_strides(sizes_)),
+          type_(options.dtype()), device_(options.device_index()),
+          storage_(std::make_shared<std::vector<std::uint8_t>>(
+              storage_elements() * bytes())) {}
+    Tensor(std::initializer_list<std::int64_t> sizes,
+           std::initializer_list<std::int64_t> strides,
+           TensorOptions options)
+        : sizes_(sizes), strides_(strides), type_(options.dtype()),
+          device_(options.device_index()),
+          storage_(std::make_shared<std::vector<std::uint8_t>>(
+              storage_elements() * bytes())) {
+        if (sizes_.size() != strides_.size())
+            throw std::runtime_error("tensor size/stride rank mismatch");
+    }
     bool is_contiguous() const { return true; }
     Device device() const { return device_; }
     std::int64_t dim() const { return sizes_.size(); }
     ScalarType scalar_type() const { return type_; }
     std::int64_t size(std::int64_t dimension) const { return sizes_.at(dimension); }
     std::int64_t stride(std::int64_t dimension) const {
-        std::int64_t result = 1;
-        for (std::int64_t index = dimension + 1;
-             index < static_cast<std::int64_t>(sizes_.size()); ++index)
-            result *= sizes_[index];
-        return result;
+        return strides_.at(dimension);
     }
     const std::vector<std::int64_t>& sizes() const { return sizes_; }
     std::int64_t numel() const { std::int64_t result = 1; for (auto value : sizes_) result *= value; return result; }
     std::size_t storage_nbytes() const { return storage_->size(); }
+    std::weak_ptr<std::vector<std::uint8_t>> weak_storage() const {
+        return storage_;
+    }
     TensorOptions options() const {
         return TensorOptions().dtype(type_).device(device_.index());
     }
@@ -166,6 +178,21 @@ public:
     }
     Tensor& copy_(const Tensor&) { return *this; }
 private:
+    static std::vector<std::int64_t> contiguous_strides(
+            const std::vector<std::int64_t>& sizes) {
+        std::vector<std::int64_t> strides(sizes.size(), 1);
+        for (std::size_t index = sizes.size(); index > 1; --index)
+            strides[index - 2] = strides[index - 1] * sizes[index - 1];
+        return strides;
+    }
+    std::size_t storage_elements() const {
+        if (numel() == 0)
+            return 0;
+        std::int64_t elements = 1;
+        for (std::size_t index = 0; index < sizes_.size(); ++index)
+            elements += (sizes_[index] - 1) * strides_[index];
+        return static_cast<std::size_t>(elements);
+    }
     std::size_t bytes() const { return type_ == kBFloat16 ? 2 : type_ == kLong ? 8 : type_ == kFloat || type_ == kInt ? 4 : 1; }
 };
 
@@ -174,9 +201,9 @@ inline Tensor empty(std::initializer_list<std::int64_t> sizes, const TensorOptio
 }
 
 inline Tensor empty_strided(std::initializer_list<std::int64_t> sizes,
-                            std::initializer_list<std::int64_t>,
+                            std::initializer_list<std::int64_t> strides,
                             const TensorOptions& options) {
-    return Tensor(sizes, options);
+    return Tensor(sizes, strides, options);
 }
 
 inline Tensor empty_like(const Tensor&) { return {}; }
