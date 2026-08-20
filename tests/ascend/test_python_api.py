@@ -235,7 +235,7 @@ def _install_fake_torch(platform, events):
 
     class FakeNpu:
         def __init__(self):
-            self.device_index = 2
+            self.device_index = 0
             self.capturing = False
 
         def current_device(self):
@@ -675,7 +675,7 @@ def _scenario_ascend_import():
             "does not belong to the event device")
     else:
         raise AssertionError("cross-device Ascend event wait was accepted")
-    torch.npu.device_index = 2
+    torch.npu.device_index = 0
 
     for name in _ForbiddenImportFinder.FORBIDDEN:
         assert name not in sys.modules, name
@@ -1526,9 +1526,9 @@ def _scenario_ascend_dispatch():
             (x, scale_factors), topk_idx=topk_idx, num_experts=2,
             num_max_tokens_per_rank=1)
     except RuntimeError as error:
-        assert "unsupported_dispatch_mode" in str(error), error
+        assert "invalid_fp8_pairing" in str(error), error
     else:
-        raise AssertionError("Ascend dispatch accepted scale factors")
+        raise AssertionError("Ascend dispatch accepted BF16 scale factors")
     assert len(runtime.dispatch_calls) == rejected_calls
 
     generation_queries_before_capture = runtime.dispatch_generation_queries
