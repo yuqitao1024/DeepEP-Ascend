@@ -2,15 +2,18 @@
 
 ## Status
 
-Implemented and qualified for synchronous single-host 2-, 4-, and 8-rank
-execution. Performance qualification, physical multi-host execution, FP8
-combine, and Phase 3E async/stream overlap remain outside this scope.
+Synchronous single-host execution is implemented and qualified at 2, 4, and
+8 ranks. The pure-scale-up async/stream-overlap extension described here is
+the next implementation slice. Performance qualification, physical
+multi-host execution, FP8 combine, the Phase 3E.3 pre-epilogue dependency
+boundary, and Phase 3E.4 same-buffer multiflight remain outside this scope.
 
 ## Goal
 
-Implement synchronous Ascend EPv2 FP8 dispatch with exact scale-factor
-transport while preserving the existing BF16 combine contract, BF16 behavior,
-public API signatures, transport ordering, generation safety, and teardown.
+Implement Ascend EPv2 FP8 dispatch with exact scale-factor transport and
+pure-scale-up async overlap while preserving the existing BF16 combine
+contract, BF16 behavior, public API signatures, transport ordering, generation
+safety, and teardown.
 
 ## Scope
 
@@ -29,9 +32,12 @@ weighted, empty, asymmetric, and `-1` lane routing are in scope. Direct
 scale-up and already-supported logical hybrid routes use the same record
 contract.
 
-Async events, communication stream allocation, performance tuning, FP8
-combine accumulation, new quantization kernels, mapped CPU memory, and
-physical multi-host qualification are outside this phase.
+The async extension covers cached and CPU-synchronized non-cached dispatch,
+normal and expanded layouts, communication-stream allocation, completion
+events, and `previous_event` ordering. It does not enable
+`previous_event_before_epilogue`, same-buffer multiflight, logical hybrid or
+physical scale-out async, mapped CPU memory, graph capture, FP8 combine
+accumulation, new quantization kernels, or performance tuning.
 
 ## Selected Approach
 
@@ -112,9 +118,42 @@ The output payload uses `x.options()`. The output SF uses `sf.options()` and
 carry input and output SF token/pack strides in element units. Empty input is
 valid and still returns correctly typed empty payload and SF tensors.
 
-The core runtime accepts FP8 only for dispatch. It requires both input and
-output SF pointers when the tiling element kind is FP8 and rejects either
-pointer for BF16. Combine continues to reject an FP8 element kind.
+The core runtime accepts FP8 only for dispatch. It requires input SF for a
+non-empty FP8 producer and output SF for a non-empty FP8 copy stage, while
+rejecting either representation for BF16. Combine continues to reject an FP8
+element kind.
+
+## Async And Stream Overlap
+
+FP8 uses the Phase 3E.2 two-stage dispatch architecture without introducing a
+second transport protocol. A non-cached CPU-synchronized launch first runs the
+producer and transport stages, publishes exact receive and expanded counts,
+and synchronizes that communication-stream stage with the host. Count-only
+runtime validation requires the FP8 input SF pointer and positive input
+strides, but does not require output pointers.
+
+After the counts are known, the host allocates `recv_x`, `recv_sf`, routing,
+weight, and metadata outputs with their exact logical extents. `recv_sf` keeps
+the input SF dtype. Row-major output uses `[sf_packs, 1]`; column-major output
+uses `[1, align(output_tokens, 4)]`. For an empty column-major output this is
+exactly `[1, 0]`, and a null data pointer is valid because the epilogue copies
+zero output records. For a non-empty FP8 output, epilogue validation requires a
+non-null SF pointer and positive strides before launching the device copy.
+
+Cached dispatch already knows the logical receive and expanded counts. It
+allocates the FP8 SF result using that exact output count, records the input and
+output SF tensors on the communication stream, and returns the SF tensor in
+both synchronous and asynchronous modes. The returned async event records the
+launch that writes payload and SF. Input SF, output SF, payload, routing,
+metadata, descriptor, and predecessor resources remain retained until event
+completion. Descriptor publication remains deferred through `AsyncBufferState`
+and follows the same completion generation as BF16.
+
+The Python collective preflight and C++ boundary admit stream overlap only for
+pure scale-up cached dispatch or pure scale-up non-cached dispatch with CPU
+count synchronization. FP8 does not weaken the existing requirements that a
+`previous_event` must pair with communication-stream allocation and that one
+operation at a time owns a buffer.
 
 ## Device Data Flow
 
@@ -161,6 +200,20 @@ Host tests cover:
 - ordinary and column-major output stride forwarding; and
 - preservation of platform-source isolation.
 
+Async host coverage additionally requires:
+
+- Python admission for cached and non-cached FP8 stream modes while deferred
+  pre-epilogue, hybrid, scale-out, graph-capture, and non-CPU-sync modes remain
+  rejected;
+- runtime admission for FP8 count-only and epilogue launches, including
+  missing input SF, missing non-empty output SF, and empty column-major output;
+- exact FP8 SF allocation and stride forwarding for normal and expanded
+  outputs;
+- cached FP8 return-shape and representation transitions between BF16 and FP8;
+  and
+- SF stream recording, retention, event drop, completion mismatch, pending
+  destruction, predecessor ordering, and repeated generations.
+
 The production matrix uses public PyTorch NPU APIs and an independent
 all-gather reference. It covers normal, expanded, padded, cached, weighted,
 empty, asymmetric, and `-1` routing, exact payload/SF comparison, BF16 combine
@@ -169,6 +222,14 @@ focused matrix runs first on two NPUs; supported four-rank and eight-rank smoke
 tests then verify rank-parameterized behavior. The serialized TaskQueue
 acceptance sequence combines a clean production build, dependency audit, host
 tests, BF16 regressions, and the complete selected FP8 runtime matrix.
+
+Async acceptance promotes the 60 deferred FP8 functional benchmark rows only
+after the public matrix passes at two ranks and focused smoke coverage passes
+at four and eight ranks. The matrix covers FP32 and packed UE8M0x4 SF, row- and
+column-major SF output, cached and non-cached normal and expanded dispatch,
+communication-stream allocation, async completion, predecessor ordering,
+empty and asymmetric routes, representation changes, and lifecycle failures.
+BF16 functional rows must remain green.
 
 ### Qualification Record
 
