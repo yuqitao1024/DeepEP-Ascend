@@ -1940,8 +1940,15 @@ class AsyncOverlapWorker:
         self.rank = dist.get_rank(group)
         self.trace_dir = pathlib.Path(trace_dir)
         self.buffers = []
-        self.fp8_reference = FP8ReferenceMatrix(
-            torch, dist, deep_ep, group, device)
+        self._fp8_reference = None
+
+    @property
+    def fp8_reference(self):
+        if self._fp8_reference is None:
+            self._fp8_reference = FP8ReferenceMatrix(
+                self.torch, self.dist, self.deep_ep,
+                self.group, self.device)
+        return self._fp8_reference
 
     def new_buffer(self, num_bytes=8 * 1024 * 1024):
         with _allow_buffer_construction_sync(self.torch):
