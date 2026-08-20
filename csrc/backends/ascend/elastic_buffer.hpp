@@ -1836,7 +1836,11 @@ public:
             if (!use_comm_stream)
                 return;
             retained_tensors.emplace_back(tensor);
-#ifndef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+            if (tensor.has_value())
+                torch::deep_ep_ascend_test_record_tensor_stream(
+                    *tensor, dispatch_stream.raw);
+#else
             if (tensor.has_value()) {
                 const auto record_status = resources_->record_tensor_stream(
                     *tensor, dispatch_stream);

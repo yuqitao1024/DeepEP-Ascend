@@ -127,3 +127,133 @@ The required host sanitizer-backed native probe and Python suites passed. Per
 task scope, no physical-NPU production matrix was run, so device allocator and
 kernel behavior beyond the exercised public/native host contract remains for
 the later NPU qualification task.
+
+## Review Fix Round 1
+
+### Changes
+
+- Added event-ID-aware observations to distinguish the split operation's
+  completion event from compute-dependency and predecessor-retirement events.
+  Async split FP8 now asserts the epilogue launch precedes that completion
+  event's record.
+- Added an FP8 split epilogue-failure case which asserts the completion event
+  is not recorded when the epilogue launch fails.
+- Added a host-test-only Tensor callback at the existing
+  `DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR` boundary. The stub exposes
+  storage identity, and the public probe observes storage identity, stream
+  identity, and a monotonic sequence without changing production APIs.
+- Cached and split async FP8 cases assert input SF and exact output SF are
+  recorded on the communication stream before the cached launch or the split
+  count/epilogue launch, respectively.
+
+Files changed in this round:
+
+- `csrc/backends/ascend/elastic_buffer.hpp`
+- `tests/ascend/production_dispatch_probe.cpp`
+- `tests/ascend/test_stub_source.py`
+- `.superpowers/sdd/fp8-async/task-3-report.md`
+
+### TDD RED
+
+With the test callback and assertions present but production host recording
+still compiled out:
+
+```bash
+python3 -m pytest -q tests/ascend/test_core_operator_contract.py::AscendCoreOperatorContractTest::test_public_dispatch_probe_executes
+```
+
+```text
+F                                                                        [100%]
+E           AssertionError: 1 != 0 : failed: FP8 uncached async scale-factor lifetime and busy rejection
+E           failed: FP8 cached async scale-factor lifetime and busy rejection
+1 failed in 27.63s
+```
+
+This RED isolates the missing host-test stream-record behavior in both native
+async gates.
+
+### Mutation Evidence
+
+All mutations below were temporary and restored before GREEN.
+
+Moving the split completion record before the epilogue and removing its normal
+post-publication record:
+
+```bash
+python3 -m pytest -q tests/ascend/test_core_operator_contract.py::AscendCoreOperatorContractTest::test_public_dispatch_probe_executes
+```
+
+```text
+E           AssertionError: 1 != 0 : failed: FP8 uncached async scale-factor lifetime and busy rejection
+E           failed: FP8 epilogue failure does not record completion event
+1 failed in 14.12s
+```
+
+Removing `retain(sf)` so input SF is neither retained nor stream-recorded:
+
+```text
+E           AssertionError: 1 != 0 : failed: FP8 uncached async scale-factor lifetime and busy rejection
+E           failed: FP8 cached async scale-factor lifetime and busy rejection
+1 failed in 27.29s
+```
+
+Removing both cached/non-split and split `retain(recv_sf)` calls so exact output
+SF is neither retained nor stream-recorded:
+
+```text
+E           AssertionError: 1 != 0 : failed: FP8 uncached async scale-factor lifetime and busy rejection
+E           failed: FP8 cached async scale-factor lifetime and busy rejection
+1 failed in 25.01s
+```
+
+### GREEN
+
+Focused command after restoring all mutations:
+
+```bash
+python3 -m pytest -q tests/ascend/test_core_operator_contract.py::AscendCoreOperatorContractTest::test_public_dispatch_probe_executes
+```
+
+```text
+.                                                                        [100%]
+1 passed in 3.45s
+```
+
+Full core operator contract:
+
+```bash
+python3 -m pytest -q tests/ascend/test_core_operator_contract.py
+```
+
+```text
+.............................................. [ 47%]
+...................................................                   [100%]
+97 passed, 29 subtests passed in 19.49s
+```
+
+Python API suite:
+
+```bash
+python3 -m pytest -q tests/ascend/test_python_api.py
+```
+
+```text
+.............................ss                       [100%]
+29 passed, 2 skipped, 19 subtests passed in 1.59s
+```
+
+### Self-Review
+
+- The callback exists only under the existing host-test macro. Non-test builds
+  retain the original `resources_->record_tensor_stream` implementation.
+- Event ordering uses native event IDs, so predecessor-retirement records
+  cannot satisfy the completion-event assertion.
+- Tensor ordering uses a separate monotonic sequence, preserving existing
+  exact string-order assertions in the probe.
+- Input and output SF assertions compare storage identity rather than nullable
+  data pointers, so empty storage remains distinguishable if later covered.
+- The epilogue-failure test checks the specific newly created completion event,
+  not the total record count, allowing legitimate predecessor records.
+- Cached/row-major empty variants remain outside this fix round as ledgered.
+- No Task 4 behavior, Python preflight, `runtime.cpp`, specs, plans, roadmap,
+  benchmark inventory, or NPU production matrix files changed.

@@ -163,6 +163,7 @@ public:
     std::weak_ptr<std::vector<std::uint8_t>> weak_storage() const {
         return storage_;
     }
+    const void* storage_identity() const { return storage_.get(); }
     TensorOptions options() const {
         return TensorOptions().dtype(type_).device(device_.index());
     }
@@ -195,6 +196,18 @@ private:
     }
     std::size_t bytes() const { return type_ == kBFloat16 ? 2 : type_ == kLong ? 8 : type_ == kFloat || type_ == kInt ? 4 : 1; }
 };
+
+using DeepEpTensorStreamRecordHook = void (*)(const Tensor&, void*);
+inline DeepEpTensorStreamRecordHook deep_ep_tensor_stream_record_hook = nullptr;
+inline void set_deep_ep_tensor_stream_record_hook(
+        DeepEpTensorStreamRecordHook hook) {
+    deep_ep_tensor_stream_record_hook = hook;
+}
+inline void deep_ep_ascend_test_record_tensor_stream(
+        const Tensor& tensor, void* stream) {
+    if (deep_ep_tensor_stream_record_hook != nullptr)
+        deep_ep_tensor_stream_record_hook(tensor, stream);
+}
 
 inline Tensor empty(std::initializer_list<std::int64_t> sizes, const TensorOptions& options) {
     return Tensor(sizes, options);

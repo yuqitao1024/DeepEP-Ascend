@@ -24,6 +24,18 @@ struct SfObservation {
     std::uint64_t output_tokens = 0;
 };
 
+struct EventRecordObservation {
+    int event_id = 0;
+    void* stream = nullptr;
+    std::uint64_t sequence = 0;
+};
+
+struct TensorStreamObservation {
+    const void* storage = nullptr;
+    void* stream = nullptr;
+    std::uint64_t sequence = 0;
+};
+
 struct Trace {
     int launches = 0;
     int epilogue_launches = 0;
@@ -62,10 +74,21 @@ struct Trace {
     std::vector<std::string> order;
     std::vector<elastic::CoreModeFlags> modes;
     std::vector<SfObservation> sf_observations;
+    std::vector<EventRecordObservation> event_record_observations;
+    std::vector<TensorStreamObservation> tensor_stream_observations;
+    std::uint64_t sequence = 0;
+    std::uint64_t count_launch_sequence = 0;
+    std::uint64_t cached_launch_sequence = 0;
+    std::uint64_t epilogue_launch_sequence = 0;
 } trace;
 
 int compute_stream_token = 0;
 int comm_stream_token = 0;
+
+void record_tensor_stream(const torch::Tensor& tensor, void* stream_value) {
+    trace.tensor_stream_observations.push_back({
+        tensor.storage_identity(), stream_value, ++trace.sequence});
+}
 
 int alloc(void*, std::uint64_t n, void** p) { *p = std::malloc(n); return *p ? 0 : 1; }
 int zero(void*, void* p, std::uint64_t n) { std::memset(p, 0, n); return 0; }
@@ -92,8 +115,10 @@ int create_event(void*, void** event) {
     trace.order.emplace_back("create event");
     return 0;
 }
-int record_event(void*, void*, void* stream_value) {
+int record_event(void*, void* event, void* stream_value) {
     ++trace.event_records;
+    trace.event_record_observations.push_back({
+        *static_cast<int*>(event), stream_value, ++trace.sequence});
     trace.order.emplace_back(stream_value == &comm_stream_token ?
         "record completion event" : "record compute dependency");
     if ((stream_value == &comm_stream_token && trace.fail_comm_records) ||
@@ -238,6 +263,10 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
     const bool expanded = elastic::has_mode(t.mode_flags, elastic::CoreMode::kExpanded);
     const bool hybrid = elastic::has_mode(t.mode_flags, elastic::CoreMode::kHybrid);
     const bool fp8 = t.element_kind == elastic::ElementKind::kFloat8E4M3;
+    if (cached)
+        trace.cached_launch_sequence = ++trace.sequence;
+    else if (cpu_sync)
+        trace.count_launch_sequence = ++trace.sequence;
     if (fp8) {
         trace.sf_observations.push_back({
             false, cached, cpu_sync, a.recv_scale_factors,
@@ -380,6 +409,7 @@ extern "C" int deep_ep_ascend_launch_dispatch(elastic::DispatchArguments a, elas
 extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
     elastic::DispatchArguments a, elastic::CoreTiling t, void*) {
     ++trace.epilogue_launches;
+    trace.epilogue_launch_sequence = ++trace.sequence;
     trace.order.emplace_back("launch uncached copy epilogue");
     if (trace.fail_epilogue_launch)
         return 79;
@@ -1740,6 +1770,9 @@ bool fp8_async_sf_lifetime_and_busy_probe(bool cached) {
         auto handle = uncached_dispatch(
             *buffer, inputs, weights, true, true, false, false, std::nullopt,
             true);
+        trace.order.clear();
+        trace.event_record_observations.clear();
+        trace.tensor_stream_observations.clear();
         trace.event_ready = false;
         auto pending = cached ?
             cached_dispatch(
@@ -1752,6 +1785,42 @@ bool fp8_async_sf_lifetime_and_busy_probe(bool cached) {
             !has_exact_sf(*std::get<1>(pending), 4, torch::kInt, true) ||
             !std::get<15>(pending).has_value())
             return false;
+        const auto find_tensor_record = [](const void* storage) {
+            return std::find_if(
+                trace.tensor_stream_observations.begin(),
+                trace.tensor_stream_observations.end(),
+                [storage](const TensorStreamObservation& observation) {
+                    return observation.storage == storage;
+                });
+        };
+        const auto input_sf_record = find_tensor_record(
+            inputs.sf->storage_identity());
+        const auto output_sf_record = find_tensor_record(
+            std::get<1>(pending)->storage_identity());
+        const auto input_launch_sequence = cached ?
+            trace.cached_launch_sequence : trace.count_launch_sequence;
+        const auto output_launch_sequence = cached ?
+            trace.cached_launch_sequence : trace.epilogue_launch_sequence;
+        if (input_sf_record == trace.tensor_stream_observations.end() ||
+            output_sf_record == trace.tensor_stream_observations.end() ||
+            input_sf_record->stream != &comm_stream_token ||
+            output_sf_record->stream != &comm_stream_token ||
+            input_launch_sequence == 0 || output_launch_sequence == 0 ||
+            input_sf_record->sequence >= input_launch_sequence ||
+            output_sf_record->sequence >= output_launch_sequence)
+            return false;
+        if (!cached) {
+            const auto completion_record = std::find_if(
+                trace.event_record_observations.begin(),
+                trace.event_record_observations.end(),
+                [](const EventRecordObservation& observation) {
+                    return observation.event_id == trace.event_creates;
+                });
+            if (completion_record == trace.event_record_observations.end() ||
+                completion_record->stream != &comm_stream_token ||
+                trace.epilogue_launch_sequence >= completion_record->sequence)
+                return false;
+        }
         const auto launches_before_retry = trace.launches;
         bool busy = false;
         try {
@@ -1785,7 +1854,37 @@ bool fp8_async_sf_lifetime_and_busy_probe(bool cached) {
         output_sf_storage.expired();
 }
 
+bool fp8_epilogue_failure_does_not_record_completion_probe() {
+    trace = {};
+    auto runtime_resources = resources();
+    if (!runtime_resources)
+        return false;
+    auto buffer = Buffer::make_testing_buffer(
+        0, std::move(runtime_resources), 2 * 1024 * 1024, 1);
+    auto inputs = fp8_inputs(torch::kFloat);
+    const std::optional<Tensor> weights = inputs.weights;
+    trace.fail_epilogue_launch = true;
+    bool failed = false;
+    try {
+        (void)uncached_dispatch(
+            *buffer, inputs, weights, true, false, true, false, std::nullopt,
+            false);
+    } catch (const std::runtime_error& error) {
+        failed = std::string(error.what()).find("backend error 79") !=
+            std::string::npos;
+    }
+    const auto completion_record = std::find_if(
+        trace.event_record_observations.begin(),
+        trace.event_record_observations.end(),
+        [](const EventRecordObservation& observation) {
+            return observation.event_id == trace.event_creates;
+        });
+    return failed && trace.epilogue_launches == 1 &&
+        completion_record == trace.event_record_observations.end();
+}
+
 int main() {
+    torch::set_deep_ep_tensor_stream_record_hook(record_tensor_stream);
     int failures = 0;
     const auto check = [&failures](bool passed, const char* name) {
         if (!passed) {
@@ -1839,5 +1938,7 @@ int main() {
           "FP8 uncached async scale-factor lifetime and busy rejection");
     check(fp8_async_sf_lifetime_and_busy_probe(true),
           "FP8 cached async scale-factor lifetime and busy rejection");
+    check(fp8_epilogue_failure_does_not_record_completion_probe(),
+          "FP8 epilogue failure does not record completion event");
     return failures == 0 ? 0 : 1;
 }
