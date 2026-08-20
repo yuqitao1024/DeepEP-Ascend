@@ -889,6 +889,65 @@ int main() {
              fp8_dispatch, fp8_tiling, fp8_storage, nullptr).ok() ||
         !trace_is(kDispatchLaunch))
         return 81;
+    auto fp8_async_cpu_sync_dispatch = fp8_tiling;
+    fp8_async_cpu_sync_dispatch.mode_flags =
+        async_cpu_sync_dispatch.mode_flags;
+    auto fp8_count_dispatch = dispatch;
+    fp8_count_dispatch.scale_factors = bytes;
+    fp8_count_dispatch.scale_factor_token_stride = 2;
+    fp8_count_dispatch.scale_factor_pack_stride = 1;
+    reset_launches();
+    if (!launch_internal_dispatch(
+             fp8_count_dispatch, fp8_async_cpu_sync_dispatch, fp8_storage,
+             reinterpret_cast<void*>(0x6161)).ok() ||
+        !trace_is(kDispatchLaunch))
+        return 90;
+
+    auto fp8_epilogue_dispatch = fp8_count_dispatch;
+    fp8_epilogue_dispatch.num_recv_tokens = 4;
+    fp8_epilogue_dispatch.num_output_tokens = 4;
+    fp8_epilogue_dispatch.recv_scale_factors = bytes;
+    fp8_epilogue_dispatch.recv_scale_factor_token_stride = 1;
+    fp8_epilogue_dispatch.recv_scale_factor_pack_stride = 4;
+    reset_launches();
+    if (!launch_internal_dispatch_epilogue(
+             fp8_epilogue_dispatch, fp8_async_cpu_sync_dispatch, fp8_storage,
+             reinterpret_cast<void*>(0x6161)).ok() ||
+        !trace_is(kDispatchEpilogueLaunch))
+        return 91;
+    fp8_epilogue_dispatch.recv_scale_factors = nullptr;
+    reset_launches();
+    if (launch_internal_dispatch_epilogue(
+            fp8_epilogue_dispatch, fp8_async_cpu_sync_dispatch, fp8_storage,
+            reinterpret_cast<void*>(0x6161)).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 92;
+    auto empty_fp8_epilogue_dispatch = fp8_epilogue_dispatch;
+    empty_fp8_epilogue_dispatch.num_recv_tokens = 0;
+    empty_fp8_epilogue_dispatch.num_output_tokens = 0;
+    empty_fp8_epilogue_dispatch.recv_scale_factor_token_stride = 1;
+    empty_fp8_epilogue_dispatch.recv_scale_factor_pack_stride = 0;
+    reset_launches();
+    if (!launch_internal_dispatch_epilogue(
+             empty_fp8_epilogue_dispatch, fp8_async_cpu_sync_dispatch,
+             fp8_storage, reinterpret_cast<void*>(0x6161)).ok() ||
+        !trace_is(kDispatchEpilogueLaunch))
+        return 93;
+    auto bf16_epilogue_scale_factors = dispatch;
+    bf16_epilogue_scale_factors.scale_factors = bytes;
+    bf16_epilogue_scale_factors.scale_factor_token_stride = 2;
+    bf16_epilogue_scale_factors.scale_factor_pack_stride = 1;
+    bf16_epilogue_scale_factors.recv_scale_factors = bytes;
+    bf16_epilogue_scale_factors.recv_scale_factor_token_stride = 1;
+    bf16_epilogue_scale_factors.recv_scale_factor_pack_stride = 4;
+    reset_launches();
+    if (launch_internal_dispatch_epilogue(
+            bf16_epilogue_scale_factors, async_cpu_sync_dispatch, storage,
+            reinterpret_cast<void*>(0x6161)).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 94;
     fp8_dispatch.scale_factor_token_stride = 0;
     reset_launches();
     if (launch_internal_dispatch(

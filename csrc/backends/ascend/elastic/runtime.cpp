@@ -314,12 +314,13 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
                 "async dispatch requires the CPU-count split"};
     if ((cpu_sync || async_event) &&
         (tiling.operation != OperationKind::kDispatch ||
-         tiling.element_kind != ElementKind::kBFloat16 ||
+         (tiling.element_kind != ElementKind::kBFloat16 &&
+          tiling.element_kind != ElementKind::kFloat8E4M3) ||
          has_mode(tiling.mode_flags, CoreMode::kCached) ||
          has_mode(tiling.mode_flags, CoreMode::kHybrid) ||
          tiling.topology.scale_out_size != 1))
         return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
-                "split dispatch supports uncached BF16 pure scale-up only"};
+                "split dispatch supports uncached BF16 or FP8 pure scale-up only"};
 
     constexpr CoreModeFlags known_modes =
         mode_bit(CoreMode::kCached) | mode_bit(CoreMode::kExpanded) |
@@ -532,6 +533,18 @@ CoreRuntimeStatus launch_internal_dispatch_epilogue(
         arguments.prefix_per_expert == nullptr ||
         arguments.unaligned_per_expert == nullptr)
         return invalid("dispatch epilogue required argument is null");
+    const bool fp8 = tiling.element_kind == ElementKind::kFloat8E4M3;
+    if ((fp8 && arguments.num_output_tokens != 0 &&
+         (arguments.recv_scale_factors == nullptr ||
+          arguments.recv_scale_factor_token_stride == 0 ||
+          arguments.recv_scale_factor_pack_stride == 0)) ||
+        (!fp8 && (arguments.scale_factors != nullptr ||
+                  arguments.recv_scale_factors != nullptr ||
+                  arguments.scale_factor_token_stride != 0 ||
+                  arguments.scale_factor_pack_stride != 0 ||
+                  arguments.recv_scale_factor_token_stride != 0 ||
+                  arguments.recv_scale_factor_pack_stride != 0)))
+        return invalid("dispatch epilogue scale factors do not match element kind");
     const int result = deep_ep_ascend_launch_dispatch_epilogue(
         arguments, tiling, stream);
     return result == 0 ? CoreRuntimeStatus{} :
