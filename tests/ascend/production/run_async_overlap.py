@@ -28,6 +28,7 @@ from tests.ascend.production.run_fp8_dispatch_combine import (  # noqa: E402
 CASE_TIMEOUT_SECONDS = 45
 WORLD_SIZE = 2
 NUM_EXPERTS = 4
+SUPPORTED_FP8_WORLD_SIZES = (2, 4, 8)
 NUM_TOPK = 2
 CAPACITY = 4
 HIDDEN = 4
@@ -294,6 +295,7 @@ def _contract():
             "dispatch_modes": ["cached", "non-cached"],
             "completion": "native-event",
             "combine": "bf16-only",
+            "supported_world_sizes": list(SUPPORTED_FP8_WORLD_SIZES),
         },
         "full_cases": list(CASE_NAMES),
         "matrix_groups": list(MATRIX_GROUPS),
@@ -756,11 +758,13 @@ def _case_command(case, trace_dir):
             f"--nproc-per-node={WORLD_SIZE}", *worker]
 
 
-def _distributed_batch_command(cases, trace_dir):
+def _distributed_batch_command(cases, trace_dir, world_size=WORLD_SIZE):
     worker = [str(pathlib.Path(__file__).resolve()),
-              "--trace-dir", str(trace_dir), "--batch-worker", *cases]
+              "--trace-dir", str(trace_dir),
+              "--world-size", str(world_size),
+              "--batch-worker", *cases]
     return [sys.executable, "-m", "torch.distributed.run", "--standalone",
-            f"--nproc-per-node={WORLD_SIZE}", *worker]
+            f"--nproc-per-node={world_size}", *worker]
 
 
 def _overlap_diagnostic_command(output, trace_dir):
@@ -1674,12 +1678,20 @@ def _run_streaming_batch(command, cases, record_result,
         _terminate_process_group(process)
 
 
-def _run_distributed_batch(cases, trace_dir, record_result):
+def _run_distributed_batch(
+        cases, trace_dir, record_result, world_size=WORLD_SIZE):
     return _run_streaming_batch(
-        _distributed_batch_command(cases, trace_dir), cases, record_result)
+        _distributed_batch_command(cases, trace_dir, world_size),
+        cases, record_result)
 
 
-def _run_suite(suite, output, trace_dir):
+def _run_suite(suite, output, trace_dir, world_size=WORLD_SIZE):
+    if suite == "fp8":
+        _check(world_size in SUPPORTED_FP8_WORLD_SIZES,
+               f"FP8 async suite world size {world_size} is unsupported")
+    else:
+        _check(world_size == WORLD_SIZE,
+               f"{suite} suite requires world size {WORLD_SIZE}")
     selected = (EVENT_CASES if suite == "event" else
                 UNCACHED_CASE_NAMES if suite == "uncached" else
                 FP8_ASYNC_CASE_NAMES if suite == "fp8" else CASE_NAMES)
@@ -1739,7 +1751,7 @@ def _run_suite(suite, output, trace_dir):
             if batch_pending:
                 batch_pending = False
                 if not _run_distributed_batch(
-                        distributed, trace_dir, record_result):
+                        distributed, trace_dir, record_result, world_size):
                     break
             continue
         if not run_standalone(case):
@@ -2080,7 +2092,7 @@ class AsyncOverlapWorker:
         result = buffer.dispatch(
             (x, sf),
             topk_idx=routes,
-            num_experts=NUM_EXPERTS,
+            num_experts=self.fp8_reference.num_experts,
             num_max_tokens_per_rank=CAPACITY,
             expert_alignment=spec.expert_alignment,
             num_sms=1,
@@ -2397,7 +2409,7 @@ class AsyncOverlapWorker:
         result = buffer.dispatch(
             (x, sf),
             topk_idx=routes,
-            num_experts=NUM_EXPERTS,
+            num_experts=self.fp8_reference.num_experts,
             num_max_tokens_per_rank=CAPACITY,
             expert_alignment=1,
             num_sms=1,
@@ -2458,7 +2470,7 @@ class AsyncOverlapWorker:
         result = buffer.dispatch(
             x,
             topk_idx=routes,
-            num_experts=NUM_EXPERTS,
+            num_experts=self.fp8_reference.num_experts,
             num_max_tokens_per_rank=CAPACITY,
             expert_alignment=1,
             num_sms=1,
@@ -2539,7 +2551,7 @@ class AsyncOverlapWorker:
                 local_failure = str(error)
         finally:
             os.environ.pop("DEEP_EP_ASCEND_TEST_COMPLETION_FAULT", None)
-        reports = [None] * WORLD_SIZE
+        reports = [None] * self.fp8_reference.world_size
         self.dist.all_gather_object(
             reports, {"rank": self.rank, "failure": local_failure},
             group=self.group)
@@ -2548,7 +2560,7 @@ class AsyncOverlapWorker:
                "device completion generation mismatch" in
                reports[0]["failure"],
                f"FP8 completion mismatch is missing: {aggregate}")
-        _check(reports[1]["failure"] is None,
+        _check(all(report["failure"] is None for report in reports[1:]),
                f"healthy FP8 rank failed: {aggregate}")
         if self.rank != 0:
             self._assert_fp8_outputs(
@@ -3803,7 +3815,22 @@ class AsyncOverlapWorker:
         raise AssertionError(f"distributed case is not implemented: {case}")
 
 
-def _run_distributed_batch_worker(cases, trace_dir, batch_protocol=True):
+def _validate_distributed_world_size(cases, world_size):
+    fp8_cases = [case in FP8_ASYNC_CASE_NAMES for case in cases]
+    if fp8_cases and all(fp8_cases):
+        _check(world_size in SUPPORTED_FP8_WORLD_SIZES,
+               f"FP8 async worker world size {world_size} is unsupported")
+        return
+    _check(not any(fp8_cases),
+           "FP8 async cases cannot share a batch with BF16 cases")
+    _check(world_size == WORLD_SIZE,
+           f"BF16 async worker requires world size {WORLD_SIZE}")
+
+
+def _run_distributed_batch_worker(
+        cases, trace_dir, batch_protocol=True,
+        expected_world_size=WORLD_SIZE):
+    _validate_distributed_world_size(cases, expected_world_size)
     import torch
     import torch.distributed as dist
     import torch_npu
@@ -3817,8 +3844,10 @@ def _run_distributed_batch_worker(cases, trace_dir, batch_protocol=True):
             backend="hccl", timeout=timedelta(seconds=25))
         initialized = True
         group = dist.group.WORLD
-        _check(dist.get_world_size(group) == WORLD_SIZE,
-               f"async overlap requires {WORLD_SIZE} ranks")
+        actual_world_size = dist.get_world_size(group)
+        _check(actual_world_size == expected_world_size,
+               f"async overlap requires {expected_world_size} ranks, "
+               f"got {actual_world_size}")
         rank = dist.get_rank(group)
         for case in cases:
             dist.barrier(group=group)
@@ -3845,7 +3874,7 @@ def _run_distributed_batch_worker(cases, trace_dir, batch_protocol=True):
                         value for value in (local_failure, cleanup_failure)
                         if value)
 
-            reports = [None] * WORLD_SIZE
+            reports = [None] * expected_world_size
             dist.all_gather_object(
                 reports,
                 {
@@ -3884,9 +3913,10 @@ def _run_distributed_batch_worker(cases, trace_dir, batch_protocol=True):
             dist.destroy_process_group()
 
 
-def _run_distributed_worker(case, trace_dir):
+def _run_distributed_worker(case, trace_dir, expected_world_size=WORLD_SIZE):
     return _run_distributed_batch_worker(
-        (case,), trace_dir, batch_protocol=False)
+        (case,), trace_dir, batch_protocol=False,
+        expected_world_size=expected_world_size)
 
 
 def _run_overlap_diagnostic_worker(output, trace_dir):
@@ -4141,7 +4171,7 @@ def _run_overlap_component_diagnostic_worker(output, trace_dir):
             dist.destroy_process_group()
 
 
-def _run_worker(case, trace_dir):
+def _run_worker(case, trace_dir, expected_world_size=WORLD_SIZE):
     if case == "capture-current-stream":
         measurements = _run_capture_worker()
         print(WORKER_RESULT_PREFIX + " " + json.dumps({
@@ -4163,7 +4193,7 @@ def _run_worker(case, trace_dir):
             "measurements": measurements,
         }, sort_keys=True), flush=True)
         return 0
-    return _run_distributed_worker(case, trace_dir)
+    return _run_distributed_worker(case, trace_dir, expected_world_size)
 
 
 def main():
@@ -4177,6 +4207,9 @@ def main():
     parser.add_argument(
         "--batch-worker", nargs="+", choices=ALL_DISTRIBUTED_CASES,
         metavar="CASE")
+    parser.add_argument(
+        "--world-size", type=int, choices=SUPPORTED_FP8_WORLD_SIZES,
+        default=WORLD_SIZE)
     parser.add_argument("--overlap-diagnostic", action="store_true")
     parser.add_argument("--overlap-diagnostic-worker", action="store_true")
     parser.add_argument("--overlap-sweep", action="store_true")
@@ -4191,10 +4224,19 @@ def main():
     if args.contract:
         print(json.dumps(_contract(), sort_keys=True))
         return 0
+    fp8_action = (
+        args.suite == "fp8" or
+        args.worker in FP8_ASYNC_CASE_NAMES or
+        (args.batch_worker is not None and
+         all(case in FP8_ASYNC_CASE_NAMES for case in args.batch_worker)))
+    if args.world_size != WORLD_SIZE and not fp8_action:
+        parser.error("--world-size 4/8 is supported only for FP8 async cases")
     if args.worker:
-        return _run_worker(args.worker, args.trace_dir)
+        return _run_worker(args.worker, args.trace_dir, args.world_size)
     if args.batch_worker:
-        return _run_distributed_batch_worker(args.batch_worker, args.trace_dir)
+        return _run_distributed_batch_worker(
+            args.batch_worker, args.trace_dir,
+            expected_world_size=args.world_size)
     if args.overlap_diagnostic_worker:
         return _run_overlap_diagnostic_worker(args.output, args.trace_dir)
     if args.overlap_diagnostic:
@@ -4209,7 +4251,8 @@ def main():
     if args.overlap_component_diagnostic:
         return _run_overlap_component_diagnostic(args.output, args.trace_dir)
     if args.suite:
-        return _run_suite(args.suite, args.output, args.trace_dir)
+        return _run_suite(
+            args.suite, args.output, args.trace_dir, args.world_size)
     parser.error(
         "one of --contract, --suite, --worker, --batch-worker, "
         "--overlap-diagnostic, --overlap-diagnostic-worker, "

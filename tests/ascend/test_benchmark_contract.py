@@ -160,6 +160,7 @@ def test_public_async_runner_declares_fp8_production_matrix():
     ]
     assert contract["fp8_async"]["completion"] == "native-event"
     assert contract["fp8_async"]["combine"] == "bf16-only"
+    assert contract["fp8_async"]["supported_world_sizes"] == [2, 4, 8]
 
 
 def test_runtime_launch_applies_predecessor_and_waits_async_event():

@@ -52,6 +52,24 @@ SCALE_UP_SMOKE = \
     ROOT / "tests/ascend/production/run_scale_up_smoke.py"
 ASYNC_OVERLAP = \
     ROOT / "tests/ascend/production/run_async_overlap.py"
+EXPECTED_FP8_ASYNC_CASES = (
+    "fp8-cached-normal-fp32-row-async-allocate-false",
+    "fp8-cached-normal-packed-column-async-allocate-true",
+    "fp8-cached-expanded-fp32-row-async-allocate-false",
+    "fp8-cached-expanded-packed-column-async-allocate-true",
+    "fp8-uncached-normal-fp32-row-async-allocate-false",
+    "fp8-uncached-normal-packed-column-async-allocate-true",
+    "fp8-uncached-expanded-fp32-row-async-allocate-false",
+    "fp8-uncached-expanded-packed-column-async-allocate-true",
+    "fp8-previous-event-allocate-true",
+    "fp8-empty-route",
+    "fp8-asymmetric-route",
+    "fp8-10-generations",
+    "fp8-cached-representation-changes",
+    "fp8-completion-mismatch",
+    "fp8-drop-event",
+    "fp8-destroy-pending-retry",
+)
 STREAM_EVENT_CAPABILITY_PROBE = \
     ROOT / "tests/ascend/stream_event/capability_probe.cpp"
 STREAM_EVENT_CAPABILITY_RUNNER = \
@@ -2209,24 +2227,7 @@ int main() {
                     "event-timeout",
                 ],
                 "fp8_async": {
-                    "case_names": [
-                        "fp8-cached-normal-fp32-row-async-allocate-false",
-                        "fp8-cached-normal-packed-column-async-allocate-true",
-                        "fp8-cached-expanded-fp32-row-async-allocate-false",
-                        "fp8-cached-expanded-packed-column-async-allocate-true",
-                        "fp8-uncached-normal-fp32-row-async-allocate-false",
-                        "fp8-uncached-normal-packed-column-async-allocate-true",
-                        "fp8-uncached-expanded-fp32-row-async-allocate-false",
-                        "fp8-uncached-expanded-packed-column-async-allocate-true",
-                        "fp8-previous-event-allocate-true",
-                        "fp8-empty-route",
-                        "fp8-asymmetric-route",
-                        "fp8-10-generations",
-                        "fp8-cached-representation-changes",
-                        "fp8-completion-mismatch",
-                        "fp8-drop-event",
-                        "fp8-destroy-pending-retry",
-                    ],
+                    "case_names": list(EXPECTED_FP8_ASYNC_CASES),
                     "payload_dtype": "float8_e4m3fn",
                     "scale_factor_dtypes": ["float32", "int32"],
                     "output_scale_layouts": [
@@ -2235,6 +2236,7 @@ int main() {
                     "dispatch_modes": ["cached", "non-cached"],
                     "completion": "native-event",
                     "combine": "bf16-only",
+                    "supported_world_sizes": [2, 4, 8],
                 },
                 "full_cases": expected_cases,
                 "matrix_groups": [
@@ -4270,6 +4272,128 @@ int main() {
 
         self.assertEqual(synchronizations, ["buffer construction"])
 
+    def test_fp8_suite_cli_selects_exact_cases_and_requested_world_size(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_fp8_async_cli", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        for world_size in (2, 4, 8):
+            with self.subTest(world_size=world_size), \
+                    tempfile.TemporaryDirectory() as directory:
+                calls = []
+
+                def run_distributed_batch(
+                        cases, trace_dir, record_result,
+                        requested_world_size):
+                    calls.append((
+                        tuple(cases), pathlib.Path(trace_dir),
+                        requested_world_size))
+                    for case in cases:
+                        record_result({
+                            "case": case,
+                            "status": "passed",
+                            "duration_seconds": 0.25,
+                            "exit_code": 0,
+                            "failure": None,
+                            "measurements": {},
+                        })
+                    return True
+
+                output = pathlib.Path(directory) / "report.json"
+                trace_dir = pathlib.Path(directory) / "traces"
+                argv = [
+                    str(ASYNC_OVERLAP),
+                    "--suite", "fp8",
+                    "--world-size", str(world_size),
+                    "--output", str(output),
+                    "--trace-dir", str(trace_dir),
+                ]
+                with mock.patch.object(sys, "argv", argv), \
+                        mock.patch.object(
+                            module, "_run_distributed_batch",
+                            run_distributed_batch), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    exit_code = module.main()
+
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(calls, [(
+                    EXPECTED_FP8_ASYNC_CASES, trace_dir, world_size)])
+
+    def test_fp8_batch_command_launches_requested_world_size(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_fp8_async_command", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        command = module._distributed_batch_command(
+            EXPECTED_FP8_ASYNC_CASES, pathlib.Path("/tmp/fp8-traces"), 8)
+
+        self.assertIn("--nproc-per-node=8", command)
+        world_size_index = command.index("--world-size")
+        self.assertEqual(command[world_size_index + 1], "8")
+        batch_index = command.index("--batch-worker")
+        self.assertEqual(
+            tuple(command[batch_index + 1:]), EXPECTED_FP8_ASYNC_CASES)
+
+    def test_fp8_declared_cases_route_to_their_behavior_handlers(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_fp8_async_routing", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        matrix_cases = EXPECTED_FP8_ASYNC_CASES[:8]
+        routes = {
+            **{
+                case: ("_run_fp8_matrix_case", (case,))
+                for case in matrix_cases
+            },
+            "fp8-previous-event-allocate-true": (
+                "_run_fp8_previous_event", ()),
+            "fp8-empty-route": (
+                "_run_fp8_route_case", ("empty-input",)),
+            "fp8-asymmetric-route": (
+                "_run_fp8_route_case", ("asymmetric-routing",)),
+            "fp8-10-generations": ("_run_fp8_generations", ()),
+            "fp8-cached-representation-changes": (
+                "_run_fp8_representation_changes", ()),
+            "fp8-completion-mismatch": (
+                "_run_fp8_completion_mismatch", ()),
+            "fp8-drop-event": ("_run_fp8_drop_event", ()),
+            "fp8-destroy-pending-retry": (
+                "_run_fp8_destroy_pending_retry", ()),
+        }
+        handler_names = {handler for handler, _args in routes.values()}
+
+        class FakeNpu:
+            @staticmethod
+            def synchronize():
+                return None
+
+        class FakeTorch:
+            npu = FakeNpu()
+
+        self.assertEqual(tuple(routes), EXPECTED_FP8_ASYNC_CASES)
+        for case, (expected_handler, expected_args) in routes.items():
+            with self.subTest(case=case):
+                worker = object.__new__(module.AsyncOverlapWorker)
+                worker.torch = FakeTorch
+                handlers = {}
+                for handler_name in handler_names:
+                    handler = mock.Mock(
+                        name=handler_name, return_value=handler_name)
+                    handlers[handler_name] = handler
+                    setattr(worker, handler_name, handler)
+
+                result = worker.run(case)
+
+                self.assertEqual(result, expected_handler)
+                handlers[expected_handler].assert_called_once_with(
+                    *expected_args)
+                for handler_name, handler in handlers.items():
+                    if handler_name != expected_handler:
+                        handler.assert_not_called()
+
     def test_async_overlap_full_suite_uses_one_distributed_launcher(self):
         spec = importlib.util.spec_from_file_location(
             "run_async_overlap_batch_launch", ASYNC_OVERLAP)
@@ -4279,10 +4403,13 @@ int main() {
         distributed = module.CASE_NAMES[1:3]
         selected = (*distributed, "record-failure")
         batch_calls = []
+        world_sizes = []
         bounded_calls = []
 
-        def run_distributed_batch(cases, _trace_dir, record_result):
+        def run_distributed_batch(
+                cases, _trace_dir, record_result, world_size):
             batch_calls.append(tuple(cases))
+            world_sizes.append(world_size)
             for case in cases:
                 record_result({
                     "case": case,
@@ -4319,6 +4446,7 @@ int main() {
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(batch_calls, [distributed])
+        self.assertEqual(world_sizes, [2])
         self.assertEqual(len(bounded_calls), 1)
 
     def test_async_overlap_uncached_suite_uses_one_distributed_launcher(self):
@@ -4329,9 +4457,12 @@ int main() {
 
         selected = module.UNCACHED_CASE_NAMES[:3]
         batch_calls = []
+        world_sizes = []
 
-        def run_distributed_batch(cases, _trace_dir, record_result):
+        def run_distributed_batch(
+                cases, _trace_dir, record_result, world_size):
             batch_calls.append(tuple(cases))
+            world_sizes.append(world_size)
             for case in cases:
                 record_result({
                     "case": case,
@@ -4360,6 +4491,7 @@ int main() {
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(batch_calls, [selected])
+        self.assertEqual(world_sizes, [2])
 
     def test_async_overlap_distributed_batch_checkpoints_each_case(self):
         spec = importlib.util.spec_from_file_location(
@@ -4370,7 +4502,9 @@ int main() {
         selected = module.CASE_NAMES[1:3]
         observed_checkpoint = []
 
-        def run_distributed_batch(cases, _trace_dir, record_result):
+        def run_distributed_batch(
+                cases, _trace_dir, record_result, world_size):
+            self.assertEqual(world_size, 2)
             for index, case in enumerate(cases):
                 record_result({
                     "case": case,
