@@ -1,15 +1,17 @@
-# Ascend Dispatch SIMT Parallelization Design
+# Ascend Dispatch and Direct Combine SIMT Parallelization
 
-**Status:** Approved design, implementation pending
+**Status:** Implemented; representative 8P correctness passed, final benchmark
+profiles pending post-push execution
 
 ## Purpose
 
-Remove the single-thread bottleneck from the Ascend EPv2 dispatch path so the
-canonical eight-rank benchmark can process its production payload size. The
-current kernels launch a 512-thread SIMT VF but both `dispatch_producer_vf` and
-`dispatch_epilogue_vf` return immediately for every thread except thread zero.
-That one thread performs route construction, record validation, expert scans,
-destination assignment, padding, and byte-wise BF16 or FP8 copies.
+Remove the single-thread bottleneck from the Ascend EPv2 direct dispatch and
+combine paths so the canonical eight-rank benchmark can process its production
+payload size. The original kernels launched a 512-thread SIMT VF but returned
+immediately for every thread except thread zero on the main data paths. That
+one thread performed route construction, record validation, expert scans,
+destination assignment, padding, BF16 or FP8 copies, combine staging, and
+hidden reduction.
 
 The first canonical FP8 case has 4,096 input tokens per rank, hidden width
 7,168, top-k 6, 256 experts, and eight ranks. Running all producer and epilogue
@@ -27,12 +29,14 @@ so Python reference generation and result checking are not the cause.
   output, zero padding, and cached-handle reuse.
 - BF16 and FP8 payloads, including FP8 scale-factor copies.
 - Synchronous dispatch and the asynchronous copy kernel.
+- Direct combine record construction, local staging, contributor validation,
+  deterministic receive-slot indexing, hidden reduction, and routing-weight
+  output.
 - Existing protocol diagnostics and completion-generation ordering.
 
 ### Excluded
 
 - Changing the fixed five-second host wait.
-- Parallelizing combine kernels.
 - Changing public Python or C++ APIs.
 - Changing output shapes, record order, logical-byte accounting, or benchmark
   workloads.
@@ -75,16 +79,18 @@ does not adequately address the canonical workload.
 ## Architecture
 
 The direct dispatch path remains one global producer kernel and, for async
-operation, one global copy kernel. Each global kernel invokes several SIMT VFs
-in sequence. A stage reads only state completed by earlier stages and publishes
-only state owned by that stage.
+operation, one global copy kernel. Direct combine also keeps its existing
+global launch API. Each global kernel invokes several SIMT VFs in sequence. A
+stage reads only state completed by earlier stages and publishes only state
+owned by that stage.
 
 Control-plane work stays on thread zero. Rank-partitioned work uses one owner
 thread per rank. Expert-partitioned work uses one owner thread per local
 expert. Record construction and output copies use all 512 threads with
 grid-stride loops over logical records or record lanes.
 
-The hybrid path continues to call the existing serial VFs. This isolates the
+The hybrid dispatch/combine paths and expanded combine without multiple
+reduction continue to call the existing serial VFs. This isolates the
 benchmark fix from hybrid forwarding and scale-out protocol behavior.
 
 ## Workspace
@@ -103,6 +109,10 @@ layout equality tests are updated with the new fields.
 
 Temporary regions are reusable between producer and epilogue stages because
 the stages do not overlap. No output tensor is used as scratch storage.
+
+Direct combine additionally reserves one aligned `int32` record-slot entry per
+expanded output record. Record builders publish deterministic receive slots
+into this region before the parallel reduction stage consumes them.
 
 ## Producer Pipeline
 
@@ -194,6 +204,19 @@ When `copy_outputs` is false, the pipeline stops after validated count and
 prefix metadata and does not publish copy completion prematurely. The existing
 async copy kernel runs the remaining epilogue stages and publishes generation.
 
+## Direct Combine Pipeline
+
+Thread zero owns producer control and transport publication. Destination-rank
+owners plan source records and write private error candidates; a thread-zero
+reduction stage stops the pipeline on the first deterministic error. All
+threads then construct records and copy local staging rows with grid-stride
+ownership.
+
+After transport acquire, all threads clear output indices and validate
+contributors. A deterministic token/lane mapping selects each receive-slot
+index without atomics. Grid-stride workers reduce hidden rows and write routing
+weights, and thread zero publishes completion only after those stages finish.
+
 ## Error Handling
 
 Parallel workers never race to write the shared protocol status. They write
@@ -254,13 +277,43 @@ After representative correctness passes, run the 144-case smoke profile. A
 full canonical performance run remains a separate benchmark step after the
 single-case regression is proven.
 
+### Verified Results
+
+All tasks used CANN 9.2.0, the pinned `hcomm-deepep-current` package, the
+qualified Python 3.10 environment, and serialized TaskQueue submission.
+
+| Evidence | Task | Result |
+| --- | --- | --- |
+| ASC/C++ extension build at `81da5ee` | `task_20260821_035026_270464421601` | Passed, `exit=0` |
+| FP8 alignment 128, sync, handle copy | `task_20260821_035216_270878415029` | 1 case passed, `exit=0` |
+| BF16 alignment 1, sync, handle copy | `task_20260821_035424_27140337624` | 1 case passed, `exit=0` |
+| BF16 alignment 1, async, previous event, comm-stream allocation | `task_20260821_035649_272065721223` | 1 case passed, `exit=0` |
+| FP8 alignment 128, async, previous event, comm-stream allocation | `task_20260821_035912_272675920526` | 1 case passed, `exit=0` |
+
+Each device case used the canonical `4096 x 7168`, top-k 6, 256-expert,
+eight-rank workload with correctness enabled, one warmup, and one measured
+iteration. These runs establish functionality only; their timings are not the
+formal performance sample.
+
+The first post-implementation run exposed a separate capacity-contract bug:
+the buffer-size hint used the configured multiple-reduction layout while
+dispatch tiling omitted that mode and requested the larger single-reduction
+window. Dispatch tiling now carries the buffer's internal reduction-layout
+flag, runtime validation accepts it, and dispatch handle mode flags continue
+to exclude it. A production dispatch probe covers uncached and cached expanded
+launches. Host verification after this fix passed `102` tests plus `48`
+subtests in the core suite and `134` benchmark contract/automation tests.
+
+The 144-case smoke profile and full canonical performance profile remain
+pending and must run only after the branch is rebased and pushed.
+
 ## Success Criteria
 
 - No direct benchmark dispatch data path is restricted to thread zero.
 - The first eight-rank canonical FP8 case completes under the unchanged
   five-second wait and passes correctness checks.
 - Representative BF16, FP8, compact, expanded, cached, and async cases pass.
-- The 144-case smoke run completes with 720 operation records.
+- The 144-case smoke run completes with 720 operation records after push.
 - Existing host contract tests and ASC compilation pass.
 - No timeout increase, public API change, or benchmark workload reduction is
   used to obtain success.
