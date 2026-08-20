@@ -52,6 +52,8 @@ public:
     virtual transport::TransportStatus read_completion(
         BufferOperationKind kind, std::uint64_t completion_offset,
         std::uint64_t* output) = 0;
+    virtual transport::TransportStatus commit_completion(
+        BufferOperationKind kind, std::uint64_t generation) = 0;
     virtual transport::TransportStatus destroy() = 0;
 };
 
@@ -71,7 +73,8 @@ private:
 
     explicit PendingOperation(std::shared_ptr<Impl> impl);
     transport::TransportStatus teardown(std::uint64_t timeout_ms);
-    bool lifetime_safe() const noexcept;
+    bool replaceable() const noexcept;
+    bool teardown_complete() const noexcept;
 
     std::shared_ptr<Impl> impl_;
 
@@ -81,6 +84,7 @@ private:
 struct EventDependency {
     std::shared_ptr<runtime::NativeEventState> event;
     std::shared_ptr<PendingOperation> pending_operation;
+    std::shared_ptr<runtime::NativeEventWaitLease> wait_lease;
 };
 
 struct PendingOperationCreateResult {
@@ -96,6 +100,9 @@ struct AsyncStateHostTestControl {
     bool destroy_paused_after_snapshot = false;
     bool resume_destroy = false;
     std::uint64_t finalization_waiter_entries = 0;
+    bool pause_after_terminal_state = false;
+    bool terminal_state_published = false;
+    bool resume_terminal_publication = false;
 };
 #endif
 

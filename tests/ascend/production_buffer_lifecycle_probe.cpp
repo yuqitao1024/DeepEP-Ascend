@@ -636,8 +636,9 @@ void check_comm_stream_barrier_order() {
     };
     CHECK(trace.order == expected);
     CHECK(trace.synchronize_stream_calls == 0);
-    CHECK(trace.destroy_event_calls == 2);
+    CHECK(trace.destroy_event_calls == 1);
     buffer->destroy();
+    CHECK(trace.destroy_event_calls == 2);
 }
 
 void check_barrier_completion_create_failure_precedes_launch() {

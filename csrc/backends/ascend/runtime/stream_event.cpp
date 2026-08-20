@@ -158,6 +158,7 @@ NativeEventState::~NativeEventState() {
 }
 
 TransportStatus NativeEventState::record(StreamIdentity stream) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (state_ != State::Created)
         return TransportStatus::invalid(
             "record_event", "native event is not ready to record");
@@ -175,7 +176,15 @@ TransportStatus NativeEventState::record(StreamIdentity stream) {
     return TransportStatus::success();
 }
 
-TransportStatus NativeEventState::wait(StreamIdentity stream) const {
+TransportStatus NativeEventState::wait(
+    StreamIdentity stream,
+    std::shared_ptr<NativeEventWaitLease>* wait_lease) {
+    if (wait_lease == nullptr || *wait_lease != nullptr)
+        return TransportStatus::invalid(
+            "wait_event", "native event wait lease is unavailable");
+    auto candidate = std::shared_ptr<NativeEventWaitLease>(
+        new NativeEventWaitLease(shared_from_this()));
+    std::lock_guard<std::mutex> lock(mutex_);
     if (state_ != State::Recorded && state_ != State::Completed)
         return TransportStatus::invalid(
             "wait_event", "native event has not been recorded");
@@ -183,11 +192,15 @@ TransportStatus NativeEventState::wait(StreamIdentity stream) const {
         return TransportStatus::invalid(
             "wait_event", "stream does not belong to the event device");
     const int result = api_.wait_event(api_.user_data, stream.raw, native_event_);
-    return result == 0 ? TransportStatus::success() :
-        backend_failure("wait_event", result);
+    if (result != 0)
+        return backend_failure("wait_event", result);
+    ++active_wait_leases_;
+    *wait_lease = std::move(candidate);
+    return TransportStatus::success();
 }
 
 TransportStatus NativeEventState::current_stream(StreamIdentity* stream) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (stream == nullptr || api_.current_stream == nullptr)
         return TransportStatus::invalid(
             "current_stream_wait", "invalid current stream request");
@@ -202,6 +215,7 @@ TransportStatus NativeEventState::current_stream(StreamIdentity* stream) const {
 }
 
 TransportStatus NativeEventState::finish(std::uint64_t timeout_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (state_ == State::Completed)
         return TransportStatus::success();
     if (state_ != State::Recorded)
@@ -234,11 +248,15 @@ TransportStatus NativeEventState::finish(std::uint64_t timeout_ms) {
 }
 
 TransportStatus NativeEventState::destroy() {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (state_ == State::Destroyed)
         return TransportStatus::success();
     if (state_ == State::Recorded)
         return TransportStatus::invalid(
             "destroy_event", "native event is not complete");
+    if (active_wait_leases_ != 0)
+        return TransportStatus::invalid(
+            "destroy_event", "native event has outstanding stream waits");
 #if DEEP_EP_ASCEND_TESTING
     if (testing_fault_enabled("destroy_failure"))
         return backend_failure("destroy_event", kTestingFaultBackendCode);
@@ -253,6 +271,17 @@ TransportStatus NativeEventState::destroy() {
 
 int NativeEventState::device_index() const noexcept {
     return device_index_;
+}
+
+void NativeEventState::release_wait_lease() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_wait_leases_ != 0)
+        --active_wait_leases_;
+}
+
+NativeEventWaitLease::~NativeEventWaitLease() {
+    if (event_ != nullptr)
+        event_->release_wait_lease();
 }
 
 NativeEventCreateResult create_native_event(

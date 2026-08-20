@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 
 #include "../transport/types.hpp"
 
@@ -30,8 +31,9 @@ struct StreamEventApi {
 StreamEventApi make_stream_event_api();
 
 struct NativeEventCreateResult;
+class NativeEventWaitLease;
 
-class NativeEventState {
+class NativeEventState : public std::enable_shared_from_this<NativeEventState> {
 public:
     ~NativeEventState();
 
@@ -39,7 +41,8 @@ public:
     NativeEventState& operator=(const NativeEventState&) = delete;
 
     transport::TransportStatus record(StreamIdentity);
-    transport::TransportStatus wait(StreamIdentity) const;
+    transport::TransportStatus wait(
+        StreamIdentity, std::shared_ptr<NativeEventWaitLease>* wait_lease);
     transport::TransportStatus current_stream(StreamIdentity*) const;
     transport::TransportStatus finish(std::uint64_t timeout_ms);
     transport::TransportStatus destroy();
@@ -59,10 +62,31 @@ private:
     StreamEventApi api_{};
     void* native_event_ = nullptr;
     int device_index_ = -1;
+    mutable std::mutex mutex_;
     State state_ = State::Created;
+    std::uint64_t active_wait_leases_ = 0;
+
+    void release_wait_lease() noexcept;
 
     friend NativeEventCreateResult create_native_event(
         StreamEventApi api, int device_index);
+    friend class NativeEventWaitLease;
+};
+
+class NativeEventWaitLease {
+public:
+    ~NativeEventWaitLease();
+
+    NativeEventWaitLease(const NativeEventWaitLease&) = delete;
+    NativeEventWaitLease& operator=(const NativeEventWaitLease&) = delete;
+
+private:
+    explicit NativeEventWaitLease(std::shared_ptr<NativeEventState> event)
+        : event_(std::move(event)) {}
+
+    std::shared_ptr<NativeEventState> event_;
+
+    friend class NativeEventState;
 };
 
 struct NativeEventCreateResult {

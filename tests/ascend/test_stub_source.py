@@ -268,7 +268,8 @@ int main() {
         return 18;
     if (module.class_methods["ElasticBuffer"] != std::set<std::string>{
             "destroy", "get_comm_stream", "get_physical_domain_size",
-            "get_logical_domain_size", "barrier", "dispatch", "combine"})
+            "get_logical_domain_size", "barrier", "dispatch", "combine",
+            "get_dispatch_handle_generation"})
         return 19;
 
     Buffer::cpu_comm_t cpu_comm;
@@ -533,7 +534,7 @@ int main() {
     if (module.class_methods["ElasticBuffer"] != std::set<std::string>{
             "destroy", "get_comm_stream", "get_physical_domain_size",
             "get_logical_domain_size", "barrier", "dispatch", "combine",
-            "is_destroyed"})
+            "is_destroyed", "get_dispatch_handle_generation"})
         return 3;
 
     deep_ep::ascend::transport::CannHostApi host_api{};

@@ -302,17 +302,19 @@ bool record_and_wait_enforce_device_identity() {
     if (!created.event->record(stream_for(2)).ok() || fake.record_calls != 2)
         return false;
 
-    status = created.event->wait(stream_for(3));
+    std::shared_ptr<runtime::NativeEventWaitLease> wait_lease;
+    status = created.event->wait(stream_for(3), &wait_lease);
     if (!is_failure(status, transport::TransportStatusCode::kInvalidArgument,
                     "wait_event") || fake.wait_calls != 0)
         return false;
     fake.wait_result = kWaitFailure;
-    status = created.event->wait(stream_for(2));
+    status = created.event->wait(stream_for(2), &wait_lease);
     if (!is_failure(status, transport::TransportStatusCode::kRuntimeFailure,
                     "wait_event", kWaitFailure))
         return false;
     fake.wait_result = 0;
-    return created.event->wait(stream_for(2)).ok() && fake.wait_calls == 2;
+    return created.event->wait(stream_for(2), &wait_lease).ok() &&
+        wait_lease != nullptr && fake.wait_calls == 2;
 }
 
 bool finish_is_bounded_and_idempotent() {
@@ -553,6 +555,16 @@ public:
         return transport::TransportStatus::success();
     }
 
+    transport::TransportStatus commit_completion(
+        elastic::BufferOperationKind kind,
+        std::uint64_t generation) override {
+        ++completion_commits;
+        if (kind != expected_kind || generation != completion)
+            return transport::TransportStatus::invalid(
+                "commit_completion", "unexpected completion generation");
+        return transport::TransportStatus::success();
+    }
+
     transport::TransportStatus destroy() override {
         ++trace_->destroy_calls;
         if (destroy_failures_remaining > 0) {
@@ -573,6 +585,7 @@ public:
     transport::TransportStatus completion_status =
         transport::TransportStatus::success();
     int destroy_failures_remaining = 0;
+    std::atomic<int> completion_commits{0};
 
 private:
     std::shared_ptr<CompletionTrace> trace_;
@@ -641,11 +654,12 @@ int check_synchronous_success() {
     ASYNC_CHECK(fixture.event_api.query_calls == 1);
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
     ASYNC_CHECK(fixture.trace->completion_reads == 1);
-    ASYNC_CHECK(fixture.event_api.destroy_calls == 1);
+    ASYNC_CHECK(fixture.event_api.destroy_calls == 0);
     ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 1);
     ASYNC_CHECK(fixture.state->coordinator().abandoned_operation_count() == 0);
     ASYNC_CHECK(fixture.trace->destroy_calls == 0);
     ASYNC_CHECK(fixture.state->destroy().ok());
+    ASYNC_CHECK(fixture.event_api.destroy_calls == 1);
     ASYNC_CHECK(fixture.trace->destroy_calls == 1);
     return 0;
 }
@@ -663,6 +677,115 @@ int check_asynchronous_publish_stays_pending() {
     ASYNC_CHECK(fixture.trace->completion_reads == 0);
     ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 0);
     ASYNC_CHECK(launched.operation->finish(20).ok());
+    return 0;
+}
+
+int check_source_finalization_precedes_dependency_retirement() {
+    PendingFixture source;
+    std::weak_ptr<runtime::NativeEventState> source_event_lifetime;
+    auto source_launch = source.launch(
+        elastic::BufferOperationKind::kDispatch, {}, {},
+        &source_event_lifetime);
+    ASYNC_CHECK(source_launch.status.ok());
+    auto source_event = source_event_lifetime.lock();
+    ASYNC_CHECK(source_event != nullptr);
+
+    std::shared_ptr<runtime::NativeEventWaitLease> wait_lease;
+    ASYNC_CHECK(source_event->wait(stream_for(2), &wait_lease).ok());
+    ASYNC_CHECK(wait_lease != nullptr);
+    std::vector<elastic::EventDependency> predecessors;
+    predecessors.push_back(
+        {source_event, source_launch.operation, std::move(wait_lease)});
+    PendingFixture dependent;
+    auto dependent_launch = dependent.launch(
+        elastic::BufferOperationKind::kCombine, {},
+        std::move(predecessors));
+    ASYNC_CHECK(dependent_launch.status.ok());
+
+    ASYNC_CHECK(source_launch.operation->finish(20).ok());
+    ASYNC_CHECK(source.event_api.destroy_calls == 0);
+    const auto blocked_destroy = source.state->destroy();
+    ASYNC_CHECK(is_failure(
+        blocked_destroy, transport::TransportStatusCode::kInvalidArgument,
+        "destroy_event"));
+    ASYNC_CHECK(source.event_api.destroy_calls == 0);
+
+    ASYNC_CHECK(dependent_launch.operation->finish(20).ok());
+    ASYNC_CHECK(source.state->destroy().ok());
+    ASYNC_CHECK(source.event_api.destroy_calls == 1);
+    return 0;
+}
+
+int check_completed_event_can_be_waited_and_reused() {
+    PendingFixture source;
+    std::weak_ptr<runtime::NativeEventState> source_event_lifetime;
+    auto source_launch = source.launch(
+        elastic::BufferOperationKind::kDispatch, {}, {},
+        &source_event_lifetime);
+    ASYNC_CHECK(source_launch.status.ok());
+    auto source_event = source_event_lifetime.lock();
+    ASYNC_CHECK(source_event != nullptr);
+    ASYNC_CHECK(source_launch.operation->finish(20).ok());
+    ASYNC_CHECK(source.event_api.destroy_calls == 0);
+
+    std::shared_ptr<runtime::NativeEventWaitLease> first_wait;
+    std::shared_ptr<runtime::NativeEventWaitLease> second_wait;
+    ASYNC_CHECK(source_event->wait(stream_for(2), &first_wait).ok());
+    first_wait.reset();
+    ASYNC_CHECK(source_event->wait(stream_for(2), &second_wait).ok());
+    ASYNC_CHECK(source.event_api.wait_calls == 2);
+    second_wait.reset();
+    ASYNC_CHECK(source.state->destroy().ok());
+    ASYNC_CHECK(source.event_api.destroy_calls == 1);
+    return 0;
+}
+
+int check_dependency_wait_serializes_with_source_finalization() {
+    PendingFixture source;
+    source.event_api.block_query = true;
+    std::weak_ptr<runtime::NativeEventState> source_event_lifetime;
+    auto source_launch = source.launch(
+        elastic::BufferOperationKind::kDispatch, {}, {},
+        &source_event_lifetime);
+    ASYNC_CHECK(source_launch.status.ok());
+    auto source_event = source_event_lifetime.lock();
+    ASYNC_CHECK(source_event != nullptr);
+
+    transport::TransportStatus finish_status;
+    transport::TransportStatus wait_status;
+    std::shared_ptr<runtime::NativeEventWaitLease> wait_lease;
+    std::thread finalizer([&] {
+        finish_status = source_launch.operation->finish(500);
+    });
+    {
+        std::unique_lock<std::mutex> lock(source.event_api.query_mutex);
+        source.event_api.query_cv.wait(lock, [&] {
+            return source.event_api.query_entered;
+        });
+    }
+    std::thread dependency([&] {
+        wait_status = source_event->wait(stream_for(2), &wait_lease);
+    });
+    {
+        std::lock_guard<std::mutex> lock(source.event_api.query_mutex);
+        source.event_api.release_query = true;
+    }
+    source.event_api.query_cv.notify_all();
+    finalizer.join();
+    dependency.join();
+
+    ASYNC_CHECK(finish_status.ok());
+    ASYNC_CHECK(wait_status.ok() && wait_lease != nullptr);
+    ASYNC_CHECK(source.event_api.query_calls == 1);
+    ASYNC_CHECK(source.event_api.wait_calls == 1);
+    ASYNC_CHECK(source.event_api.destroy_calls == 0);
+    ASYNC_CHECK(is_failure(
+        source.state->destroy(),
+        transport::TransportStatusCode::kInvalidArgument,
+        "destroy_event"));
+    wait_lease.reset();
+    ASYNC_CHECK(source.state->destroy().ok());
+    ASYNC_CHECK(source.event_api.destroy_calls == 1);
     return 0;
 }
 
@@ -703,7 +826,7 @@ int check_two_thread_finish_is_exactly_once() {
     ASYNC_CHECK(fixture.event_api.query_calls == 1);
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
     ASYNC_CHECK(fixture.trace->completion_reads == 1);
-    ASYNC_CHECK(fixture.event_api.destroy_calls == 1);
+    ASYNC_CHECK(fixture.event_api.destroy_calls == 0);
     ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 1);
     return 0;
 }
@@ -721,7 +844,7 @@ int check_repeated_finish_returns_the_stored_result() {
     ASYNC_CHECK(fixture.event_api.query_calls == 1);
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
     ASYNC_CHECK(fixture.trace->completion_reads == 1);
-    ASYNC_CHECK(fixture.event_api.destroy_calls == 1);
+    ASYNC_CHECK(fixture.event_api.destroy_calls == 0);
     ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 1);
     return 0;
 }
@@ -785,13 +908,55 @@ int check_diagnostic_read_failure_abandons_without_completion_read() {
         "read_diagnostic", kDiagnosticReadFailure));
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
     ASYNC_CHECK(fixture.trace->completion_reads == 0);
-    ASYNC_CHECK(fixture.event_api.destroy_calls == 1);
+    ASYNC_CHECK(fixture.event_api.destroy_calls == 0);
     ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 0);
     ASYNC_CHECK(fixture.state->coordinator().abandoned_operation_count() == 1);
     ASYNC_CHECK(same_status(status, launched.operation->finish(20)));
     const auto terminal = fixture.state->terminal_failure();
     ASYNC_CHECK(terminal.has_value() && same_status(status, *terminal));
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
+    return 0;
+}
+
+int check_terminal_failure_is_visible_with_failed_state() {
+    auto control = std::make_shared<elastic::AsyncStateHostTestControl>();
+    PendingFixture fixture(0, 5, control);
+    fixture.resources->diagnostic_status =
+        transport::TransportStatus::runtime_failure(
+            "read_diagnostic", kDiagnosticReadFailure,
+            "injected diagnostic read failure");
+    auto launched = fixture.launch();
+    ASYNC_CHECK(launched.status.ok());
+    {
+        std::lock_guard<std::mutex> lock(control->mutex);
+        control->pause_after_terminal_state = true;
+    }
+
+    transport::TransportStatus finish_status;
+    std::thread finalizer([&] {
+        finish_status = launched.operation->finish(500);
+    });
+    bool terminal_published = false;
+    {
+        std::unique_lock<std::mutex> lock(control->mutex);
+        terminal_published = control->cv.wait_for(
+            lock, std::chrono::seconds(1), [&] {
+                return control->terminal_state_published;
+            });
+    }
+    const auto state = launched.operation->state();
+    const auto terminal_failure = fixture.state->terminal_failure();
+    {
+        std::lock_guard<std::mutex> lock(control->mutex);
+        control->resume_terminal_publication = true;
+    }
+    control->cv.notify_all();
+    finalizer.join();
+
+    ASYNC_CHECK(terminal_published);
+    ASYNC_CHECK(state == elastic::PendingState::kFailed);
+    ASYNC_CHECK(terminal_failure.has_value());
+    ASYNC_CHECK(same_status(finish_status, *terminal_failure));
     return 0;
 }
 
@@ -804,7 +969,7 @@ int check_diagnostic_abi_mismatch_abandons() {
     ASYNC_CHECK(!status.ok());
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
     ASYNC_CHECK(fixture.trace->completion_reads == 0);
-    ASYNC_CHECK(fixture.event_api.destroy_calls == 1);
+    ASYNC_CHECK(fixture.event_api.destroy_calls == 0);
     ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 0);
     ASYNC_CHECK(fixture.state->coordinator().abandoned_operation_count() == 1);
     ASYNC_CHECK(same_status(status, launched.operation->finish(20)));
@@ -848,7 +1013,7 @@ int check_diagnostic_error_abandons() {
     }
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
     ASYNC_CHECK(fixture.trace->completion_reads == 0);
-    ASYNC_CHECK(fixture.event_api.destroy_calls == 1);
+    ASYNC_CHECK(fixture.event_api.destroy_calls == 0);
     ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 0);
     ASYNC_CHECK(fixture.state->coordinator().abandoned_operation_count() == 1);
     ASYNC_CHECK(same_status(status, launched.operation->finish(20)));
@@ -865,7 +1030,7 @@ int check_diagnostic_generation_mismatch_abandons() {
     ASYNC_CHECK(!status.ok());
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
     ASYNC_CHECK(fixture.trace->completion_reads == 0);
-    ASYNC_CHECK(fixture.event_api.destroy_calls == 1);
+    ASYNC_CHECK(fixture.event_api.destroy_calls == 0);
     ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 0);
     ASYNC_CHECK(fixture.state->coordinator().abandoned_operation_count() == 1);
     ASYNC_CHECK(same_status(status, launched.operation->finish(20)));
@@ -887,7 +1052,7 @@ int check_completion_read_failure_abandons() {
         "read_completion", kCompletionReadFailure));
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
     ASYNC_CHECK(fixture.trace->completion_reads == 1);
-    ASYNC_CHECK(fixture.event_api.destroy_calls == 1);
+    ASYNC_CHECK(fixture.event_api.destroy_calls == 0);
     ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 0);
     ASYNC_CHECK(fixture.state->coordinator().abandoned_operation_count() == 1);
     ASYNC_CHECK(same_status(status, launched.operation->finish(20)));
@@ -905,7 +1070,7 @@ int check_completion_mismatch_abandons() {
     ASYNC_CHECK(!status.ok());
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
     ASYNC_CHECK(fixture.trace->completion_reads == 1);
-    ASYNC_CHECK(fixture.event_api.destroy_calls == 1);
+    ASYNC_CHECK(fixture.event_api.destroy_calls == 0);
     ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 0);
     ASYNC_CHECK(fixture.state->coordinator().abandoned_operation_count() == 1);
     ASYNC_CHECK(same_status(status, launched.operation->finish(20)));
@@ -920,23 +1085,26 @@ int check_event_destroy_failure_is_stable_and_retryable() {
     auto launched = fixture.launch();
     ASYNC_CHECK(launched.status.ok());
     const auto first = launched.operation->finish(20);
+    ASYNC_CHECK(first.ok());
+    ASYNC_CHECK(fixture.event_api.query_calls == 1);
+    ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
+    ASYNC_CHECK(fixture.trace->completion_reads == 1);
+    ASYNC_CHECK(fixture.event_api.destroy_calls == 0);
+    ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 1);
+    ASYNC_CHECK(fixture.state->coordinator().abandoned_operation_count() == 0);
+    ASYNC_CHECK(same_status(first, launched.operation->finish(20)));
+
+    const auto destroy_status = fixture.state->destroy();
     ASYNC_CHECK(is_failure(
-        first, transport::TransportStatusCode::kRuntimeFailure,
+        destroy_status, transport::TransportStatusCode::kRuntimeFailure,
         "destroy_event", kDestroyFailure));
     ASYNC_CHECK(fixture.event_api.query_calls == 1);
     ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
     ASYNC_CHECK(fixture.trace->completion_reads == 1);
     ASYNC_CHECK(fixture.event_api.destroy_calls == 1);
-    ASYNC_CHECK(fixture.state->coordinator().completed_operation_count() == 0);
-    ASYNC_CHECK(fixture.state->coordinator().abandoned_operation_count() == 1);
-    ASYNC_CHECK(same_status(first, launched.operation->finish(20)));
-
+    ASYNC_CHECK(fixture.trace->destroy_calls == 0);
     fixture.event_api.destroy_result = 0;
-    const auto destroy_status = fixture.state->destroy();
-    ASYNC_CHECK(same_status(first, destroy_status));
-    ASYNC_CHECK(fixture.event_api.query_calls == 1);
-    ASYNC_CHECK(fixture.trace->diagnostic_reads == 1);
-    ASYNC_CHECK(fixture.trace->completion_reads == 1);
+    ASYNC_CHECK(fixture.state->destroy().ok());
     ASYNC_CHECK(fixture.event_api.destroy_calls == 2);
     ASYNC_CHECK(fixture.trace->destroy_calls == 1);
     return 0;
@@ -1005,7 +1173,7 @@ int check_destroy_race_retains_publish_owners_until_event_is_safe() {
     std::vector<std::optional<torch::Tensor>> tensors;
     tensors.emplace_back(torch::Tensor(tensor_lifetime));
     std::vector<elastic::EventDependency> predecessors;
-    predecessors.push_back({predecessor.event, nullptr});
+    predecessors.push_back({predecessor.event, nullptr, nullptr});
 
     {
         std::lock_guard<std::mutex> lock(control->mutex);
@@ -1213,7 +1381,7 @@ int check_retained_tensors_and_predecessors_release_after_safe_teardown() {
     tensors.emplace_back(torch::Tensor(tensor_lifetime));
     std::vector<elastic::EventDependency> dependencies;
     dependencies.push_back(
-        {predecessor_event.event, predecessor_operation});
+        {predecessor_event.event, predecessor_operation, nullptr});
     PendingFixture fixture;
     auto launched = fixture.launch(
         elastic::BufferOperationKind::kCombine, std::move(tensors),
@@ -1257,6 +1425,12 @@ int check_generation_exhaustion_never_publishes_a_second_operation() {
 int run_async_state_contract() {
     if (const int status = check_synchronous_success()) return status;
     if (const int status = check_asynchronous_publish_stays_pending()) return status;
+    if (const int status = check_source_finalization_precedes_dependency_retirement())
+        return status;
+    if (const int status = check_completed_event_can_be_waited_and_reused())
+        return status;
+    if (const int status = check_dependency_wait_serializes_with_source_finalization())
+        return status;
     if (const int status = check_two_thread_finish_is_exactly_once()) return status;
     if (const int status = check_repeated_finish_returns_the_stored_result())
         return status;
@@ -1265,6 +1439,8 @@ int run_async_state_contract() {
     if (const int status = check_event_timeout_is_stable_and_teardown_is_retryable())
         return status;
     if (const int status = check_diagnostic_read_failure_abandons_without_completion_read())
+        return status;
+    if (const int status = check_terminal_failure_is_visible_with_failed_state())
         return status;
     if (const int status = check_diagnostic_abi_mismatch_abandons()) return status;
     if (const int status = check_diagnostic_error_abandons()) return status;

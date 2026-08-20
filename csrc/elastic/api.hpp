@@ -20,7 +20,9 @@ inline void register_apis(pybind11::module_& m) {
 #else
     binding::register_event<deep_ep::ascend::EventHandle>(m);
     auto cls = binding::register_common_apis<deep_ep::ascend::ElasticBuffer>(m);
-    cls.def("is_destroyed", &deep_ep::ascend::ElasticBuffer::is_destroyed);
+    cls.def("is_destroyed", &deep_ep::ascend::ElasticBuffer::is_destroyed)
+       .def("get_dispatch_handle_generation",
+            &deep_ep::ascend::ElasticBuffer::get_dispatch_handle_generation);
 #endif
 }
 

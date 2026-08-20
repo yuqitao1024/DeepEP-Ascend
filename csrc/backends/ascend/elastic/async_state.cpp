@@ -144,6 +144,11 @@ TransportStatus diagnostic_failure_status(
 }
 
 struct PendingOperation::Impl {
+    struct FinalizeResult {
+        TransportStatus status;
+        bool event_completed = false;
+    };
+
     Impl(
         std::shared_ptr<SharedAsyncContext> shared_context,
         BufferOperationCoordinator::OperationLease operation_lease,
@@ -156,13 +161,10 @@ struct PendingOperation::Impl {
           retained_tensors(std::move(tensors)),
           predecessors(std::move(dependencies)) {}
 
-    TransportStatus finalize(std::uint64_t timeout_ms) {
+    FinalizeResult finalize(std::uint64_t timeout_ms) {
         auto status = event->finish(timeout_ms);
-        if (!status.ok()) {
-            lease.abandon();
-            return status;
-        }
-        event_completed = true;
+        if (!status.ok())
+            return {status, false};
 
         transport::DeviceTransportDiagnostic diagnostic{};
         status = context->resources->read_diagnostic(
@@ -191,33 +193,26 @@ struct PendingOperation::Impl {
             status = completion_failure(
                 recipe.kind, "device completion generation mismatch");
         }
-
-        const auto destroy_status = event->destroy();
-        if (destroy_status.ok()) {
-            release_retained_owners();
-        } else if (status.ok()) {
-            status = destroy_status;
+        if (status.ok()) {
+            status = context->resources->commit_completion(
+                recipe.kind, recipe.generation);
         }
 
-        if (status.ok())
-            lease.complete();
-        else
-            lease.abandon();
-        return status;
+        return {status, true};
     }
 
     TransportStatus retry_teardown(std::uint64_t timeout_ms) {
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::milliseconds(timeout_ms);
         std::unique_lock<std::mutex> lock(mutex);
-        if (retained_lifetime_safe)
+        if (teardown_complete)
             return TransportStatus::success();
         if (teardown_in_progress) {
             if (!cv.wait_until(lock, deadline, [&] {
                     return !teardown_in_progress;
                 }))
                 return destroy_wait_timeout();
-            if (retained_lifetime_safe)
+            if (teardown_complete)
                 return TransportStatus::success();
         }
         teardown_in_progress = true;
@@ -231,13 +226,16 @@ struct PendingOperation::Impl {
         if (status.ok()) {
             lock.lock();
             event_completed = true;
+            release_retained_owners();
             lock.unlock();
             status = retained_event->destroy();
         }
 
         lock.lock();
-        if (status.ok())
-            release_retained_owners();
+        if (status.ok()) {
+            event.reset();
+            teardown_complete = true;
+        }
         teardown_in_progress = false;
         lock.unlock();
         cv.notify_all();
@@ -245,10 +243,11 @@ struct PendingOperation::Impl {
     }
 
     void release_retained_owners() {
-        event.reset();
+        if (retained_owners_released)
+            return;
         retained_tensors.clear();
         predecessors.clear();
-        retained_lifetime_safe = true;
+        retained_owners_released = true;
     }
 
     std::shared_ptr<SharedAsyncContext> context;
@@ -263,7 +262,8 @@ struct PendingOperation::Impl {
     TransportStatus terminal_status = TransportStatus::success();
     std::chrono::steady_clock::time_point finalization_deadline{};
     bool event_completed = false;
-    bool retained_lifetime_safe = false;
+    bool retained_owners_released = false;
+    bool teardown_complete = false;
     bool teardown_in_progress = false;
 };
 
@@ -300,15 +300,38 @@ TransportStatus PendingOperation::finish(std::uint64_t timeout_ms) {
     impl_->state = PendingState::kFinalizing;
     impl_->finalization_deadline = requested_deadline;
     lock.unlock();
-    const auto status = impl_->finalize(timeout_ms);
+    const auto result = impl_->finalize(timeout_ms);
     lock.lock();
-    impl_->terminal_status = status;
-    impl_->state = status.ok() ? PendingState::kSucceeded : PendingState::kFailed;
+    if (result.event_completed) {
+        impl_->event_completed = true;
+        impl_->release_retained_owners();
+    }
+    impl_->terminal_status = result.status;
+    if (result.status.ok())
+        impl_->lease.complete();
+    else
+        impl_->lease.abandon();
+    if (!result.status.ok())
+        impl_->context->record_terminal_failure(result.status);
+    impl_->state = result.status.ok() ?
+        PendingState::kSucceeded : PendingState::kFailed;
     lock.unlock();
-    if (!status.ok())
-        impl_->context->record_terminal_failure(status);
+#ifdef DEEP_EP_ASCEND_ASYNC_STATE_HOST_TEST_TENSOR
+    if (impl_->context->host_test_control != nullptr) {
+        auto control = impl_->context->host_test_control;
+        std::unique_lock<std::mutex> control_lock(control->mutex);
+        if (control->pause_after_terminal_state) {
+            control->terminal_state_published = true;
+            control->cv.notify_all();
+            (void)control->cv.wait_for(
+                control_lock, std::chrono::seconds(5), [&] {
+                    return control->resume_terminal_publication;
+                });
+        }
+    }
+#endif
     impl_->cv.notify_all();
-    return status;
+    return result.status;
 }
 
 PendingState PendingOperation::state() const noexcept {
@@ -324,9 +347,14 @@ TransportStatus PendingOperation::teardown(std::uint64_t timeout_ms) {
     return impl_->retry_teardown(timeout_ms);
 }
 
-bool PendingOperation::lifetime_safe() const noexcept {
+bool PendingOperation::replaceable() const noexcept {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    return impl_->retained_lifetime_safe;
+    return impl_->retained_owners_released;
+}
+
+bool PendingOperation::teardown_complete() const noexcept {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->teardown_complete;
 }
 
 struct AsyncBufferState::Impl {
@@ -399,7 +427,7 @@ AsyncBufferState::~AsyncBufferState() {
         {
             std::lock_guard<std::mutex> lock(impl_->mutex);
             unresolved_launch = impl_->pending != nullptr &&
-                !impl_->pending->lifetime_safe();
+                !impl_->pending->teardown_complete();
         }
         if (!unresolved_launch)
             return;
@@ -442,7 +470,7 @@ PendingOperationCreateResult AsyncBufferState::publish(
         status = invalid_publish("async state is being destroyed");
     } else if (status.ok() && impl_->pending != nullptr &&
                (!terminal(impl_->pending->state()) ||
-                !impl_->pending->lifetime_safe())) {
+                !impl_->pending->replaceable())) {
         status = invalid_publish("another operation is still pending");
     }
     if (!status.ok()) {
@@ -451,7 +479,7 @@ PendingOperationCreateResult AsyncBufferState::publish(
         if (event != nullptr && !impl_->destroy_reserved &&
             (impl_->pending == nullptr ||
              (terminal(impl_->pending->state()) &&
-              impl_->pending->lifetime_safe()))) {
+              impl_->pending->replaceable()))) {
             auto failed_impl = std::make_shared<PendingOperation::Impl>(
                 impl_->context, std::move(lease), std::move(event), recipe,
                 std::move(retained_tensors), std::move(predecessors));
@@ -528,8 +556,8 @@ TransportStatus AsyncBufferState::destroy() {
         if (pending != nullptr) {
             const bool was_terminal = terminal(pending->state());
             pending_status = pending->finish(impl_->owned_timeout_ms);
-            if (!pending->lifetime_safe()) {
-                if (!was_terminal) {
+            if (!pending->teardown_complete()) {
+                if (!was_terminal && !pending->replaceable()) {
                     impl_->finish_destroy_attempt();
                     return pending_status;
                 }

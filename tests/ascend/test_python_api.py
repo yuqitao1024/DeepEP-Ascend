@@ -297,12 +297,22 @@ def _install_fake_extension(platform, events):
                 state = types.SimpleNamespace(
                     device_index=(sys.modules["torch"].npu.current_device()
                                   if platform == "ascend" else 0),
-                    wait_count=0)
+                    wait_count=0, owners=0, completed=False,
+                    completion_error=None, on_finish=None)
                 events.append(("event.capture", state.device_index))
             self._state = state
+            self._state.owners += 1
 
         def __copy__(self):
             return EventHandle(self._state)
+
+        def _finish(self):
+            if self._state.completion_error is not None:
+                raise RuntimeError(self._state.completion_error)
+            if not self._state.completed:
+                if self._state.on_finish is not None:
+                    self._state.on_finish()
+                self._state.completed = True
 
         def current_stream_wait(self):
             if (platform == "ascend" and
@@ -311,8 +321,17 @@ def _install_fake_extension(platform, events):
                 raise RuntimeError(
                     "DeepEP Ascend backend: current_stream_wait current NPU "
                     "device does not belong to the event device")
+            self._finish()
             self._state.wait_count += 1
             events.append(("event.current_stream_wait", self._state.wait_count))
+
+        def __del__(self):
+            try:
+                self._state.owners -= 1
+                if self._state.owners == 0:
+                    self._finish()
+            except Exception:
+                pass
 
     class ElasticRuntime:
         def __init__(self, *args):
@@ -325,6 +344,11 @@ def _install_fake_extension(platform, events):
             self.destroyed = False
             self.destroy_error = None
             self.destroy_error_destroys_runtime = False
+            self.next_dispatch_generation = 0
+            self.last_dispatch_generation = 0
+            self.committed_dispatch_tensor = None
+            self.committed_dispatch_fingerprint = None
+            self.fail_next_dispatch_completion = False
             events.append(("runtime.construct", args))
 
         def destroy(self):
@@ -342,6 +366,13 @@ def _install_fake_extension(platform, events):
         def get_comm_stream(self):
             events.append("runtime.get_comm_stream")
             return _FakeStream(17, 2, 1)
+
+        def get_dispatch_handle_generation(self, tensor):
+            if (tensor is not self.committed_dispatch_tensor or
+                    tuple(tensor._values) !=
+                    self.committed_dispatch_fingerprint):
+                return 0
+            return self.last_dispatch_generation
 
         def get_logical_domain_size(self):
             events.append("runtime.get_logical_domain_size")
@@ -372,8 +403,30 @@ def _install_fake_extension(platform, events):
                 args[2].device.type, args[2].shape, args[2].dtype,
                 device_index=args[2].device.index)
             token_metadata_at_forward = (
+                args[12] if platform == "ascend" and args[12] is not None else
                 _FakeTensor(device.type, (120,), device_index=device.index)
                 if platform == "ascend" else None)
+            event = EventHandle() if args[22] or platform != "ascend" else None
+            if platform == "ascend":
+                self.next_dispatch_generation += 1
+                generation = self.next_dispatch_generation
+
+                def commit_dispatch():
+                    token_metadata_at_forward._values[0] = generation
+                    self.last_dispatch_generation = generation
+                    self.committed_dispatch_tensor = token_metadata_at_forward
+                    self.committed_dispatch_fingerprint = tuple(
+                        token_metadata_at_forward._values)
+
+                if args[22]:
+                    if self.fail_next_dispatch_completion:
+                        event._state.completion_error = (
+                            "DeepEP Ascend backend: dispatch completion failed")
+                        self.fail_next_dispatch_completion = False
+                    else:
+                        event._state.on_finish = commit_dispatch
+                else:
+                    commit_dispatch()
             return (args[0], args[1], args[2], args[3], cloned_topk_idx,
                     1, 1, [], _FakeTensor(device.type, device_index=device.index),
                     _FakeTensor(device.type, device_index=device.index),
@@ -382,7 +435,7 @@ def _install_fake_extension(platform, events):
                     _FakeTensor(device.type, device_index=device.index),
                     token_metadata_at_forward,
                     None,
-                    (EventHandle() if args[22] or platform != "ascend" else None))
+                    event)
 
         def combine(self, *args):
             self.combine_calls.append(args)
@@ -1471,21 +1524,34 @@ def _scenario_ascend_dispatch():
 
     torch.npu.capturing = True
     try:
-        buffer.dispatch(
-            x, topk_weights=cached_topk_weights, handle=handle,
-            async_with_compute_stream=True)
-    except RuntimeError as error:
-        assert "unsupported_graph_capture" in str(error), error
-    else:
-        raise AssertionError("Ascend async dispatch accepted graph capture")
-    try:
-        buffer.dispatch(
-            x, topk_idx=topk_idx, num_experts=2,
-            num_max_tokens_per_rank=1, async_with_compute_stream=True)
-    except RuntimeError as error:
-        assert "unsupported_dispatch_mode" in str(error), error
-    else:
-        raise AssertionError("Ascend dispatch accepted uncached async mode")
+        capture_modes = (
+            ("sync", False, False, None),
+            ("sync allocated", False, True, None),
+            ("async", True, False, None),
+            ("async allocated", True, True, None),
+            ("sync predecessor", False, True, previous),
+            ("async predecessor", True, True, previous),
+        )
+        for name, async_mode, allocate, predecessor in capture_modes:
+            try:
+                buffer.dispatch(
+                    x, topk_weights=cached_topk_weights, handle=handle,
+                    previous_event=predecessor,
+                    async_with_compute_stream=async_mode,
+                    allocate_on_comm_stream=allocate)
+            except RuntimeError as error:
+                assert "unsupported_graph_capture" in str(error), (name, error)
+            else:
+                raise AssertionError(
+                    f"Ascend dispatch accepted graph capture for {name}")
+        try:
+            buffer.dispatch(
+                x, topk_idx=topk_idx, num_experts=2,
+                num_max_tokens_per_rank=1)
+        except RuntimeError as error:
+            assert "unsupported_graph_capture" in str(error), error
+        else:
+            raise AssertionError("Ascend uncached dispatch accepted graph capture")
     finally:
         torch.npu.capturing = False
     assert len(runtime.dispatch_calls) == rejected_calls
@@ -1731,6 +1797,75 @@ def _scenario_ascend_dispatch_optimized():
     buffer.destroy()
 
 
+def _new_ascend_publication_fixture():
+    deep_ep, extension, events = _load_package("ascend", True)
+    buffer = deep_ep.ElasticBuffer(
+        _FakeGroup(events, rank=0, size=2), num_bytes=2 * 1024 * 1024,
+        allow_hybrid_mode=False, explicitly_destroy=True)
+    torch = sys.modules["torch"]
+    x = _FakeTensor("npu", (1, 16), torch.bfloat16)
+    topk_idx = _FakeTensor("npu", (1, 1), torch.int64)
+    _, _, _, handle, _ = buffer.dispatch(
+        x, topk_idx=topk_idx, num_experts=2,
+        num_max_tokens_per_rank=1)
+    return buffer, extension.runtime_instances[-1], x, handle
+
+
+def _scenario_ascend_copied_event_publication():
+    buffer, runtime, x, handle = _new_ascend_publication_fixture()
+    initial_generation = handle._ascend_generation
+    _, _, _, _, overlap = buffer.dispatch(
+        x, handle=handle, async_with_compute_stream=True)
+    copied_event = copy.copy(overlap.event)
+    copied_event.current_stream_wait()
+    assert runtime.last_dispatch_generation == initial_generation + 1
+    assert buffer._ascend_handle_generation == initial_generation
+
+    _, _, _, reused_handle, reused_event = buffer.dispatch(x, handle=handle)
+    assert reused_handle is handle
+    assert reused_event.event is None
+    assert handle._ascend_generation == initial_generation + 2
+    buffer.destroy()
+
+
+def _scenario_ascend_dropped_event_publication():
+    buffer, runtime, x, handle = _new_ascend_publication_fixture()
+    initial_generation = handle._ascend_generation
+    _, _, _, _, overlap = buffer.dispatch(
+        x, handle=handle, async_with_compute_stream=True)
+    del overlap
+    import gc
+    gc.collect()
+    assert runtime.last_dispatch_generation == initial_generation + 1
+    assert buffer._ascend_handle_generation == initial_generation
+
+    _, _, _, reused_handle, reused_event = buffer.dispatch(x, handle=handle)
+    assert reused_handle is handle
+    assert reused_event.event is None
+    assert handle._ascend_generation == initial_generation + 2
+    buffer.destroy()
+
+
+def _scenario_ascend_failed_event_does_not_publish():
+    buffer, runtime, x, handle = _new_ascend_publication_fixture()
+    initial_generation = handle._ascend_generation
+    initial_fingerprint = handle._ascend_descriptor_fingerprint
+    runtime.fail_next_dispatch_completion = True
+    _, _, _, _, overlap = buffer.dispatch(
+        x, handle=handle, async_with_compute_stream=True)
+    try:
+        overlap.current_stream_wait()
+    except RuntimeError as error:
+        assert "dispatch completion failed" in str(error), error
+    else:
+        raise AssertionError("failed Ascend completion unexpectedly succeeded")
+    assert runtime.last_dispatch_generation == initial_generation
+    assert buffer._ascend_handle_generation == initial_generation
+    assert handle._ascend_generation == initial_generation
+    assert handle._ascend_descriptor_fingerprint == initial_fingerprint
+    buffer.destroy()
+
+
 def _scenario_ascend_combine():
     deep_ep, extension, events = _load_package("ascend", True)
     buffer = deep_ep.ElasticBuffer(
@@ -1854,11 +1989,25 @@ def _scenario_ascend_combine():
 
     torch.npu.capturing = True
     try:
-        buffer.combine(x, handle, async_with_compute_stream=True)
-    except RuntimeError as error:
-        assert "unsupported_graph_capture" in str(error), error
-    else:
-        raise AssertionError("Ascend async combine accepted graph capture")
+        capture_modes = (
+            ("sync", False, False, None),
+            ("sync allocated", False, True, None),
+            ("async", True, False, None),
+            ("async allocated", True, True, None),
+            ("sync predecessor", False, True, previous),
+            ("async predecessor", True, True, previous),
+        )
+        for name, async_mode, allocate, predecessor in capture_modes:
+            try:
+                buffer.combine(
+                    x, handle, previous_event=predecessor,
+                    async_with_compute_stream=async_mode,
+                    allocate_on_comm_stream=allocate)
+            except RuntimeError as error:
+                assert "unsupported_graph_capture" in str(error), (name, error)
+            else:
+                raise AssertionError(
+                    f"Ascend combine accepted graph capture for {name}")
     finally:
         torch.npu.capturing = False
     assert len(runtime.combine_calls) == calls_before
@@ -2107,6 +2256,12 @@ SCENARIOS = {
     "ascend_fp8_dispatch": _scenario_ascend_fp8_dispatch,
     "ascend_owner_device_preflight": _scenario_ascend_owner_device_preflight,
     "ascend_dispatch_optimized": _scenario_ascend_dispatch_optimized,
+    "ascend_copied_event_publication":
+        _scenario_ascend_copied_event_publication,
+    "ascend_dropped_event_publication":
+        _scenario_ascend_dropped_event_publication,
+    "ascend_failed_event_does_not_publish":
+        _scenario_ascend_failed_event_does_not_publish,
     "ascend_combine": _scenario_ascend_combine,
     "ascend_weak_lru_gate": _scenario_ascend_weak_lru_gate,
     "cuda_preservation": _scenario_cuda_preservation,
@@ -2211,6 +2366,15 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_dispatch_count_validation_survives_optimized_python(self):
         self.run_scenario("ascend_dispatch_optimized", optimize=True)
+
+    def test_copied_raw_event_wait_publishes_cached_handle(self):
+        self.run_scenario("ascend_copied_event_publication")
+
+    def test_dropped_event_publishes_cached_handle_before_reuse(self):
+        self.run_scenario("ascend_dropped_event_publication")
+
+    def test_failed_event_completion_does_not_publish_cached_handle(self):
+        self.run_scenario("ascend_failed_event_does_not_publish")
 
     def test_combine_async_routes_native_events_and_rejects_deferred_modes(self):
         self.run_scenario("ascend_combine")

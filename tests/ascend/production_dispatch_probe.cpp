@@ -938,7 +938,7 @@ bool cached_async_order_and_commit_probe() {
 
     std::get<15>(pending)->current_stream_wait();
     std::get<15>(pending)->current_stream_wait();
-    return descriptor->generation == 2 && trace.event_destroys == 2 &&
+    return descriptor->generation == 2 && trace.event_destroys == 1 &&
         buffer->testing_operation_generation() == 2;
 }
 
@@ -1010,7 +1010,7 @@ bool completion_record_failure_retains_launched_dispatch_probe() {
     return trace.frees == 0;
 }
 
-bool completion_mismatch_fault_is_exact_and_post_commit() {
+bool completion_mismatch_fault_does_not_publish() {
     trace = {};
     auto runtime_resources = resources();
     if (!runtime_resources)
@@ -1051,7 +1051,7 @@ bool completion_mismatch_fault_is_exact_and_post_commit() {
     }
     unsetenv("DEEP_EP_ASCEND_TEST_COMPLETION_FAULT");
     if (failure.find("device completion generation mismatch") ==
-            std::string::npos || descriptor->generation != 3)
+            std::string::npos || descriptor->generation != 2)
         return false;
     std::string destroy_failure;
     try {
@@ -1060,7 +1060,7 @@ bool completion_mismatch_fault_is_exact_and_post_commit() {
         destroy_failure = error.what();
     }
     return destroy_failure.find("device completion generation mismatch") !=
-            std::string::npos && trace.event_destroys == 4 &&
+            std::string::npos && trace.event_destroys == 3 &&
         buffer->is_destroyed();
 }
 
@@ -1095,7 +1095,7 @@ int main() {
           "completion create failure precedes cached launch");
     check(completion_record_failure_retains_launched_dispatch_probe(),
           "completion record failure retains launched dispatch");
-    check(completion_mismatch_fault_is_exact_and_post_commit(),
-          "completion mismatch fault is exact and post-commit");
+    check(completion_mismatch_fault_does_not_publish(),
+          "completion mismatch fault does not publish");
     return failures == 0 ? 0 : 1;
 }

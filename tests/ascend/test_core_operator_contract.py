@@ -2325,7 +2325,7 @@ int main() {
                     ]},
                 )
 
-    def test_async_overlap_completion_mismatch_then_drop_event_reseeds(self):
+    def test_async_overlap_completion_mismatch_then_drop_event_reuses_handle(self):
         spec = importlib.util.spec_from_file_location(
             "run_async_overlap_lifecycle_sequence", ASYNC_OVERLAP)
         module = importlib.util.module_from_spec(spec)
@@ -2384,30 +2384,28 @@ int main() {
             self.assertNotIn(fault_name, os.environ)
 
             class Handle:
-                def __init__(self):
-                    self.valid = True
+                pass
 
             class DroppedEvent:
-                def __init__(self, handle):
-                    self.handle = handle
-
-                def __del__(self):
-                    self.handle.valid = False
+                pass
 
             drop = object.__new__(module.AsyncOverlapWorker)
             drop_buffer = object()
             drop.new_buffer = lambda: drop_buffer
-            handles = iter((Handle(), Handle()))
-            drop._seed = lambda buffer: next(handles)
+            seeded_handle = Handle()
+            seed_calls = []
+
+            def seed(buffer):
+                seed_calls.append(buffer)
+                return seeded_handle
+
+            drop._seed = seed
             cached_calls = []
 
             def cached_dispatch(buffer, handle, fixture, **options):
-                if not handle.valid:
-                    raise RuntimeError(
-                        "dispatch preflight failed (invalid_dispatch_handle)")
                 cached_calls.append((buffer, handle, fixture, options))
                 if len(cached_calls) == 1:
-                    return object(), DroppedEvent(handle), object(), object()
+                    return object(), DroppedEvent(), object(), object()
                 return object(), object(), object(), object()
 
             drop._cached_dispatch = cached_dispatch
@@ -2417,10 +2415,12 @@ int main() {
                 module.AsyncOverlapWorker._run_drop_event(drop)
             self.assertTrue(drop_measurements["event_dropped_without_wait"])
             self.assertTrue(drop_measurements["buffer_reused"])
+            self.assertEqual(seed_calls, [drop_buffer])
             self.assertEqual(len(cached_calls), 2)
             self.assertIs(cached_calls[0][0], drop_buffer)
             self.assertIs(cached_calls[1][0], drop_buffer)
-            self.assertIsNot(cached_calls[0][1], cached_calls[1][1])
+            self.assertIs(cached_calls[0][1], seeded_handle)
+            self.assertIs(cached_calls[1][1], seeded_handle)
         finally:
             os.environ.pop(fault_name, None)
             if original_fault is not None:

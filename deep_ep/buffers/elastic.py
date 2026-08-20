@@ -551,6 +551,25 @@ class ElasticBuffer:
             self.num_rdma_ranks, self.num_nvlink_ranks = \
                 self.get_physical_domain_size()
 
+    def _reconcile_ascend_handle(self, handle) -> bool:
+        if not isinstance(handle, EPHandle) or self.runtime is None:
+            return False
+        descriptor = getattr(handle, 'token_metadata_at_forward', None)
+        if not isinstance(descriptor, torch.Tensor):
+            return False
+        generation = self.runtime.get_dispatch_handle_generation(descriptor)
+        if (not isinstance(generation, int) or generation <= 0 or
+                generation < self._ascend_handle_generation):
+            return False
+        fingerprint = _ascend_descriptor_fingerprint(descriptor)
+        if fingerprint is None:
+            return False
+        self._ascend_handle_generation = generation
+        handle._ascend_owner = self
+        handle._ascend_generation = generation
+        handle._ascend_descriptor_fingerprint = fingerprint
+        return True
+
     def _preflight_ascend_dispatch(
             self, x, sf, topk_idx, topk_weights, handle,
             num_experts, num_max_tokens_per_rank, expert_alignment,
@@ -562,6 +581,7 @@ class ElasticBuffer:
         handle_error = None
         descriptor_valid = True
         if cached:
+            self._reconcile_ascend_handle(handle)
             descriptor_fingerprint = _ascend_descriptor_fingerprint(
                 getattr(handle, 'token_metadata_at_forward', None))
             if (not isinstance(handle, EPHandle) or
@@ -651,8 +671,7 @@ class ElasticBuffer:
             scalar_error = "invalid_capacity"
         elif not isinstance(alignment, int) or alignment <= 0:
             scalar_error = "invalid_expert_alignment"
-        elif (cached and async_with_compute_stream and
-              ascend_current_stream_is_capturing()):
+        elif ascend_current_stream_is_capturing():
             scalar_error = "unsupported_graph_capture"
         elif previous_event_before_epilogue is not None:
             scalar_error = "unsupported_dispatch_mode"
@@ -722,6 +741,7 @@ class ElasticBuffer:
             async_with_compute_stream, allocate_on_comm_stream):
         handle_error = None
         descriptor_valid = True
+        self._reconcile_ascend_handle(handle)
         descriptor_fingerprint = _ascend_descriptor_fingerprint(
             getattr(handle, 'token_metadata_at_forward', None))
         if (not isinstance(handle, EPHandle) or
@@ -761,8 +781,7 @@ class ElasticBuffer:
         scalar_error = None
         if num_sms not in (0, 1) or num_qps != 0:
             scalar_error = "invalid_launch_configuration"
-        elif (async_with_compute_stream and
-              ascend_current_stream_is_capturing()):
+        elif ascend_current_stream_is_capturing():
             scalar_error = "unsupported_graph_capture"
         elif previous_event_before_epilogue is not None:
             scalar_error = "unsupported_combine_mode"
@@ -1528,12 +1547,10 @@ class ElasticBuffer:
         hooks_after_wait = []
         if not is_cuda():
             def commit_ascend_handle():
-                self._ascend_handle_generation += 1
-                handle._ascend_owner = self
-                handle._ascend_generation = self._ascend_handle_generation
-                handle._ascend_descriptor_fingerprint = (
-                    _ascend_descriptor_fingerprint(
-                        handle.token_metadata_at_forward))
+                if not self._reconcile_ascend_handle(handle):
+                    raise RuntimeError(
+                        'DeepEP Ascend backend: dispatch completion did not '
+                        'publish its handle generation')
 
             if async_with_compute_stream:
                 hooks_after_wait.append(commit_ascend_handle)

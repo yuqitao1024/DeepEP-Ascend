@@ -191,7 +191,7 @@ private:
     elastic::EventDependency dependency() const {
         TORCH_CHECK(state_ != nullptr && state_->event != nullptr,
                     "DeepEP Ascend backend: predecessor event is unavailable");
-        return {state_->event, state_->pending_operation};
+        return {state_->event, state_->pending_operation, nullptr};
     }
 
     friend class ElasticBuffer;
@@ -231,9 +231,32 @@ public:
             generation, std::move(tensor), descriptor};
     }
 
-    void commit_dispatch_generation(std::uint64_t generation) {
+    void commit_dispatch_descriptor(
+        std::uint64_t generation, const torch::Tensor& descriptor_tensor,
+        const elastic::DispatchHandleDescriptor& descriptor) {
         std::lock_guard<std::mutex> lock(mutex_);
         last_dispatch_generation_ = generation;
+        committed_dispatch_tensor_ = descriptor_tensor;
+        committed_dispatch_descriptor_ = descriptor;
+    }
+
+    std::uint64_t dispatch_handle_generation(
+        const torch::Tensor& descriptor_tensor) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (resources_ == nullptr ||
+            !committed_dispatch_tensor_.has_value() ||
+            !committed_dispatch_descriptor_.has_value() ||
+            descriptor_tensor.data_ptr() !=
+                committed_dispatch_tensor_->data_ptr())
+            return 0;
+        elastic::DispatchHandleDescriptor observed{};
+        const auto status = resources_->copy_to_host(
+            &observed, descriptor_tensor.data_ptr(), sizeof(observed));
+        if (!status.ok() || std::memcmp(
+                &observed, &*committed_dispatch_descriptor_,
+                sizeof(observed)) != 0)
+            return 0;
+        return last_dispatch_generation_;
     }
 
     void stage_combine_completion(
@@ -292,8 +315,6 @@ public:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 staged = staged_combine_;
-                if (staged.has_value() && *output == staged->generation)
-                    staged_combine_.reset();
             }
             if (staged.has_value() && *output != staged->generation)
                 return combine_completion_failure(*staged);
@@ -304,22 +325,41 @@ public:
         }
         if (kind != elastic::BufferOperationKind::kDispatch)
             return status;
+#if DEEP_EP_ASCEND_TESTING
+        inject_testing_completion_mismatch(output);
+#endif
+        return status;
+    }
+
+    transport::TransportStatus commit_completion(
+        elastic::BufferOperationKind kind,
+        std::uint64_t generation) override {
+        if (kind == elastic::BufferOperationKind::kCombine) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!staged_combine_.has_value() ||
+                staged_combine_->generation != generation)
+                return transport::TransportStatus::invalid(
+                    "combine", "generation-bound completion is unavailable");
+            staged_combine_.reset();
+            return transport::TransportStatus::success();
+        }
+        if (kind != elastic::BufferOperationKind::kDispatch)
+            return transport::TransportStatus::success();
 
         std::lock_guard<std::mutex> lock(mutex_);
         if (!staged_dispatch_.has_value() ||
-            staged_dispatch_->generation != *output)
+            staged_dispatch_->generation != generation)
             return transport::TransportStatus::invalid(
                 "dispatch", "generation-bound descriptor commit is unavailable");
-        status = resources_->copy_from_host(
+        auto status = resources_->copy_from_host(
             staged_dispatch_->tensor.data_ptr(), &staged_dispatch_->descriptor,
             sizeof(staged_dispatch_->descriptor));
         if (!status.ok())
             return status;
-        last_dispatch_generation_ = staged_dispatch_->generation;
+        last_dispatch_generation_ = generation;
+        committed_dispatch_tensor_ = staged_dispatch_->tensor;
+        committed_dispatch_descriptor_ = staged_dispatch_->descriptor;
         staged_dispatch_.reset();
-#if DEEP_EP_ASCEND_TESTING
-        inject_testing_completion_mismatch(output);
-#endif
         return transport::TransportStatus::success();
     }
 
@@ -478,6 +518,9 @@ private:
     std::uint64_t last_dispatch_generation_ = 0;
     int rank_idx_ = -1;
     std::optional<StagedDispatch> staged_dispatch_;
+    std::optional<torch::Tensor> committed_dispatch_tensor_;
+    std::optional<elastic::DispatchHandleDescriptor>
+        committed_dispatch_descriptor_;
     std::optional<StagedCombine> staged_combine_;
 };
 
@@ -979,6 +1022,15 @@ public:
         return async_state_ == nullptr;
     }
 
+    std::uint64_t get_dispatch_handle_generation(
+        const torch::Tensor& descriptor_tensor) const {
+        std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+        if (completion_resources_ == nullptr)
+            return 0;
+        return completion_resources_->dispatch_handle_generation(
+            descriptor_tensor);
+    }
+
     c10::Stream get_comm_stream() const {
         std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
 #if DEEP_EP_ASCEND_TESTING
@@ -1059,7 +1111,8 @@ public:
                 raise_transport_status(status, rank_idx_);
             dependency.event = std::move(created.event);
             stream = resources_->comm_stream();
-            status = dependency.event->wait(stream);
+            status = dependency.event->wait(
+                stream, &dependency.wait_lease);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
         }
@@ -1400,7 +1453,8 @@ public:
                 predecessor.event = std::move(created.event);
             }
             dispatch_stream = resources_->comm_stream();
-            status = predecessor.event->wait(dispatch_stream);
+            status = predecessor.event->wait(
+                dispatch_stream, &predecessor.wait_lease);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
         }
@@ -2034,7 +2088,8 @@ public:
             sizeof(committed_descriptor));
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
-        completion_resources_->commit_dispatch_generation(generation);
+        completion_resources_->commit_dispatch_descriptor(
+            generation, descriptor_tensor, committed_descriptor);
         lease.complete();
         const int output_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
         auto narrowed_x = recv_x.narrow(0, 0, output_tokens);
@@ -2401,7 +2456,8 @@ public:
             predecessor.event = std::move(created.event);
         }
         const auto stream = resources_->comm_stream();
-        status = predecessor.event->wait(stream);
+        status = predecessor.event->wait(
+            stream, &predecessor.wait_lease);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
 #if DEEP_EP_ASCEND_HAS_GENERIC_STREAM_GUARD
