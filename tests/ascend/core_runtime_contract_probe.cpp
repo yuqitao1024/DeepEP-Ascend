@@ -923,6 +923,30 @@ int main() {
             CoreRuntimeStatusCode::kInvalidArgument ||
         launch_trace_size != 0)
         return 92;
+    auto zero_token_stride_fp8_epilogue_dispatch = fp8_epilogue_dispatch;
+    zero_token_stride_fp8_epilogue_dispatch.recv_scale_factors = bytes;
+    zero_token_stride_fp8_epilogue_dispatch.recv_scale_factor_token_stride = 0;
+    zero_token_stride_fp8_epilogue_dispatch.recv_scale_factor_pack_stride = 4;
+    reset_launches();
+    if (launch_internal_dispatch_epilogue(
+            zero_token_stride_fp8_epilogue_dispatch,
+            fp8_async_cpu_sync_dispatch, fp8_storage,
+            reinterpret_cast<void*>(0x6161)).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 95;
+    auto zero_pack_stride_fp8_epilogue_dispatch = fp8_epilogue_dispatch;
+    zero_pack_stride_fp8_epilogue_dispatch.recv_scale_factors = bytes;
+    zero_pack_stride_fp8_epilogue_dispatch.recv_scale_factor_token_stride = 1;
+    zero_pack_stride_fp8_epilogue_dispatch.recv_scale_factor_pack_stride = 0;
+    reset_launches();
+    if (launch_internal_dispatch_epilogue(
+            zero_pack_stride_fp8_epilogue_dispatch,
+            fp8_async_cpu_sync_dispatch, fp8_storage,
+            reinterpret_cast<void*>(0x6161)).code !=
+            CoreRuntimeStatusCode::kInvalidArgument ||
+        launch_trace_size != 0)
+        return 96;
     auto empty_fp8_epilogue_dispatch = fp8_epilogue_dispatch;
     empty_fp8_epilogue_dispatch.num_recv_tokens = 0;
     empty_fp8_epilogue_dispatch.num_output_tokens = 0;
