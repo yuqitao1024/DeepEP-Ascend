@@ -58,6 +58,24 @@ int main() {
             std::numeric_limits<std::uint64_t>::max(), 65,
             &bitmap_words))
         return 29;
+    std::uint64_t bitmap_word = 0;
+    std::uint64_t bitmap_mask = 0;
+    if (!dispatch_bitmap_location(
+            0, 65, &bitmap_word, &bitmap_mask) ||
+        bitmap_word != 0 || bitmap_mask != 1 ||
+        !dispatch_bitmap_location(
+            63, 65, &bitmap_word, &bitmap_mask) ||
+        bitmap_word != 0 || bitmap_mask != (std::uint64_t{1} << 63U) ||
+        !dispatch_bitmap_location(
+            64, 65, &bitmap_word, &bitmap_mask) ||
+        bitmap_word != 1 || bitmap_mask != 1 ||
+        dispatch_bitmap_location(
+            65, 65, &bitmap_word, &bitmap_mask) ||
+        dispatch_bitmap_location(
+            0, 65, nullptr, &bitmap_mask) ||
+        dispatch_bitmap_location(
+            0, 65, &bitmap_word, nullptr))
+        return 33;
 
     CoreTiling tiling{};
     auto input = valid_input();

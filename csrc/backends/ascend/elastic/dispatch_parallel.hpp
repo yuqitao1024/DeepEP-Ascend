@@ -40,6 +40,17 @@ dispatch_owner_bitmap_words(
     return true;
 }
 
+DEEP_EP_ASCEND_DISPATCH_PARALLEL_CALLEE constexpr bool
+dispatch_bitmap_location(
+    std::uint64_t bit, std::uint64_t bit_count,
+    std::uint64_t* word, std::uint64_t* mask) noexcept {
+    if (word == nullptr || mask == nullptr || bit >= bit_count)
+        return false;
+    *word = bit / kDispatchBitmapWordBits;
+    *mask = std::uint64_t{1} << (bit % kDispatchBitmapWordBits);
+    return true;
+}
+
 }  // namespace deep_ep::ascend::elastic
 
 #undef DEEP_EP_ASCEND_DISPATCH_PARALLEL_CALLEE

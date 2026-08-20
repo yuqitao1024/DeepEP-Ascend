@@ -363,9 +363,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_remote_operator_commands_reuse_checked_team_peer(self):
         release = (ELASTIC / "release_protocol.hpp").read_text()
-        for source_name, signal_name in (
-                ("dispatch.asc", "kDispatchReleaseSignalIndex"),
-                ("combine.asc", "kCombineReleaseSignalIndex")):
+        for source_name, signal_name, barrier_calls in (
+                ("dispatch.asc", "kDispatchReleaseSignalIndex", 3),
+                ("combine.asc", "kCombineReleaseSignalIndex", 2)):
             source = (ELASTIC / source_name).read_text()
             self.assertIn("checked_device_team_peer_for_world_rank(", source,
                           source_name)
@@ -381,7 +381,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "TransportTeam::kScaleUp, destination_rank", source,
                 source_name)
             self.assertIn(signal_name, source, source_name)
-            self.assertEqual(source.count("transport.device_barrier("), 2,
+            self.assertEqual(source.count("transport.device_barrier("),
+                             barrier_calls,
                              source_name)
         barrier = (ELASTIC / "barrier.asc").read_text()
         self.assertEqual(barrier.count("transport.device_barrier("), 1)
