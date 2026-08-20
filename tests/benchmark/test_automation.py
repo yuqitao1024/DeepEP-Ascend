@@ -13,6 +13,7 @@ import pytest
 
 from tests.benchmark.profiles import BenchmarkProfile, PROFILES, profile_manifest
 from tests.benchmark.run_ep import (
+    ASCEND_READINESS_COMMAND,
     RunConfig,
     build_backend_command,
     build_parser,
@@ -752,6 +753,24 @@ def test_ascend_readiness_requires_the_complete_supported_inventory():
             validate_ascend_readiness({"summary": summary})
 
 
+def test_live_ascend_inventory_satisfies_automation_readiness():
+    result = subprocess.run(
+        ASCEND_READINESS_COMMAND,
+        capture_output=True,
+        text=True,
+        env={},
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["summary"] == {
+        "total": 144,
+        "supported": 144,
+        "deferred": 0,
+    }
+    validate_ascend_readiness(payload)
+
+
 class FakeRunCommand:
     def __init__(
         self,
@@ -824,11 +843,7 @@ def test_execute_run_publishes_exactly_four_final_artifacts(
     assert '"profile": "smoke"' in log
     assert "fake child output" in log
     if backend == "ascend":
-        assert runner.commands[0] == (
-            sys.executable,
-            "tests/ascend/benchmark/bench_ep.py",
-            "--list-cases", "--suite", "all", "--format", "json",
-        )
+        assert runner.commands[0] == ASCEND_READINESS_COMMAND
 
 
 def test_execute_run_returns_child_exit_and_retains_failure_artifacts(tmp_path):

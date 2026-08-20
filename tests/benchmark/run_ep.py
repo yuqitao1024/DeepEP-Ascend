@@ -35,6 +35,11 @@ FINAL_MARKDOWN_NAME = "benchmark.md"
 WORKLOAD_NAME = "workload.json"
 RUN_LOG_NAME = "run.log"
 CHILD_CLEANUP_TIMEOUT_SECONDS = 5.0
+ASCEND_READINESS_COMMAND = (
+    sys.executable,
+    "tests/ascend/benchmark/bench_ep.py",
+    "--list-cases", "--suite", "all", "--format", "json",
+)
 
 
 @dataclass(frozen=True)
@@ -303,14 +308,9 @@ def execute_run(config: RunConfig, command_runner=run_logged_command) -> int:
         try:
             manifest_path = _resolve_workload(config, output_dir)
             if config.backend == "ascend":
-                readiness_command = (
-                    sys.executable,
-                    "tests/ascend/benchmark/bench_ep.py",
-                    "--list-cases", "--suite", "all", "--format", "json",
-                )
                 exit_code, output = _invoke_command(
                     command_runner,
-                    readiness_command,
+                    ASCEND_READINESS_COMMAND,
                     log_handle,
                     config,
                 )

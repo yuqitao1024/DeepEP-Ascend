@@ -20,8 +20,8 @@ The profile and artifact contracts are strict:
 - benchmark.json files are comparison inputs; Markdown files are outputs only
 - Ascend launch requires all 144 inventory rows to be supported
 
-The current Ascend inventory does not yet satisfy the 144/144 launch gate.
-Do not run either Ascend command below until every inventory row is supported.
+The current Ascend inventory satisfies the strict 144/144/0 launch gate. The
+gate remains a regression guard against partial benchmark results.
 
 Run the automation smoke on the H800 host:
 
@@ -40,7 +40,7 @@ scp results/h800-smoke/workload.json \
   ascend-host:DeepEP-Ascend/results/h800-smoke/workload.json
 ```
 
-After the 144/144 gate is satisfied, run the matching Ascend smoke:
+With the 144/144/0 gate satisfied, run the matching Ascend smoke:
 
 ```bash
 python3 tests/benchmark/run_ep.py \
@@ -76,7 +76,7 @@ scp results/h800-canonical/workload.json \
   ascend-host:DeepEP-Ascend/results/h800-canonical/workload.json
 ```
 
-Then run the Ascend canonical profile after the 144/144 gate is satisfied:
+Then run the Ascend canonical profile:
 
 ```bash
 python3 tests/benchmark/run_ep.py \
