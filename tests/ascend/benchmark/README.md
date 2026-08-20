@@ -10,6 +10,106 @@ byte formulas.
 The deterministic case enumeration is defined in
 `tests/utils/ep_benchmark_manifest.py`.
 
+## Eight-rank comparison automation
+
+The profile and artifact contracts are strict:
+
+- smoke validates automation only and is not performance evidence
+- canonical is the only formal H800/Ascend comparison profile
+- workload.json must be transferred byte-for-byte to the second host
+- benchmark.json files are comparison inputs; Markdown files are outputs only
+- Ascend launch requires all 144 inventory rows to be supported
+
+The current Ascend inventory does not yet satisfy the 144/144 launch gate.
+Do not run either Ascend command below until every inventory row is supported.
+
+Run the automation smoke on the H800 host:
+
+```bash
+python3 tests/benchmark/run_ep.py \
+  --backend cuda \
+  --profile smoke \
+  --output-dir results/h800-smoke
+```
+
+Transfer the exact manifest to the repository on the Ascend host, preserving
+the relative path used by the next command:
+
+```bash
+scp results/h800-smoke/workload.json \
+  ascend-host:DeepEP-Ascend/results/h800-smoke/workload.json
+```
+
+After the 144/144 gate is satisfied, run the matching Ascend smoke:
+
+```bash
+python3 tests/benchmark/run_ep.py \
+  --backend ascend \
+  --profile smoke \
+  --workload-manifest results/h800-smoke/workload.json \
+  --output-dir results/ascend-smoke
+```
+
+Transfer both `benchmark.json` files to any offline checkout of this repository
+and compare them. No device runtime is needed:
+
+```bash
+python3 tests/benchmark/compare_ep.py \
+  --cuda results/h800-smoke/benchmark.json \
+  --ascend results/ascend-smoke/benchmark.json \
+  --output smoke-comparison.md
+```
+
+For the only formal comparison, run the canonical profile on the H800 host:
+
+```bash
+python3 tests/benchmark/run_ep.py \
+  --backend cuda \
+  --profile canonical \
+  --output-dir results/h800-canonical
+```
+
+Transfer the canonical manifest byte-for-byte:
+
+```bash
+scp results/h800-canonical/workload.json \
+  ascend-host:DeepEP-Ascend/results/h800-canonical/workload.json
+```
+
+Then run the Ascend canonical profile after the 144/144 gate is satisfied:
+
+```bash
+python3 tests/benchmark/run_ep.py \
+  --backend ascend \
+  --profile canonical \
+  --workload-manifest results/h800-canonical/workload.json \
+  --output-dir results/ascend-canonical
+```
+
+Compare only the two canonical JSON reports for the formal result:
+
+```bash
+python3 tests/benchmark/compare_ep.py \
+  --cuda results/h800-canonical/benchmark.json \
+  --ascend results/ascend-canonical/benchmark.json \
+  --output comparison.md
+```
+
+Every successful backend run has the four-artifact layout defined by the
+automation contract:
+
+```text
+output-dir/
+|-- workload.json
+|-- benchmark.json
+|-- benchmark.md
+`-- run.log
+```
+
+`workload.json` is the shared byte-for-byte manifest. Each `benchmark.json` is
+machine-readable comparison input. `benchmark.md`, the comparison Markdown,
+and `run.log` are outputs and must never be used as comparison inputs.
+
 ## Suite classification
 
 | Classification | Cases | Ascend behavior | Reason |

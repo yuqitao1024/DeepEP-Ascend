@@ -1,9 +1,11 @@
+import ast
 from copy import deepcopy
 from dataclasses import asdict
 import json
 import math
 import re
 import signal
+import subprocess
 from pathlib import Path
 import sys
 
@@ -455,6 +457,155 @@ def test_comparison_rejects_each_identity_mismatch_without_writing_output(
         render_comparison_markdown(cuda, ascend, PROFILES["smoke"])
 
     assert not output.exists()
+
+
+def _run_comparison_cli(cuda_path, ascend_path, output_path):
+    repository_root = Path(__file__).resolve().parents[2]
+    return subprocess.run(
+        [
+            sys.executable,
+            "tests/benchmark/compare_ep.py",
+            "--cuda",
+            str(cuda_path),
+            "--ascend",
+            str(ascend_path),
+            "--output",
+            str(output_path),
+        ],
+        cwd=repository_root,
+        env={},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _write_comparison_inputs(tmp_path, cuda, ascend):
+    cuda_path = tmp_path / "cuda.json"
+    ascend_path = tmp_path / "ascend.json"
+    cuda_path.write_text(json.dumps(cuda), encoding="utf-8")
+    ascend_path.write_text(json.dumps(ascend), encoding="utf-8")
+    return cuda_path, ascend_path
+
+
+def test_comparison_cli_writes_complete_noncanonical_markdown_with_empty_environment(
+    tmp_path,
+):
+    cuda, ascend = _make_comparison_reports()
+    cuda_path, ascend_path = _write_comparison_inputs(tmp_path, cuda, ascend)
+    output = tmp_path / "comparison.md"
+
+    result = _run_comparison_cli(cuda_path, ascend_path, output)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""
+    markdown = output.read_text(encoding="utf-8")
+    assert "NON-CANONICAL AUTOMATION VALIDATION" in markdown
+    assert markdown.count("\n| `ep-") == 720
+
+
+@pytest.mark.parametrize(
+    ("failure", "field"),
+    (
+        ("wrong_platform", "platform"),
+        ("wrong_fingerprint", "workload_fingerprint"),
+        ("wrong_case_count", "cases"),
+    ),
+)
+def test_comparison_cli_rejects_invalid_reports_without_replacing_output(
+    tmp_path, failure, field
+):
+    cuda, ascend = _make_comparison_reports()
+    if failure == "wrong_platform":
+        cuda["platform"] = "ascend"
+    elif failure == "wrong_fingerprint":
+        ascend["workload_fingerprint"] = "b" * 64
+    else:
+        ascend["cases"].pop()
+    cuda_path, ascend_path = _write_comparison_inputs(tmp_path, cuda, ascend)
+    output = tmp_path / "comparison.md"
+    output.write_text("existing\n", encoding="utf-8")
+
+    result = _run_comparison_cli(cuda_path, ascend_path, output)
+
+    assert result.returncode != 0
+    assert field in result.stderr
+    assert "Traceback" not in result.stderr
+    assert output.read_text(encoding="utf-8") == "existing\n"
+
+
+def test_comparison_cli_reports_missing_input_without_replacing_output(tmp_path):
+    _, ascend = _make_comparison_reports()
+    missing_cuda = tmp_path / "missing-cuda.json"
+    ascend_path = tmp_path / "ascend.json"
+    ascend_path.write_text(json.dumps(ascend), encoding="utf-8")
+    output = tmp_path / "comparison.md"
+    output.write_text("existing\n", encoding="utf-8")
+
+    result = _run_comparison_cli(missing_cuda, ascend_path, output)
+
+    assert result.returncode != 0
+    assert str(missing_cuda) in result.stderr
+    assert "No such file or directory" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert output.read_text(encoding="utf-8") == "existing\n"
+
+
+def test_comparison_cli_reports_invalid_json_without_replacing_output(tmp_path):
+    _, ascend = _make_comparison_reports()
+    cuda_path = tmp_path / "cuda.json"
+    ascend_path = tmp_path / "ascend.json"
+    cuda_path.write_text("{invalid\n", encoding="utf-8")
+    ascend_path.write_text(json.dumps(ascend), encoding="utf-8")
+    output = tmp_path / "comparison.md"
+    output.write_text("existing\n", encoding="utf-8")
+
+    result = _run_comparison_cli(cuda_path, ascend_path, output)
+
+    assert result.returncode != 0
+    assert "Expecting property name enclosed in double quotes" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert output.read_text(encoding="utf-8") == "existing\n"
+
+
+def test_comparison_modules_are_runtime_free():
+    repository_root = Path(__file__).resolve().parents[2]
+    forbidden = (
+        "torch",
+        "torch_npu",
+        "deep_ep",
+        "tests.ascend.benchmark.runtime",
+    )
+    imported = {}
+    for relative_path in (
+        "tests/benchmark/compare_ep.py",
+        "tests/benchmark/report_markdown.py",
+        "tests/benchmark/profiles.py",
+    ):
+        source = (repository_root / relative_path).read_text(encoding="utf-8")
+        modules = []
+        for node in ast.walk(ast.parse(source, filename=relative_path)):
+            if isinstance(node, ast.Import):
+                modules.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                modules.append(node.module)
+                modules.extend(f"{node.module}.{alias.name}" for alias in node.names)
+        imported[relative_path] = modules
+
+    violations = {
+        path: [
+            module
+            for module in modules
+            if any(module == name or module.startswith(f"{name}.") for name in forbidden)
+        ]
+        for path, modules in imported.items()
+    }
+    assert violations == {
+        "tests/benchmark/compare_ep.py": [],
+        "tests/benchmark/report_markdown.py": [],
+        "tests/benchmark/profiles.py": [],
+    }
 
 
 def test_write_text_atomic_replaces_destination_and_cleans_failed_temporary_file(
