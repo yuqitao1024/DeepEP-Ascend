@@ -2241,8 +2241,8 @@ class AsyncOverlapWorker:
             buffer.destroy()
         except RuntimeError as error:
             retry_failure = str(error)
-        _check(retry_failure is not None and "destroy_event" in retry_failure,
-               f"retry lost stable destroy failure: {retry_failure}")
+        _check(retry_failure is None,
+               f"destroy retry repeated a transient failure: {retry_failure}")
         _check(buffer.runtime is None,
                "destroy retry did not release Python runtime ownership")
         self.buffers.remove(buffer)

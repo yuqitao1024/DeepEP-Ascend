@@ -2325,6 +2325,60 @@ int main() {
                     ]},
                 )
 
+    def test_async_overlap_destroy_retry_recovers_transient_event_failure(self):
+        spec = importlib.util.spec_from_file_location(
+            "run_async_overlap_destroy_retry", ASYNC_OVERLAP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        fault_name = "DEEP_EP_ASCEND_TEST_STREAM_EVENT_FAULT"
+        original_fault = os.environ.pop(fault_name, None)
+        try:
+            class RetryBuffer:
+                def __init__(self):
+                    self.runtime = object()
+                    self.destroy_calls = 0
+
+                def destroy(self):
+                    self.destroy_calls += 1
+                    if self.destroy_calls == 1:
+                        self.assert_fault_enabled()
+                        raise RuntimeError(
+                            "destroy_event failed with backend error -2")
+                    self.assert_fault_disabled()
+                    self.runtime = None
+
+                @staticmethod
+                def assert_fault_enabled():
+                    if os.environ.get(fault_name) != "destroy_failure":
+                        raise AssertionError("destroy fault was not enabled")
+
+                @staticmethod
+                def assert_fault_disabled():
+                    if fault_name in os.environ:
+                        raise AssertionError("destroy fault leaked into retry")
+
+            buffer = RetryBuffer()
+            worker = object.__new__(module.AsyncOverlapWorker)
+            worker.buffers = [buffer]
+            worker.new_buffer = lambda: buffer
+            worker._seed = lambda _buffer: object()
+            worker._cached_dispatch = lambda *_args, **_kwargs: (
+                object(), object(), object(), object())
+
+            measurements = module.AsyncOverlapWorker._run_destroy_pending_retry(
+                worker)
+
+            self.assertEqual(buffer.destroy_calls, 2)
+            self.assertIsNone(buffer.runtime)
+            self.assertIsNone(measurements["retry_failure"])
+            self.assertTrue(measurements["runtime_released_after_retry"])
+            self.assertEqual(worker.buffers, [])
+        finally:
+            os.environ.pop(fault_name, None)
+            if original_fault is not None:
+                os.environ[fault_name] = original_fault
+
     def test_async_overlap_completion_mismatch_then_drop_event_reuses_handle(self):
         spec = importlib.util.spec_from_file_location(
             "run_async_overlap_lifecycle_sequence", ASYNC_OVERLAP)
