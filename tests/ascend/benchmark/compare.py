@@ -8,6 +8,19 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from tests.ascend.benchmark.report import (  # noqa: E402
+    SCHEMA_VERSION,
+    validate_execution_protocol,
+)
+
+
+def _validate_report_identity(report: dict[str, Any]) -> None:
+    if report.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(
+            "benchmark reports are not comparable: schema_version"
+        )
+    validate_execution_protocol(report.get("execution_protocol"))
+
 
 def _require_equal(
     cuda: dict[str, Any],
@@ -53,6 +66,8 @@ def _positive(record: dict[str, Any], path: tuple[str, ...]) -> float:
 def compare_reports(
     cuda: dict[str, Any], ascend: dict[str, Any]
 ) -> list[dict[str, Any]]:
+    _validate_report_identity(cuda)
+    _validate_report_identity(ascend)
     _require_equal(
         cuda,
         ascend,
@@ -61,6 +76,7 @@ def compare_reports(
             "formula_version",
             "world_size",
             "workload_fingerprint",
+            "execution_protocol",
         ),
     )
     _require_equal(

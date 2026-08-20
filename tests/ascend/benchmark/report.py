@@ -10,8 +10,31 @@ from typing import Any, Callable, Iterable
 from tests.utils.ep_benchmark_manifest import EPModeCase
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 FORMULA_VERSION = 1
+
+
+def validate_execution_protocol(
+    protocol: Any,
+    *,
+    expected_allow_multiple_reduction: int | None = None,
+) -> None:
+    if (
+        not isinstance(protocol, dict)
+        or protocol.keys() != {"allow_multiple_reduction"}
+    ):
+        raise ValueError("execution_protocol")
+    allow_multiple_reduction = protocol["allow_multiple_reduction"]
+    if (
+        type(allow_multiple_reduction) is not int
+        or allow_multiple_reduction not in (0, 1)
+        or (
+            expected_allow_multiple_reduction is not None
+            and allow_multiple_reduction
+            != expected_allow_multiple_reduction
+        )
+    ):
+        raise ValueError("execution_protocol.allow_multiple_reduction")
 
 
 def _current_git_commit() -> str:
@@ -42,6 +65,7 @@ class BenchmarkReport:
     git_commit: str = field(default_factory=_current_git_commit)
     device: dict[str, Any] = field(default_factory=dict)
     workload: dict[str, Any] = field(default_factory=dict)
+    execution_protocol: dict[str, Any] = field(default_factory=dict)
     timing_protocol: dict[str, Any] = field(default_factory=dict)
     failures: list[dict[str, Any]] = field(default_factory=list)
 
@@ -53,7 +77,12 @@ class BenchmarkReport:
         classify: Callable[[EPModeCase], Any],
         workload_fingerprint: str,
         world_size: int,
+        allow_multiple_reduction: int,
     ) -> "BenchmarkReport":
+        execution_protocol = {
+            "allow_multiple_reduction": allow_multiple_reduction,
+        }
+        validate_execution_protocol(execution_protocol)
         records = []
         for case in cases:
             capability = classify(case)
@@ -74,6 +103,7 @@ class BenchmarkReport:
             workload_fingerprint=workload_fingerprint,
             world_size=world_size,
             cases=records,
+            execution_protocol=execution_protocol,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,6 +117,7 @@ class BenchmarkReport:
             "world_size": self.world_size,
             "workload": self.workload,
             "workload_fingerprint": self.workload_fingerprint,
+            "execution_protocol": self.execution_protocol,
             "timing_protocol": self.timing_protocol,
             "case_summary": {
                 "total": len(self.cases),
@@ -133,11 +164,18 @@ def validate_comparable(
     left: BenchmarkReport,
     right: BenchmarkReport,
 ) -> None:
+    for report in (left, right):
+        if report.schema_version != SCHEMA_VERSION:
+            raise ValueError(
+                "benchmark reports are not comparable: schema_version"
+            )
+        validate_execution_protocol(report.execution_protocol)
     identity_fields = (
         "schema_version",
         "formula_version",
         "workload_fingerprint",
         "world_size",
+        "execution_protocol",
     )
     mismatches = [
         field_name

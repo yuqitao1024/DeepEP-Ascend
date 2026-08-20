@@ -81,7 +81,7 @@ def complete_report(platform, profile_name, device_name):
         for case in enumerate_ep_mode_cases()
     ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "formula_version": 1,
         "generated_at": "2026-08-20T00:00:00+00:00",
         "git_commit": "a" * 40,
@@ -90,6 +90,9 @@ def complete_report(platform, profile_name, device_name):
         "world_size": 8,
         "workload": asdict(manifest.spec),
         "workload_fingerprint": manifest.fingerprint,
+        "execution_protocol": {
+            "allow_multiple_reduction": profile.allow_multiple_reduction,
+        },
         "timing_protocol": {
             "timer": "cuda_event" if platform == "cuda" else "npu_event",
             "warmups": profile.warmups,
@@ -211,12 +214,68 @@ def test_identify_profile_rejects_noncanonical_timer():
         identify_profile(report)
 
 
+def test_identify_profile_rejects_schema_v1_with_field_specific_error():
+    report = complete_report("cuda", "smoke", device_name="NVIDIA H800")
+    report["schema_version"] = 1
+
+    with pytest.raises(ValueError, match="schema_version"):
+        identify_profile(report)
+
+
+def test_identify_profile_rejects_disabled_reduction_with_field_specific_error():
+    report = complete_report("cuda", "smoke", device_name="NVIDIA H800")
+    report["execution_protocol"]["allow_multiple_reduction"] = 0
+
+    with pytest.raises(
+        ValueError,
+        match="execution_protocol.allow_multiple_reduction",
+    ):
+        identify_profile(report)
+
+
+@pytest.mark.parametrize(
+    ("execution_protocol", "field"),
+    (
+        (
+            {"allow_multiple_reduction": 0},
+            "execution_protocol.allow_multiple_reduction",
+        ),
+        (
+            {"allow_multiple_reduction": True},
+            "execution_protocol.allow_multiple_reduction",
+        ),
+        (
+            {"allow_multiple_reduction": 1, "unexpected": True},
+            "execution_protocol",
+        ),
+        (None, "execution_protocol"),
+    ),
+)
+def test_complete_report_requires_exact_enabled_execution_protocol(
+    execution_protocol, field
+):
+    report = complete_report("cuda", "smoke", device_name="NVIDIA H800")
+    report["execution_protocol"] = execution_protocol
+
+    with pytest.raises(ValueError, match=re.escape(field)):
+        validate_complete_report(
+            report,
+            platform="cuda",
+            profile=PROFILES["smoke"],
+            require_h800=True,
+        )
+
+
 def _set_wrong_platform(report):
     report["platform"] = "ascend"
 
 
 def _set_wrong_world_size(report):
     report["world_size"] = 4
+
+
+def _set_wrong_schema_version(report):
+    report["schema_version"] = 1
 
 
 def _set_non_h800_device(report):
@@ -293,6 +352,7 @@ def _set_wrong_sample_count(report):
     (
         (_set_wrong_platform, "platform"),
         (_set_wrong_world_size, "world_size"),
+        (_set_wrong_schema_version, "schema_version"),
         (_set_non_h800_device, "device.name"),
         (_set_wrong_workload, "workload.hidden"),
         (_set_wrong_fingerprint, "workload_fingerprint"),
@@ -394,6 +454,38 @@ def test_comparison_rows_and_markdown_render_ascend_over_cuda_ratios():
     ) in markdown
 
 
+def test_canonical_comparison_renders_workload_before_detail_without_warning():
+    cuda = complete_report("cuda", "canonical", device_name="NVIDIA H800")
+    ascend = complete_report("ascend", "canonical", device_name="Ascend 950")
+
+    markdown = render_comparison_markdown(
+        cuda, ascend, PROFILES["canonical"]
+    )
+
+    assert "NON-CANONICAL AUTOMATION VALIDATION" not in markdown
+    assert markdown.index("## Provenance") < markdown.index("## Workload")
+    assert markdown.index("## Workload") < markdown.index("## Detail")
+    assert "| Tokens | 4096 |" in markdown
+    assert "| Hidden | 7168 |" in markdown
+    assert "| Top-k | 6 |" in markdown
+    assert "| Experts | 256 |" in markdown
+    assert "| Seed | 0 |" in markdown
+    assert "| Warmups | 30 |" in markdown
+    assert "| Iterations | 30 |" in markdown
+
+
+def test_automation_comparison_rejects_matching_disabled_reduction_reports():
+    cuda, ascend = _make_comparison_reports()
+    cuda["execution_protocol"]["allow_multiple_reduction"] = 0
+    ascend["execution_protocol"]["allow_multiple_reduction"] = 0
+
+    with pytest.raises(
+        ValueError,
+        match="execution_protocol.allow_multiple_reduction",
+    ):
+        render_comparison_markdown(cuda, ascend, PROFILES["smoke"])
+
+
 def _set_comparison_profile_mismatch(cuda, ascend):
     replacement = complete_report("ascend", "canonical", device_name="Ascend 950")
     ascend.clear()
@@ -401,7 +493,7 @@ def _set_comparison_profile_mismatch(cuda, ascend):
 
 
 def _set_comparison_schema_mismatch(cuda, ascend):
-    ascend["schema_version"] = 2
+    ascend["schema_version"] = 1
 
 
 def _set_comparison_formula_mismatch(cuda, ascend):
@@ -418,6 +510,10 @@ def _set_comparison_world_size_mismatch(cuda, ascend):
 
 def _set_comparison_aggregation_mismatch(cuda, ascend):
     ascend["timing_protocol"]["rank_aggregation"] = "mean_latency"
+
+
+def _set_comparison_execution_protocol_mismatch(cuda, ascend):
+    ascend["execution_protocol"]["allow_multiple_reduction"] = 0
 
 
 def _set_comparison_case_sequence_mismatch(cuda, ascend):
@@ -442,6 +538,10 @@ def _set_comparison_logical_bytes_mismatch(cuda, ascend):
         (_set_comparison_fingerprint_mismatch, "workload_fingerprint"),
         (_set_comparison_world_size_mismatch, "world_size"),
         (_set_comparison_aggregation_mismatch, "timing_protocol.rank_aggregation"),
+        (
+            _set_comparison_execution_protocol_mismatch,
+            "execution_protocol.allow_multiple_reduction",
+        ),
         (_set_comparison_case_sequence_mismatch, "cases[0].case_id"),
         (_set_comparison_operation_sequence_mismatch, "cases[0].operations[0].operation_id"),
         (_set_comparison_logical_bytes_mismatch, "logical_bytes"),
@@ -504,6 +604,36 @@ def test_comparison_cli_writes_complete_noncanonical_markdown_with_empty_environ
     markdown = output.read_text(encoding="utf-8")
     assert "NON-CANONICAL AUTOMATION VALIDATION" in markdown
     assert markdown.count("\n| `ep-") == 720
+
+
+@pytest.mark.parametrize("input_name", ("cuda", "ascend"))
+@pytest.mark.parametrize("alias_kind", ("normalized", "hardlink"))
+def test_comparison_cli_rejects_output_aliasing_either_input_without_modifying_sources(
+    tmp_path, input_name, alias_kind
+):
+    cuda, ascend = _make_comparison_reports()
+    cuda_path, ascend_path = _write_comparison_inputs(tmp_path, cuda, ascend)
+    source_paths = {"cuda": cuda_path, "ascend": ascend_path}
+    original_bytes = {
+        name: path.read_bytes() for name, path in source_paths.items()
+    }
+    aliased_input = source_paths[input_name]
+    if alias_kind == "normalized":
+        alias_directory = tmp_path / "alias-directory"
+        alias_directory.mkdir()
+        output = alias_directory / ".." / aliased_input.name
+    else:
+        output = tmp_path / f"{input_name}-alias.md"
+        output.hardlink_to(aliased_input)
+
+    result = _run_comparison_cli(cuda_path, ascend_path, output)
+
+    assert result.returncode != 0
+    assert f"--output must not alias --{input_name}" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert cuda_path.read_bytes() == original_bytes["cuda"]
+    assert ascend_path.read_bytes() == original_bytes["ascend"]
+    assert output.read_bytes() == original_bytes[input_name]
 
 
 @pytest.mark.parametrize(
@@ -973,6 +1103,63 @@ def test_execute_run_keeps_staging_diagnostics_when_markdown_rendering_fails(
     assert not (output_dir / "benchmark.md").exists()
     assert list(output_dir.glob(".benchmark.md.*")) == []
     assert "markdown exploded" in (output_dir / "run.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("fail_on_promotion", "expected_promotions"),
+    (
+        pytest.param(1, ("benchmark.md",), id="first-promotion"),
+        pytest.param(
+            2,
+            ("benchmark.md", "benchmark.json"),
+            id="after-one-final-artifact",
+        ),
+    ),
+)
+def test_execute_run_rolls_back_injected_publication_failures(
+    tmp_path,
+    monkeypatch,
+    fail_on_promotion,
+    expected_promotions,
+):
+    output_dir = tmp_path / f"promotion-{fail_on_promotion}"
+    report = complete_report("cuda", "smoke", "NVIDIA H800")
+    runner = FakeRunCommand(report)
+    real_replace = run_ep.os.replace
+    promotions = []
+
+    def fail_selected_promotion(source, destination):
+        destination = Path(destination)
+        if destination.name in ("benchmark.md", "benchmark.json"):
+            promotions.append(destination.name)
+            if len(promotions) == fail_on_promotion:
+                raise OSError(
+                    f"injected {destination.name} promotion failure"
+                )
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(run_ep.os, "replace", fail_selected_promotion)
+
+    result = execute_run(
+        RunConfig("cuda", "smoke", output_dir, None),
+        command_runner=runner,
+    )
+
+    assert result == 1
+    assert tuple(promotions) == expected_promotions
+    assert not (output_dir / "benchmark.json").exists()
+    assert not (output_dir / "benchmark.md").exists()
+    assert json.loads(
+        (output_dir / "benchmark.staging.json").read_text(encoding="utf-8")
+    ) == report
+    assert load_manifest(output_dir / "workload.json") == profile_manifest(
+        PROFILES["smoke"]
+    )
+    assert list(output_dir.glob(".benchmark.md.*")) == []
+    log = (output_dir / "run.log").read_text(encoding="utf-8")
+    assert "injected benchmark." in log
+    assert '"event": "run_end"' in log
+    assert '"exit_code": 1' in log
 
 
 def test_input_manifest_is_validated_and_copied_byte_for_byte(tmp_path):

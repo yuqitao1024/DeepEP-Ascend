@@ -837,6 +837,7 @@ def run_benchmark(args: Any, selected_case_ids: tuple[str, ...]) -> int:
             classify=classify_ascend_case,
             workload_fingerprint=manifest.fingerprint,
             world_size=world_size,
+            allow_multiple_reduction=args.allow_multiple_reduction,
         )
         report.workload = asdict(manifest.spec)
         report.timing_protocol = {

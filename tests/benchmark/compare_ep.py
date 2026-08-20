@@ -32,6 +32,28 @@ def _load_report(path: Path) -> dict:
     return report
 
 
+def _paths_alias(left: Path, right: Path) -> bool:
+    if left == right:
+        return True
+    try:
+        return left.samefile(right)
+    except FileNotFoundError:
+        return False
+
+
+def _resolved_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    cuda_path = args.cuda.resolve()
+    ascend_path = args.ascend.resolve()
+    output_path = args.output.resolve()
+    for option, input_path in (
+        ("cuda", cuda_path),
+        ("ascend", ascend_path),
+    ):
+        if _paths_alias(output_path, input_path):
+            raise ValueError(f"--output must not alias --{option}")
+    return cuda_path, ascend_path, output_path
+
+
 def _identify_profiles(cuda: dict, ascend: dict):
     cuda_profile = None
     ascend_profile = None
@@ -71,8 +93,9 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        cuda = _load_report(args.cuda)
-        ascend = _load_report(args.ascend)
+        cuda_path, ascend_path, output_path = _resolved_paths(args)
+        cuda = _load_report(cuda_path)
+        ascend = _load_report(ascend_path)
         cuda_profile, ascend_profile = _identify_profiles(cuda, ascend)
         validate_complete_report(
             cuda,
@@ -86,7 +109,7 @@ def main(argv=None) -> int:
             profile=ascend_profile,
         )
         markdown = render_comparison_markdown(cuda, ascend, cuda_profile)
-        write_text_atomic(args.output, markdown)
+        write_text_atomic(output_path, markdown)
     except (OSError, json.JSONDecodeError, ValueError) as error:
         parser.error(str(error))
     return 0

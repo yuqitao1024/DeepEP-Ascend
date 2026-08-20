@@ -5,6 +5,10 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from tests.ascend.benchmark.report import (
+    SCHEMA_VERSION,
+    validate_execution_protocol,
+)
 from tests.benchmark.profiles import BenchmarkProfile, PROFILES, profile_manifest
 from tests.utils.ep_benchmark_core import PERFORMANCE_OPERATIONS
 from tests.utils.ep_benchmark_manifest import EPModeCase, enumerate_ep_mode_cases
@@ -51,6 +55,9 @@ def _expected_timing(platform: str, profile: BenchmarkProfile) -> dict[str, Any]
 
 
 def identify_profile(report: dict) -> BenchmarkProfile:
+    if not isinstance(report, dict):
+        raise ValueError("report does not match canonical or smoke profile")
+    _require_equal(report.get("schema_version"), SCHEMA_VERSION, "schema_version")
     platform = report.get("platform")
     if platform not in ("cuda", "ascend"):
         raise ValueError("report does not match canonical or smoke profile")
@@ -66,7 +73,12 @@ def identify_profile(report: dict) -> BenchmarkProfile:
             matches.append(profile)
     if len(matches) != 1:
         raise ValueError("report does not match canonical or smoke profile")
-    return matches[0]
+    profile = matches[0]
+    validate_execution_protocol(
+        report.get("execution_protocol"),
+        expected_allow_multiple_reduction=profile.allow_multiple_reduction,
+    )
+    return profile
 
 
 def _validate_operation(
@@ -122,7 +134,9 @@ def validate_complete_report(
         raise ValueError("platform")
     if not isinstance(report, dict):
         raise ValueError("report")
-    _require_equal(report.get("schema_version"), 1, "schema_version")
+    _require_equal(
+        report.get("schema_version"), SCHEMA_VERSION, "schema_version"
+    )
     _require_equal(report.get("formula_version"), 1, "formula_version")
     _require_equal(report.get("platform"), platform, "platform")
     _require_equal(report.get("world_size"), profile.world_size, "world_size")
@@ -134,6 +148,10 @@ def validate_complete_report(
         report.get("workload_fingerprint"),
         manifest.fingerprint,
         "workload_fingerprint",
+    )
+    validate_execution_protocol(
+        report.get("execution_protocol"),
+        expected_allow_multiple_reduction=profile.allow_multiple_reduction,
     )
     _require_exact_dict(
         report.get("timing_protocol"),
@@ -220,8 +238,25 @@ def _backend_title(platform: str) -> str:
     raise ValueError("platform")
 
 
-def _backend_metadata_lines(report: dict, profile: BenchmarkProfile) -> list[str]:
+def _workload_metadata_lines(
+    report: dict, profile: BenchmarkProfile
+) -> list[str]:
     workload = report["workload"]
+    return [
+        "## Workload",
+        "| Field | Value |",
+        "| --- | ---: |",
+        f"| Tokens | {workload['num_tokens']} |",
+        f"| Hidden | {workload['hidden']} |",
+        f"| Top-k | {workload['num_topk']} |",
+        f"| Experts | {workload['num_experts']} |",
+        f"| Seed | {workload['seed']} |",
+        f"| Warmups | {profile.warmups} |",
+        f"| Iterations | {profile.iterations} |",
+    ]
+
+
+def _backend_metadata_lines(report: dict, profile: BenchmarkProfile) -> list[str]:
     return [
         "## Provenance",
         "| Field | Value |",
@@ -233,16 +268,7 @@ def _backend_metadata_lines(report: dict, profile: BenchmarkProfile) -> list[str
         f"| World size | {report['world_size']} |",
         f"| Workload fingerprint | {_markdown_cell(report['workload_fingerprint'])} |",
         "",
-        "## Workload",
-        "| Field | Value |",
-        "| --- | ---: |",
-        f"| Tokens | {workload['num_tokens']} |",
-        f"| Hidden | {workload['hidden']} |",
-        f"| Top-k | {workload['num_topk']} |",
-        f"| Experts | {workload['num_experts']} |",
-        f"| Seed | {workload['seed']} |",
-        f"| Warmups | {profile.warmups} |",
-        f"| Iterations | {profile.iterations} |",
+        *_workload_metadata_lines(report, profile),
     ]
 
 
@@ -326,6 +352,7 @@ def comparison_rows(cuda: dict, ascend: dict) -> tuple[dict, ...]:
         "formula_version",
         "world_size",
         "workload_fingerprint",
+        "execution_protocol",
     ):
         _comparison_equal(cuda.get(field), ascend.get(field), field)
     for field in (
@@ -405,6 +432,8 @@ def render_comparison_markdown(
         f"| World size | {cuda['world_size']} | {ascend['world_size']} |",
         f"| Workload fingerprint | {_markdown_cell(cuda['workload_fingerprint'])} | "
         f"{_markdown_cell(ascend['workload_fingerprint'])} |",
+        "",
+        *_workload_metadata_lines(cuda, profile),
         "",
         "## Detail",
         "| Case | Operation | H800 Mean us | H800 P50 us | H800 P95 us | "

@@ -534,8 +534,9 @@ and child output without serializing environment secrets.
 After the backend exits successfully, the automation rejects the run unless:
 
 - the report schema and formula versions are supported;
-- platform, eight-rank world size, workload, fingerprint, warmups, iterations,
-  and aggregation rules match the selected profile and manifest;
+- platform, eight-rank world size, workload, fingerprint, execution protocol,
+  warmups, iterations, and aggregation rules match the selected profile and
+  manifest;
 - all 144 expected case IDs appear once in canonical enumeration order;
 - all cases passed with no failures; and
 - every case contains the same five expected timed operation IDs with positive
@@ -559,10 +560,12 @@ python3 tests/benchmark/compare_ep.py \
 The command runs on a machine with only Python and the repository. It does not
 import CUDA, Torch-NPU, DeepEP runtime modules, or model services. It rejects
 reports unless both are the same profile and match on schema/formula version,
-world size, workload fingerprint, timing counts and aggregation, complete
-144-case sequence, five operation IDs per case, and logical bytes for every
-matched operation. Profile identity is derived from the exact workload and
-timing tuple in each JSON report, not from its filename or Markdown text.
+world size, workload fingerprint, execution protocol, timing counts and
+aggregation, complete 144-case sequence, five operation IDs per case, and
+logical bytes for every matched operation. Profile identity is derived from
+the exact workload, execution-protocol, and timing values in each JSON report,
+not from its filename or Markdown text. The comparison rejects an output path
+that resolves to either input report, including an existing filesystem alias.
 
 The comparison Markdown starts with provenance and workload tables, followed
 by exactly 720 detail rows in canonical case order and fixed operation order.
@@ -682,11 +685,26 @@ device
 world_size
 workload
 workload_fingerprint
+execution_protocol
 timing_protocol
 case_summary
 cases
 failures
 ```
+
+Benchmark reports use schema version 2. `execution_protocol` is exactly:
+
+```json
+{"allow_multiple_reduction": 0}
+```
+
+or the same object with value `1`, populated from the backend's actual CLI
+argument. This setting is execution identity, not routing identity or timing,
+so it is deliberately absent from the workload fingerprint and
+`timing_protocol`. The fixed `canonical` and `smoke` automation profiles require
+value `1`; schema-v1 reports and direct-run reports with value `0` are rejected
+by automation identification, validation, and comparison. No schema-v1
+migration is provided before merge.
 
 `git_commit` records the repository `HEAD` that generated the report. Source
 archives without Git metadata use the explicit value `unknown`.
@@ -716,9 +734,9 @@ deferred.
 - JSON is written atomically after all selected cases complete and rank results
   are aggregated.
 - Comparison rejects mismatched fingerprints, case IDs, formula versions,
-  world sizes, timing counts/aggregation, logical bytes, or operation IDs
-  rather than displaying misleading ratios. CUDA and NPU event timer names are
-  platform-specific and are not required to match.
+  world sizes, execution protocols, timing counts/aggregation, logical bytes,
+  or operation IDs rather than displaying misleading ratios. CUDA and NPU
+  event timer names are platform-specific and are not required to match.
 
 ## Testing
 

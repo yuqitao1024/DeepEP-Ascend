@@ -190,6 +190,7 @@ def run_cuda_parity(buffer, args):
         classify=classify_cuda_case,
         workload_fingerprint=manifest.fingerprint,
         world_size=world_size,
+        allow_multiple_reduction=args.allow_multiple_reduction,
     )
     report.workload = asdict(manifest.spec)
     report.device = {

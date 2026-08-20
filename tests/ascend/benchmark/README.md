@@ -19,6 +19,8 @@ The profile and artifact contracts are strict:
 - workload.json must be transferred byte-for-byte to the second host
 - benchmark.json files are comparison inputs; Markdown files are outputs only
 - Ascend launch requires all 144 inventory rows to be supported
+- benchmark reports use schema version 2 and both profiles require multiple
+  reduction enabled
 
 The current Ascend inventory satisfies the strict 144/144/0 launch gate. The
 gate remains a regression guard against partial benchmark results.
@@ -109,6 +111,20 @@ output-dir/
 `workload.json` is the shared byte-for-byte manifest. Each `benchmark.json` is
 machine-readable comparison input. `benchmark.md`, the comparison Markdown,
 and `run.log` are outputs and must never be used as comparison inputs.
+Comparison output must be a separate path and cannot alias either JSON input.
+
+Schema-v2 reports record the backend's actual reduction setting in this exact
+top-level object:
+
+```json
+{"execution_protocol": {"allow_multiple_reduction": 1}}
+```
+
+The field is execution identity and is intentionally outside both the workload
+fingerprint and `timing_protocol`. The fixed smoke and canonical automation
+profiles reject value `0`, missing or additional protocol fields, and all
+schema-v1 reports; there is no pre-merge migration path for older automation
+artifacts.
 
 ## Suite classification
 
@@ -315,9 +331,9 @@ python3 tests/ascend/benchmark/compare.py \
 The table reports CUDA and Ascend mean/p50/p95 device latency, logical GB/s,
 Ascend-over-CUDA latency ratio, and Ascend-over-CUDA bandwidth ratio.
 Comparison is rejected when schema version, formula version, world size,
-workload fingerprint, timing counts/aggregation, passed case IDs, operation
-IDs, or logical bytes differ. The CUDA and NPU event timer names are expected
-to differ and are not a rejection condition.
+workload fingerprint, execution protocol, timing counts/aggregation, passed
+case IDs, operation IDs, or logical bytes differ. The CUDA and NPU event timer
+names are expected to differ and are not a rejection condition.
 
 ## JSON interpretation
 
@@ -325,12 +341,13 @@ The default report contains exactly 144 supported cases and 720 operation
 records; the 144-row inventory is available separately through
 `--list-cases`. Top-level identity and provenance fields include
 `schema_version`, `formula_version`, `git_commit`, `platform`, `world_size`,
-`workload`, and `workload_fingerprint`. `git_commit` is the repository `HEAD`,
-or `unknown` when Git metadata is unavailable. `case_summary` reports `total`,
-`pending`, `passed`, and `failed` for cases actually present. Each passed
-operation records raw device/wall samples, mean/p50/p95 summaries, logical
-bytes, formula version, per-rank summaries, and aggregated logical GB/s. Rank
-latency uses the maximum for each sample; logical bytes are summed over ranks.
+`workload`, `workload_fingerprint`, and `execution_protocol`. `git_commit` is the
+repository `HEAD`, or `unknown` when Git metadata is unavailable. `case_summary`
+reports `total`, `pending`, `passed`, and `failed` for cases actually present.
+Each passed operation records raw device/wall samples, mean/p50/p95 summaries,
+logical bytes, formula version, per-rank summaries, and aggregated logical GB/s.
+Rank latency uses the maximum for each sample; logical bytes are summed over
+ranks.
 
 Do not compare internal kernel-stage profiler times across platforms. The
 canonical comparable latency is the end-to-end CUDA/NPU event interval around

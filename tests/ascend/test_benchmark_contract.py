@@ -421,13 +421,17 @@ def test_default_report_contains_all_current_cases(tmp_path):
         classify=classify_ascend_case,
         workload_fingerprint="a" * 64,
         world_size=2,
+        allow_multiple_reduction=1,
     )
     output = tmp_path / "benchmark.json"
 
     write_report_atomic(output, report)
     payload = json.loads(output.read_text())
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
+    assert payload["execution_protocol"] == {
+        "allow_multiple_reduction": 1,
+    }
     assert payload["git_commit"] == subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=ROOT,
@@ -451,6 +455,7 @@ def test_performance_report_accepts_every_inventory_case():
         classify=classify_ascend_case,
         workload_fingerprint="a" * 64,
         world_size=2,
+        allow_multiple_reduction=1,
     )
 
     assert len(report.cases) == 144
@@ -468,6 +473,7 @@ def test_comparison_rejects_incompatible_report_identity():
         classify=classify_ascend_case,
         workload_fingerprint="a" * 64,
         world_size=2,
+        allow_multiple_reduction=1,
     )
     right = BenchmarkReport.empty_for_cases(
         platform="ascend",
@@ -475,10 +481,93 @@ def test_comparison_rejects_incompatible_report_identity():
         classify=classify_ascend_case,
         workload_fingerprint="b" * 64,
         world_size=2,
+        allow_multiple_reduction=1,
     )
 
     with pytest.raises(ValueError, match="workload_fingerprint"):
         validate_comparable(left, right)
+
+
+@pytest.mark.parametrize("allow_multiple_reduction", (0, 1))
+def test_report_schema_v2_serializes_exact_execution_protocol(
+    allow_multiple_reduction,
+):
+    report = BenchmarkReport.empty_for_cases(
+        platform="ascend",
+        cases=(),
+        classify=classify_ascend_case,
+        workload_fingerprint="a" * 64,
+        world_size=2,
+        allow_multiple_reduction=allow_multiple_reduction,
+    )
+
+    payload = report.to_dict()
+
+    assert payload["schema_version"] == 2
+    assert payload["execution_protocol"] == {
+        "allow_multiple_reduction": allow_multiple_reduction,
+    }
+
+
+def test_report_comparison_rejects_execution_protocol_mismatch():
+    reports = [
+        BenchmarkReport.empty_for_cases(
+            platform=platform,
+            cases=(),
+            classify=classify_ascend_case,
+            workload_fingerprint="a" * 64,
+            world_size=2,
+            allow_multiple_reduction=allow_multiple_reduction,
+        )
+        for platform, allow_multiple_reduction in (
+            ("cuda", 1),
+            ("ascend", 0),
+        )
+    ]
+
+    with pytest.raises(ValueError, match="execution_protocol"):
+        validate_comparable(*reports)
+
+
+def test_report_comparison_rejects_schema_v1_pair():
+    reports = [
+        BenchmarkReport.empty_for_cases(
+            platform=platform,
+            cases=(),
+            classify=classify_ascend_case,
+            workload_fingerprint="a" * 64,
+            world_size=2,
+            allow_multiple_reduction=1,
+        )
+        for platform in ("cuda", "ascend")
+    ]
+    for report in reports:
+        report.schema_version = 1
+
+    with pytest.raises(ValueError, match="schema_version"):
+        validate_comparable(*reports)
+
+
+def test_report_comparison_rejects_boolean_execution_protocol_value():
+    reports = [
+        BenchmarkReport.empty_for_cases(
+            platform=platform,
+            cases=(),
+            classify=classify_ascend_case,
+            workload_fingerprint="a" * 64,
+            world_size=2,
+            allow_multiple_reduction=1,
+        )
+        for platform in ("cuda", "ascend")
+    ]
+    for report in reports:
+        report.execution_protocol["allow_multiple_reduction"] = True
+
+    with pytest.raises(
+        ValueError,
+        match="execution_protocol.allow_multiple_reduction",
+    ):
+        validate_comparable(*reports)
 
 
 def test_benchmark_parser_preserves_production_size_defaults():
@@ -732,11 +821,12 @@ def _report_fixture(
     logical_bytes=200_000,
 ):
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "formula_version": 1,
         "platform": platform,
         "world_size": 2,
         "workload_fingerprint": fingerprint,
+        "execution_protocol": {"allow_multiple_reduction": 1},
         "timing_protocol": {
             "timer": f"{platform}_event",
             "warmups": 30,
@@ -789,6 +879,38 @@ def test_compare_reports_rejects_timing_protocol_mismatch():
             _report_fixture("cuda", iterations=30),
             _report_fixture("ascend", iterations=1),
         )
+
+
+def test_compare_reports_rejects_execution_protocol_mismatch():
+    cuda = _report_fixture("cuda")
+    ascend = _report_fixture("ascend")
+    ascend["execution_protocol"]["allow_multiple_reduction"] = 0
+
+    with pytest.raises(ValueError, match="execution_protocol"):
+        compare_reports(cuda, ascend)
+
+
+def test_compare_reports_rejects_schema_v1_pair():
+    cuda = _report_fixture("cuda")
+    ascend = _report_fixture("ascend")
+    cuda["schema_version"] = 1
+    ascend["schema_version"] = 1
+
+    with pytest.raises(ValueError, match="schema_version"):
+        compare_reports(cuda, ascend)
+
+
+def test_compare_reports_rejects_boolean_execution_protocol_value():
+    cuda = _report_fixture("cuda")
+    ascend = _report_fixture("ascend")
+    cuda["execution_protocol"]["allow_multiple_reduction"] = True
+    ascend["execution_protocol"]["allow_multiple_reduction"] = True
+
+    with pytest.raises(
+        ValueError,
+        match="execution_protocol.allow_multiple_reduction",
+    ):
+        compare_reports(cuda, ascend)
 
 
 def test_compare_reports_rejects_logical_byte_mismatch():
