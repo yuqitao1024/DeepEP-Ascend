@@ -569,6 +569,39 @@ def test_comparison_cli_reports_invalid_json_without_replacing_output(tmp_path):
     assert output.read_text(encoding="utf-8") == "existing\n"
 
 
+def test_comparison_cli_rejects_malformed_cuda_device_without_replacing_output(
+    tmp_path,
+):
+    cuda, ascend = _make_comparison_reports()
+    cuda["device"] = []
+    cuda_path, ascend_path = _write_comparison_inputs(tmp_path, cuda, ascend)
+    output = tmp_path / "comparison.md"
+    output.write_text("existing\n", encoding="utf-8")
+
+    result = _run_comparison_cli(cuda_path, ascend_path, output)
+
+    assert result.returncode != 0
+    assert "device" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert output.read_text(encoding="utf-8") == "existing\n"
+
+
+def test_comparison_cli_rejects_malformed_ascend_device_without_creating_output(
+    tmp_path,
+):
+    cuda, ascend = _make_comparison_reports()
+    ascend["device"] = []
+    cuda_path, ascend_path = _write_comparison_inputs(tmp_path, cuda, ascend)
+    output = tmp_path / "comparison.md"
+
+    result = _run_comparison_cli(cuda_path, ascend_path, output)
+
+    assert result.returncode != 0
+    assert "device" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not output.exists()
+
+
 def test_comparison_modules_are_runtime_free():
     repository_root = Path(__file__).resolve().parents[2]
     forbidden = (

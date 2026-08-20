@@ -140,8 +140,11 @@ def validate_complete_report(
         _expected_timing(platform, profile),
         "timing_protocol",
     )
+    device = report.get("device")
+    if not isinstance(device, dict):
+        raise ValueError("device")
     if require_h800:
-        name = report.get("device", {}).get("name")
+        name = device.get("name")
         if not isinstance(name, str) or "h800" not in name.lower():
             raise ValueError("device.name")
 
