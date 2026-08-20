@@ -2,14 +2,19 @@ from copy import deepcopy
 from dataclasses import asdict
 import math
 import re
+from pathlib import Path
 
 import pytest
 
 from tests.benchmark.profiles import BenchmarkProfile, PROFILES, profile_manifest
 from tests.benchmark.report_markdown import (
+    comparison_rows,
     identify_profile,
     operation_records,
+    render_backend_markdown,
+    render_comparison_markdown,
     validate_complete_report,
+    write_text_atomic,
 )
 from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
 
@@ -300,3 +305,157 @@ def test_complete_report_rejects_each_invalid_field(mutate, field):
             profile=PROFILES["smoke"],
             require_h800=True,
         )
+
+
+def test_backend_markdown_renders_smoke_warning_and_canonical_detail_rows():
+    report = complete_report("cuda", "smoke", device_name="NVIDIA H800")
+
+    markdown = render_backend_markdown(report, PROFILES["smoke"])
+
+    assert "# EP Benchmark: CUDA / smoke" in markdown
+    assert "NON-CANONICAL AUTOMATION VALIDATION" in markdown
+    assert "| Case | Operation | Mean us | P50 us | P95 us | Logical GB/s |" in markdown
+    assert markdown.count("\n| `ep-") == 720
+    assert (
+        "| `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0` | dispatch | "
+        "1.000 | 1.000 | 1.000 | 2.000 |"
+    ) in markdown
+    assert markdown.index("| `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0` | dispatch") < markdown.index(
+        "| `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0` | cached_dispatch"
+    )
+    assert markdown.endswith("\n")
+    assert not markdown.endswith("\n\n")
+
+
+def test_backend_markdown_renders_canonical_provenance_workload_and_escaped_cells():
+    report = complete_report("ascend", "canonical", device_name="Ascend|950\\rack\r\nnext")
+    report["git_commit"] = "commit|abc\\def\r\nnext"
+
+    markdown = render_backend_markdown(report, PROFILES["canonical"])
+
+    assert "# EP Benchmark: Ascend / canonical" in markdown
+    assert "NON-CANONICAL AUTOMATION VALIDATION" not in markdown
+    assert "| Git commit | commit\\|abc\\\\def\\r\\nnext |" in markdown
+    assert "| Device | Ascend\\|950\\\\rack\\r\\nnext |" in markdown
+    assert "| World size | 8 |" in markdown
+    assert "| Workload fingerprint | " + report["workload_fingerprint"] + " |" in markdown
+    assert "| Tokens | 4096 |" in markdown
+    assert "| Hidden | 7168 |" in markdown
+    assert "| Top-k | 6 |" in markdown
+    assert "| Experts | 256 |" in markdown
+
+
+def _make_comparison_reports():
+    cuda = complete_report("cuda", "smoke", device_name="NVIDIA H800")
+    ascend = complete_report("ascend", "smoke", device_name="Ascend 950")
+    cuda_operation = cuda["cases"][0]["operations"][0]
+    ascend_operation = ascend["cases"][0]["operations"][0]
+    cuda_operation["device_seconds"].update(mean=1e-6, p50=2e-6, p95=3e-6)
+    ascend_operation["device_seconds"].update(mean=2e-6, p50=4e-6, p95=6e-6)
+    cuda_operation["logical_gbps"] = 4.0
+    ascend_operation["logical_gbps"] = 2.0
+    return cuda, ascend
+
+
+def test_comparison_rows_and_markdown_render_ascend_over_cuda_ratios():
+    cuda, ascend = _make_comparison_reports()
+
+    rows = comparison_rows(cuda, ascend)
+    markdown = render_comparison_markdown(cuda, ascend, PROFILES["smoke"])
+
+    assert len(rows) == 720
+    assert rows[0]["latency_ratio"] == pytest.approx(2.0)
+    assert rows[0]["bandwidth_ratio"] == pytest.approx(0.5)
+    assert "# EP Benchmark Comparison: H800 vs Ascend" in markdown
+    assert "NON-CANONICAL AUTOMATION VALIDATION" in markdown
+    assert markdown.count("\n| `ep-") == 720
+    assert (
+        "| `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0` | dispatch | "
+        "1.000 | 2.000 | 3.000 | 4.000 | 2.000 | 4.000 | 6.000 | 2.000 | "
+        "2.000 | 0.500 |"
+    ) in markdown
+
+
+def _set_comparison_profile_mismatch(cuda, ascend):
+    replacement = complete_report("ascend", "canonical", device_name="Ascend 950")
+    ascend.clear()
+    ascend.update(replacement)
+
+
+def _set_comparison_schema_mismatch(cuda, ascend):
+    ascend["schema_version"] = 2
+
+
+def _set_comparison_formula_mismatch(cuda, ascend):
+    ascend["formula_version"] = 2
+
+
+def _set_comparison_fingerprint_mismatch(cuda, ascend):
+    ascend["workload_fingerprint"] = "b" * 64
+
+
+def _set_comparison_world_size_mismatch(cuda, ascend):
+    ascend["world_size"] = 4
+
+
+def _set_comparison_aggregation_mismatch(cuda, ascend):
+    ascend["timing_protocol"]["rank_aggregation"] = "mean_latency"
+
+
+def _set_comparison_case_sequence_mismatch(cuda, ascend):
+    ascend["cases"][0], ascend["cases"][1] = ascend["cases"][1], ascend["cases"][0]
+
+
+def _set_comparison_operation_sequence_mismatch(cuda, ascend):
+    operations = ascend["cases"][0]["operations"]
+    operations[0], operations[1] = operations[1], operations[0]
+
+
+def _set_comparison_logical_bytes_mismatch(cuda, ascend):
+    ascend["cases"][0]["operations"][0]["logical_bytes"] = {"scaleup": 2001}
+
+
+@pytest.mark.parametrize(
+    ("mutate", "field"),
+    (
+        (_set_comparison_profile_mismatch, "profile"),
+        (_set_comparison_schema_mismatch, "schema_version"),
+        (_set_comparison_formula_mismatch, "formula_version"),
+        (_set_comparison_fingerprint_mismatch, "workload_fingerprint"),
+        (_set_comparison_world_size_mismatch, "world_size"),
+        (_set_comparison_aggregation_mismatch, "timing_protocol.rank_aggregation"),
+        (_set_comparison_case_sequence_mismatch, "cases[0].case_id"),
+        (_set_comparison_operation_sequence_mismatch, "cases[0].operations[0].operation_id"),
+        (_set_comparison_logical_bytes_mismatch, "logical_bytes"),
+    ),
+)
+def test_comparison_rejects_each_identity_mismatch_without_writing_output(
+    tmp_path, mutate, field
+):
+    cuda, ascend = _make_comparison_reports()
+    output = tmp_path / "comparison.md"
+    mutate(cuda, ascend)
+
+    with pytest.raises(ValueError, match=re.escape(field)):
+        render_comparison_markdown(cuda, ascend, PROFILES["smoke"])
+
+    assert not output.exists()
+
+
+def test_write_text_atomic_replaces_destination_and_cleans_failed_temporary_file(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "report.md"
+    output.write_text("old\n", encoding="utf-8")
+    write_text_atomic(output, "new\n")
+    assert output.read_text(encoding="utf-8") == "new\n"
+
+    def fail_replace(source, destination):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("tests.benchmark.report_markdown.os.replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        write_text_atomic(output, "uncommitted\n")
+
+    assert output.read_text(encoding="utf-8") == "new\n"
+    assert list(Path(tmp_path).glob(".report.md.*")) == []
