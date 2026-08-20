@@ -116,7 +116,7 @@ python3 tests/ascend/production/run_async_overlap.py \
   --trace-dir /tmp/phase3e-traces
 ```
 
-Every runner case has a 30-second child-process bound. The complete TaskQueue
+Every runner case has a 45-second child-process bound. The complete TaskQueue
 job remains bounded by `--max-time 300`. The runner atomically rewrites the
 JSON report after every completed case, streams captured diagnostics for a
 failed child, and stops at the first failure. The report summary distinguishes

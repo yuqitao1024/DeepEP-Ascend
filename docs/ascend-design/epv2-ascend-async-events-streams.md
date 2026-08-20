@@ -399,6 +399,15 @@ Every fixed Phase 3E.1 gate passed, so Phase 3E.1 is accepted. This does not
 promote any of the 120 deferred full functional benchmark rows or change the
 3E.2-3E.4 and FP8 Phase 3F boundaries.
 
+Post-rebase qualification keeps every functional and performance gate above,
+but raises the external per-case process watchdog from 30 to 45 seconds. A
+clean exact-source run completed both CANN profiler exports in about 19.7
+seconds yet crossed the old watchdog at `30.0009s` before result publication;
+the earlier accepted overlap row had already consumed `26.7121s`. The extra
+controller margin does not change the five-second native event deadline, the
+5% median-improvement threshold, the three warmups, seven measured samples, or
+the 300-second TaskQueue bound.
+
 ## Decisions
 
 ### Native resource model

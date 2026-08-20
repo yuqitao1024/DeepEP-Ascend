@@ -2082,7 +2082,7 @@ int main() {
             json.loads(result.stdout),
             {
                 "case_names": expected_cases,
-                "case_timeout_seconds": 30,
+                "case_timeout_seconds": 45,
                 "contract_checks": [
                     "literal-bf16-torch-reference",
                     "rank-qualified-failure-aggregation",
@@ -2171,7 +2171,7 @@ int main() {
                     "warmups": 3,
                 },
                 "reference": "rank-gathered-literal-inputs-and-torch-ops",
-                "watchdog_seconds": 30,
+                "watchdog_seconds": 45,
                 "world_size": 2,
             })
 

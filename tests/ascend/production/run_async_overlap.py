@@ -17,7 +17,7 @@ from datetime import timedelta
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
-CASE_TIMEOUT_SECONDS = 30
+CASE_TIMEOUT_SECONDS = 45
 WORLD_SIZE = 2
 NUM_EXPERTS = 4
 NUM_TOPK = 2
