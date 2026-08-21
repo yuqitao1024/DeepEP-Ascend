@@ -56,6 +56,8 @@ ADDITIONAL_CASE_NAMES = (
     "expanded-single-padded-extent",
     "odd-hidden-unweighted",
     "odd-hidden-weighted",
+    "vector-hidden-256",
+    "vector-tail-hidden-272-two-bias",
 )
 
 INTERLEAVED_CASE_NAMES = (
@@ -66,8 +68,8 @@ CASE_NAMES = (BASELINE_CASE_NAMES[:13] + ADDITIONAL_CASE_NAMES +
               BASELINE_CASE_NAMES[13:16] + INTERLEAVED_CASE_NAMES +
               BASELINE_CASE_NAMES[16:])
 
-REGULAR_CASES = CASE_NAMES[:17]
-SPECIAL_CASES = CASE_NAMES[17:]
+REGULAR_CASES = CASE_NAMES[:19]
+SPECIAL_CASES = CASE_NAMES[19:]
 
 
 @dataclass(frozen=True)
@@ -176,6 +178,13 @@ def _case_specs():
             (((0.125, 0.25), (0.375, 0.5)),
              ((0.625, 0.75), (0.875, 1.0))),
             hidden=1),
+        "vector-hidden-256": CaseSpec(
+            "vector-hidden-256", _payloads((2, 2), 45, hidden=256),
+            normal_routes, hidden=256),
+        "vector-tail-hidden-272-two-bias": CaseSpec(
+            "vector-tail-hidden-272-two-bias",
+            _payloads((2, 2), 47, hidden=272), normal_routes,
+            bias_count=2, hidden=272),
         "cached-dispatch-changed-outputs": CaseSpec(
             "cached-dispatch-changed-outputs", _payloads((2, 2), 25),
             normal_routes,
@@ -768,6 +777,18 @@ def _behavior_fixtures():
             "restored_weights": restored_weights,
         },
         "weight_mismatch": weight_mismatch,
+        "vector_payload": {
+            "pure_vector": {
+                "bias_count": _case_specs()["vector-hidden-256"].bias_count,
+                "hidden": _case_specs()["vector-hidden-256"].hidden,
+            },
+            "vector_tail": {
+                "bias_count": _case_specs()[
+                    "vector-tail-hidden-272-two-bias"].bias_count,
+                "hidden": _case_specs()[
+                    "vector-tail-hidden-272-two-bias"].hidden,
+            },
+        },
     }
 
 
@@ -804,6 +825,11 @@ def _contract():
            specs["odd-hidden-weighted"].hidden == 1 and
            specs["odd-hidden-weighted"].weights is not None,
            "odd-hidden weighted and unweighted coverage is incomplete")
+    _check(specs["vector-hidden-256"].hidden == 256 and
+           specs["vector-hidden-256"].bias_count == 0 and
+           specs["vector-tail-hidden-272-two-bias"].hidden == 272 and
+           specs["vector-tail-hidden-272-two-bias"].bias_count == 2,
+           "vector payload and scalar-tail coverage is incomplete")
     _check(_reference_fixture() == {
         "rank0": [[4.0, 6.0, 8.0, 10.0], [5.0, 6.0, 7.0, 8.0]],
         "rank1": [[36.0, 38.0, 40.0, 42.0]],
@@ -897,6 +923,7 @@ def _contract():
             "expanded-weighted-multiple-reduction",
             "padding-expanded-input-capacity",
             "odd-hidden-record-layout",
+            "vector-payload-and-tail",
             "case-boundary-barriers",
             "distributed-failure-aggregation",
             "buffer-before-group-teardown",

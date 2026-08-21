@@ -297,6 +297,118 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "inactive-lane", "partial-mask"):
             self.assertIn(fixture, probe)
 
+    def test_direct_combine_vector_payload_compile_probe_contract(self):
+        """Catches shipping an uncompiled BF16 DataCopy/vector payload path."""
+        probe_path = CORE_OPS / "core_operator_compile_probe.asc"
+        probe = probe_path.read_text()
+        cmake = (CORE_OPS / "CMakeLists.txt").read_text()
+
+        self.assertIn("core_operator_compile_probe.asc", cmake)
+        for marker in (
+                '#include "kernel_operator.h"',
+                "kCombineVectorTileElements = 256",
+                "direct_combine_vector_payload_compile_probe",
+                "AscendC::TPipe", "AscendC::TQue", "AscendC::TBuf",
+                "AscendC::GlobalTensor<bfloat16_t>",
+                "AscendC::DataCopy", "AscendC::Cast", "AscendC::Add",
+                "AscendC::Duplicate"):
+            self.assertIn(marker, probe)
+
+    def test_direct_combine_vector_payload_contract(self):
+        """Catches losing the qualified UB payload path or its scalar tail."""
+        source = (ELASTIC / "combine.asc").read_text()
+        self.assertIn('#include "kernel_operator.h"', source)
+        self.assertIn("kCombineVectorTileElements = 256", source)
+        self.assertIn("kCombineDataCopyAlignmentElements = 16", source)
+
+        prepare_begin = source.index(
+            "__simt_vf__ inline void "
+            "direct_combine_epilogue_prepare_vector_slots_vf")
+        prepare_end = source.index("\n}\n", prepare_begin)
+        prepare = source[prepare_begin:prepare_end]
+        for marker in (
+                "direct_subgroup_grid_stride(", "group_topk_subgroup(",
+                "topk_broadcast_owner_value(",
+                "slots[logical_index] = resolved_slot"):
+            self.assertIn(marker, prepare)
+        self.assertNotIn("combined_x", prepare)
+        self.assertNotIn("combine_receive_shard_address", prepare)
+
+        vector_begin = source.index(
+            "__aicore__ inline void direct_combine_epilogue_vector_reduce")
+        vector_end = source.index("\n}\n", vector_begin)
+        vector_reduce = source[vector_begin:vector_end]
+        for marker in (
+                "AscendC::GetBlockIdx()", "AscendC::GetBlockNum()",
+                "AscendC::TPipe", "AscendC::TQue", "AscendC::TBuf",
+                "AscendC::GlobalTensor<bfloat16_t>",
+                "AscendC::DataCopy", "AscendC::Cast", "AscendC::Add",
+                "AscendC::Duplicate", "for (int contributor_rank = 0;",
+                "vector_end", "hidden < vector_end",
+                "bias_0 != nullptr", "bias_1 != nullptr"):
+            self.assertIn(marker, vector_reduce)
+        self.assertLess(
+            vector_reduce.index("for (int contributor_rank = 0;"),
+            vector_reduce.index("AscendC::DataCopy(\n"
+                                "                output_tile"))
+
+        tail_signature = (
+            "__simt_vf__ inline void "
+            "direct_combine_epilogue_vector_tail_vf")
+        self.assertIn(tail_signature, source)
+        tail_begin = source.index(tail_signature)
+        tail_end = source.index("\n}\n", tail_begin)
+        tail = source[tail_begin:tail_end]
+        for marker in (
+                "direct_subgroup_grid_stride(", "vector_end",
+                "hidden = vector_end + work.lane",
+                "hidden < hidden_elements",
+                "for (int contributor_rank = 0;",
+                "combined_x[logical]"):
+            self.assertIn(marker, tail)
+
+        kernel = source[source.index(
+            "__global__ __vector__ void combine_kernel"):]
+        prepare_stage = kernel.index(
+            "stage == DirectCombineStage::kEpiloguePrepare")
+        prepare_call = kernel.index(
+            "asc_vf_call<"
+            "direct_combine_epilogue_prepare_vector_slots_vf>",
+            prepare_stage)
+        reduce_stage = kernel.index(
+            "stage == DirectCombineStage::kEpilogueReduce",
+            prepare_call)
+        vector_call = kernel.index(
+            "direct_combine_epilogue_vector_reduce(", reduce_stage)
+        fallback_call = kernel.index(
+            "asc_vf_call<direct_combine_epilogue_reduce_vf>",
+            vector_call)
+        weights_stage = kernel.index(
+            "stage == DirectCombineStage::kEpilogueWeights",
+            fallback_call)
+        tail_call = kernel.index(
+            "asc_vf_call<direct_combine_epilogue_vector_tail_vf>",
+            weights_stage)
+        weights_call = kernel.index(
+            "asc_vf_call<direct_combine_epilogue_weights_vf>",
+            tail_call)
+        self.assertLess(prepare_call, vector_call)
+        self.assertLess(vector_call, fallback_call)
+        self.assertLess(fallback_call, tail_call)
+        self.assertLess(tail_call, weights_call)
+        self.assertIn(
+            "tiling.num_topk <= kTopkSubgroupWidth",
+            kernel[prepare_stage:fallback_call])
+        self.assertEqual(
+            kernel.count(
+                "tiling.hidden % kCombineDataCopyAlignmentElements == 0"),
+            3)
+        self.assertIn(
+            "tiling.hidden % kCombineVectorTileElements != 0",
+            kernel[weights_stage:tail_call])
+        self.assertNotIn("combine_contributor_count_offset", source)
+        self.assertNotIn("combine_contributor_entry_offset", source)
+
     def test_direct_combine_grouping_contract(self):
         """Catches restoring a separate grouping launch or contributor table."""
         source = (ELASTIC / "combine.asc").read_text()
@@ -4851,6 +4963,8 @@ int main() {
             "expanded-single-padded-extent",
             "odd-hidden-unweighted",
             "odd-hidden-weighted",
+            "vector-hidden-256",
+            "vector-tail-hidden-272-two-bias",
             "cached-dispatch-changed-outputs",
             "sequential-100-generations",
             "cross-buffer-handle",
@@ -4878,6 +4992,7 @@ int main() {
                     "expanded-weighted-multiple-reduction",
                     "padding-expanded-input-capacity",
                     "odd-hidden-record-layout",
+                    "vector-payload-and-tail",
                     "case-boundary-barriers",
                     "distributed-failure-aggregation",
                     "buffer-before-group-teardown",
@@ -4999,6 +5114,10 @@ int main() {
                         "expected": [[0.125, 0.25], [0.375, 0.0]],
                         "rank": 0,
                     },
+                    "vector_payload": {
+                        "pure_vector": {"bias_count": 0, "hidden": 256},
+                        "vector_tail": {"bias_count": 2, "hidden": 272},
+                    },
                 },
                 "expected_world_size": 2,
                 "empty_reference_shape": [0, 4],
@@ -5010,6 +5129,25 @@ int main() {
                     "rank1": [[36.0, 38.0, 40.0, 42.0]],
                 },
                 "system_under_test": ["Buffer.dispatch", "Buffer.combine"],
+            })
+
+    def test_two_rank_combine_vector_payload_cases_contract(self):
+        """Catches losing pure-vector and vector-plus-tail device coverage."""
+        result = subprocess.run(
+            ["python3", str(TWO_RANK_COMBINE), "--contract"],
+            cwd=ROOT, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        contract = json.loads(result.stdout)
+        self.assertIn("vector-hidden-256", contract["case_names"])
+        self.assertIn("vector-tail-hidden-272-two-bias", contract["case_names"])
+        self.assertIn(
+            "vector-payload-and-tail",
+            contract["contract_checks"])
+        self.assertEqual(
+            contract["behavior_fixtures"]["vector_payload"],
+            {
+                "pure_vector": {"bias_count": 0, "hidden": 256},
+                "vector_tail": {"bias_count": 2, "hidden": 272},
             })
 
     def test_rank_parameterized_scale_up_smoke_contract(self):
