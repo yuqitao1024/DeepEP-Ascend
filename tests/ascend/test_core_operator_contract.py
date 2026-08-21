@@ -398,6 +398,35 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("direct_data_grid_stride(", reduction)
         self.assertNotIn("workspace_slot_offset", reduction)
         self.assertNotIn("combine_reduce_origin_records(", reduction)
+        self.assertRegex(
+            reduction,
+            re.compile(
+                r"std::uint32_t contributor_count = 0;\s*"
+                r"if \(work\.lane == 0\)\s*\{\s*"
+                r"contributor_count = contributor_counts\[token\];\s*\}\s*"
+                r"contributor_count = asc_shfl\(\s*contributor_count, 0,\s*"
+                r"kTopkSubgroupWidth\);",
+                re.DOTALL))
+        self.assertRegex(
+            reduction,
+            re.compile(
+                r"std::int32_t contributor_rank = 0;\s*"
+                r"std::int32_t receive_slot = 0;\s*"
+                r"if \(work\.lane == 0\)\s*\{(?P<owner_loads>.*?)\}\s*"
+                r"contributor_ranks\[contributor_index\] = asc_shfl\(\s*"
+                r"contributor_rank, 0, kTopkSubgroupWidth\);\s*"
+                r"receive_slots\[contributor_index\] = asc_shfl\(\s*"
+                r"receive_slot, 0, kTopkSubgroupWidth\);",
+                re.DOTALL))
+        self.assertEqual(reduction.count("asc_shfl("), 3, reduction)
+        owner_loads = re.search(
+            r"if \(work\.lane == 0\)\s*\{(?P<body>.*?)\}\s*"
+            r"contributor_ranks\[contributor_index\] = asc_shfl",
+            reduction, flags=re.DOTALL)
+        self.assertIsNotNone(owner_loads, reduction)
+        self.assertIn("entry->contributor_rank", owner_loads.group("body"))
+        self.assertIn("entry->receive_slot", owner_loads.group("body"))
+        self.assertIn("if (contributor_count <= kTopkSubgroupWidth)", reduction)
 
         plan = source[source.index(
             "__simt_vf__ inline void direct_combine_producer_plan_vf"):
