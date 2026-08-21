@@ -228,6 +228,25 @@ compact entry order. The probe also establishes the exact ballot and shuffle
 API spelling, subgroup width, and mask type for the pinned CANN toolchain.
 These compiler-specific details stay inside the adapter.
 
+The Phase A probe qualified this contract on CANN 9.2.0 for `dav-3510`:
+
+```text
+subgroup width:       32 lanes
+mask type:            uint32_t
+ballot:               asc_ballot(predicate ? 1 : 0)
+shuffle:              asc_shfl(value, source_lane, 32)
+first set lane:       __ffs(static_cast<int32_t>(mask)) - 1
+lower-lane mask:      lanemask_lt()
+population count:     __popc(mask)
+```
+
+TaskQueue task `task_20260821_160951_6423513389` compiled, linked, and ran the
+five device fixtures on NPU device 6. The fixtures covered all-equal keys,
+all-distinct keys, noncontiguous duplicates, inactive `-1` lanes, and a
+partial logical mask. The executable reported `topk-grouping PASSED`. This is
+a ballot/shuffle construction; the backend neither found nor uses a native
+`match_any` intrinsic.
+
 For `K` greater than the qualified subgroup width, the public API remains
 valid and selects a deterministic per-token bounded-scan implementation. The
 canonical `K = 6` path must use subgroup grouping.

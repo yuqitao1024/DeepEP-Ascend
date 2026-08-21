@@ -39,3 +39,17 @@ target_include_directories(deep_ep_ascend_core_operator_runner PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../../..
     $ENV{ASCEND_HOME_PATH}/include
     $ENV{ASCEND_HOME_PATH}/x86_64-linux/asc/include)
+
+add_executable(deep_ep_ascend_topk_grouping_probe
+    topk_grouping_probe.asc)
+
+set_target_properties(deep_ep_ascend_topk_grouping_probe PROPERTIES
+    LINKER_LANGUAGE ASC)
+
+target_compile_options(deep_ep_ascend_topk_grouping_probe PRIVATE
+    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${CMAKE_ASC_ARCHITECTURES}>)
+
+target_include_directories(deep_ep_ascend_topk_grouping_probe PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/../../..
+    $ENV{ASCEND_HOME_PATH}/include
+    $ENV{ASCEND_HOME_PATH}/x86_64-linux/asc/include)

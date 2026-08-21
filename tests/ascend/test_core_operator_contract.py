@@ -272,6 +272,26 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             function = source[begin:end]
             self.assertIn("direct_data_grid_stride(", function)
 
+    def test_topk_grouping_compile_probe_contract(self):
+        """Catches an uncompiled ballot adapter or a native match-any dependency."""
+        header = (ELASTIC / "topk_grouping.hpp").read_text()
+        probe_path = CORE_OPS / "topk_grouping_probe.asc"
+        self.assertTrue(probe_path.is_file(), str(probe_path))
+        probe = probe_path.read_text()
+        cmake = (CORE_OPS / "CMakeLists.txt").read_text()
+
+        self.assertIn("deep_ep_ascend_topk_grouping_probe", cmake)
+        self.assertIn("topk_grouping_probe.asc", cmake)
+        for symbol in (
+                "asc_ballot", "asc_shfl", "laneid", "lanemask_lt",
+                "__popc", "__ffs"):
+            self.assertIn(symbol, header)
+        self.assertNotIn("match_any", header.lower())
+        for fixture in (
+                "all-equal", "all-distinct", "noncontiguous-duplicates",
+                "inactive-lane", "partial-mask"):
+            self.assertIn(fixture, probe)
+
     def test_direct_combine_uses_staged_simt_data_paths(self):
         """Catches restoring canonical direct combine to one-thread data paths."""
         source = (ELASTIC / "combine.asc").read_text()
