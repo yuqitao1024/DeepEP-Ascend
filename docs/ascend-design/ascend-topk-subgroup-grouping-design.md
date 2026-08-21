@@ -12,8 +12,11 @@ called the 72-core slice P0.0. This document uses the repository numbering:
 
 - P0.1: stream-ordered control/data kernels and a configurable 1-to-72 data
   grid, completed at commit `993ba59`;
-- P0.2: vote-ballot-based top-k subgroup grouping, specified here; and
-- P0.3: vector or DataCopy payload movement, explicitly outside this work.
+- P0.2: vote-ballot grouping plus token-subgroup execution and register-local
+  routing metadata, specified here; and
+- P0.3: vector or DataCopy payload movement and common-shape specialization,
+  tracked here as the final CUDA-alignment steps but implemented only after
+  the P0.2 control-path gates pass.
 
 ## Problem
 
@@ -138,8 +141,9 @@ surrounded those necessary additions.
 - Expose a backend-local top-k grouping adapter with `match_any`-equivalent
   semantics built from `vote_ballot`, shuffle, first-set-bit, and
   population-count operations.
-- Resolve direct-combine contributor records once per token and store them in
-  deterministic compact order.
+- Resolve direct-combine contributor records once per token in deterministic
+  compact order, first through a checked workspace ABI and finally in
+  subgroup registers after the fused path is qualified.
 - Make the hidden reduction iterate compact contributor entries without a
   `world_size * topk` routing scan.
 - Reuse the grouping adapter in a later direct-dispatch count, prefix, and
@@ -151,7 +155,9 @@ surrounded those necessary additions.
 
 ## Non-goals
 
-- Vectorizing hidden, FP8 scale-factor, or metadata copies. That is P0.3.
+- Vectorizing hidden, FP8 scale-factor, or metadata copies inside the P0.2
+  control-path changes. Vector/DataCopy work starts only at alignment item 4,
+  the separately gated P0.3 payload slice.
 - Changing HCOMM command submission, service, flush, or release publication.
 - Implementing the P1.5 expert histogram or P1.6 validation parallelization.
 - Changing public Python arguments, benchmark cases, logical-byte formulas,
@@ -264,7 +270,7 @@ acquire contributor controls
   -> publish completion
 ```
 
-### Proposed data flow
+### First compact-table data flow
 
 ```text
 acquire contributor controls
@@ -385,6 +391,58 @@ expert validity checks, contributor comparisons, slot-index calculations, and
 record-address selection from the hidden loop. Relative to the current code,
 the routing relationship is derived once per token instead of `H = 7168`
 times for the representative workload.
+
+### CUDA alignment gaps and closure order
+
+The first compact-table implementation proved the grouping semantics and
+removed the explicit `R * K` scan, but it did not reproduce the execution and
+storage hierarchy of the CUDA DeepEP v2 epilogue. CUDA assigns one warp to a
+token, keeps `topk_slot_idx[]` and rank metadata in registers, reduces vector
+chunks cooperatively, and writes through shared memory and TMA in the same
+epilogue kernel. Materializing the compact relation in global memory is not
+part of that CUDA path.
+
+The remaining gaps are split into five ordered items. Each item gets its own
+host RED/GREEN, ASC compile, two-rank correctness, and unchanged representative
+72-block measurement. A later item cannot hide a failed gate from an earlier
+one.
+
+| Order | Gap | Current Ascend behavior | CUDA DeepEP v2 behavior | Ascend closure |
+| ---: | --- | --- | --- | --- |
+| 1 | Token execution granularity | The reduction data grid assigns one SIMT thread to one scalar `(token, hidden)` element. | One warp owns one token and its lanes cover hidden chunks cooperatively. | Assign one qualified 32-lane subgroup to one token. Lane `l` reduces `h = l, l + 32, ...`; preserve contributor order and scalar BF16 output exactly. |
+| 2 | Routing metadata load ownership | Item 1 leaves all 32 lanes loading the same count and 12-byte entries once per token. | The warp computes slots once and exchanges register values between lanes. | Make one lane load each field and broadcast it with `asc_shfl`, reducing 32 identical per-token loads to one; all physical lanes execute the same collectives. |
+| 3 | Stage and GM round trip | A group stage writes count, entries, and resolved slots to GM; a later reduce stage reads count and entries. | Grouping and payload reduction share one epilogue kernel and register state. | Fuse grouping into the token-subgroup reduction after item 2 is qualified. Keep resolved slots only when the separate weight output still needs them; then remove unused compact workspace and the extra stage through an ABI change. |
+| 4 | Payload width and local storage | Each lane performs scalar BF16 load, FP32 add, and BF16 store operations. | Lanes reduce vector chunks, use shared memory, and issue TMA output movement. | Introduce the qualified Ascend vector/DataCopy/UB path with a scalar tail. This is the P0.3 payload slice and must not change logical bytes or numerical order. |
+| 5 | Compile-time specialization | Runtime `num_topk`, hidden bounds, and address arithmetic remain in inner loops. | `K`, `H`, rank layout, vector width, and unroll factors are template constants. | Add explicit AOT fast paths for qualified common shapes, starting with `K=6` and aligned `H=7168`; retain the dynamic path for all other valid shapes. |
+
+The first correction implements item 1 only. Each lane may load the same
+compact metadata once per token in that step; the 32-to-1 metadata-load
+reduction belongs to item 2. This deliberately separates the benefit of
+token-subgroup scheduling from the benefit of owner-lane broadcast.
+
+Item 1 changes the work mapping from:
+
+```text
+thread q -> one scalar output (token = q / H, hidden = q % H)
+```
+
+to:
+
+```text
+subgroup w -> one token t
+lane l -> hidden indices l, l + 32, l + 64, ... < H
+```
+
+For the representative `H = 7168`, each lane processes exactly
+`7168 / 32 = 224` hidden elements. Contributor metadata is loop-invariant for
+those 224 elements and remains in lane registers after its once-per-token
+load. Item 2 then changes 32 identical lane loads into one owner-lane load plus
+subgroup broadcasts.
+
+The five-item sequence is not a claim that CUDA TMA maps directly to one
+Ascend instruction. It aligns ownership, lifetime, and movement level first;
+the concrete Ascend implementation uses only operations qualified by the
+pinned CANN toolchain.
 
 ## Phase B: Dispatch Grouping
 
@@ -509,6 +567,41 @@ The earlier P0.1 run did not capture profiler-level simultaneous active-core
 evidence, so its `device.num_sms = 72` field is configuration evidence, not an
 active-residency claim.
 
+### First compact-table measurement
+
+Task `task_20260821_170909_151408525395` built the production extension on
+devices `6,7` and passed eight focused two-rank cases: compact combine,
+expanded multiple reduction, weights, duplicate same-contributor lanes,
+`-1` routes, empty input, and one- and two-bias output. Task
+`task_20260821_171407_18450785056` then passed the FP8/previous-event/async
+smoke and the unchanged representative BF16 case.
+
+The representative report kept schema version 2, the exact case
+`ep-bf16-align128-bias0-hcopy1-prev0-async0-alloc0`, fingerprint
+`da3db00de02d1c93088c159430363bfb8659a8ed2397b6768f41145bfad14522`,
+`num_sms = 72`, one warmup, three measured iterations, maximum-latency rank
+aggregation, and the original logical-byte counts.
+
+| Operation | P0.1 mean | Compact-table mean | Bandwidth change | Latency change |
+| --- | ---: | ---: | ---: | ---: |
+| Dispatch | 4.638705 GB/s, 150.35 ms | 4.084343 GB/s, 170.75 ms | -11.95% | +13.57% |
+| Expanded dispatch | 9.257460 GB/s, 152.06 ms | 8.291660 GB/s, 169.77 ms | -10.43% | +11.65% |
+| Cached dispatch | 4.874099 GB/s, 143.09 ms | 4.657750 GB/s, 149.73 ms | -4.44% | +4.64% |
+| Combine | 5.939782 GB/s, 97.82 ms | 5.062780 GB/s, 114.76 ms | -14.76% | +17.32% |
+| Reduced combine | 4.800069 GB/s, 121.04 ms | 4.697684 GB/s, 123.68 ms | -2.13% | +2.18% |
+
+The compact-table implementation therefore fails the 20% combine retain gate;
+the required threshold is `7.127738 GB/s`. The simultaneous dispatch
+regressions and wide three-sample spread indicate system-level noise in that
+run, but noise cannot convert the result into a pass. It motivates an exact
+repeat and stage-level diagnosis.
+
+Repeat task `task_20260821_171559_200754410601` produced no benchmark
+measurement. It failed while constructing `ElasticBuffer`, before an EP kernel
+launch, because HCCL `all_gather_object` timed out establishing its socket.
+That task is environment-failure evidence only and is excluded from all
+bandwidth and latency comparisons.
+
 ## Documentation Updates
 
 When Phase A is qualified, update the teaching guide to:
@@ -527,15 +620,21 @@ When Phase A is qualified, update the teaching guide to:
 1. Add host grouping semantics and checked workspace-layout tests.
 2. Add the vote-ballot ASC compile and device probe.
 3. Add the backend-local match-any-equivalent grouping adapter.
-4. Add direct-combine compact contributor storage and the stream-ordered
-   grouping stage.
-5. Replace hidden and routing-weight scans with compact or resolved-slot
-   lookup.
-6. Run host, compile, two-rank, representative performance, and eight-rank
-   smoke gates.
-7. Record qualified evidence in the design and teaching guide.
-8. Design and implement the deterministic dispatch count/prefix/scatter slice
-   using the qualified adapter.
+4. Measure the compact-table implementation and retain its correctness and
+   failed-performance evidence.
+5. Close CUDA-alignment item 1, token-subgroup execution, and run its complete
+   gate without item 2 changes.
+6. Close item 2, owner-lane metadata load and broadcast, and repeat the same
+   gate.
+7. Close item 3, fused grouping and reduction, remove unused workspace through
+   a checked ABI change, and repeat the same gate.
+8. Close item 4, vector/DataCopy payload movement, with aligned and scalar-tail
+   coverage.
+9. Close item 5, common-shape AOT specialization, while preserving the dynamic
+   fallback.
+10. Record qualified evidence in the teaching guide, then design the
+    deterministic dispatch count/prefix/scatter slice using the qualified
+    adapter.
 
 Each implementation slice is independently revertible. The vote-ballot
 adapter is retained only when its measured end-to-end benefit passes the
