@@ -8,7 +8,9 @@ direct pipeline work. The first implementation slice optimizes direct combine;
 the second reuses the same grouping adapter in direct dispatch.
 
 The repository calls the completed multi-AIV work P0.1. Earlier discussion
-called the 72-core slice P0.0. This document uses the repository numbering:
+called the 72-core slice P0.0. Direct-combine P0.2 items 1 through 3 are now
+qualified; direct dispatch remains the next grouping slice. This document uses
+the repository numbering:
 
 - P0.1: stream-ordered control/data kernels and a configurable 1-to-72 data
   grid, completed at commit `993ba59`;
@@ -697,6 +699,77 @@ retained as the ownership basis for item 3, where grouping and reduction can
 share register state and remove the separate GM round trip. Item 3 must compare
 against the immediate item 2 state, the best item 1 result, and P0.1.
 
+### CUDA-alignment item 3: fused grouping and reduction
+
+Commit `9bff96b` removed the standalone direct-combine Group stage. The direct
+pipeline now has seven stages rather than eight: error reduction is followed
+directly by the fused Reduce stage, then weights and completion. The checked
+core tiling ABI moved from 16 to 17. The workspace no longer contains the
+per-token contributor count or `T * K` compact entry table; the two-rank host
+fixture's total combine workspace fell from 928 to 736 bytes, and its aligned
+scratch region fell from 544 to 352 bytes. The record-slot workspace remains
+because the following weights stage reads the resolved slot for every logical
+top-k lane.
+
+For `K <= 32`, one subgroup still owns one token. Every lane loads its expert
+and observed slot once, calls the vote-ballot grouping adapter, broadcasts the
+owner slot, and writes the resolved slot for the weights stage. Each valid
+owner computes its own rank-order ordinal from its unbroadcast contributor
+key. The subgroup then walks the common owner mask and broadcasts the owner's
+ordinal, contributor rank, and receive slot into lane-local arrays. Indexing
+those arrays by ordinal preserves the prior ascending-contributor-rank FP32
+addition order. Passing a rank value already broadcast from one owner into the
+ordinal helper would make every owner appear to have ordinal zero; the
+implementation and source contract specifically prevent that mistake.
+
+For `K > 32`, the fused kernel takes a correctness fallback before any
+subgroup collective. One scalar grid worker owns a token, scans contributor
+ranks in ascending order, propagates each first valid owner's slot to duplicate
+lanes, and reduces hidden elements in the same rank order. This avoids a fixed
+array larger than 32 and avoids divergent ballot or shuffle calls. It is not a
+performance target, but it retains the earlier fallback's route and numerical
+semantics.
+
+The host RED/GREEN cycle finished with all 106 contracts passing. Task
+`task_20260821_195147_27124303804` compiled and linked the complete ASC target
+on device 6 and passed `combine-state-probe`. Task
+`task_20260821_195400_280557827737` rebuilt the production extension on devices
+`6,7` and passed normal, expanded multiple reduction, weights, duplicate
+same-rank experts, `-1` route, empty input, one bias, and two biases. Task
+`task_20260821_195723_320695327050` independently passed the FP8 previous-event,
+async, and communication-stream-allocation smoke.
+
+Representative tasks `task_20260821_195820_330724814006` and
+`task_20260821_195929_349642329352` both exited successfully on devices `6,7`.
+Their report SHA-256 values are
+`e843b0001f8e90870832a65c3a0b4dd53e8210dd999cf83f108e25761877b80b` and
+`a224fb22f25bd3d9cb60fa9da23f03e65a4202f0b63330684b610efc86d3dd78`.
+Both retained schema 2, formula 1, case
+`ep-bf16-align128-bias0-hcopy1-prev0-async0-alloc0`, fingerprint
+`da3db00de02d1c93088c159430363bfb8659a8ed2397b6768f41145bfad14522`,
+world size 2, `num_sms=72`, one warmup, three measured iterations, NPU-event
+timing, maximum-rank latency aggregation, execution protocol, and all five
+logical-byte objects. The table aggregates all six device samples.
+
+| Operation | Six device samples (ms) | Mean latency | Logical bandwidth | Change from item 2 | Change from item 1 | Change from P0.1 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 148.939, 149.307, 148.022, 148.058, 148.565, 149.074 | 148.661 ms | 4.691347 GB/s | +0.73% | +1.11% | +1.13% |
+| Expanded dispatch | 150.755, 149.796, 150.613, 198.230, 188.469, 148.257 | 164.353 ms | 8.564745 GB/s | -7.99% | -7.73% | -7.48% |
+| Cached dispatch | 143.532, 142.002, 143.516, 135.090, 136.746, 139.630 | 140.086 ms | 4.978506 GB/s | +1.47% | +1.36% | +2.14% |
+| Combine | 89.969, 88.864, 90.926, 89.788, 89.611, 92.479 | 90.273 ms | 6.436262 GB/s | +0.73% | +0.53% | +8.36% |
+| Reduced combine | 114.813, 113.017, 114.359, 113.924, 111.844, 115.561 | 113.920 ms | 5.100253 GB/s | -0.64% | -0.12% | +6.25% |
+
+Item 3 is **correctness-qualified and retained with a small positive public
+combine result**. Its six-sample combine bandwidth is 0.73 percent above the
+immediate item 2 state and 8.36 percent above P0.1. Expanded dispatch is noisy:
+the first run measured 150.388 ms, while the second included 198.230 and
+188.469 ms samples around a 148.257 ms sample. That operation does not consume
+the changed combine code, and the six-sample aggregate remains within the
+existing 10 percent unaffected-operation regression bound. We record the
+outliers as system-level variation and do not attribute them to the fused
+kernel. This qualification has no fixed minimum improvement threshold and does
+not trigger an automatic rollback. Item 3 becomes the baseline for item 4.
+
 ## Documentation Updates
 
 When Phase A is qualified, update the teaching guide to:
@@ -718,11 +791,11 @@ When Phase A is qualified, update the teaching guide to:
 4. Measure the compact-table implementation and retain its correctness and
    failed-performance evidence.
 5. Close CUDA-alignment item 1, token-subgroup execution, and run its complete
-   gate without item 2 changes.
+   gate without item 2 changes. Completed.
 6. Close item 2, owner-lane metadata load and broadcast, and repeat the same
-   gate.
+   gate. Completed.
 7. Close item 3, fused grouping and reduction, remove unused workspace through
-   a checked ABI change, and repeat the same gate.
+   a checked ABI change, and repeat the same gate. Completed.
 8. Close item 4, vector/DataCopy payload movement, with aligned and scalar-tail
    coverage.
 9. Close item 5, common-shape AOT specialization, while preserving the dynamic
