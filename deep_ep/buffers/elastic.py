@@ -34,6 +34,7 @@ from ..utils.envs import (
 
 
 _ASCEND_DEVICE_TRANSPORT_CAPABILITIES = 0x775
+_ASCEND_MAX_DATA_BLOCKS = 72
 
 
 class EPHandle:
@@ -672,7 +673,10 @@ class ElasticBuffer:
         scalar_error = None
         if capturing:
             scalar_error = "unsupported_graph_capture"
-        elif num_sms not in (0, 1) or num_qps != 0:
+        elif (not isinstance(num_sms, int) or num_sms < 1 or
+              num_sms > _ASCEND_MAX_DATA_BLOCKS or num_qps != 0 or
+              ((self.allow_hybrid_mode or self.num_scaleout_ranks > 1) and
+               num_sms != 1)):
             scalar_error = "invalid_launch_configuration"
         elif (not isinstance(num_experts, int) or num_experts <= 0 or
                 num_experts % self.num_ranks != 0):
@@ -794,7 +798,10 @@ class ElasticBuffer:
         scalar_error = None
         if capturing:
             scalar_error = "unsupported_graph_capture"
-        elif num_sms not in (0, 1) or num_qps != 0:
+        elif (not isinstance(num_sms, int) or num_sms < 1 or
+              num_sms > _ASCEND_MAX_DATA_BLOCKS or num_qps != 0 or
+              ((self.allow_hybrid_mode or self.num_scaleout_ranks > 1) and
+               num_sms != 1)):
             scalar_error = "invalid_launch_configuration"
         elif previous_event_before_epilogue is not None:
             scalar_error = "unsupported_combine_mode"
@@ -1466,6 +1473,10 @@ class ElasticBuffer:
         x, sf = x if isinstance(x, tuple) else (x, None)
 
         if not is_cuda():
+            if num_sms == 0:
+                num_sms = (1 if self.allow_hybrid_mode or
+                           self.num_scaleout_ranks > 1 else
+                           _ASCEND_MAX_DATA_BLOCKS)
             self._preflight_ascend_dispatch(
                 x, sf, topk_idx, topk_weights, handle, num_experts,
                 num_max_tokens_per_rank, expert_alignment, num_sms, num_qps,
@@ -1473,7 +1484,6 @@ class ElasticBuffer:
                 async_with_compute_stream, allocate_on_comm_stream,
                 do_cpu_sync, do_expand, do_zero_padding,
                 use_tma_aligned_col_major_sf)
-            num_sms = 1
 
         # Unpack handles
         # Reuse some values if possible
@@ -1643,8 +1653,10 @@ class ElasticBuffer:
         check_torch_deterministic()
 
         if not is_cuda():
+            resolved_num_sms = (
+                getattr(handle, "num_sms", 0) if num_sms == 0 else num_sms)
             self._preflight_ascend_combine(
-                x, handle, topk_weights, bias, num_sms, num_qps,
+                x, handle, topk_weights, bias, resolved_num_sms, num_qps,
                 previous_event, previous_event_before_epilogue,
                 async_with_compute_stream, allocate_on_comm_stream)
 
@@ -1655,9 +1667,15 @@ class ElasticBuffer:
             num_qps = self.get_theoretical_num_qps(num_sms) if num_qps == 0 else num_qps
             assert num_qps <= self.num_allocated_qps, f'Allocated QPs are not enough'
         else:
-            if (num_sms not in (0, 1) or num_qps != 0):
+            num_sms = resolved_num_sms
+            if (not isinstance(num_sms, int) or num_sms < 1 or
+                    num_sms > _ASCEND_MAX_DATA_BLOCKS or num_qps != 0 or
+                    ((self.allow_hybrid_mode or self.num_scaleout_ranks > 1) and
+                     num_sms != 1)):
                 raise RuntimeError(
-                    'DeepEP Ascend backend: combine requires num_sms=1 and num_qps=0')
+                    'DeepEP Ascend backend: combine requires num_sms in '
+                    '[1, 72] for direct scale-up, num_sms=1 for hybrid or '
+                    'scale-out, and num_qps=0')
             if previous_event_before_epilogue is not None:
                 raise RuntimeError(
                     'DeepEP Ascend backend: combine does not support '
@@ -1672,7 +1690,6 @@ class ElasticBuffer:
                 raise RuntimeError(
                     'DeepEP Ascend backend: combine stream overlap requires '
                     'BF16 pure-scale-up mode')
-            num_sms = 1
 
         bias_0, bias_1 = ElasticBuffer._unpack_bias(bias)
         combined_x, combined_topk_weights, event = \

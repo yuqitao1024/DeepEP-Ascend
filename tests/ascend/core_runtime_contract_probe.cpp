@@ -437,7 +437,7 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 }
 
 int main() {
-    static_assert(kCoreTilingAbiVersion == 14);
+    static_assert(kCoreTilingAbiVersion == 15);
     auto hybrid_tiling = valid_two_dimensional_tiling(
         OperationKind::kDispatch, 0,
         transport::TransportTopologyKind::kLogicalSimulation,
@@ -841,6 +841,11 @@ int main() {
     if (validate_internal_launch(malformed, storage).code !=
         CoreRuntimeStatusCode::kInvalidArgument)
         return 12;
+    malformed = dispatch_tiling;
+    malformed.data_launch.num_threads = 0;
+    if (validate_internal_launch(malformed, storage).code !=
+        CoreRuntimeStatusCode::kInvalidArgument)
+        return 92;
     malformed = dispatch_tiling;
     malformed.transport_context.topology.world_rank = 1;
     if (validate_internal_launch(malformed, storage).code !=

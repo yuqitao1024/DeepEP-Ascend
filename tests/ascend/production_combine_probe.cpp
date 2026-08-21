@@ -1204,7 +1204,8 @@ bool tensor_and_flag_validation() {
     if (!error_contains([&] { (void)call(*target, inputs, std::nullopt,
             std::nullopt, std::nullopt, channel); }, "channel") ||
         !error_contains([&] { (void)call(*target, inputs, std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt, 2); }, "num_sms=1") ||
+            std::nullopt, std::nullopt, std::nullopt, 73); },
+            "num_sms in [1, 72]") ||
         !error_contains([&] { (void)call(*target, inputs, std::nullopt,
             std::nullopt, std::nullopt, std::nullopt, 1, 1); }, "num_qps=0"))
         return false;

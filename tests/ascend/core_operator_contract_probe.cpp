@@ -31,6 +31,7 @@ CoreTilingInput valid_input() {
     input.num_topk = 2;
     input.expert_alignment = 4;
     input.num_max_tokens_per_rank = 16;
+    input.data_num_blocks = 1;
     input.topology.world_size = 1;
     input.topology.scale_up_size = 1;
     input.topology.scale_out_size = 1;
@@ -115,6 +116,44 @@ int main() {
     if (tiling.abi_version != kCoreTilingAbiVersion ||
         tiling.struct_size != sizeof(CoreTiling))
         return 2;
+    if (tiling.control_launch.num_blocks != 1 ||
+        tiling.control_launch.num_threads != 512 ||
+        tiling.control_launch.dynamic_ub_bytes != 0 ||
+        tiling.data_launch.num_blocks != 1 ||
+        tiling.data_launch.num_threads != 512 ||
+        tiling.data_launch.dynamic_ub_bytes != 0)
+        return 35;
+
+    for (const auto operation : {
+             OperationKind::kDispatch, OperationKind::kCombine}) {
+        input = valid_input();
+        input.operation = operation;
+        input.data_num_blocks = 72;
+        status = build_core_tiling(input, &tiling);
+        if (!status.ok() || tiling.control_launch.num_blocks != 1 ||
+            tiling.data_launch.num_blocks != 72)
+            return 36;
+
+        input.data_num_blocks = 0;
+        if (build_core_tiling(input, &tiling).code !=
+            TilingStatusCode::kInvalidArgument)
+            return 37;
+        input.data_num_blocks = 73;
+        if (build_core_tiling(input, &tiling).code !=
+            TilingStatusCode::kInvalidArgument)
+            return 38;
+    }
+
+    input = valid_input();
+    input.operation = OperationKind::kBarrier;
+    input.data_num_blocks = 72;
+    if (build_core_tiling(input, &tiling).code !=
+        TilingStatusCode::kInvalidArgument)
+        return 39;
+    input = valid_input();
+    status = build_core_tiling(input, &tiling);
+    if (!status.ok())
+        return 41;
     if (tiling.token_layout.hidden_offset != 0 ||
         tiling.token_layout.hidden_bytes != 128 ||
         tiling.token_layout.scale_factor_bytes != 0 ||
@@ -383,6 +422,11 @@ int main() {
     input.topology.scale_out_size = 2;
     input.topology.kind =
         deep_ep::ascend::transport::TransportTopologyKind::kLogicalSimulation;
+    input.data_num_blocks = 72;
+    if (build_core_tiling(input, &tiling).code !=
+        TilingStatusCode::kInvalidArgument)
+        return 40;
+    input.data_num_blocks = 1;
     status = build_core_tiling(input, &tiling);
     if (!status.ok())
         return 21;

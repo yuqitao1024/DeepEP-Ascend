@@ -770,7 +770,8 @@ class ElasticBuffer {
         std::uint64_t num_max_tokens_per_rank,
         elastic::CoreModeFlags mode_flags,
         elastic::ElementKind element_kind,
-        std::uint64_t num_scale_factor_packs) const {
+        std::uint64_t num_scale_factor_packs,
+        std::uint32_t data_num_blocks) const {
         const auto& context = resources_->device_context();
         elastic::CoreTilingInput input{};
         input.operation = elastic::OperationKind::kDispatch;
@@ -784,6 +785,7 @@ class ElasticBuffer {
         input.num_max_tokens_per_rank = num_max_tokens_per_rank;
         input.num_scale_factor_packs = num_scale_factor_packs;
         input.scale_factor_pack_bytes = num_scale_factor_packs == 0 ? 0 : 4;
+        input.data_num_blocks = data_num_blocks;
         input.has_reusable_slots =
             elastic::has_mode(mode_flags, elastic::CoreMode::kCached);
         input.topology.world_rank = context.topology.world_rank;
@@ -804,7 +806,8 @@ class ElasticBuffer {
 
     elastic::CoreTiling build_combine_tiling(
         const elastic::DispatchHandleDescriptor& descriptor,
-        elastic::CoreModeFlags mode_flags) const {
+        elastic::CoreModeFlags mode_flags,
+        std::uint32_t data_num_blocks) const {
         const auto& context = resources_->device_context();
         elastic::CoreTilingInput input{};
         input.operation = elastic::OperationKind::kCombine;
@@ -816,6 +819,7 @@ class ElasticBuffer {
         input.num_topk = descriptor.num_topk;
         input.expert_alignment = descriptor.expert_alignment;
         input.num_max_tokens_per_rank = descriptor.num_max_tokens_per_rank;
+        input.data_num_blocks = data_num_blocks;
         input.topology = descriptor.topology;
         elastic::CoreTiling tiling{};
         const auto status = elastic::build_core_tiling(input, &tiling);
@@ -1347,8 +1351,14 @@ public:
                     "pure-scale-up mode with cached metadata or CPU sync");
         TORCH_CHECK(do_cpu_sync || cached_mode,
                     "DeepEP Ascend backend: dispatch requires do_cpu_sync unless cached");
-        TORCH_CHECK(num_sms == 1 && num_qps == 0,
-                    "DeepEP Ascend backend: dispatch requires num_sms=1 and num_qps=0");
+        TORCH_CHECK(num_sms >= 1 &&
+                        num_sms <= static_cast<int>(
+                            elastic::kAscendMaxDataBlocks) &&
+                        (!allow_hybrid_mode_ || num_sms == 1) &&
+                        num_qps == 0,
+                    "DeepEP Ascend backend: dispatch requires num_sms in "
+                    "[1, 72] for direct scale-up, num_sms=1 for hybrid, "
+                    "and num_qps=0");
         TORCH_CHECK(!do_zero_padding || do_expand,
                     "DeepEP Ascend backend: dispatch zero padding requires expansion");
         TORCH_CHECK(num_max_tokens_per_rank > 0 && num_experts > 0 &&
@@ -1454,7 +1464,8 @@ public:
             mode_flags,
             fp8_dispatch ? elastic::ElementKind::kFloat8E4M3 :
                            elastic::ElementKind::kBFloat16,
-            num_scale_factor_packs);
+            num_scale_factor_packs,
+            static_cast<std::uint32_t>(num_sms));
         TORCH_CHECK(tiling.communication_buffer_bytes <=
                         static_cast<std::uint64_t>(num_buffer_bytes_) &&
                         tiling.workspace_bytes <= resources_->workspace_bytes(),
@@ -2371,8 +2382,12 @@ public:
                     "BF16 pure-scale-up mode");
         TORCH_CHECK(!channel_linked_list.has_value(),
                     "DeepEP Ascend backend: combine does not support channel handles");
-        TORCH_CHECK(num_sms == 1,
-                    "DeepEP Ascend backend: combine requires num_sms=1");
+        TORCH_CHECK(num_sms >= 1 &&
+                        num_sms <= static_cast<int>(
+                            elastic::kAscendMaxDataBlocks) &&
+                        (!allow_hybrid_mode_ || num_sms == 1),
+                    "DeepEP Ascend backend: combine requires num_sms in "
+                    "[1, 72] for direct scale-up and num_sms=1 for hybrid");
         TORCH_CHECK(num_qps == 0,
                     "DeepEP Ascend backend: combine requires num_qps=0");
         TORCH_CHECK(num_experts > 0 && num_experts % num_ranks_ == 0 &&
@@ -2567,7 +2582,8 @@ public:
         if (use_expanded_layout && allow_multiple_reduction_)
             combine_mode |= elastic::mode_bit(
                 elastic::CoreMode::kAllowMultipleReduction);
-        auto tiling = build_combine_tiling(descriptor, combine_mode);
+        auto tiling = build_combine_tiling(
+            descriptor, combine_mode, static_cast<std::uint32_t>(num_sms));
         const std::uint64_t maximum_input_rows = use_expanded_layout ?
             tiling.dispatch_output_capacity : maximum_source_rows;
         TORCH_CHECK(
@@ -2642,7 +2658,9 @@ public:
         TORCH_CHECK(previous_end == num_source_rows,
                     "DeepEP Ascend backend: combine rank prefix tail mismatch");
 
-        TORCH_CHECK(tiling.launch.num_blocks == 1 &&
+        TORCH_CHECK(tiling.control_launch.num_blocks == 1 &&
+                        tiling.data_launch.num_blocks ==
+                            static_cast<std::uint32_t>(num_sms) &&
                         tiling.communication_buffer_bytes <=
                             static_cast<std::uint64_t>(num_buffer_bytes_) &&
                         tiling.workspace_bytes <= resources_->workspace_bytes(),

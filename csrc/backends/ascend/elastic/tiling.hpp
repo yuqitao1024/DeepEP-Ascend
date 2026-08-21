@@ -39,11 +39,13 @@ struct CoreTilingInput {
     std::uint64_t num_max_tokens_per_rank = 0;
     std::uint64_t num_scale_factor_packs = 0;
     std::uint64_t scale_factor_pack_bytes = 0;
+    std::uint32_t data_num_blocks = 1;
     bool has_reusable_slots = false;
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 14;
+inline constexpr std::uint32_t kAscendMaxDataBlocks = 72;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 15;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -62,7 +64,11 @@ struct CoreTiling {
     std::uint64_t num_scale_factor_packs = 0;
     std::uint64_t scale_factor_pack_bytes = 0;
     CoreTopology topology{};
+    // Keep launch as the one-block compatibility shape until all outer
+    // kernels have split control and data launchers.
     CoreLaunchShape launch{};
+    CoreLaunchShape control_launch{};
+    CoreLaunchShape data_launch{};
     TokenLayout token_layout{};
     WorkspaceLayout workspace_layout{};
     SymmetricWindowLayout symmetric_window_layout{};
@@ -400,6 +406,15 @@ inline TilingStatus build_core_tiling(
     *output = {};
     if (!detail::valid_topology(input.topology))
         return TilingStatus::invalid("invalid topology");
+    if (input.data_num_blocks == 0 ||
+        input.data_num_blocks > kAscendMaxDataBlocks)
+        return TilingStatus::invalid("invalid data block count");
+    if ((input.operation == OperationKind::kBarrier ||
+         has_mode(input.mode_flags, CoreMode::kHybrid) ||
+         input.topology.scale_out_size > 1) &&
+        input.data_num_blocks != 1)
+        return TilingStatus::invalid(
+            "barrier, hybrid, and scale-out require one data block");
     const bool requires_token_shape =
         input.operation != OperationKind::kBarrier;
     if (requires_token_shape &&
@@ -507,6 +522,10 @@ inline TilingStatus build_core_tiling(
     tiling.num_scale_factor_packs = input.num_scale_factor_packs;
     tiling.scale_factor_pack_bytes = input.scale_factor_pack_bytes;
     tiling.topology = input.topology;
+    tiling.control_launch = CoreLaunchShape{};
+    tiling.data_launch = CoreLaunchShape{};
+    tiling.data_launch.num_blocks = input.data_num_blocks;
+    tiling.launch = tiling.control_launch;
     tiling.workspace_bytes = tiling.workspace_layout.total_bytes;
     tiling.transport_context = transport::make_device_transport_context();
     tiling.transport_context.topology.world_rank = input.topology.world_rank;

@@ -381,6 +381,7 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
     input.num_max_tokens_per_rank = tiling.num_max_tokens_per_rank;
     input.num_scale_factor_packs = tiling.num_scale_factor_packs;
     input.scale_factor_pack_bytes = tiling.scale_factor_pack_bytes;
+    input.data_num_blocks = tiling.data_launch.num_blocks;
     input.has_reusable_slots = has_mode(tiling.mode_flags, CoreMode::kCached);
     input.topology = tiling.topology;
     CoreTiling expected{};
@@ -389,6 +390,16 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
     if (tiling.launch.num_blocks != expected.launch.num_blocks ||
         tiling.launch.num_threads != expected.launch.num_threads ||
         tiling.launch.dynamic_ub_bytes != expected.launch.dynamic_ub_bytes ||
+        tiling.control_launch.num_blocks !=
+            expected.control_launch.num_blocks ||
+        tiling.control_launch.num_threads !=
+            expected.control_launch.num_threads ||
+        tiling.control_launch.dynamic_ub_bytes !=
+            expected.control_launch.dynamic_ub_bytes ||
+        tiling.data_launch.num_blocks != expected.data_launch.num_blocks ||
+        tiling.data_launch.num_threads != expected.data_launch.num_threads ||
+        tiling.data_launch.dynamic_ub_bytes !=
+            expected.data_launch.dynamic_ub_bytes ||
         !same_topology(tiling.topology, expected.topology) ||
         !same_token_layout(tiling.token_layout, expected.token_layout) ||
         !same_workspace_layout(
