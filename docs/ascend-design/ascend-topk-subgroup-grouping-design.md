@@ -8,9 +8,9 @@ direct pipeline work. The first implementation slice optimizes direct combine;
 the second reuses the same grouping adapter in direct dispatch.
 
 The repository calls the completed multi-AIV work P0.1. Earlier discussion
-called the 72-core slice P0.0. Direct-combine P0.2 items 1 through 3 are now
-qualified; direct dispatch remains the next grouping slice. This document uses
-the repository numbering:
+called the 72-core slice P0.0. Direct-combine CUDA-alignment items 1 through 4
+are now qualified; item 5 and direct dispatch remain. This document uses the
+repository numbering:
 
 - P0.1: stream-ordered control/data kernels and a configurable 1-to-72 data
   grid, completed at commit `993ba59`;
@@ -770,6 +770,78 @@ outliers as system-level variation and do not attribute them to the fused
 kernel. This qualification has no fixed minimum improvement threshold and does
 not trigger an automatic rollback. Item 3 becomes the baseline for item 4.
 
+### CUDA-alignment item 4: vectorized payload reduction
+
+Commit `cbd88a2` moves the aligned direct-combine payload through AscendC
+DataCopy and UB vector operations. The change applies to the staged direct
+path when `K <= 32`, `H % 16 == 0`, and the launch uses more than one data
+block. `kFull`, one-block execution, `K > 32`, and hidden sizes that fail the
+16-element DataCopy alignment keep the item 3 SIMT reducer.
+
+The seven-stage pipeline and tiling ABI 17 are unchanged. The work is split
+across three existing stages:
+
+1. `kEpiloguePrepare` runs ballot grouping and writes each duplicate lane's
+   resolved slot to the existing slot workspace.
+2. `kEpilogueReduce` assigns tokens to AIV blocks. Each block reduces full
+   256-element BF16 tiles in UB. It copies one contributor tile from GM,
+   casts it to FP32, adds contributors in ascending rank order, then adds bias
+   0 and bias 1 in that order. A single round-to-nearest cast produces the
+   BF16 output tile before DataCopy writes it to GM.
+3. `kEpilogueWeights` runs the SIMT tail only when `H % 256 != 0`. The tail
+   starts at `H - H % 256` and uses the same contributor and bias order.
+
+This layout avoids padding and out-of-bounds reads. It also keeps the scalar
+tail out of the outer `__aicore__` body. The pinned `dav-3510` compiler rejects
+scalar BF16 conversion there, even though the same conversion is valid inside
+a SIMT VF.
+
+The compiler probes found two concrete toolchain restrictions. Task
+`task_20260821_202248_28322867425` rejected a const pointer passed directly to
+`GlobalTensor::SetGlobalBuffer`. The probe passed in task
+`task_20260821_202441_303257421578` after a narrow `const_cast` at that API
+boundary. Task `task_20260821_203127_380216632533` then rejected the outer-AIV
+scalar BF16 tail. Moving the tail to the next stage's SIMT VF produced a full
+compile, link, and `combine-state-probe` pass in task
+`task_20260821_203520_417968711622`.
+
+Task `task_20260821_203738_31306819256` passed the original eight focused
+two-rank cases, and task `task_20260821_204021_5799062390` passed the independent
+FP8 previous-event, async, and communication-stream-allocation smoke. The final
+alignment gate compiled in task `task_20260821_205810_32507671319`. Task
+`task_20260821_210655_11174930146` rebuilt the production extension and passed
+ten cases on devices `6,7`. The two added cases use `H=256` for a pure vector
+tile and `H=272` with two biases for one vector tile plus a 16-element SIMT
+tail.
+
+Representative tasks `task_20260821_211002_3775754950` and
+`task_20260821_211104_45653122871` both completed on devices `6,7`. Their report
+SHA-256 values are
+`1bd821d7f9a49eba6373f56897c602272264795053f21214d4d9073ad476a808` and
+`a09f63e5a4221b3215196ca8681030fb1387d743b408af345870584addd24c9b`.
+Both reports retained schema 2, formula 1, case
+`ep-bf16-align128-bias0-hcopy1-prev0-async0-alloc0`, fingerprint
+`da3db00de02d1c93088c159430363bfb8659a8ed2397b6768f41145bfad14522`,
+world size 2, `num_sms=72`, one warmup, three measured iterations, maximum-rank
+latency aggregation, and all five logical-byte objects. The table aggregates
+the six samples from both runs.
+
+| Operation | Six device samples (ms) | Mean latency | Logical bandwidth | Change from item 3 | Change from P0.1 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Dispatch | 148.928, 149.332, 149.388, 150.491, 149.016, 152.588 | 149.957 ms | 4.650786 GB/s | -0.86% | +0.26% |
+| Expanded dispatch | 151.143, 149.830, 150.123, 151.280, 149.936, 149.701 | 150.336 ms | 9.363349 GB/s | +9.32% | +1.14% |
+| Cached dispatch | 142.727, 141.639, 142.006, 138.151, 139.772, 137.760 | 140.343 ms | 4.969408 GB/s | -0.18% | +1.96% |
+| Combine | 90.141, 90.804, 91.577, 87.689, 86.578, 89.429 | 89.370 ms | 6.501314 GB/s | +1.01% | +9.45% |
+| Reduced combine | 114.342, 114.387, 114.068, 114.416, 111.941, 111.471 | 113.437 ms | 5.121944 GB/s | +0.43% | +6.71% |
+
+Public combine is 1.01 percent faster than item 3, 1.74 percent faster than
+item 2, 1.54 percent faster than item 1, and 9.45 percent faster than P0.1.
+The two runs also show normal short-run variation: their separate combine
+means are 6.396054 and 6.610096 GB/s. The six-sample aggregate is used for the
+comparison. Item 4 is correctness-qualified and retained. Item 5 uses this
+result as its immediate baseline and specializes only the common
+`K=6, H=7168` shape.
+
 ## Documentation Updates
 
 When Phase A is qualified, update the teaching guide to:
@@ -797,7 +869,7 @@ When Phase A is qualified, update the teaching guide to:
 7. Close item 3, fused grouping and reduction, remove unused workspace through
    a checked ABI change, and repeat the same gate. Completed.
 8. Close item 4, vector/DataCopy payload movement, with aligned and scalar-tail
-   coverage.
+   coverage. Completed.
 9. Close item 5, common-shape AOT specialization, while preserving the dynamic
    fallback.
 10. Record qualified evidence in the teaching guide, then design the
