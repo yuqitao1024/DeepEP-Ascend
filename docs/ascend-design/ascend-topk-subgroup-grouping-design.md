@@ -602,6 +602,60 @@ launch, because HCCL `all_gather_object` timed out establishing its socket.
 That task is environment-failure evidence only and is excluded from all
 bandwidth and latency comparisons.
 
+### CUDA-alignment item 1: one subgroup per token
+
+Commit `8e68b8a` changed only the compact direct-combine reduction. One
+32-lane subgroup owned a token, lane `l` reduced hidden elements
+`l, l + 32, ...`, and each lane loaded the token's compact contributor ranks
+and receive slots once before its hidden loop. It did not add the item 2
+owner-lane broadcast: all 32 lanes still loaded the same metadata. Counts above
+32 kept a correctness fallback that read entries directly rather than
+overflowing the fixed lane-local arrays.
+
+Task `task_20260821_184344_11774205132` compiled the complete ASC target on
+device 6, linked the runner, and passed `combine-state-probe`. Task
+`task_20260821_184701_126929126773` rebuilt the production extension with
+`DEEP_EP_ASCEND_TESTING=0` on devices `6,7` and passed the eight focused cases:
+normal, expanded multiple reduction, weights, duplicate same-rank experts,
+`-1` route, empty input, one bias, and two biases. Its following FP8 launcher
+failed before `ElasticBuffer` construction because the driver could not
+allocate another HCCL stream after the first distributed launcher exited. That
+failure contains no EP-kernel result. The same FP8 previous-event, async, and
+communication-stream-allocation case passed by itself in task
+`task_20260821_185045_13946435099`.
+
+Representative task `task_20260821_185356_147346114207` ran on devices `6,7`
+and exited successfully. The report SHA-256 is
+`3ae007cf427178c8186e768c9072852d090a1983ff3458e954123c946034a7c2`.
+It retained schema version 2, formula version 1, the exact case
+`ep-bf16-align128-bias0-hcopy1-prev0-async0-alloc0`, fingerprint
+`da3db00de02d1c93088c159430363bfb8659a8ed2397b6768f41145bfad14522`,
+`T=4096`, `H=7168`, `K=6`, `E=256`, world size 2, `num_sms=72`, one warmup,
+three measured iterations, NPU-event timing, maximum-rank latency aggregation,
+and `allow_multiple_reduction=1`. All five logical-byte objects exactly matched
+the P0.1 report.
+
+| Operation | Device samples | Mean latency | Logical bandwidth | Change from P0.1 | Change from compact table |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Dispatch | 149.974, 149.869, 151.092 ms | 150.312 ms | 4.639822 GB/s | +0.02% | +13.60% |
+| Expanded dispatch | 152.328, 151.244, 151.363 ms | 151.645 ms | 9.282500 GB/s | +0.27% | +11.95% |
+| Cached dispatch | 143.888, 139.906, 142.190 ms | 141.995 ms | 4.911590 GB/s | +0.77% | +5.45% |
+| Combine | 90.939, 90.153, 91.153 ms | 90.748 ms | 6.402551 GB/s | +7.79% | +26.46% |
+| Reduced combine | 114.057, 114.276, 113.001 ms | 113.778 ms | 5.106618 GB/s | +6.39% | +8.71% |
+
+Item 1 removes a real bottleneck: public combine improves 26.46 percent over
+the compact-table experiment and 7.79 percent over P0.1, while unaffected
+operations stay within the 10 percent regression limit. It nevertheless misses
+the original single-item retain threshold of `7.127738 GB/s` by 10.17 percent.
+The measured positive increment shows that the five CUDA-alignment items are
+not an all-or-nothing performance switch: each item can remove part of the
+current bottleneck, while later items address the next exposed limit. By user
+decision, item 1 is **correctness-qualified and retained as the item 2
+baseline**. Item 2 must report its incremental change from `6.402551 GB/s`, in
+addition to the cumulative change from P0.1; failure of the original item 1
+threshold is retained as measurement evidence rather than used as a rollback
+condition.
+
 ## Documentation Updates
 
 When Phase A is qualified, update the teaching guide to:
