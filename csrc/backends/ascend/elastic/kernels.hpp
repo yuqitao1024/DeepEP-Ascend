@@ -58,6 +58,47 @@ inline constexpr CoreLaunchShape direct_dispatch_stage_launch(
         tiling.data_launch : tiling.control_launch;
 }
 
+enum class DirectCombineStage : std::uint8_t {
+    kFull,
+    kProducerControl,
+    kProducerRecord,
+    kProducerRelease,
+    kEpiloguePrepare,
+    kEpilogueReduce,
+    kEpilogueWeights,
+    kEpilogueComplete,
+};
+
+struct DirectCombinePipeline {
+    DirectCombineStage stages[7]{};
+    std::uint32_t count = 0;
+};
+
+inline constexpr DirectCombinePipeline direct_combine_pipeline() noexcept {
+    return {{
+        DirectCombineStage::kProducerControl,
+        DirectCombineStage::kProducerRecord,
+        DirectCombineStage::kProducerRelease,
+        DirectCombineStage::kEpiloguePrepare,
+        DirectCombineStage::kEpilogueReduce,
+        DirectCombineStage::kEpilogueWeights,
+        DirectCombineStage::kEpilogueComplete,
+    }, 7U};
+}
+
+inline constexpr bool direct_combine_data_stage(
+    DirectCombineStage stage) noexcept {
+    return stage == DirectCombineStage::kProducerRecord ||
+           stage == DirectCombineStage::kEpilogueReduce ||
+           stage == DirectCombineStage::kEpilogueWeights;
+}
+
+inline constexpr CoreLaunchShape direct_combine_stage_launch(
+    const CoreTiling& tiling, DirectCombineStage stage) noexcept {
+    return direct_combine_data_stage(stage) ?
+        tiling.data_launch : tiling.control_launch;
+}
+
 enum class WorldRouteKind : std::uint32_t {
     kLocal,
     kScaleUp,

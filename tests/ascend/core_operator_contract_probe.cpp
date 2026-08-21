@@ -164,6 +164,28 @@ int main() {
         epilogue_pipeline.stages[2] !=
             DirectDispatchStage::kEpilogueComplete)
         return 47;
+    const auto combine_pipeline = direct_combine_pipeline();
+    const DirectCombineStage expected_combine_stages[] = {
+        DirectCombineStage::kProducerControl,
+        DirectCombineStage::kProducerRecord,
+        DirectCombineStage::kProducerRelease,
+        DirectCombineStage::kEpiloguePrepare,
+        DirectCombineStage::kEpilogueReduce,
+        DirectCombineStage::kEpilogueWeights,
+        DirectCombineStage::kEpilogueComplete,
+    };
+    if (combine_pipeline.count != 7)
+        return 49;
+    for (std::uint32_t index = 0; index < combine_pipeline.count; ++index) {
+        if (combine_pipeline.stages[index] != expected_combine_stages[index])
+            return 50;
+        const auto launch = direct_combine_stage_launch(
+            tiling, combine_pipeline.stages[index]);
+        const bool data_stage = index == 1 || index == 4 || index == 5;
+        if (launch.num_blocks != (data_stage ? 72U : 1U) ||
+            launch.num_threads != 512 || launch.dynamic_ub_bytes != 0)
+            return 51;
+    }
 #if !defined(DEEP_EP_ASCEND_SIMT_DEVICE)
     for (const std::uint64_t item_count : {
              0ULL, 1ULL, 511ULL, 512ULL, 513ULL, 36871ULL}) {

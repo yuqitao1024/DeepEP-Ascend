@@ -245,6 +245,33 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             function = source[begin:end]
             self.assertIn("direct_data_grid_stride(", function)
 
+    def test_direct_combine_launcher_consumes_stage_pipeline(self):
+        """Catches keeping direct combine data stages on one AI Vector."""
+        source = (ELASTIC / "combine.asc").read_text()
+        launch = source[source.index(
+            'extern "C" int deep_ep_ascend_launch_combine'):]
+        self.assertIn("direct_combine_pipeline(", launch)
+        self.assertIn("direct_combine_stage_launch(", source)
+        self.assertIn("launch_direct_combine_stage(", launch)
+        self.assertIn("tiling.data_launch.num_blocks == 1", launch)
+        self.assertIn("expanded && !allow_multiple_reduction", launch)
+        self.assertIn("DirectCombineStage::kFull", launch)
+        compile_probe = (
+            CORE_OPS / "core_operator_compile_probe.asc").read_text()
+        self.assertIn(
+            "direct_combine_pipeline_compile_probe", compile_probe)
+        self.assertIn("direct_combine_stage_launch", compile_probe)
+
+        for function_name in (
+                "direct_combine_producer_record_vf",
+                "direct_combine_epilogue_reduce_vf",
+                "direct_combine_epilogue_weights_vf"):
+            begin = source.index(
+                f"__simt_vf__ inline void {function_name}")
+            end = source.index("\n}\n", begin)
+            function = source[begin:end]
+            self.assertIn("direct_data_grid_stride(", function)
+
     def test_direct_combine_uses_staged_simt_data_paths(self):
         """Catches restoring canonical direct combine to one-thread data paths."""
         source = (ELASTIC / "combine.asc").read_text()
@@ -426,10 +453,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 for argument in required_arguments:
                     self.assertIn(argument, call.group(1), function_name)
             operation = source_name.removesuffix(".asc")
+            launch_boundary = (
+                f"launch_direct_{operation}_stage"
+                if f"launch_direct_{operation}_stage" in source
+                else f"deep_ep_ascend_launch_{operation}")
             self.assertRegex(
                 source,
-                rf"(?s)extern \"C\" int deep_ep_ascend_launch_{operation}"
-                rf"\s*\(.*?arguments\.generation,\s*"
+                rf"(?s){launch_boundary}\s*\(.*?arguments\.generation,\s*"
                 rf"arguments\.timeout_cycles,",
                 operation)
 
