@@ -298,31 +298,41 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertIn(fixture, probe)
 
     def test_direct_combine_grouping_contract(self):
-        """Catches retaining route discovery under the hidden reduction loop."""
+        """Catches restoring a separate grouping launch or contributor table."""
         source = (ELASTIC / "combine.asc").read_text()
-        group_begin = source.index(
-            "__simt_vf__ inline void direct_combine_epilogue_group_vf")
-        group_end = source.index("\n}\n", group_begin)
-        group = source[group_begin:group_end]
-        for marker in (
-                "group_topk_subgroup(", "combine_contributor_count_offset",
-                "combine_contributor_entry_offset", "slot_offset"):
-            self.assertIn(marker, group)
-        ordinal_call = group.index("topk_compact_owner_ordinal(")
-        owner_write = group.index(
-            "if (group.is_owner && resolved_slot >= 0)")
-        self.assertLess(
-            ordinal_call, owner_write,
-            "every subgroup lane must execute the ordinal shuffles")
+        self.assertIn('#include "topk_grouping.hpp"', source)
+        self.assertNotIn("direct_combine_epilogue_group_vf", source)
+        self.assertNotIn("combine_contributor_count_offset", source)
+        self.assertNotIn("combine_contributor_entry_offset", source)
 
         reduce_begin = source.index(
             "__simt_vf__ inline void direct_combine_epilogue_reduce_vf")
         reduce_end = source.index("\n}\n", reduce_begin)
         reduce = source[reduce_begin:reduce_end]
-        self.assertIn("CombineContributorEntry", reduce)
-        self.assertIn("contributor_count", reduce)
-        self.assertNotIn("for (int contributor_rank", reduce)
-        self.assertNotIn("combined_topk_indices", reduce)
+        for marker in (
+                "combined_topk_indices", "world_size", "num_experts",
+                "slot_offset", "group_topk_subgroup(",
+                "topk_broadcast_owner_value(", "entry_owner_mask",
+                "topk_compact_owner_ordinal(",
+                "slots[logical_index] = resolved_slot"):
+            self.assertIn(marker, reduce)
+        self.assertNotIn("CombineContributorEntry", reduce)
+        self.assertIn("if (num_topk > kTopkSubgroupWidth)", reduce)
+        self.assertIn("direct_data_grid_stride(", reduce)
+        self.assertIn("for (int contributor_rank = 0;", reduce)
+        self.assertIn("slots[token_base + lane] = owner_slot", reduce)
+
+        ordinal_call = reduce.index("topk_compact_owner_ordinal(")
+        owner_iteration = reduce.index(
+            "TopkSubgroupMask remaining_owners = entry_owner_mask")
+        self.assertLess(
+            ordinal_call, owner_iteration,
+            "each owner must calculate its rank-order ordinal before broadcast")
+        for marker in (
+                "broadcast_ordinal", "broadcast_rank", "broadcast_slot",
+                "contributor_ranks[broadcast_ordinal]",
+                "receive_slots[broadcast_ordinal]"):
+            self.assertIn(marker, reduce)
 
         weights_begin = source.index(
             "__simt_vf__ inline void direct_combine_epilogue_weights_vf")
@@ -335,20 +345,18 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "__global__ __vector__ void combine_kernel"):]
         reduce_errors = launch.index(
             "asc_vf_call<direct_combine_epilogue_reduce_errors_vf>")
-        group_call = launch.index(
-            "asc_vf_call<direct_combine_epilogue_group_vf>")
         reduce_call = launch.index(
             "asc_vf_call<direct_combine_epilogue_reduce_vf>")
         weights_call = launch.index(
             "asc_vf_call<direct_combine_epilogue_weights_vf>")
         complete_call = launch.index(
             "asc_vf_call<direct_combine_epilogue_complete_vf>")
-        self.assertLess(
-            reduce_errors, group_call, "grouping must follow validation errors")
-        self.assertLess(group_call, reduce_call)
+        self.assertLess(reduce_errors, reduce_call)
         self.assertLess(reduce_call, weights_call)
         self.assertLess(weights_call, complete_call)
-        self.assertIn("DirectCombineStage::kEpilogueGroup", launch)
+        self.assertNotIn(
+            "asc_vf_call<direct_combine_epilogue_group_vf>", launch)
+        self.assertNotIn("DirectCombineStage::kEpilogueGroup", launch)
 
     def test_direct_combine_uses_staged_simt_data_paths(self):
         """Catches restoring canonical direct combine to one-thread data paths."""
@@ -385,9 +393,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         for stage in (record, reduction):
             self.assertIn("threadIdx.x", stage)
             self.assertIn("blockDim.x", stage)
-        self.assertIn("combine_contributor_count_offset", reduction)
-        self.assertIn("combine_contributor_entry_offset", reduction)
+        self.assertNotIn("combine_contributor_count_offset", reduction)
+        self.assertNotIn("combine_contributor_entry_offset", reduction)
         self.assertIn("direct_subgroup_grid_stride(", reduction)
+        self.assertIn("direct_data_grid_stride(", reduction)
         self.assertIn("kTopkSubgroupWidth", reduction)
         self.assertIn("token = work.first", reduction)
         self.assertIn("token += work.stride", reduction)
@@ -395,38 +404,16 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("hidden += kTopkSubgroupWidth", reduction)
         self.assertNotIn("output_count", reduction)
         self.assertNotIn("logical / hidden_elements", reduction)
-        self.assertNotIn("direct_data_grid_stride(", reduction)
         self.assertNotIn("workspace_slot_offset", reduction)
         self.assertNotIn("combine_reduce_origin_records(", reduction)
-        self.assertRegex(
-            reduction,
-            re.compile(
-                r"std::uint32_t contributor_count = 0;\s*"
-                r"if \(work\.lane == 0\)\s*\{\s*"
-                r"contributor_count = contributor_counts\[token\];\s*\}\s*"
-                r"contributor_count = asc_shfl\(\s*contributor_count, 0,\s*"
-                r"kTopkSubgroupWidth\);",
-                re.DOTALL))
-        self.assertRegex(
-            reduction,
-            re.compile(
-                r"std::int32_t contributor_rank = 0;\s*"
-                r"std::int32_t receive_slot = 0;\s*"
-                r"if \(work\.lane == 0\)\s*\{(?P<owner_loads>.*?)\}\s*"
-                r"contributor_ranks\[contributor_index\] = asc_shfl\(\s*"
-                r"contributor_rank, 0, kTopkSubgroupWidth\);\s*"
-                r"receive_slots\[contributor_index\] = asc_shfl\(\s*"
-                r"receive_slot, 0, kTopkSubgroupWidth\);",
-                re.DOTALL))
-        self.assertEqual(reduction.count("asc_shfl("), 3, reduction)
-        owner_loads = re.search(
-            r"if \(work\.lane == 0\)\s*\{(?P<body>.*?)\}\s*"
-            r"contributor_ranks\[contributor_index\] = asc_shfl",
-            reduction, flags=re.DOTALL)
-        self.assertIsNotNone(owner_loads, reduction)
-        self.assertIn("entry->contributor_rank", owner_loads.group("body"))
-        self.assertIn("entry->receive_slot", owner_loads.group("body"))
-        self.assertIn("if (contributor_count <= kTopkSubgroupWidth)", reduction)
+        self.assertIn("const std::uint32_t owner_ordinal", reduction)
+        self.assertIn("TopkSubgroupMask remaining_owners", reduction)
+        self.assertIn("const std::uint32_t broadcast_ordinal", reduction)
+        self.assertIn("const std::int32_t broadcast_rank", reduction)
+        self.assertIn("const std::int32_t broadcast_slot", reduction)
+        self.assertNotIn("contributor_counts[token]", reduction)
+        self.assertNotIn("entry->contributor_rank", reduction)
+        self.assertNotIn("entry->receive_slot", reduction)
 
         plan = source[source.index(
             "__simt_vf__ inline void direct_combine_producer_plan_vf"):
