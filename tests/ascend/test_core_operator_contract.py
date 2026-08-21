@@ -292,6 +292,59 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "inactive-lane", "partial-mask"):
             self.assertIn(fixture, probe)
 
+    def test_direct_combine_grouping_contract(self):
+        """Catches retaining route discovery under the hidden reduction loop."""
+        source = (ELASTIC / "combine.asc").read_text()
+        group_begin = source.index(
+            "__simt_vf__ inline void direct_combine_epilogue_group_vf")
+        group_end = source.index("\n}\n", group_begin)
+        group = source[group_begin:group_end]
+        for marker in (
+                "group_topk_subgroup(", "combine_contributor_count_offset",
+                "combine_contributor_entry_offset", "slot_offset"):
+            self.assertIn(marker, group)
+        ordinal_call = group.index("topk_compact_owner_ordinal(")
+        owner_write = group.index(
+            "if (group.is_owner && resolved_slot >= 0)")
+        self.assertLess(
+            ordinal_call, owner_write,
+            "every subgroup lane must execute the ordinal shuffles")
+
+        reduce_begin = source.index(
+            "__simt_vf__ inline void direct_combine_epilogue_reduce_vf")
+        reduce_end = source.index("\n}\n", reduce_begin)
+        reduce = source[reduce_begin:reduce_end]
+        self.assertIn("CombineContributorEntry", reduce)
+        self.assertIn("contributor_count", reduce)
+        self.assertNotIn("for (int contributor_rank", reduce)
+        self.assertNotIn("combined_topk_indices", reduce)
+
+        weights_begin = source.index(
+            "__simt_vf__ inline void direct_combine_epilogue_weights_vf")
+        weights_end = source.index("\n}\n", weights_begin)
+        weights = source[weights_begin:weights_end]
+        self.assertNotIn("candidate_lane", weights)
+        self.assertIn("slots[logical]", weights)
+
+        launch = source[source.index(
+            "__global__ __vector__ void combine_kernel"):]
+        reduce_errors = launch.index(
+            "asc_vf_call<direct_combine_epilogue_reduce_errors_vf>")
+        group_call = launch.index(
+            "asc_vf_call<direct_combine_epilogue_group_vf>")
+        reduce_call = launch.index(
+            "asc_vf_call<direct_combine_epilogue_reduce_vf>")
+        weights_call = launch.index(
+            "asc_vf_call<direct_combine_epilogue_weights_vf>")
+        complete_call = launch.index(
+            "asc_vf_call<direct_combine_epilogue_complete_vf>")
+        self.assertLess(
+            reduce_errors, group_call, "grouping must follow validation errors")
+        self.assertLess(group_call, reduce_call)
+        self.assertLess(reduce_call, weights_call)
+        self.assertLess(weights_call, complete_call)
+        self.assertIn("DirectCombineStage::kEpilogueGroup", launch)
+
     def test_direct_combine_uses_staged_simt_data_paths(self):
         """Catches restoring canonical direct combine to one-thread data paths."""
         source = (ELASTIC / "combine.asc").read_text()
@@ -327,7 +380,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         for stage in (record, reduction):
             self.assertIn("threadIdx.x", stage)
             self.assertIn("blockDim.x", stage)
-        self.assertIn("workspace_slot_offset", reduction)
+        self.assertIn("combine_contributor_count_offset", reduction)
+        self.assertIn("combine_contributor_entry_offset", reduction)
+        self.assertNotIn("workspace_slot_offset", reduction)
         self.assertNotIn("combine_reduce_origin_records(", reduction)
 
         plan = source[source.index(
