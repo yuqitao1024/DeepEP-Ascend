@@ -8,6 +8,56 @@ namespace deep_ep::ascend::elastic {
 
 struct HybridRouteRecord;
 
+enum class DirectDispatchStage : std::uint8_t {
+    kFull,
+    kProducerControl,
+    kProducerRecord,
+    kProducerRelease,
+    kEpiloguePrepare,
+    kEpilogueCopy,
+    kEpilogueComplete,
+};
+
+struct DirectDispatchPipeline {
+    DirectDispatchStage stages[6]{};
+    std::uint32_t count = 0;
+};
+
+inline constexpr DirectDispatchPipeline direct_dispatch_pipeline(
+    bool cpu_sync) noexcept {
+    DirectDispatchPipeline pipeline{{
+        DirectDispatchStage::kProducerControl,
+        DirectDispatchStage::kProducerRecord,
+        DirectDispatchStage::kProducerRelease,
+        DirectDispatchStage::kEpiloguePrepare,
+        DirectDispatchStage::kEpilogueCopy,
+        DirectDispatchStage::kEpilogueComplete,
+    }, cpu_sync ? 4U : 6U};
+    return pipeline;
+}
+
+inline constexpr DirectDispatchPipeline
+direct_dispatch_epilogue_pipeline() noexcept {
+    DirectDispatchPipeline pipeline{{
+        DirectDispatchStage::kEpiloguePrepare,
+        DirectDispatchStage::kEpilogueCopy,
+        DirectDispatchStage::kEpilogueComplete,
+    }, 3U};
+    return pipeline;
+}
+
+inline constexpr bool direct_dispatch_data_stage(
+    DirectDispatchStage stage) noexcept {
+    return stage == DirectDispatchStage::kProducerRecord ||
+           stage == DirectDispatchStage::kEpilogueCopy;
+}
+
+inline constexpr CoreLaunchShape direct_dispatch_stage_launch(
+    const CoreTiling& tiling, DirectDispatchStage stage) noexcept {
+    return direct_dispatch_data_stage(stage) ?
+        tiling.data_launch : tiling.control_launch;
+}
+
 enum class WorldRouteKind : std::uint32_t {
     kLocal,
     kScaleUp,
@@ -31,6 +81,20 @@ struct ReleaseBoundary {
 #else
 #define DEEP_EP_ASCEND_KERNEL_CALLEE inline constexpr
 #endif
+
+struct DirectDataGridStride {
+    std::uint64_t first = 0;
+    std::uint64_t stride = 0;
+};
+
+DEEP_EP_ASCEND_KERNEL_CALLEE DirectDataGridStride direct_data_grid_stride(
+    std::uint32_t block_index, std::uint32_t thread_index,
+    std::uint32_t num_blocks, std::uint32_t num_threads) noexcept {
+    return {
+        static_cast<std::uint64_t>(block_index) * num_threads + thread_index,
+        static_cast<std::uint64_t>(num_blocks) * num_threads,
+    };
+}
 
 DEEP_EP_ASCEND_KERNEL_CALLEE WorldRoute classify_world_route(
     int origin_world_rank, int destination_world_rank,

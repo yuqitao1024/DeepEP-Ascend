@@ -6,6 +6,7 @@
 #include "csrc/backends/ascend/elastic/combine_parallel.hpp"
 #include "csrc/backends/ascend/elastic/dispatch_parallel.hpp"
 #include "csrc/backends/ascend/elastic/layout.hpp"
+#include "csrc/backends/ascend/elastic/kernels.hpp"
 #include "csrc/backends/ascend/elastic/tiling.hpp"
 
 using namespace deep_ep::ascend::elastic;
@@ -123,6 +124,66 @@ int main() {
         tiling.data_launch.num_threads != 512 ||
         tiling.data_launch.dynamic_ub_bytes != 0)
         return 35;
+
+    input.data_num_blocks = 72;
+    status = build_core_tiling(input, &tiling);
+    if (!status.ok())
+        return 42;
+    const auto direct_pipeline = direct_dispatch_pipeline(false);
+    const DirectDispatchStage expected_direct_stages[] = {
+        DirectDispatchStage::kProducerControl,
+        DirectDispatchStage::kProducerRecord,
+        DirectDispatchStage::kProducerRelease,
+        DirectDispatchStage::kEpiloguePrepare,
+        DirectDispatchStage::kEpilogueCopy,
+        DirectDispatchStage::kEpilogueComplete,
+    };
+    if (direct_pipeline.count != 6)
+        return 43;
+    for (std::uint32_t index = 0; index < direct_pipeline.count; ++index) {
+        if (direct_pipeline.stages[index] != expected_direct_stages[index])
+            return 44;
+        const auto launch = direct_dispatch_stage_launch(
+            tiling, direct_pipeline.stages[index]);
+        const bool data_stage = index == 1 || index == 4;
+        if (launch.num_blocks != (data_stage ? 72U : 1U) ||
+            launch.num_threads != 512 || launch.dynamic_ub_bytes != 0)
+            return 45;
+    }
+    const auto cpu_sync_pipeline = direct_dispatch_pipeline(true);
+    if (cpu_sync_pipeline.count != 4 ||
+        cpu_sync_pipeline.stages[3] !=
+            DirectDispatchStage::kEpiloguePrepare)
+        return 46;
+    const auto epilogue_pipeline = direct_dispatch_epilogue_pipeline();
+    if (epilogue_pipeline.count != 3 ||
+        epilogue_pipeline.stages[0] !=
+            DirectDispatchStage::kEpiloguePrepare ||
+        epilogue_pipeline.stages[1] !=
+            DirectDispatchStage::kEpilogueCopy ||
+        epilogue_pipeline.stages[2] !=
+            DirectDispatchStage::kEpilogueComplete)
+        return 47;
+#if !defined(DEEP_EP_ASCEND_SIMT_DEVICE)
+    for (const std::uint64_t item_count : {
+             0ULL, 1ULL, 511ULL, 512ULL, 513ULL, 36871ULL}) {
+        for (const std::uint32_t blocks : {1U, 72U}) {
+            std::uint64_t visits[36871]{};
+            for (std::uint32_t block = 0; block < blocks; ++block) {
+                for (std::uint32_t thread = 0; thread < 512; ++thread) {
+                    const auto work = direct_data_grid_stride(
+                        block, thread, blocks, 512);
+                    for (std::uint64_t item = work.first;
+                         item < item_count; item += work.stride)
+                        ++visits[item];
+                }
+            }
+            for (std::uint64_t item = 0; item < item_count; ++item)
+                if (visits[item] != 1)
+                    return 48;
+        }
+    }
+#endif
 
     for (const auto operation : {
              OperationKind::kDispatch, OperationKind::kCombine}) {

@@ -225,6 +225,26 @@ def _valid_component_rank(rank):
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
+    def test_direct_dispatch_launcher_consumes_stage_pipeline(self):
+        """Catches accepting 72 blocks without launching split data stages."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        launch = source[source.index(
+            'extern "C" int deep_ep_ascend_launch_dispatch'):]
+        self.assertIn("direct_dispatch_pipeline(", launch)
+        self.assertIn("direct_dispatch_epilogue_pipeline(", launch)
+        self.assertIn("direct_dispatch_stage_launch(", source)
+        self.assertIn("launch_direct_dispatch_stage(", launch)
+        self.assertIn("tiling.data_launch.num_blocks == 1", launch)
+
+        for function_name in (
+                "direct_dispatch_producer_record_vf",
+                "direct_dispatch_epilogue_copy_outputs_vf"):
+            begin = source.index(
+                f"__simt_vf__ inline void {function_name}")
+            end = source.index("\n}\n", begin)
+            function = source[begin:end]
+            self.assertIn("direct_data_grid_stride(", function)
+
     def test_direct_combine_uses_staged_simt_data_paths(self):
         """Catches restoring canonical direct combine to one-thread data paths."""
         source = (ELASTIC / "combine.asc").read_text()
@@ -1683,7 +1703,8 @@ int main() {
             'extern "C" int deep_ep_ascend_launch_dispatch_epilogue'):]
         self.assertIn("dispatch_copy_kernel<<<", epilogue)
         self.assertIn("aclrtGetLastError(ACL_RT_THREAD_LEVEL)", epilogue)
-        self.assertNotIn("return 0;", epilogue)
+        self.assertIn("direct_dispatch_epilogue_pipeline()", epilogue)
+        self.assertIn("if (status != 0)\n            return status;", epilogue)
 
         self.assertIn("launch_internal_dispatch_epilogue(", runtime)
         self.assertIn("CoreMode::kCpuSync", buffer)
