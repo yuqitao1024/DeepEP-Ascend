@@ -10,6 +10,38 @@ byte formulas.
 The deterministic case enumeration is defined in
 `tests/utils/ep_benchmark_manifest.py`.
 
+## Ascend data-block profiles
+
+Ascend direct EP uses 72 AI Vector data blocks by default. Pass
+`--num-sms 1` for the compatibility baseline; values outside `[1, 72]` are
+rejected before the device runtime is imported. This setting does not change
+case IDs, workload routing, logical-byte formulas, or the workload fingerprint.
+The selected value is recorded as `device.num_sms` in `benchmark.json`.
+
+A short two-rank 1-versus-72 measurement uses the same workload manifest and
+case ID for both runs:
+
+```bash
+CASE=ep-bf16-align128-bias0-hcopy1-prev0-async0-alloc0
+
+torchrun --standalone --nproc-per-node=2 \
+  tests/ascend/benchmark/bench_ep.py \
+  --num-tokens 16 --hidden 128 --num-topk 2 --num-experts 8 \
+  --cases "$CASE" --num-sms 1 --warmups 1 --iterations 3 \
+  --dump-manifest /tmp/ascend-72aiv-workload.json \
+  --output /tmp/ascend-1block.json
+
+torchrun --standalone --nproc-per-node=2 \
+  tests/ascend/benchmark/bench_ep.py \
+  --workload-manifest /tmp/ascend-72aiv-workload.json \
+  --cases "$CASE" --num-sms 72 --warmups 1 --iterations 3 \
+  --output /tmp/ascend-72block.json
+```
+
+Compact combine and expanded combine with multiple reduction use the split
+data grid. Expanded combine with `--allow-multiple-reduction 0` intentionally
+keeps the one-block general algorithm and is not evidence for this optimization.
+
 ## Eight-rank comparison automation
 
 The profile and artifact contracts are strict:
@@ -189,9 +221,10 @@ DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace
 
 Keep the environment exports and build/run command in the same TaskQueue
 shell. The benchmark initializes HCCL, maps `LOCAL_RANK` to the local NPU,
-uses `allow_hybrid_mode=False`, `num_sms=1`, and `num_qps=0`, and destroys the
-buffer before the process group. Here `num_qps=0` means the CUDA QP tuning
-argument is unused; HCOMM still owns the Ascend communication resources.
+uses `allow_hybrid_mode=False`, defaults to `num_sms=72`, keeps `num_qps=0`,
+and destroys the buffer before the process group. Here `num_qps=0` means the
+CUDA QP tuning argument is unused; HCOMM still owns the Ascend communication
+resources.
 
 ## TaskQueue acceptance
 
@@ -220,7 +253,7 @@ DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace &&
 python -m torch.distributed.run --standalone --nproc-per-node=2 \
   tests/ascend/benchmark/bench_ep.py \
   --num-tokens 16 --hidden 128 --num-topk 2 --num-experts 4 \
-  --warmups 1 --iterations 1 \
+  --num-sms 72 --warmups 1 --iterations 1 \
   --output /tmp/ascend-ep2-performance-smoke.json
 '
 ```

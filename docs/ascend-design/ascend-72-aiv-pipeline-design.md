@@ -1,6 +1,6 @@
 # Ascend direct EP 72-AIV pipeline design
 
-**Status:** Ready for implementation planning
+**Status:** Implemented and qualified on NPU8P
 
 ## Goal
 
@@ -149,7 +149,9 @@ submitted only after both data kernels finish.
 
 The current `allow_multiple_reduction` and expanded behavior is preserved. The
 data stage changes iteration ownership, not which records contribute to a
-token.
+token. Expanded combine with `allow_multiple_reduction=false` still uses the
+legacy general algorithm and is submitted with the one-block control launch;
+the host launcher never submits that algorithm on the 72-block data grid.
 
 ## Kernel interface rules
 
@@ -179,8 +181,11 @@ resolved data block count into `build_dispatch_tiling` and
 launch shapes instead.
 
 Benchmark runtime configuration changes from fixed `num_sms=1` to an explicit
-profile value. The canonical P0.1 run uses 72. Existing tests that specifically
-exercise fallback or hybrid behavior continue to pass 1.
+profile or CLI value. Ascend profiles and the direct CLI default use 72;
+`--num-sms 1` selects the comparison baseline. The selected value is recorded
+in `benchmark.json` without changing the shared workload manifest or its
+fingerprint. Existing tests that specifically exercise fallback or hybrid
+behavior continue to pass 1.
 
 ## Correctness invariants
 
@@ -248,6 +253,48 @@ qualification even if latency improves.
   by more than 10 percent.
 - Benchmark schema, workload fingerprint, case IDs, and logical-byte formulas
   are unchanged.
+
+## NPU8P qualification evidence
+
+The qualification used CANN 9.2.0, the pinned
+`hcomm-deepep-current` package, the `deepep-ascend-py310` environment, and
+devices `6,7`. The extension build completed in
+`task_20260821_131712_269628026508`. Production ASC compilation also completed
+in `task_20260821_124045_259050332208` and the final combine pipeline probe in
+`task_20260821_130428_267183818000`.
+
+Correctness coverage:
+
+- `task_20260821_132046_27085297174`: two-rank BF16 compact, expanded,
+  cached, combine, and reduced-combine paths with one data block;
+- `task_20260821_132148_27114842719`: the same workload and case with 72 data
+  blocks; and
+- `task_20260821_132615_272404714981`: FP8 dispatch with previous-event and
+  asynchronous compute-stream mode at 72 data blocks.
+
+All three tasks completed with one case passed after reference checks. The
+small `16 x 128` workload showed that seven stage submissions can dominate
+latency; it is a correctness smoke, not performance evidence.
+
+The representative measurement used two ranks, 4096 tokens per rank, hidden
+size 7168, top-k 6, 256 experts, BF16, one warmup, and three measured
+iterations. Baseline task `task_20260821_132309_271487832248` and 72-block task
+`task_20260821_132456_271989713619` used the same workload fingerprint
+`da3db00de02d1c93088c159430363bfb8659a8ed2397b6768f41145bfad14522`.
+
+| Operation | 1 block mean | 72 blocks mean | Speedup | Latency reduction |
+| --- | ---: | ---: | ---: | ---: |
+| Dispatch | 1417.60 ms | 150.35 ms | 9.43x | 89.39% |
+| Expanded dispatch | 2556.65 ms | 152.06 ms | 16.81x | 94.05% |
+| Cached dispatch | 1409.17 ms | 143.09 ms | 9.85x | 89.85% |
+| Combine | 1002.76 ms | 97.82 ms | 10.25x | 90.25% |
+| Reduced combine | 1278.79 ms | 121.04 ms | 10.56x | 90.53% |
+
+The benchmark reports record `device.num_sms` as 1 and 72 respectively. Host
+tiling contracts and the ASC launcher compile prove the data stages consume
+the 72-block launch shape. A profiler-level active-core trace was not captured
+in this pass, so the report field is configuration evidence rather than a
+claim that all 72 AI Vector cores were simultaneously resident.
 
 ## Rollback and diagnosis
 

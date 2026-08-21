@@ -580,6 +580,18 @@ def test_benchmark_parser_preserves_production_size_defaults():
     assert args.warmups == 30
     assert args.iterations == 30
     assert args.allow_multiple_reduction == 1
+    assert args.num_sms == 72
+
+
+def test_benchmark_parser_accepts_one_and_72_data_blocks():
+    parser = build_parser()
+
+    assert parser.parse_args(["--num-sms", "1"]).num_sms == 1
+    assert parser.parse_args(["--num-sms", "72"]).num_sms == 72
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--num-sms", "0"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--num-sms", "73"])
 
 
 def test_default_selection_contains_all_current_supported_cases():
@@ -712,7 +724,8 @@ def test_runtime_source_pins_supported_ascend_contract():
     assert 'torch.device("npu", local_rank)' in source
     assert "allow_hybrid_mode=False" in source
     assert "explicitly_destroy=True" in source
-    assert "num_sms=1" in source
+    assert "num_sms=args.num_sms" in source
+    assert '"num_sms": args.num_sms' in source
     assert "num_qps=0" in source
     assert source.index("buffer.destroy()") < source.index(
         "dist.destroy_process_group()")

@@ -863,6 +863,7 @@ def test_ascend_command_uses_current_python_distributed_launcher_and_staging_onl
     assert ("--num-experts", "8") in pairs
     assert ("--warmups", "1") in pairs
     assert ("--iterations", "1") in pairs
+    assert ("--num-sms", "72") in pairs
     assert ("--workload-manifest", str(manifest)) in pairs
     assert ("--output", str(staging)) in pairs
     assert "benchmark.json" not in command

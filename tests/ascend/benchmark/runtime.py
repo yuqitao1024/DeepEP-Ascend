@@ -36,7 +36,7 @@ from tests.utils.ep_benchmark_manifest import (
 
 
 BF16_TOLERANCE = 1 / 128
-NUM_SMS = 1
+NUM_SMS = 72
 NUM_QPS = 0
 
 
@@ -850,10 +850,12 @@ def run_benchmark(args: Any, selected_case_ids: tuple[str, ...]) -> int:
         report.device = {
             "name": torch.npu.get_device_name(local_rank),
             "local_rank": local_rank,
+            "num_sms": args.num_sms,
+            "num_qps": NUM_QPS,
         }
         runtime = AscendRuntime(
             torch, dist, deep_ep, group, device, args, manifest,
-            num_sms=1, num_qps=0,
+            num_sms=args.num_sms, num_qps=0,
         )
         runtime.synchronized_step(
             runtime.construct_buffer, "buffer construction"

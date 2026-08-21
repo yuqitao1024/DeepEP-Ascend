@@ -12,6 +12,17 @@ from tests.ascend.benchmark.workloads import classify_ascend_case
 from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
 
 
+ASCEND_MAX_DATA_BLOCKS = 72
+
+
+def _data_blocks(value: str) -> int:
+    blocks = int(value)
+    if not 1 <= blocks <= ASCEND_MAX_DATA_BLOCKS:
+        raise argparse.ArgumentTypeError(
+            f"must be in [1, {ASCEND_MAX_DATA_BLOCKS}]")
+    return blocks
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Benchmark the supported Ascend EPv2 kernel matrix",
@@ -42,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--warmups", type=int, default=30)
     parser.add_argument("--iterations", type=int, default=30)
+    parser.add_argument("--num-sms", type=_data_blocks, default=72)
     parser.add_argument("--cases")
     parser.add_argument("--skip-check", action="store_true")
     return parser

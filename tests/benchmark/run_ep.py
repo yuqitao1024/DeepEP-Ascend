@@ -116,6 +116,7 @@ def build_backend_command(
         "--standalone",
         f"--nproc-per-node={profile.world_size}",
         "tests/ascend/benchmark/bench_ep.py",
+        "--num-sms", str(profile.ascend_num_sms),
         *common,
         "--output", str(Path(staging_report)),
     )

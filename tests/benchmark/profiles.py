@@ -20,6 +20,7 @@ class BenchmarkProfile:
     precise_unbalanced_ratio: bool = False
     masked_ratio: float = 0.0
     allow_multiple_reduction: int = 1
+    ascend_num_sms: int = 72
 
 
 PROFILES: Mapping[str, BenchmarkProfile] = MappingProxyType({
