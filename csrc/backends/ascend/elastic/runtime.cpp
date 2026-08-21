@@ -102,6 +102,14 @@ bool same_workspace_layout(
                rhs.combine_record_slots_offset &&
            lhs.combine_record_slots_bytes ==
                rhs.combine_record_slots_bytes &&
+           lhs.combine_contributor_count_offset ==
+               rhs.combine_contributor_count_offset &&
+           lhs.combine_contributor_count_bytes ==
+               rhs.combine_contributor_count_bytes &&
+           lhs.combine_contributor_entry_offset ==
+               rhs.combine_contributor_entry_offset &&
+           lhs.combine_contributor_entry_bytes ==
+               rhs.combine_contributor_entry_bytes &&
            lhs.total_bytes == rhs.total_bytes;
 }
 

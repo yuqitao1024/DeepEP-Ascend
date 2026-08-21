@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "../transport/types.hpp"
+#include "topk_grouping.hpp"
 
 namespace deep_ep::ascend::elastic {
 
@@ -163,6 +164,10 @@ struct WorkspaceLayout {
     std::uint64_t dispatch_expert_bitmap_bytes = 0;
     std::uint64_t combine_record_slots_offset = 0;
     std::uint64_t combine_record_slots_bytes = 0;
+    std::uint64_t combine_contributor_count_offset = 0;
+    std::uint64_t combine_contributor_count_bytes = 0;
+    std::uint64_t combine_contributor_entry_offset = 0;
+    std::uint64_t combine_contributor_entry_bytes = 0;
     std::uint64_t total_bytes = 0;
 };
 

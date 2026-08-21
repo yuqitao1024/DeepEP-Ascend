@@ -64,13 +64,14 @@ enum class DirectCombineStage : std::uint8_t {
     kProducerRecord,
     kProducerRelease,
     kEpiloguePrepare,
+    kEpilogueGroup,
     kEpilogueReduce,
     kEpilogueWeights,
     kEpilogueComplete,
 };
 
 struct DirectCombinePipeline {
-    DirectCombineStage stages[7]{};
+    DirectCombineStage stages[8]{};
     std::uint32_t count = 0;
 };
 
@@ -80,15 +81,17 @@ inline constexpr DirectCombinePipeline direct_combine_pipeline() noexcept {
         DirectCombineStage::kProducerRecord,
         DirectCombineStage::kProducerRelease,
         DirectCombineStage::kEpiloguePrepare,
+        DirectCombineStage::kEpilogueGroup,
         DirectCombineStage::kEpilogueReduce,
         DirectCombineStage::kEpilogueWeights,
         DirectCombineStage::kEpilogueComplete,
-    }, 7U};
+    }, 8U};
 }
 
 inline constexpr bool direct_combine_data_stage(
     DirectCombineStage stage) noexcept {
     return stage == DirectCombineStage::kProducerRecord ||
+           stage == DirectCombineStage::kEpilogueGroup ||
            stage == DirectCombineStage::kEpilogueReduce ||
            stage == DirectCombineStage::kEpilogueWeights;
 }

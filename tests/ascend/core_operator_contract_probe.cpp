@@ -261,18 +261,20 @@ int main() {
         DirectCombineStage::kProducerRecord,
         DirectCombineStage::kProducerRelease,
         DirectCombineStage::kEpiloguePrepare,
+        DirectCombineStage::kEpilogueGroup,
         DirectCombineStage::kEpilogueReduce,
         DirectCombineStage::kEpilogueWeights,
         DirectCombineStage::kEpilogueComplete,
     };
-    if (combine_pipeline.count != 7)
+    if (combine_pipeline.count != 8)
         return 49;
     for (std::uint32_t index = 0; index < combine_pipeline.count; ++index) {
         if (combine_pipeline.stages[index] != expected_combine_stages[index])
             return 50;
         const auto launch = direct_combine_stage_launch(
             tiling, combine_pipeline.stages[index]);
-        const bool data_stage = index == 1 || index == 4 || index == 5;
+        const bool data_stage =
+            index == 1 || index == 4 || index == 5 || index == 6;
         if (launch.num_blocks != (data_stage ? 72U : 1U) ||
             launch.num_threads != 512 || launch.dynamic_ub_bytes != 0)
             return 51;
@@ -492,9 +494,9 @@ int main() {
         std::uint64_t combine_bytes;
     };
     for (const auto fixture : {
-             ScratchFixture{2, 160, 4, 16, 32, 352},
-             ScratchFixture{4, 256, 6, 32, 48, 672},
-             ScratchFixture{8, 416, 10, 64, 80, 1248}}) {
+             ScratchFixture{2, 160, 4, 16, 32, 544},
+             ScratchFixture{4, 256, 6, 32, 48, 864},
+             ScratchFixture{8, 416, 10, 64, 80, 1440}}) {
         for (const auto operation : {
                  OperationKind::kDispatch, OperationKind::kCombine}) {
             input = valid_input();
@@ -562,7 +564,11 @@ int main() {
                         rank_scratch.scratch_offset +
                             rank_scratch.scratch_bytes ||
                     rank_scratch.combine_record_slots_offset != 0 ||
-                    rank_scratch.combine_record_slots_bytes != 0)
+                    rank_scratch.combine_record_slots_bytes != 0 ||
+                    rank_scratch.combine_contributor_count_offset != 0 ||
+                    rank_scratch.combine_contributor_count_bytes != 0 ||
+                    rank_scratch.combine_contributor_entry_offset != 0 ||
+                    rank_scratch.combine_contributor_entry_bytes != 0)
                     return 30;
             } else if (rank_scratch.combine_record_slots_offset == 0 ||
                        rank_scratch.combine_record_slots_offset %
@@ -572,6 +578,22 @@ int main() {
                                sizeof(std::int32_t) ||
                        rank_scratch.combine_record_slots_offset +
                                rank_scratch.combine_record_slots_bytes >
+                           rank_scratch.scratch_offset +
+                               rank_scratch.scratch_bytes ||
+                       rank_scratch.combine_contributor_count_offset %
+                               alignof(std::uint32_t) != 0 ||
+                       rank_scratch.combine_contributor_count_bytes !=
+                           input.num_tokens * sizeof(std::uint32_t) ||
+                       rank_scratch.combine_contributor_entry_offset %
+                               alignof(CombineContributorEntry) != 0 ||
+                       rank_scratch.combine_contributor_entry_bytes !=
+                           input.num_tokens * input.num_topk *
+                               sizeof(CombineContributorEntry) ||
+                       rank_scratch.combine_contributor_count_offset +
+                               rank_scratch.combine_contributor_count_bytes >
+                           rank_scratch.combine_contributor_entry_offset ||
+                       rank_scratch.combine_contributor_entry_offset +
+                               rank_scratch.combine_contributor_entry_bytes >
                            rank_scratch.scratch_offset +
                                rank_scratch.scratch_bytes ||
                        rank_scratch.dispatch_error_offset != 0 ||
@@ -619,6 +641,10 @@ int main() {
         hybrid_scratch.dispatch_rank_bitmap_bytes != 0 ||
         hybrid_scratch.dispatch_expert_bitmap_offset != 0 ||
         hybrid_scratch.dispatch_expert_bitmap_bytes != 0 ||
+        hybrid_scratch.combine_contributor_count_offset != 0 ||
+        hybrid_scratch.combine_contributor_count_bytes != 0 ||
+        hybrid_scratch.combine_contributor_entry_offset != 0 ||
+        hybrid_scratch.combine_contributor_entry_bytes != 0 ||
         hybrid_scratch.scratch_outbound_ingress_counts_offset +
                 4 * sizeof(std::uint64_t) >
             hybrid_scratch.scratch_offset + hybrid_scratch.scratch_bytes)

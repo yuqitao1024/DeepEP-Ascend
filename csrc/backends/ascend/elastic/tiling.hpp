@@ -45,7 +45,7 @@ struct CoreTilingInput {
 };
 
 inline constexpr std::uint32_t kAscendMaxDataBlocks = 72;
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 15;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 16;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -208,6 +208,9 @@ inline bool build_workspace_layout(
     const bool parallel_combine =
         input.operation == OperationKind::kCombine &&
         !has_mode(input.mode_flags, CoreMode::kHybrid);
+    const bool grouped_combine = parallel_combine &&
+        (!has_mode(input.mode_flags, CoreMode::kExpanded) ||
+         has_mode(input.mode_flags, CoreMode::kAllowMultipleReduction));
     const std::uint64_t local_experts = parallel_dispatch ?
         input.num_experts /
             static_cast<std::uint64_t>(input.topology.world_size) : 0;
@@ -226,6 +229,19 @@ inline bool build_workspace_layout(
         !checked_multiply(
             dispatch_output_capacity, sizeof(std::int32_t),
             &layout.combine_record_slots_bytes))
+        return false;
+    std::uint64_t combine_contributor_entry_count = 0;
+    if (grouped_combine &&
+        (!checked_multiply(
+             input.num_tokens, sizeof(std::uint32_t),
+             &layout.combine_contributor_count_bytes) ||
+         !checked_multiply(
+             input.num_tokens, input.num_topk,
+             &combine_contributor_entry_count) ||
+         !checked_multiply(
+             combine_contributor_entry_count,
+             sizeof(CombineContributorEntry),
+             &layout.combine_contributor_entry_bytes)))
         return false;
     std::uint64_t scratch_cursor = 0;
     if (!checked_multiply(
@@ -309,6 +325,24 @@ inline bool build_workspace_layout(
                 &scratch_cursor))
             return false;
     }
+    if (grouped_combine) {
+        if (!checked_align(
+                scratch_cursor, alignof(std::uint32_t), &scratch_cursor))
+            return false;
+        layout.combine_contributor_count_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, layout.combine_contributor_count_bytes,
+                &scratch_cursor) ||
+            !checked_align(
+                scratch_cursor, alignof(CombineContributorEntry),
+                &scratch_cursor))
+            return false;
+        layout.combine_contributor_entry_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, layout.combine_contributor_entry_bytes,
+                &scratch_cursor))
+            return false;
+    }
     if (
         !checked_align(
             scratch_cursor, kAscendElasticAlignment,
@@ -359,7 +393,16 @@ inline bool build_workspace_layout(
         (parallel_combine &&
          !checked_add(
              layout.scratch_offset, layout.combine_record_slots_offset,
-             &layout.combine_record_slots_offset)))
+             &layout.combine_record_slots_offset)) ||
+        (grouped_combine &&
+         (!checked_add(
+              layout.scratch_offset,
+              layout.combine_contributor_count_offset,
+              &layout.combine_contributor_count_offset) ||
+          !checked_add(
+              layout.scratch_offset,
+              layout.combine_contributor_entry_offset,
+              &layout.combine_contributor_entry_offset))))
         return false;
     *output = layout;
     return true;
