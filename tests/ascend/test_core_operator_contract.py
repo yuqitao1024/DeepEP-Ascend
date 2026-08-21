@@ -379,7 +379,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "stage == DirectCombineStage::kEpilogueReduce",
             prepare_call)
         vector_call = kernel.index(
-            "direct_combine_epilogue_vector_reduce(", reduce_stage)
+            "direct_combine_epilogue_vector_reduce_impl<", reduce_stage)
         fallback_call = kernel.index(
             "asc_vf_call<direct_combine_epilogue_reduce_vf>",
             vector_call)
@@ -408,6 +408,42 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             kernel[weights_stage:tail_call])
         self.assertNotIn("combine_contributor_count_offset", source)
         self.assertNotIn("combine_contributor_entry_offset", source)
+
+    def test_direct_combine_common_shape_specialization_contract(self):
+        """Catches losing the K=6/H=7168 AOT path or dynamic fallback."""
+        source = (ELASTIC / "combine.asc").read_text()
+        self.assertIn("kCombineCommonTopk = 6", source)
+        self.assertIn("kCombineCommonHidden = 7168", source)
+        self.assertIn(
+            "template <std::uint64_t StaticNumTopk,\n"
+            "          std::uint64_t StaticHiddenElements>",
+            source)
+        self.assertIn(
+            "direct_combine_epilogue_vector_reduce_impl<\n"
+            "                    kCombineCommonTopk,\n"
+            "                    kCombineCommonHidden>",
+            source)
+        self.assertIn(
+            "direct_combine_epilogue_vector_reduce_impl<0, 0>", source)
+
+        kernel = source[source.index(
+            "__global__ __vector__ void combine_kernel"):]
+        reduce_stage = kernel.index(
+            "stage == DirectCombineStage::kEpilogueReduce")
+        common_guard = kernel.index(
+            "tiling.num_topk == kCombineCommonTopk", reduce_stage)
+        common_hidden = kernel.index(
+            "tiling.hidden == kCombineCommonHidden", common_guard)
+        common_call = kernel.index(
+            "direct_combine_epilogue_vector_reduce_impl<", common_hidden)
+        dynamic_call = kernel.index(
+            "direct_combine_epilogue_vector_reduce_impl<0, 0>", common_call)
+        scalar_fallback = kernel.index(
+            "asc_vf_call<direct_combine_epilogue_reduce_vf>", dynamic_call)
+        self.assertLess(common_guard, common_hidden)
+        self.assertLess(common_hidden, common_call)
+        self.assertLess(common_call, dynamic_call)
+        self.assertLess(dynamic_call, scalar_fallback)
 
     def test_direct_combine_grouping_contract(self):
         """Catches restoring a separate grouping launch or contributor table."""
@@ -4965,6 +5001,7 @@ int main() {
             "odd-hidden-weighted",
             "vector-hidden-256",
             "vector-tail-hidden-272-two-bias",
+            "specialized-k6-hidden7168",
             "cached-dispatch-changed-outputs",
             "sequential-100-generations",
             "cross-buffer-handle",
@@ -4993,6 +5030,7 @@ int main() {
                     "padding-expanded-input-capacity",
                     "odd-hidden-record-layout",
                     "vector-payload-and-tail",
+                    "common-shape-specialization",
                     "case-boundary-barriers",
                     "distributed-failure-aggregation",
                     "buffer-before-group-teardown",
@@ -5038,6 +5076,14 @@ int main() {
                                   "process-group"],
                         "failures": ["buffer-a failed", "buffer-c failed",
                                      "process-group failed"],
+                    },
+                    "common_shape": {
+                        "allow_multiple_reduction": True,
+                        "has_duplicate_contributor": True,
+                        "has_inactive_lane": True,
+                        "hidden": 7168,
+                        "num_experts": 8,
+                        "num_topk": 6,
                     },
                     "expanded": {
                         "mapped_rows": [2],
@@ -5148,6 +5194,28 @@ int main() {
             {
                 "pure_vector": {"bias_count": 0, "hidden": 256},
                 "vector_tail": {"bias_count": 2, "hidden": 272},
+            })
+
+    def test_two_rank_combine_common_shape_case_contract(self):
+        """Catches losing public K=6/H=7168 specialization coverage."""
+        result = subprocess.run(
+            ["python3", str(TWO_RANK_COMBINE), "--contract"],
+            cwd=ROOT, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        contract = json.loads(result.stdout)
+        self.assertIn("specialized-k6-hidden7168", contract["case_names"])
+        self.assertIn(
+            "common-shape-specialization",
+            contract["contract_checks"])
+        self.assertEqual(
+            contract["behavior_fixtures"]["common_shape"],
+            {
+                "allow_multiple_reduction": True,
+                "has_duplicate_contributor": True,
+                "has_inactive_lane": True,
+                "hidden": 7168,
+                "num_experts": 8,
+                "num_topk": 6,
             })
 
     def test_rank_parameterized_scale_up_smoke_contract(self):

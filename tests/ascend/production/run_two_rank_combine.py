@@ -58,6 +58,7 @@ ADDITIONAL_CASE_NAMES = (
     "odd-hidden-weighted",
     "vector-hidden-256",
     "vector-tail-hidden-272-two-bias",
+    "specialized-k6-hidden7168",
 )
 
 INTERLEAVED_CASE_NAMES = (
@@ -68,8 +69,8 @@ CASE_NAMES = (BASELINE_CASE_NAMES[:13] + ADDITIONAL_CASE_NAMES +
               BASELINE_CASE_NAMES[13:16] + INTERLEAVED_CASE_NAMES +
               BASELINE_CASE_NAMES[16:])
 
-REGULAR_CASES = CASE_NAMES[:19]
-SPECIAL_CASES = CASE_NAMES[19:]
+REGULAR_CASES = CASE_NAMES[:20]
+SPECIAL_CASES = CASE_NAMES[20:]
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ class CaseSpec:
     require_padding: bool = False
     transform_variant: object = 0
     hidden: int = HIDDEN
+    num_experts: int = NUM_EXPERTS
 
 
 def _payloads(counts, offset, hidden=HIDDEN):
@@ -185,6 +187,12 @@ def _case_specs():
             "vector-tail-hidden-272-two-bias",
             _payloads((2, 2), 47, hidden=272), normal_routes,
             bias_count=2, hidden=272),
+        "specialized-k6-hidden7168": CaseSpec(
+            "specialized-k6-hidden7168",
+            _payloads((2, 2), 49, hidden=7168),
+            (((0, 1, 4, 5, -1, 0), (3, 7, 4, -1, 1, 5)),
+             ((4, 5, 0, 1, -1, 4), (7, 3, 0, -1, 5, 1))),
+            num_topk=6, hidden=7168, num_experts=8),
         "cached-dispatch-changed-outputs": CaseSpec(
             "cached-dispatch-changed-outputs", _payloads((2, 2), 25),
             normal_routes,
@@ -232,8 +240,9 @@ def _integer(value):
 
 
 def _reference_values(routes, origin_rank, variant=0,
-                      contributor_order=None, lane_order=None, hidden=HIDDEN):
-    local_experts = NUM_EXPERTS // WORLD_SIZE
+                      contributor_order=None, lane_order=None, hidden=HIDDEN,
+                      num_experts=NUM_EXPERTS):
+    local_experts = num_experts // WORLD_SIZE
     contributor_order = tuple(range(WORLD_SIZE)) if contributor_order is None \
         else tuple(contributor_order)
     result = []
@@ -292,7 +301,8 @@ def _apply_biases_once(values, biases, hidden=HIDDEN):
 
 
 def _expanded_reference_rows(num_rows, metadata, gathered_routes,
-                             contributor_rank, variant, hidden=HIDDEN):
+                             contributor_rank, variant, hidden=HIDDEN,
+                             num_experts=NUM_EXPERTS):
     rows = [[PADDING_SENTINEL] * hidden for _ in range(num_rows)]
     mapped = set()
     for metadata_row in metadata:
@@ -304,7 +314,7 @@ def _expanded_reference_rows(num_rows, metadata, gathered_routes,
             if destination < 0:
                 continue
             expert = _integer(gathered_routes[source_rank][source_token][lane])
-            local_experts = NUM_EXPERTS // WORLD_SIZE
+            local_experts = num_experts // WORLD_SIZE
             if expert // local_experts != contributor_rank:
                 raise AssertionError("expanded metadata names a nonlocal lane")
             if destination in mapped or not 0 <= destination < num_rows:
@@ -324,7 +334,7 @@ def _literal_expanded_layout(spec, contributor_rank):
            f"{spec.name} has no literal expanded-layout expectation")
     _check(0 <= contributor_rank < WORLD_SIZE,
            "expanded-layout contributor rank is invalid")
-    local_experts = NUM_EXPERTS // WORLD_SIZE
+    local_experts = spec.num_experts // WORLD_SIZE
     first_expert = contributor_rank * local_experts
     expert_counts = [0] * local_experts
     for source_routes in spec.routes:
@@ -358,10 +368,13 @@ def _validate_expanded_layout(spec, contributor_rank, num_rows,
            f"got {len(padding_rows)}")
 
 
-def _reference_matrix(routes, origin_rank, variant=0, hidden=HIDDEN):
+def _reference_matrix(routes, origin_rank, variant=0, hidden=HIDDEN,
+                      num_experts=NUM_EXPERTS):
     return {
         "shape": [len(routes), hidden],
-        "values": _reference_values(routes, origin_rank, variant, hidden=hidden),
+        "values": _reference_values(
+            routes, origin_rank, variant, hidden=hidden,
+            num_experts=num_experts),
     }
 
 
@@ -467,6 +480,7 @@ def _behavior_fixtures():
         order_routes, 0, ORDER_VARIANT, contributor_order=(1, 0))[0]
 
     same_contributor_spec = _case_specs()["duplicate-same-rank-experts"]
+    common_shape_spec = _case_specs()["specialized-k6-hidden7168"]
     same_contributor_routes = (
         ((0, 1), (2, 3)),
         ((1, 0), (3, 2)),
@@ -728,6 +742,25 @@ def _behavior_fixtures():
             "calls": cleanup_calls,
             "failures": cleanup_failures,
         },
+        "common_shape": {
+            "allow_multiple_reduction":
+                common_shape_spec.allow_multiple_reduction,
+            "has_duplicate_contributor": any(
+                len(valid_ranks) != len(set(valid_ranks))
+                for rank_routes in common_shape_spec.routes
+                for token_routes in rank_routes
+                for valid_ranks in [[
+                    expert // (common_shape_spec.num_experts // WORLD_SIZE)
+                    for expert in token_routes if expert >= 0]]),
+            "has_inactive_lane": any(
+                expert == -1
+                for rank_routes in common_shape_spec.routes
+                for token_routes in rank_routes
+                for expert in token_routes),
+            "hidden": common_shape_spec.hidden,
+            "num_experts": common_shape_spec.num_experts,
+            "num_topk": common_shape_spec.num_topk,
+        },
         "expanded": {
             "mapped_rows": expanded["mapped_rows"],
             "padding_rows": expanded["padding_rows"],
@@ -830,6 +863,13 @@ def _contract():
            specs["vector-tail-hidden-272-two-bias"].hidden == 272 and
            specs["vector-tail-hidden-272-two-bias"].bias_count == 2,
            "vector payload and scalar-tail coverage is incomplete")
+    common_shape = specs["specialized-k6-hidden7168"]
+    _check(common_shape.num_topk == 6 and common_shape.hidden == 7168 and
+           common_shape.num_experts == 8 and
+           common_shape.allow_multiple_reduction and
+           any(expert == -1 for rank_routes in common_shape.routes
+               for token_routes in rank_routes for expert in token_routes),
+           "common-shape specialization coverage is incomplete")
     _check(_reference_fixture() == {
         "rank0": [[4.0, 6.0, 8.0, 10.0], [5.0, 6.0, 7.0, 8.0]],
         "rank1": [[36.0, 38.0, 40.0, 42.0]],
@@ -924,6 +964,7 @@ def _contract():
             "padding-expanded-input-capacity",
             "odd-hidden-record-layout",
             "vector-payload-and-tail",
+            "common-shape-specialization",
             "case-boundary-barriers",
             "distributed-failure-aggregation",
             "buffer-before-group-teardown",
@@ -1091,7 +1132,7 @@ class CombineMatrix:
             x,
             topk_idx=routes,
             topk_weights=weights,
-            num_experts=NUM_EXPERTS,
+            num_experts=spec.num_experts,
             num_max_tokens_per_rank=CAPACITY,
             expert_alignment=spec.expert_alignment,
             num_sms=1,
@@ -1105,7 +1146,7 @@ class CombineMatrix:
     def _expert_outputs(self, recv_x, handle, gathered_routes, spec, variant):
         _validate_expansion_mode(handle.do_expand, spec.do_expand)
         metadata = handle.recv_src_metadata.detach().cpu()
-        local_experts = NUM_EXPERTS // WORLD_SIZE
+        local_experts = spec.num_experts // WORLD_SIZE
         first_expert = self.rank * local_experts
         last_expert = first_expert + local_experts
         if not handle.do_expand:
@@ -1129,7 +1170,7 @@ class CombineMatrix:
 
         expanded = _expanded_reference_rows(
             recv_x.shape[0], metadata, gathered_routes, self.rank, variant,
-            spec.hidden)
+            spec.hidden, spec.num_experts)
         if spec.name in LITERAL_EXPANDED_LAYOUTS:
             _validate_expanded_layout(
                 spec, self.rank, recv_x.shape[0], expanded["padding_rows"])
@@ -1160,9 +1201,10 @@ class CombineMatrix:
         return biases[0] if len(biases) == 1 else tuple(biases)
 
     def _expected(self, gathered_routes, variant, weights, biases,
-                  hidden=HIDDEN):
+                  hidden=HIDDEN, num_experts=NUM_EXPERTS):
         reference = _reference_matrix(
-            gathered_routes[self.rank], self.rank, variant, hidden)
+            gathered_routes[self.rank], self.rank, variant, hidden,
+            num_experts)
         values = reference["values"]
         if biases is not None:
             bias_tensors = (biases,) if isinstance(
@@ -1278,7 +1320,7 @@ class CombineMatrix:
             biases = self._biases(spec, state["routes"].shape[0])
             expected = self._expected(
                 state["gathered_routes"], state["variant"], state["weights"],
-                biases, spec.hidden)
+                biases, spec.hidden, spec.num_experts)
             return expert_x, biases, expected
 
         expert_x, biases, expected = self._run_step(
