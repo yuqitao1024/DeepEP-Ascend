@@ -264,18 +264,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
         for function_name in (
                 "direct_combine_producer_record_vf",
+                "direct_combine_epilogue_reduce_vf",
                 "direct_combine_epilogue_weights_vf"):
             begin = source.index(
                 f"__simt_vf__ inline void {function_name}")
             end = source.index("\n}\n", begin)
             function = source[begin:end]
             self.assertIn("direct_data_grid_stride(", function)
-
-        reduce_begin = source.index(
-            "__simt_vf__ inline void direct_combine_epilogue_reduce_vf")
-        reduce_end = source.index("\n}\n", reduce_begin)
-        reduction = source[reduce_begin:reduce_end]
-        self.assertIn("direct_subgroup_grid_stride(", reduction)
 
     def test_topk_grouping_compile_probe_contract(self):
         """Catches an uncompiled ballot adapter or a native match-any dependency."""
@@ -387,15 +382,6 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertIn("blockDim.x", stage)
         self.assertIn("combine_contributor_count_offset", reduction)
         self.assertIn("combine_contributor_entry_offset", reduction)
-        self.assertIn("direct_subgroup_grid_stride(", reduction)
-        self.assertIn("kTopkSubgroupWidth", reduction)
-        self.assertIn("token = work.first", reduction)
-        self.assertIn("token += work.stride", reduction)
-        self.assertIn("hidden = work.lane", reduction)
-        self.assertIn("hidden += kTopkSubgroupWidth", reduction)
-        self.assertNotIn("output_count", reduction)
-        self.assertNotIn("logical / hidden_elements", reduction)
-        self.assertNotIn("direct_data_grid_stride(", reduction)
         self.assertNotIn("workspace_slot_offset", reduction)
         self.assertNotIn("combine_reduce_origin_records(", reduction)
 
