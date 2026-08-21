@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟读懂 DeepEP 在 MoE 中的位置</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main class="page">
+  <header class="cover">
+    <div class="eyebrow">DeepEP 导学 0001 · 约 15 分钟</div>
+    <h1>读懂一条 MoE 数据流</h1>
+    <p class="lead">读完后，你应该能在白板上画出 router、dispatch、专家计算和 combine，并准确指出 DeepEP 负责哪两段。</p>
+  </header>
+
+  <h2>先看完整路径</h2>
+  <div class="flow">
+    <div><strong>1. Router</strong>为每个 token 选 top-k 专家，产生 expert id 和权重。</div>
+    <div><strong>2. Dispatch</strong>按专家所在 rank 重排并发送 token。</div>
+    <div><strong>3. Expert GEMM</strong>本 rank 的专家处理收到的 token。</div>
+    <div><strong>4. Combine</strong>把结果送回 token 原 rank，按路由权重归并。</div>
+  </div>
+  <div class="band"><strong>DeepEP 的边界：</strong>主要负责 dispatch 和 combine，以及两者依赖的 barrier、窗口、事件和通信流。router 与专家 GEMM 属于模型或推理框架。</div>
+
+  <h2>为什么需要 EP</h2>
+  <p>MoE 让模型拥有很多专家，但每个 token 只激活少量专家。稀疏激活降低了单 token 的计算量，却没有降低所有专家权重的总显存需求。把不同专家放到不同加速卡上，就是 Expert Parallelism。代价是：router 选中的专家经常不在 token 当前所在的卡上，所以每个 MoE 层都出现一次发散的 all-to-all 和一次反向归并。</p>
+
+  <h2>一个最小例子</h2>
+  <pre><code>rank 0 持有 token A、B，专家 E0、E1
+rank 1 持有 token C、D，专家 E2、E3
+
+router(A) = {E0, E3}
+
+dispatch: A 留一份给本地 E0，同时发一份到 rank 1 的 E3
+expert:   E0(A) 与 E3(A) 分别计算
+combine:  E3(A) 的结果返回 rank 0，与 E0(A) 按权重相加</code></pre>
+  <p>top-k 大于 1 时，一个 token 会复制到多个专家。dispatch 必须记住来源 token、目标专家、目标槽位和路由权重。combine 依赖这个 handle 恢复原顺序并完成归并。</p>
+
+  <h2>自测</h2>
+  <details class="quiz">
+    <summary>问题 1：DeepEP 是否执行专家 MLP 的 grouped GEMM？</summary>
+    <div class="answer">否。DeepEP 为专家计算准备按专家组织的输入，并在计算后归并输出。grouped GEMM 由 DeepGEMM、Triton、CANN 算子或其他 MoE runner 执行。</div>
+  </details>
+  <details class="quiz">
+    <summary>问题 2：为什么 combine 不能只是一次普通 all-to-all？</summary>
+    <div class="answer">因为它还要恢复原 token 顺序，并处理 top-k 多路结果、路由权重、可选 bias 和 multiple reduction。通信只是其中一部分。</div>
+  </details>
+  <details class="quiz">
+    <summary>问题 3：prefill 和 decode 更关注同一种指标吗？</summary>
+    <div class="answer">不完全相同。prefill token 多，通常更关注吞吐和链路带宽；decode 每步 token 少，更在意端到端延迟、固定开销和 CUDA/NPU graph 兼容性。EPv2 用统一接口承载这些工作负载，但调度参数仍需按场景选择。</div>
+  </details>
+
+  <h2>下一步</h2>
+  <p>继续阅读<a href="../reference/deepep-v2-ascend-950-guide.html">《DeepEP v2：从 MoE 专家并行到 Ascend 950 性能优化》</a>。主讲义会把这条数据流展开到 H800、NCCL Gin、Ascend staged transport、8 个优化任务和 NPU8P 操作。</p>
+  <p>遇到不清楚的术语或代码路径，先记下主讲义章节号，再结合证据索引中的论文和仓库文件核对。</p>
+
+  <footer>主要阅读：<a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a>；<a href="https://github.com/sgl-project/sglang/blob/main/docs/docs/advanced_features/expert_parallelism.mdx">SGLang Expert Parallelism</a>。</footer>
+</main>
+</body>
+</html>

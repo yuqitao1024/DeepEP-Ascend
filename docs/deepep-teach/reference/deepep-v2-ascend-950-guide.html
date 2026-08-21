@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="DeepEP v2、H800、Ascend 950、HCCL/HCOMM、性能优化和 NPU8P 协作指南">
+  <title>DeepEP v2：从 MoE 专家并行到 Ascend 950 性能优化</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main class="page">
+  <header class="cover">
+    <div class="eyebrow">团队串讲与协作开发手册</div>
+    <h1>DeepEP v2：从 MoE 专家并行到 Ascend 950 性能优化</h1>
+    <p class="lead">材料沿着一个 token 在 MoE 层中的数据流展开，说明 EP 解决什么问题、DeepEP 在推理栈中负责什么、H800 与 Ascend 950 的实现有何差别，并给出当前性能证据和 8 个可独立认领的白盒优化任务。</p>
+    <div class="meta">
+      <span>代码基线：DeepEP-Ascend 2c434b3</span>
+      <span>上游基线：EPv2 018f21e</span>
+      <span>环境基线：CANN 9.2.0 / dav-3510</span>
+      <span>更新：2026-08-21</span>
+    </div>
+  </header>
+
+  <section class="band warning">
+    <div class="kicker">数据口径</div>
+    <p>本文把证据分为三类：仓库和 NPU8P 任务产生的实测、上游公开数据、根据两者做的量级判断。只有 workload fingerprint、case、拓扑、计时边界和逻辑字节公式一致时，才能形成正式 H800/Ascend 比值。当前缺少同口径 H800 报告，因此本文不会给出伪精确的 parity 结论。</p>
+  </section>
+
+  <h2 id="toc">目录与串讲安排</h2>
+  <ol class="toc">
+    <li><a href="#summary">阅读索引：六个判断</a></li>
+    <li><a href="#moe">MoE 与 EP：为什么要做专家并行</a></li>
+    <li><a href="#position">DeepEP 在模型推理中的位置</a></li>
+    <li><a href="#epv2">DeepEP v2 的设计思路与架构</a></li>
+    <li><a href="#h800">H800：单机与多机如何优化</a></li>
+    <li><a href="#ascend">Ascend 950：如何实现类 Gin 路径</a></li>
+    <li><a href="#operators">算子清单及其 MoE 作用</a></li>
+    <li><a href="#performance">性能差距和证据边界</a></li>
+    <li><a href="#tasks">8 个白盒优化项与分工建议</a></li>
+    <li><a href="#npu8p">NPU8P 环境使用</a></li>
+    <li><a href="#sources">来源与延伸阅读</a></li>
+  </ol>
+  <p>推荐串讲时长 75 分钟：背景 10 分钟，EPv2/H800 15 分钟，Ascend 950 20 分钟，性能与任务拆解 20 分钟，NPU8P 10 分钟。</p>
+
+  <h2 id="summary">1. 阅读索引：六个判断</h2>
+  <div class="grid">
+    <article class="card"><h3>EP 分摊专家权重</h3><p>大量专家分布在多卡，每个 token 只计算 top-k 专家。模型容量可以增长，但每卡只保存部分专家。</p></article>
+    <article class="card"><h3>EP 引入两次数据搬运</h3><p>router 后需要 dispatch，专家计算后需要 combine。通信模式接近不规则 all-to-all，负载由 token 路由决定。</p></article>
+    <article class="card"><h3>DeepEP 不是 MoE 计算库</h3><p>它负责 token shuffle、元数据、归并、通信资源和 overlap。router 与专家 grouped GEMM 由上层框架负责。</p></article>
+    <article class="card"><h3>EPv2 以 Gin 为通信底座</h3><p>NCCL communicator、对称窗口、LSA 和 GPU 发起的 GIN 让 kernel 能按 peer 选择本地直访或 RDMA。</p></article>
+    <article class="card"><h3>Ascend 不能逐行翻译 CUDA</h3><p>CANN 9.2 的公开 AIN 是 AICore 接口，SIMT VF 不能直接敲 URMA doorbell。本仓采用 SIMT 录命令、AICore 执行的 staged transport。</p></article>
+    <article class="card"><h3>首要瓶颈是片上并行度</h3><p>8 卡功能已过 144 cases，但主数据路径仍只启动 1 个 AI Vector block。先解除 1/72 资源上限，再讨论链路微调。</p></article>
+  </div>
+
+  <h2 id="moe">2. MoE 与 EP：为什么要做专家并行</h2>
+  <h3>2.1 从 Dense FFN 到稀疏 MoE</h3>
+  <p>Dense Transformer 的每个 token 都经过同一组 FFN 参数。MoE 把 FFN 替换成多个 expert，router 为 token 选择 top-k 个 routed experts，并给出归并权重。DeepSeekMoE 还引入细粒度 routed experts 和始终参与的 shared experts，用更细的专家组合提升专门化，同时用 shared experts 承接共通知识。<a class="source" href="#s1">[S1]</a><a class="source" href="#s2">[S2]</a></p>
+  <pre><code>输入 X: [T, H]
+router(X) -&gt; topk_idx [T, K], topk_weights [T, K]
+Y_t = shared_experts(X_t) + sum(weight[t,k] * expert[topk_idx[t,k]](X_t))</code></pre>
+  <p>稀疏激活省的是每个 token 的 FLOPs，不是全部参数的存储。256 个 routed experts 即使每次只激活 8 个，所有专家权重仍要放在设备上。单卡无法容纳或无法高效服务时，就要把专家切到多卡。</p>
+
+  <h3>2.2 EP 为什么必要</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>问题</th><th>EP 的处理</th><th>新增代价</th></tr></thead>
+    <tbody>
+      <tr><td>专家权重总量超过单卡显存</td><td>每个 rank 只保存一部分专家</td><td>token 可能要跨卡找专家</td></tr>
+      <tr><td>希望增加专家数而不同比例增加 token FLOPs</td><td>扩大 EP domain，仍只激活 top-k</td><td>all-to-all 扇出和元数据增加</td></tr>
+      <tr><td>不同 expert 热度不均</td><td>专家重排、复制或 EPLB</td><td>慢 rank 决定层延迟，需要容量和溢出策略</td></tr>
+      <tr><td>跨节点带宽远低于节点内带宽</td><td>device/node-limited routing 限制每个 token 触达的设备或节点</td><td>路由质量和通信约束要共同优化</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>DeepSeek-V2 的 device-limited routing 和 DeepSeek-V3 的 node-limited routing 都在控制通信扇出。V3 训练还使用无 token 丢弃策略，因此通信和 expert capacity 不能靠丢弃热点 token 来掩盖。<a class="source" href="#s1">[S1]</a><a class="source" href="#s2">[S2]</a></p>
+
+  <figure class="explainer" id="fig-token-journey">
+    <p class="figure-title">图 1：一个 token 为什么先发散，再回到原 rank</p>
+    <p class="figure-note">例子：token A 原来在 rank 0，router 选中本地 E0 和 rank 1 上的 E3。</p>
+    <div class="token-journey">
+      <div class="diagram-node"><strong>Router @ rank 0</strong><span class="token-chip">A</span><br><span class="expert-chip">E0 · 0.4</span><span class="expert-chip">E3 · 0.6</span></div>
+      <div class="diagram-arrow">→</div>
+      <div class="diagram-node"><strong>Dispatch</strong><span class="token-chip">A→E0</span><span class="token-chip">A→E3</span><br><span class="diagram-label">一份本地，一份跨 rank</span></div>
+      <div class="diagram-arrow">→</div>
+      <div class="diagram-node"><strong>Experts</strong><span class="expert-chip">rank 0: E0(A)</span><span class="expert-chip">rank 1: E3(A)</span><br><span class="diagram-label">各自执行 expert GEMM</span></div>
+      <div class="diagram-arrow">→</div>
+      <div class="diagram-node"><strong>Combine @ rank 0</strong><span class="token-chip">Y(A)</span><br><span class="diagram-label">0.4·E0(A) + 0.6·E3(A)</span></div>
+    </div>
+    <div class="legend"><span class="legend-data">token / payload 数据流</span><span class="legend-control">handle、slot 和完成信号未画入主线</span></div>
+    <figcaption>Dispatch 解决“token 去哪里”，combine 解决“结果回哪里、如何恢复顺序并加权”。DeepEP 覆盖这两段，router 和 expert GEMM 在其边界之外。依据：<a href="#s1">DeepSeek-V3</a> 与 <a href="#s7">SGLang EP 调用链</a>。</figcaption>
+  </figure>
+
+  <h3>2.3 prefill、训练和 decode 的差异</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>场景</th><th>token 规模</th><th>主要目标</th><th>DeepEP 关注点</th></tr></thead>
+    <tbody>
+      <tr><td>训练</td><td>大 batch</td><td>吞吐、稳定、反向传播</td><td>高带宽 dispatch/combine、FP8 通信、计算通信 overlap</td></tr>
+      <tr><td>prefill</td><td>一次处理长 prompt</td><td>吞吐和首 token 时间</td><td>normal/high-throughput 路径、分块、链路饱和</td></tr>
+      <tr><td>decode</td><td>每步 token 少</td><td>单步尾延迟</td><td>固定开销、同步次数、graph 兼容、低延迟路径</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2 id="position">3. DeepEP 在模型推理中的位置</h2>
+  <div class="flow">
+    <div><strong>Attention / Norm</strong>产生本层 hidden states</div>
+    <div><strong>Router</strong>选择 expert id 与权重</div>
+    <div><strong>DeepEP dispatch</strong>计数、重排、跨 rank 发送</div>
+    <div><strong>Expert runner</strong>pre-permute、grouped GEMM、post-permute</div>
+    <div><strong>DeepEP combine</strong>返回 origin rank、加权归并</div>
+    <div><strong>Residual / next block</strong>继续模型前向</div>
+  </div>
+  <p>SGLang 的实际抽象就是 <code>TopK -&gt; Dispatcher.dispatch -&gt; MoeRunner -&gt; Dispatcher.combine</code>，vLLM 也把 DeepEP 作为 all-to-all backend。这个边界很重要：DeepEP 输出适合 expert GEMM 的布局和每 expert token 数，但不拥有 expert 权重，也不决定 router 算法。<a class="source" href="#s7">[S7]</a><a class="source" href="#s8">[S8]</a></p>
+
+  <h3>3.1 dispatch 做了什么</h3>
+  <ol>
+    <li>从 <code>topk_idx</code> 计算目标 rank、目标 expert 和每 rank/expert 的 token 数。</li>
+    <li>为每个去重后的目标 rank 分配槽位。top-k 中多个 expert 位于同一 rank 时，payload 通常只需发一份，metadata 保留多个 expert lane。</li>
+    <li>把 hidden、可选 FP8 scale factor、expert id、权重和 origin token 信息写入目标 inbox。</li>
+    <li>在 payload 可见后发布 control/release，接收方构造紧凑或按 expert 对齐的输出。</li>
+    <li>返回 handle。cached dispatch 和 combine 复用其中的 slot、prefix、来源与顺序信息。</li>
+  </ol>
+
+  <h3>3.2 combine 做了什么</h3>
+  <ol>
+    <li>expert runner 把每个 expert 的输出交给 combine。</li>
+    <li>combine 按 dispatch handle 把记录送回 origin rank。</li>
+    <li>接收方恢复 origin token 顺序，对 top-k 贡献做 BF16 归并，可应用路由权重和 bias。</li>
+    <li><code>allow_multiple_reduction</code> 决定同一 contributor rank 上的多个 lane 如何归约；expanded/reduced 路径处理展开布局。</li>
+  </ol>
+
+  <h2 id="epv2">4. DeepEP v2 的设计思路与整体架构</h2>
+  <h3>4.1 V1 到 V2</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>维度</th><th>DeepEP V1</th><th>DeepEP v2</th></tr></thead>
+    <tbody>
+      <tr><td>通信底座</td><td>NVSHMEM</td><td>NCCL Gin，复用已有 NCCL communicator</td></tr>
+      <tr><td>API</td><td>normal 与 low-latency 多套 Buffer 路径</td><td>统一 <code>ElasticBuffer</code>，统一 dispatch/combine 表面</td></tr>
+      <tr><td>内存</td><td>NVLink/RDMA buffer 分区</td><td>elastic symmetric virtual address，规划 GPU/CPU 混合物理段</td></tr>
+      <tr><td>调优</td><td>常依赖预设配置和 auto-tune</td><td>根据流量、链路和 overlap 偏好分析计算 SM/QP</td></tr>
+      <tr><td>规模</td><td>较小 EP domain</td><td>目标支持到 EP2048，更大的 scale-up/scale-out domain</td></tr>
+      <tr><td>SM 占用</td><td>V3 类训练常用 24 SM</td><td>上游称 4 到 6 SM 可保持相当或更好性能，峰值场景可用更多 SM</td></tr>
+    </tbody>
+  </table></div>
+  <p>V2 的取舍也很明确：buffer 占用更大，V1 的 0-SM RDMA low-latency EP 不再保留。Engram、PP 和 CP 仍标为实验能力。<a class="source" href="#s4">[S4]</a></p>
+
+  <h3>4.2 分层架构</h3>
+  <div class="lane"><div>框架层</div><div>PyTorch process group、router、MoE runner、event/stream 调度</div></div>
+  <div class="lane"><div>Python API</div><div><code>deep_ep.buffers.elastic.ElasticBuffer</code>，负责参数校验、后端选择、shape/handle 和自动 SM/QP</div></div>
+  <div class="lane"><div>C++ runtime</div><div>对称内存、NCCL context/window、JIT kernel launch、资源所有权</div></div>
+  <div class="lane"><div>EP kernel</div><div>barrier、direct/hybrid dispatch、direct/hybrid combine、copy/reduce epilogue、PP、Engram</div></div>
+  <div class="lane"><div>通信层</div><div>节点内 LSA/NVLink 直访；节点间 NCCL Gin/GDAKI、QP、RDMA window、signal/flush/wait</div></div>
+
+  <figure class="explainer" id="fig-epv2-stack">
+    <p class="figure-title">图 2：EPv2 在推理栈中的位置和责任边界</p>
+    <p class="figure-note">橙色边框内是 DeepEP 主要拥有的运行时与数据通路。</p>
+    <div class="stack-diagram">
+      <div class="stack-layer"><strong>模型与推理框架</strong><span>Attention · Router · Expert weights · Grouped GEMM · Scheduler</span></div>
+      <div class="stack-layer focus"><strong>ElasticBuffer API</strong><span>dispatch / combine / barrier · handle · event · SM/QP policy</span></div>
+      <div class="stack-layer focus"><strong>EP kernels</strong><span>route/count · payload copy · direct/hybrid transport · receive validation · reduction</span></div>
+      <div class="stack-layer focus"><strong>Runtime 与对称内存</strong><span>JIT launch · symmetric window · stream ownership · resource lifecycle</span></div>
+      <div class="stack-layer"><strong>设备通信</strong><span>H800: LSA + NCCL Gin · Ascend 950: HCCL/HCOMM + staged URMA service</span></div>
+      <div class="stack-layer"><strong>硬件</strong><span>NVLink / RDMA / CX7 · AI Vector / UBC_CTP / RoCE</span></div>
+    </div>
+    <figcaption>框架把 router 的 top-k 结果交给 ElasticBuffer，DeepEP 产出 expert-friendly 布局，再接收 expert runner 的输出执行 combine。它不持有模型专家权重。代码入口：<a href="../../../deep_ep/buffers/elastic.py">elastic.py</a>。</figcaption>
+  </figure>
+
+  <h3>4.3 direct 与 hybrid</h3>
+  <p><strong>Direct mode</strong> 把 EP domain 看成一个目标 rank 集合。节点内 peer 可走对称地址的直接 load/store，跨节点 peer 通过 GIN 完成 put、signal 和 completion。路径短，适合拓扑和网络允许 full connection 的场景。</p>
+  <p><strong>Hybrid mode</strong> 把 rank 表示为 <code>(scaleout_rank, scaleup_rank)</code>。kernel 先按 scale-out 目标组织 token，再由节点内 forwarder 使用 NVLink 转发到本节点对应 expert。它减少每个 GPU 的跨节点连接压力，也适配 group/node-limited routing。代价是多一级 buffer、channel metadata 和转发同步。</p>
+
+  <h3>4.4 handle、JIT 和 overlap</h3>
+  <ul>
+    <li>首次 dispatch 生成 handle；cached dispatch 避免重复部分 layout 工作，combine 用它恢复来源和顺序。</li>
+    <li>kernel 由轻量 JIT 在运行时按 dtype、top-k、hidden、rank 数和模式实例化，安装阶段无需编译全部 CUDA 组合。</li>
+    <li><code>previous_event</code>、<code>async_finish</code> 和 communication stream 让上层把共享专家或其他计算与通信重叠。</li>
+    <li><code>get_theoretical_num_sms</code> 根据受限流量和目标带宽估算 SM；<code>get_theoretical_num_qps</code> 在 direct/hybrid 下选择不同 QP 数，减少盲目 auto-tune。</li>
+  </ul>
+
+  <h2 id="h800">5. H800 场景如何优化</h2>
+  <p>这里的 H800 指上游 Hopper/SM90 实现和 V1 明确标注的 H800 平台。EPv2 README 的新数据按架构写作 SM90/SM100，因此不能把每个 V2 数字都改写成 H800 实测。</p>
+
+  <h3>5.1 单机多卡：让 NVLink 和 SM 同时吃满</h3>
+  <div class="grid">
+    <article class="card"><h4>对称内存与 LSA</h4><p>各 rank 注册同布局 window。kernel 用 rank 和 offset 计算 peer 地址，节点内走直接 load/store，省去 host 发起 collective。</p></article>
+    <article class="card"><h4>warp 分工</h4><p>warp 分别承担 notify、payload、forward 和 reduce。一个 warp 可对应一个 channel，减少控制分支互相阻塞。</p></article>
+    <article class="card"><h4>top-k 去重</h4><p>CUDA 用 warp match/deduplicate 把相同目标 rank 的 lane 分组，一份 token payload 只发一次，lane metadata 仍完整。</p></article>
+    <article class="card"><h4>TMA 与异步 copy</h4><p>hidden 主体通过 TMA 在 global/shared memory 间搬运，FP8 scale factor 使用对齐 copy，标量只处理尾部。</p></article>
+    <article class="card"><h4>布局贴合 GEMM</h4><p>expanded output 可按 expert alignment 填充并清零 gap，直接供 grouped GEMM 消费，减少框架侧二次 permute。</p></article>
+    <article class="card"><h4>资源可控</h4><p>峰值性能可增加 SM，在线推理 overlap 则保留更少 SM 给计算。combine 复用 dispatch 的 SM 选择。</p></article>
+  </div>
+
+  <h3>5.2 多机多卡：分开处理 scale-up 和 scale-out</h3>
+  <ol>
+    <li>router 用 node-limited routing 控制每 token 触达节点数，先从模型层减少 RDMA 扇出。</li>
+    <li>同节点使用 NVLink/LSA，跨节点使用 NCCL Gin。window 隐藏地址注册差异，operator 保留 put、signal、flush 等明确语义。</li>
+    <li>hybrid dispatch 让 scale-out warp 发送到目标节点，再由 forward warp 分发到目标 GPU；combine 反向执行。</li>
+    <li>每 channel/QP 并行推进 RDMA，payload 完成后通过 release signal 发布 tail，避免 control 先于数据可见。</li>
+    <li>FP8 dispatch 降低正向通信字节，combine 保持 BF16 归并精度。事件和独立通信流把 all-to-all 藏在共享 expert 或其他计算后面。</li>
+  </ol>
+
+  <figure class="explainer" id="fig-h800-topology">
+    <p class="figure-title">图 3：H800 单机 direct 与多机 hybrid 的差别</p>
+    <p class="figure-note">蓝色实线是节点内 NVLink/LSA，橙色虚线是节点间 Gin/RDMA。</p>
+    <div class="topology-compare">
+      <section class="topology-panel">
+        <h4>单机 direct：peer 直接收 token</h4>
+        <div class="node-box"><div class="gpu-box">GPU 0<br>E0/E1</div><div class="gpu-box">GPU 1<br>E2/E3</div><div class="gpu-box">GPU 2<br>E4/E5</div><div class="gpu-box">GPU 3<br>E6/E7</div></div>
+        <div class="link-line">NVLink / LSA 对称地址直访</div>
+        <p class="diagram-label">每个 destination rank 直接写自己的 inbox，路径短，适合单个 scale-up domain。</p>
+      </section>
+      <section class="topology-panel">
+        <h4>多机 hybrid：先跨机，再节点内转发</h4>
+        <div class="node-box"><div class="gpu-box">Node A · GPU 0<br>sender</div><div class="gpu-box">Node A · GPU 1<br>sender</div></div>
+        <div class="link-line rdma">NCCL Gin / RDMA：按目标节点聚合</div>
+        <div class="node-box"><div class="gpu-box">Node B · forwarder<br>接收跨机流量</div><div class="gpu-box">Node B · expert GPU<br>NVLink 转发</div></div>
+        <p class="diagram-label">把 full-mesh 跨机连接收敛为 scale-out channel，再用 scale-up 网络到达本地 expert。</p>
+      </section>
+    </div>
+    <figcaption>Direct 和 hybrid 的选择由拓扑、连接能力及 <code>allow_hybrid_mode</code> 决定。模型侧 node-limited routing 会进一步限制每个 token 触达的节点数。来源：<a href="#s1">DeepSeek-V3</a> 与 <a href="#s4">DeepEP EPv2</a>。</figcaption>
+  </figure>
+
+  <h3>5.3 Gin 的依赖与运行语义</h3>
+  <p>Gin 是 NCCL Device API 的 GPU-Initiated Networking 层。DeepEP v2 要求 NCCL 2.30.4 及以上，并用已有 NCCL communicator 创建 device communicator、team 和 window。它不是普通 host collective 的别名，而是让 GPU kernel 发起远端内存操作。<a class="source" href="#s4">[S4]</a><a class="source" href="#s6">[S6]</a></p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>依赖</th><th>DeepEP 用途</th><th>关键语义</th></tr></thead>
+    <tbody>
+      <tr><td>NCCL communicator</td><td>复用 rank、拓扑、bootstrap 和网络资源</td><td>生命周期必须覆盖 ElasticBuffer</td></tr>
+      <tr><td>team: World/LSA/Rail</td><td>选择全局、节点内或同 rail peer 集合</td><td>rank 映射不能混用</td></tr>
+      <tr><td>symmetric window</td><td>把同布局 buffer 注册为 device 可寻址窗口</td><td>pointer 转 offset、跨 rank 相同逻辑布局</td></tr>
+      <tr><td>LSA</td><td>节点内直接 peer 内存访问</td><td>load/store memory semantics</td></tr>
+      <tr><td>GIN put/get/value/atomic</td><td>跨节点 payload、控制字和 release signal</td><td>one-sided 网络操作</td></tr>
+      <tr><td>request/flush/wait/barrier</td><td>批量提交、完成和代际同步</td><td>payload-before-control ordering</td></tr>
+      <tr><td>QP 与 sharing mode</td><td>把 warp/channel 映射到网络队列</td><td>并行度和资源占用之间权衡</td></tr>
+    </tbody>
+  </table></div>
+  <h2 id="ascend">6. Ascend 950：如何实现类 Gin 路径</h2>
+  <h3>6.1 不能直接复刻 Gin 的原因</h3>
+  <p>CANN 9.2.0 的 AIN 提供 window、team、Put、Get、PutValue、Signal、Flush、Wait 和 barrier 等语义，表面上接近 Gin。但其 device 方法带 <code>__aicore__</code> 资格，DeepEP 当前 operator 的通信生产者是 <code>__simt_vf__</code>。更关键的是，URMA SQ/CQ doorbell 需要 <code>st_dev/ld_dev</code>，这些 builtin 不能从 SIMT VF 安全调用。用普通非缓存 global store 假装 doorbell 没有 CANN 参考实现支持，存在静默丢命令风险。<a class="source" href="#s10">[S10]</a><a class="source" href="#s11">[S11]</a></p>
+
+  <h3>6.2 本仓的类 Gin 分层</h3>
+  <div class="lane"><div>Operator</div><div>Ascend dispatch/combine/barrier 只依赖 backend-neutral <code>DeviceTransportFacade</code></div></div>
+  <div class="lane"><div>SIMT producer</div><div>把 put、put-value、signal、flush、barrier 编码为固定大小命令，发布到 GM command buffer</div></div>
+  <div class="lane"><div>AICore service</div><div>解析命令，构造 URMA WQE/SGE，敲 SQ doorbell，轮询 CQ，写结构化诊断</div></div>
+  <div class="lane"><div>Host transport</div><div>从 PyTorch <code>ProcessGroupHCCL</code> 借用 communicator，创建 HCOMM team/window/channel</div></div>
+  <div class="lane"><div>CANN/HCOMM</div><div>拥有连接、注册、UBC_CTP channel、SQ/CQ、认证 token 和资源 teardown</div></div>
+  <pre><code>service::reset(context, generation)
+  -&gt; asc_vf_call&lt;producer&gt;       // SIMT 只录命令
+  -&gt; service::execute(context)   // AICore 执行 URMA
+  -&gt; asc_vf_call&lt;consumer&gt;       // 消费远端完成后的数据
+  -&gt; epilogue / completion</code></pre>
+  <p>这个边界保持了上游 operator 的语义结构，但不是函数名一一复制。比如 Gin 的 symmetric pointer、put、remote add release、flush 和 wait，在 Ascend facade 中仍是不同操作；底层可以用 offset、POD descriptor 和 staged command 表示。</p>
+
+  <figure class="explainer" id="fig-gin-ascend-mapping">
+    <p class="figure-title">图 4：Gin 与 Ascend staged transport，语义相同，执行位置不同</p>
+    <p class="figure-note">中列是 operator 依赖的稳定语义。左右两列说明这些语义在哪里执行。</p>
+    <div class="mapping-diagram">
+      <div class="mapping-row"><div class="mapping-head">H800 / NCCL Gin</div><div class="semantic">Operator 语义</div><div class="mapping-head">Ascend 950 / HCOMM</div></div>
+      <div class="mapping-row"><div>CUDA thread 直接调用 Gin，选择 team/window/QP</div><div class="semantic">peer + symmetric offset</div><div>SIMT VF 把 peer、offset 和 operation 编码进 GM command</div></div>
+      <div class="mapping-row"><div>Gin 在 GPU kernel 内发起 put/value/atomic</div><div class="semantic">put · signal · release</div><div>AICore service 构造 URMA WQE，并通过 <code>st_dev</code> 敲 SQ doorbell</div></div>
+      <div class="mapping-row"><div>request、flush、wait 表达网络完成</div><div class="semantic">completion + ordering</div><div>Drain/CQ polling 完成批次，generation 隔离重复调用</div></div>
+      <div class="mapping-row"><div>LSA peer 可直接 load/store</div><div class="semantic">scale-up 快路径</div><div>无已验证 direct peer pointer，当前统一走 window/channel 语义</div></div>
+    </div>
+    <figcaption>Ascend 多了一次“录命令再执行”的阶段，是因为 CANN 9.2.0 的 AIN/doorbell 能力属于 AICore，不能从 <code>__simt_vf__</code> 直接安全调用。依据：<a href="#s10">SIMT facade</a> 与 <a href="#s11">URMA staged transport</a>。</figcaption>
+  </figure>
+
+  <h3>6.3 Gin 与 Ascend 的语义映射</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>NCCL Gin</th><th>Ascend 950 对应物</th><th>当前实现说明</th></tr></thead>
+    <tbody>
+      <tr><td>NCCL communicator</td><td>PyTorch HCCL communicator</td><td>非 owning，process group 必须晚于 ElasticBuffer 销毁</td></tr>
+      <tr><td>World/LSA/Rail team</td><td>HCOMM world/scale-up/scale-out team</td><td>row-major topology 和 peer translation 由 host runtime 管理</td></tr>
+      <tr><td>ncclWindow</td><td>HcclTeamWindowRegister</td><td>持久 device buffer 注册为 symmetric window</td></tr>
+      <tr><td>GIN connection/QP</td><td>AIV UBC_CTP channel 与 URMA SQ/CQ</td><td>当前 facade channel 策略与 CUDA QP 参数分离</td></tr>
+      <tr><td>device put/value/signal</td><td>WriteNbi/WriteValueNbi/AtomicFAA</td><td>由 AICore service 提交</td></tr>
+      <tr><td>direct peer pointer</td><td>无已验证公开等价物</td><td>非本地 peer 保持 disabled，operator 走 window offset</td></tr>
+      <tr><td>GPU memory ordering</td><td>generation、payload/control 分阶段、Drain 和 signal</td><td>不能把 AIN relaxed signal 当作 release fence</td></tr>
+      <tr><td>request wait</td><td>channel drain、CQ polling、事件</td><td>完成粒度可能比 Gin request 更粗</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>6.4 单机多卡的实现状态与优化方向</h3>
+  <ul>
+    <li>Host 端创建 HCCL scale-up team、一个持久对称 window 和每 remote peer 的 AIV UBC_CTP channel。</li>
+    <li>window 按 control/generation、dispatch inbox、combine inbox 和扩展区划分。每个 destination 为每个 source 保留固定 shard，发送端无需远端分配。</li>
+    <li>64 位 generation 隔离重复调用；payload 写完后才能发布 count/completion。timeout 返回 rank、peer、command、channel 和 generation。</li>
+    <li>BF16、FP8、expanded/cached dispatch、combine、多 reduction、previous event、async 和 comm stream 已纳入 144-case 基准交集。</li>
+    <li>4/8 rank 的公开 smoke 已有历史记录，但完整不对称、近容量、失败和 teardown 矩阵仍是拓扑 qualification gap。</li>
+  </ul>
+  <div class="band danger"><strong>当前资源占用：</strong>direct dispatch/combine 仍固定启动 1 个 <code>__vector__</code> block、512 个 SIMT threads，benchmark 传 <code>num_sms=1</code>。Ascend 950PR_9599 每设备有 72 个 AI Vector 资源，主数据路径只用了其中一个执行域。这是 8 个优化项的共同起点。</div>
+
+  <figure class="explainer" id="fig-aiv-utilization">
+    <p class="figure-title">图 5：当前瓶颈不是 72 个执行域都慢，而是只启动了 1 个</p>
+    <div class="utilization-compare">
+      <section class="utilization-panel">
+        <div class="utilization-number">1 / 72</div>
+        <div class="resource-bar" aria-hidden="true"><div class="resource-fill current"></div></div>
+        <strong>当前单 block</strong>
+        <p class="diagram-label">route、copy、validation、reduction 和 HCOMM publication 都挤在一个 block 内。</p>
+      </section>
+      <section class="utilization-panel">
+        <div class="utilization-number">最多 72</div>
+        <div class="resource-bar" aria-hidden="true"><div class="resource-fill target"></div></div>
+        <strong>目标多 kernel 数据网格</strong>
+        <p class="diagram-label">control kernel 保持单 block；data kernel 用 1/8/16/32/64/72 blocks 扫描并调参。</p>
+      </section>
+    </div>
+    <figcaption>P0.1 先建立 stream-ordered 的 control/data kernel 边界，随后 P0.2、P0.3 和 metadata 优化才能安全扩到多 AI Vector。72 是首个峰值试验点，不是所有在线场景的固定值。</figcaption>
+  </figure>
+
+  <h3>6.5 多机多卡的实现状态与优化方向</h3>
+  <p>设计上，rank 用 row-major <code>(scaleout_rank, scaleup_rank)</code> 表示。scale-up team 处理本节点卡间路径，scale-out team 处理同 rail 的跨节点路径，hybrid 路由可覆盖 local、scale-up、scale-out rail 和 diagonal 四类 route。physical scale-out 还需要 RoCE NIC 选择、远端注册、链路错误、地址发布和 teardown。</p>
+  <p>NPU8P 只有一个物理主机。仓库做过 4 rank 的 <code>logical-single-host</code> 两节点模拟，能够证明拓扑翻译、command 和 operator 逻辑，却不能证明 RoCE 数据面、NIC 亲和性、跨机故障或性能。因此 physical multi-host capability 仍应保持 disabled。mapped CPU elastic buffer 也缺少公开、完整的 host map/unmap 与 CPU/NPU release-acquire cache visibility 契约。<a class="source" href="#s13">[S13]</a></p>
+
+  <h2 id="operators">7. 算子清单及其在 MoE 中的作用</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>接口或 kernel</th><th>MoE 流程位置</th><th>输入/输出与用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>get_dispatch_layout</code></td><td>router 后，dispatch 前</td><td>根据 top-k 计算 per-rank/per-expert count、rank bitmap 和接收布局。Python 公共准备接口，不是网络搬运本身。</td></tr>
+      <tr><td><code>barrier</code></td><td>资源建立、代际或测试边界</td><td>确保 team 成员到达同一 generation。不是每层都应额外插入 host barrier。</td></tr>
+      <tr><td><code>dispatch</code></td><td>router 到 expert GEMM</td><td>发送 hidden、expert metadata、权重和 FP8 scale factor，输出按本地 expert 组织的 token 及 handle。</td></tr>
+      <tr><td>expanded dispatch</td><td>expert GEMM 输入布局</td><td>按 expert alignment 展开并对 padding 清零，便于固定 stride 或 grouped GEMM。</td></tr>
+      <tr><td>cached dispatch</td><td>路由/布局可复用时</td><td>复用 handle 中的 destination slot 和 prefix，降低重复 metadata 成本。</td></tr>
+      <tr><td><code>dispatch_copy_epilogue</code></td><td>dispatch 接收尾部</td><td>验证 record，构造输出 tensor、top-k metadata、source metadata 和 padding。</td></tr>
+      <tr><td><code>combine</code></td><td>expert GEMM 到 MoE 输出</td><td>把 expert 输出送回 origin rank，恢复 token 顺序，按权重归并，可加 bias。</td></tr>
+      <tr><td>reduced/expanded combine</td><td>expanded expert 输出之后</td><td>处理多个 expert lane 或 contributor 的归约，支持 multiple reduction policy。</td></tr>
+      <tr><td><code>combine_reduce_epilogue</code></td><td>combine 接收尾部</td><td>按 origin token 对贡献做 BF16 reduction，写 routing weights 或 top-k indices。</td></tr>
+      <tr><td><code>hybrid_dispatch/combine</code></td><td>多机 EP</td><td>把 scale-out RDMA 与 scale-up 转发组合起来，减少 full-mesh 网络连接。</td></tr>
+      <tr><td>event/comm stream</td><td>MoE 层调度</td><td>表达输入依赖和完成边界，让共享专家或相邻计算与通信 overlap。</td></tr>
+    </tbody>
+  </table></div>
+  <h3>7.1 同仓但不属于核心 MoE round trip 的算子</h3>
+  <ul>
+    <li><code>engram_write/fetch/fetch_wait</code>：远端参数或 embedding 访问实验路径，不是每个 MoE 层的 dispatch/combine。</li>
+    <li><code>pp_send/pp_recv</code>：pipeline parallel 点对点传输。</li>
+    <li>AGRS、all-gather、reduce-scatter、CP：README 或 roadmap 中的扩展方向，不能据接口存在推断 Ascend 生产可用。</li>
+  </ul>
+
+  <h2 id="performance">8. 当前性能差距和证据边界</h2>
+  <h3>8.1 Ascend 950 当前 8 卡基线</h3>
+  <p>canonical shape 为每 rank 4096 tokens、hidden 7168、top-k 6、256 experts。8 rank smoke 覆盖 144 cases、720 operation records。以下 FP8 代表值来自 1 次 warmup 和 1 次测量，只能用于定位量级，不能作为稳定产线成绩。<a class="source" href="#s15">[S15]</a></p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>操作</th><th>平均时间</th><th>逻辑带宽</th></tr></thead>
+    <tbody>
+      <tr><td>dispatch</td><td class="metric">1.597 s</td><td class="metric">2.035 GB/s</td></tr>
+      <tr><td>expanded dispatch</td><td class="metric">1.773 s</td><td class="metric">2.115 GB/s</td></tr>
+      <tr><td>cached dispatch</td><td class="metric">1.589 s</td><td class="metric">2.045 GB/s</td></tr>
+      <tr><td>combine</td><td class="metric">2.511 s</td><td class="metric">1.848 GB/s</td></tr>
+      <tr><td>reduced combine</td><td class="metric">2.838 s</td><td class="metric">1.635 GB/s</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>8.2 H800/SM90 公开参考</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>来源</th><th>拓扑与 workload</th><th>dispatch</th><th>combine</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>DeepEP V1 H800</td><td>单机 EP8，4096 token，H7168，top-8</td><td class="metric">153 GB/s</td><td class="metric">158 GB/s</td><td>明确 H800 的节点内量级参考</td></tr>
+      <tr><td>DeepEP V1 H800</td><td>decode EP8，128 token，top-8，pure RDMA</td><td class="metric">77 us</td><td class="metric">114 us</td><td>低延迟路径参考，不可与当前大 batch 直接比</td></tr>
+      <tr><td>DeepEP v2 SM90/CX7</td><td>EP 8 x 2，8K token，top-8</td><td class="metric">90 GB/s</td><td class="metric">81 GB/s</td><td>V2 多机公开量级，不明确写成 H800</td></tr>
+    </tbody>
+  </table></div>
+  <p>若只拿 V1 单机 H800 逻辑带宽除以当前 Ascend 代表值，dispatch 约 75 倍、combine 约 86 倍。这个计算混合了 top-k 8/6、V1/V2 和不同计时实现，只能说明差距很大，不能写入正式 parity 报告。当前更可靠的白盒结论是：Ascend 延迟为秒级，上游同类训练路径在毫秒级，并且 Ascend 只使用 1/72 AI Vector execution domains。</p>
+  <div class="band evidence"><strong>正式对比所需口径：</strong>在 H800 与 Ascend 上使用同一个 workload manifest，分别运行当前 144-case automation，再用 <code>tests/benchmark/compare_ep.py</code> 比较 schema、fingerprint、case IDs、logical bytes、mean/p50/p95 和 aggregated logical GB/s。任何缺 case、超时或 fingerprint 不一致都应拒绝比较。</div>
+
+  <h2 id="tasks">9. 8 个白盒优化项与分工建议</h2>
+  <p>优先级不是八个人同时改两个大 kernel。先补 stage profiler，再建立多 kernel 全局同步边界。P0.1 是其余数据并行工作的地基；P0.2 和 P0.3 决定最大重复计算与内存效率；metadata 和 HCOMM 优化随后按 profiler 结果推进。</p>
+  <figure class="explainer" id="fig-optimization-roadmap">
+    <p class="figure-title">图 6：8 个白盒优化项的依赖和分批方式</p>
+    <p class="figure-note">从左到右推进。每一波先合入可测的底座，再让下一波复用。</p>
+    <div class="roadmap">
+      <section class="roadmap-wave"><h4>Wave 0 · 看清时间</h4><div class="roadmap-item">Stage timing</div><div class="roadmap-item">AI Vector active blocks</div><div class="roadmap-item">HCOMM submit/service/wait</div></section>
+      <section class="roadmap-wave"><h4>Wave 1 · 打开并行度</h4><div class="roadmap-item"><strong>P0.1</strong> multi-kernel / multi-AIV</div><div class="roadmap-item">1-block fallback</div><div class="roadmap-item">全局边界由 stream order 保证</div></section>
+      <section class="roadmap-wave"><h4>Wave 2 · 数据热路径</h4><div class="roadmap-item"><strong>P0.2</strong> subgroup grouping</div><div class="roadmap-item"><strong>P0.3</strong> vector/DataCopy</div><div class="roadmap-item"><strong>P1.5</strong> expert histogram</div><div class="roadmap-item"><strong>P1.6</strong> combine planning</div><div class="roadmap-item"><strong>P2.7</strong> route planning</div><div class="roadmap-item"><strong>P2.8</strong> receive validation</div></section>
+      <section class="roadmap-wave"><h4>Wave 3 · 测后再调</h4><div class="roadmap-item"><strong>P1.4</strong> HCOMM batch/parallel</div><div class="roadmap-item">block sweep 1→72</div><div class="roadmap-item">144 cases / 720 records</div><div class="roadmap-item">同 fingerprint H800 对比</div></section>
+    </div>
+    <figcaption>P1.4 的编号虽是 P1，但实现时应由 profiler 决定是否提前。没有通信阶段占比证据时，先处理 1/72 资源上限和十亿级重复扫描。</figcaption>
+  </figure>
+
+  <article class="task"><h3><span class="tag p0">P0.1</span> 从 1 个 AI Vector 扩到多 block 数据流水</h3><dl>
+    <dt>现状</dt><dd>dispatch/combine 只有 1 个 vector block、512 threads，72 个 AI Vector 只用 1 个。</dd>
+    <dt>方案</dt><dd>拆分 one-block control kernel 与 data-grid kernel。所有数据阶段使用 global thread/stride；同 stream 的 kernel 顺序作为全局阶段边界，禁止跨 block 自旋 barrier。</dd>
+    <dt>文件</dt><dd><code>dispatch.asc</code>、<code>combine.asc</code>、<code>tiling.hpp</code>、<code>runtime.cpp</code>、<code>elastic_buffer.hpp</code></dd>
+    <dt>依赖</dt><dd>先增加逐 stage event 和 active block/AI Vector profiler；定义 control/data block ABI 与 workspace checked arithmetic。</dd>
+    <dt>验收</dt><dd>72-block 代表 case 正确；profiler 显示多个 AI Vector 活跃；目标 stage 至少快 20%，其他公共操作回退不超过 10%。</dd>
+    <dt>风险</dt><dd>重复发布 control、跨 block 未完成就进入 epilogue、占满 AI Vector 破坏计算通信 overlap。</dd>
+  </dl></article>
+
+  <article class="task"><h3><span class="tag p0">P0.2</span> 实现 match_any 等价的 top-k subgroup grouping</h3><dl>
+    <dt>现状</dt><dd>相同目标或 contributor 通过 world_size/top-k 重复扫描。combine 最坏约执行 14.09 亿次 rank/lane check。</dd>
+    <dt>方案</dt><dd>封装 active lane 按 integer key 分组、确定 owner、broadcast slot、active/unique mask，并定义 <code>-1</code> lane。优先用已验证原生 SIMT primitive，否则用 ballot+shuffle 构造。</dd>
+    <dt>文件</dt><dd>新建 backend-local subgroup helper，并替换 dispatch slot assignment 与 combine contributor scan。</dd>
+    <dt>依赖</dt><dd>P0.1 的 data grid；需独立 compile probe 覆盖 partial active mask、重复 key 和 invalid lane。</dd>
+    <dt>验收</dt><dd>每个 unique rank 只有一个 owner；multiple reduction 行为不变；combine 不再对每个 hidden element 扫描 <code>world_size * topk</code>。</dd>
+    <dt>风险</dt><dd>Ascend subgroup 宽度或 mask 语义与 CUDA warp 不同，容易产生静默 slot 冲突。</dd>
+  </dl></article>
+
+  <article class="task"><h3><span class="tag p0">P0.3</span> 把标量 payload copy 改为 vector/DataCopy</h3><dl>
+    <dt>现状</dt><dd>一个 SIMT thread 在标量循环中复制 hidden bytes/BF16，global memory transaction 低效。</dd>
+    <dt>方案</dt><dd>对齐主体采用最大已验证 vector transaction 或 GM-UB DataCopy，必要时双缓冲；标量只处理尾部。FP8 scale factor 保留 token/pack 与列主序 stride。</dd>
+    <dt>依赖</dt><dd>P0.1 的 disjoint tile ownership；先证明 symmetric record alignment 和 canonical H7168 的整齐路径。</dd>
+    <dt>验收</dt><dd>canonical hidden 完全走向量路径；BF16、FP8 行/列 scale layout 全过；copy stage 至少快 20%。</dd>
+    <dt>风险</dt><dd>越界读取、UB 容量、FP8 scale factor stride 被错误合并、expanded padding 未清零。</dd>
+  </dl></article>
+
+  <article class="task"><h3><span class="tag p1">P1.4</span> 并行或批量化 HCOMM publication</h3><dl>
+    <dt>现状</dt><dd>thread 0 串行遍历 peer，put payload、flush、发布 control、等待 release、执行 barrier。</dd>
+    <dt>方案</dt><dd>先将 command construction、AICore service、payload completion、remote release 和 barrier 分段计时。对独立 peer 批量建命令，最少 flush 后按确定 rank 顺序发布 control。</dd>
+    <dt>依赖</dt><dd>P0.1 阶段边界和 profiler。若 transport stage 占比不高，保留串行实现并记录证据。</dd>
+    <dt>验收</dt><dd>payload-before-control ordering 不变；独立 peer 有并发或 batch 证据；100 generations 无 stale state。</dd>
+    <dt>风险</dt><dd>为了并发破坏 release ordering、command buffer 溢出、不同 channel completion 被错误合并。</dd>
+  </dl></article>
+
+  <article class="task"><h3><span class="tag p1">P1.5</span> 重写 expert counting 和 expanded destination assignment</h3><dl>
+    <dt>现状</dt><dd>32 个 expert owner 各自重扫所有 record 和 top-k lane，大部分线程空闲，record 被重复读取。</dd>
+    <dt>方案</dt><dd>按 record 分片做 histogram，确定性 prefix 计算 expert range，再 scatter 到 expanded destination。atomic 只用于中间 count，最终顺序由 prefix/scatter 决定。</dd>
+    <dt>依赖</dt><dd>P0.1 data grid；可复用 P0.2 grouping；workspace 要做 overflow 和 alignment 检查。</dd>
+    <dt>验收</dt><dd>每个 top-k entry 有界读取；expert count、prefix、padding 和 byte ordering 与现有输出一致。</dd>
+    <dt>风险</dt><dd>atomic 完成顺序渗入 public ordering，导致 cached handle 或 grouped GEMM layout 改变。</dd>
+  </dl></article>
+
+  <article class="task"><h3><span class="tag p1">P1.6</span> 并行 combine planning、validation 与 contributor list</h3><dl>
+    <dt>现状</dt><dd>8 个 destination/contributor owner 扫描 rows/records，504/512 threads 在 metadata stage 空闲。</dd>
+    <dt>方案</dt><dd>row/record partition 覆盖全 data grid，构造每 token 的 compact contributor list。错误候选写私有槽，再按原 rank/record/lane 次序做确定性 first-error reduction。</dd>
+    <dt>依赖</dt><dd>P0.1；compact contributor 去重依赖 P0.2。</dd>
+    <dt>验收</dt><dd>reduction 只遍历 compact list；masked route、multiple reduction 0/1、bias 0/1/2 与错误优先级不变。</dd>
+    <dt>风险</dt><dd>并行 validation 改变首错诊断，或 contributor 去重漏掉同 rank 多 expert 的合法贡献。</dd>
+  </dl></article>
+
+  <article class="task"><h3><span class="tag p2">P2.7</span> 重写 dispatch route planning</h3><dl>
+    <dt>现状</dt><dd>8 个 destination owner 各扫 4096 tokens x 6 lanes，按 rank 串行分配 slot。</dd>
+    <dt>方案</dt><dd>每个 token 的 top-k 读取一次，经 subgroup grouping 产生 unique destination；随后 count、deterministic prefix、scatter 分配 slot。</dd>
+    <dt>依赖</dt><dd>P0.1 和 P0.2。建议与 P1.5 共享 prefix/scatter primitives，不共享 public metadata 语义。</dd>
+    <dt>验收</dt><dd>destination slot、rank prefix、handle 和 cached dispatch byte-for-byte 兼容；route stage 至少快 20%。</dd>
+    <dt>风险</dt><dd>使用 atomic 返回值作为最终 slot 会让顺序不确定，破坏 cached combine。</dd>
+  </dl></article>
+
+  <article class="task"><h3><span class="tag p2">P2.8</span> 并行 dispatch receive validation</h3><dl>
+    <dt>现状</dt><dd>8 个 source owner 各自串行验证整个 receive shard，shard 大时尾延迟明显。</dd>
+    <dt>方案</dt><dd>按 record 分配给全 data grid，分别验证 ABI、generation、origin、expert、slot 和边界；最后做确定性 first-error reduction。</dd>
+    <dt>依赖</dt><dd>P0.1；错误归约 helper 可与 P1.6 共用。</dd>
+    <dt>验收</dt><dd>正常、empty、asymmetric、near-capacity 与故障注入路径一致；错误仍报告原 source/record/lane。</dd>
+    <dt>风险</dt><dd>过度拆分产生 kernel launch overhead。性能成熟后只融合无全局依赖且 ownership 兼容的阶段。</dd>
+  </dl></article>
+
+  <h3>9.1 建议的协作与验收节奏</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>批次</th><th>任务</th><th>合入门槛</th></tr></thead>
+    <tbody>
+      <tr><td>基础设施</td><td>stage profiler、P0.1</td><td>1-block fallback + 72-block 正确性，多 AI Vector 活跃</td></tr>
+      <tr><td>数据热路径</td><td>P0.2、P0.3</td><td>独立 microbenchmark 和代表 FP8 case 均满足 20% stage gate</td></tr>
+      <tr><td>元数据</td><td>P1.5、P1.6、P2.7、P2.8</td><td>确定性 ordering/first-error contract，144-case smoke 完整</td></tr>
+      <tr><td>传输与调参</td><td>P1.4、block sweep</td><td>profiler 证明收益，30 warmup/30 iteration canonical report</td></tr>
+      <tr><td>最终对比</td><td>H800 + Ascend automation</td><td>相同 fingerprint、720 records、compare tool 接受</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2 id="npu8p">10. NPU8P 环境使用</h2>
+  <h3>10.1 连接和硬性规则</h3>
+  <pre class="shell"><code>/usr/bin/jump NPU8P
+# 等价别名：/usr/bin/jump 4</code></pre>
+  <ul>
+    <li>登录节点只做文件准备和 TaskQueue 控制。任何访问 NPU 的命令都必须通过 <code>task-submit</code> 或 <code>pto-task</code>。</li>
+    <li>不得读取、打印或复制 <code>/etc/jump/NPU8P.password</code>。<code>jump</code> 内部完成认证。</li>
+    <li>当前只允许设备 <code>0,1</code> 或 <code>6,7</code>，最多两卡。禁止 <code>--device auto</code>、设备 2 到 5、混搭 pair 和 <code>--ignore-whitelist</code>。</li>
+    <li>同一提交者最多一个 pending/running task。前一任务到 terminal 并处理结果后，才能提交下一任务。</li>
+  </ul>
+
+  <h3>10.2 每个任务都要加载的环境</h3>
+  <pre class="shell"><code>source /usr/local/Ascend/cann-9.2.0/set_env.sh
+export HCOMM_ROOT=/home/pyptouser/yuqitao/Ascend/hcomm-deepep-current/cann
+export PATH="$HCOMM_ROOT/bin${PATH:+:$PATH}"
+export LD_LIBRARY_PATH="$HCOMM_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBRARY_PATH="$HCOMM_ROOT/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}"
+export CPLUS_INCLUDE_PATH="$HCOMM_ROOT/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+export CPATH="$HCOMM_ROOT/include${CPATH:+:$CPATH}"
+export CMAKE_INCLUDE_PATH="$HCOMM_ROOT/include${CMAKE_INCLUDE_PATH:+:$CMAKE_INCLUDE_PATH}"
+export CMAKE_LIBRARY_PATH="$HCOMM_ROOT/lib64${CMAKE_LIBRARY_PATH:+:$CMAKE_LIBRARY_PATH}"
+export PYTHONPATH="$HCOMM_ROOT/python/site-packages${PYTHONPATH:+:$PYTHONPATH}"
+source /home/pyptouser/yuqitao/venvs/deepep-ascend-py310/bin/activate</code></pre>
+  <p>顺序不能交换：先 system CANN，再把已验证的 <code>hcomm-deepep-current</code> 放到 system 路径之前，最后激活 Python 3.10 / Torch-NPU 2.10 环境。headers 与 <code>libhcomm.so</code> 必须来自同一个包。</p>
+
+  <h3>10.3 标准任务生命周期</h3>
+  <pre class="shell"><code>task-submit --list
+
+task-submit --device 0,1 --max-time 300 --run '
+set -e
+source /usr/local/Ascend/cann-9.2.0/set_env.sh
+export HCOMM_ROOT=/home/pyptouser/yuqitao/Ascend/hcomm-deepep-current/cann
+export PATH="$HCOMM_ROOT/bin${PATH:+:$PATH}"
+export LD_LIBRARY_PATH="$HCOMM_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBRARY_PATH="$HCOMM_ROOT/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}"
+export CPLUS_INCLUDE_PATH="$HCOMM_ROOT/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+export CPATH="$HCOMM_ROOT/include${CPATH:+:$CPATH}"
+export CMAKE_INCLUDE_PATH="$HCOMM_ROOT/include${CMAKE_INCLUDE_PATH:+:$CMAKE_INCLUDE_PATH}"
+export CMAKE_LIBRARY_PATH="$HCOMM_ROOT/lib64${CMAKE_LIBRARY_PATH:+:$CMAKE_LIBRARY_PATH}"
+export PYTHONPATH="$HCOMM_ROOT/python/site-packages${PYTHONPATH:+:$PYTHONPATH}"
+source /home/pyptouser/yuqitao/venvs/deepep-ascend-py310/bin/activate
+cd /path/to/DeepEP-Ascend
+torchrun --standalone --nproc-per-node=2 tests/ascend/benchmark/bench_ep.py \
+  --num-tokens 4096 --hidden 7168 --num-topk 6 --num-experts 256 \
+  --warmups 1 --iterations 1 --output /tmp/ascend-ep2-smoke.json
+'
+
+task-submit --status TASK_ID
+task-submit --wait TASK_ID
+task-submit --log TASK_ID</code></pre>
+  <p>把 <code>/path/to/DeepEP-Ascend</code> 替换成任务节点上的真实 checkout。失败、超时、killed 或 canceled 时先读 log、保留 task id、commit 和输出，再决定下一次提交。不要靠加大五秒 operator watchdog 隐藏慢 kernel。</p>
+
+  <h3>10.4 性能优化者应保留的证据</h3>
+  <ul>
+    <li>git commit、工作树是否 dirty、CANN/HCOMM 路径和设备 pair。</li>
+    <li>完整 workload manifest 与 fingerprint，warmup/iteration 数和 case IDs。</li>
+    <li>device event 的 mean/p50/p95、每 rank 最大 latency、logical bytes/GB/s。</li>
+    <li>逐 stage profiler、AI Vector active block、HCOMM submit/service/wait/barrier 时间。</li>
+    <li>TaskQueue task id、exit status、失败日志和 JSON/Markdown artifact 路径。</li>
+  </ul>
+  <div class="band warning"><strong>8 卡工作：</strong>NPU8P 机器有 8 张卡不等于当前账号可以申请 8 卡。现有 profile 只允许两卡。4/8 卡 canonical 或 logical multi-host 任务必须先取得相应资源授权和队列策略，不能通过多个任务或多个 shell 拼出 8 卡。</div>
+
+  <h2 id="sources">11. 来源与延伸阅读</h2>
+  <ol class="footnotes">
+    <li id="s1"><a href="https://arxiv.org/abs/2412.19437">[S1] DeepSeek-V3 Technical Report</a>：DeepSeekMoE、node-limited routing、DualPipe、跨节点 all-to-all 和推理部署。</li>
+    <li id="s2"><a href="https://arxiv.org/abs/2405.04434">[S2] DeepSeek-V2</a>：细粒度专家、共享专家隔离和 device-limited routing。</li>
+    <li id="s3"><a href="https://arxiv.org/abs/2401.06066">[S3] DeepSeekMoE</a>：专家专门化架构原始论文。</li>
+    <li id="s4"><a href="https://github.com/deepseek-ai/DeepEP/tree/epv2-release">[S4] DeepEP EPv2 upstream</a>：README、ElasticBuffer 和 CUDA kernel。</li>
+    <li id="s5"><a href="../../legacy.md">[S5] DeepEP V1 archived documentation</a>：H800 normal/low-latency 公开性能。</li>
+    <li id="s6"><a href="https://github.com/NVIDIA/nccl/blob/master/docs/contrib/GIN/NCCL_Gin_and_Symmetric_Memory/NCCL_Gin_and_Symmetric_Memory.md">[S6] NCCL GIN and Symmetric Memory</a>。</li>
+    <li id="s7"><a href="https://github.com/sgl-project/sglang/blob/main/docs/docs/advanced_features/expert_parallelism.mdx">[S7] SGLang expert parallelism</a>：推理框架调用链和 overlap。</li>
+    <li id="s8"><a href="https://github.com/vllm-project/vllm/blob/main/docs/serving/expert_parallel_deployment.md">[S8] vLLM expert parallel deployment</a>。</li>
+    <li id="s9"><a href="../../ascend-design/epv2-ascend-transport-contract.md">[S9] Ascend transport contract</a>。</li>
+    <li id="s10"><a href="../../ascend-design/epv2-ascend-simt-transport-stub.md">[S10] Ascend SIMT transport facade</a>。</li>
+    <li id="s11"><a href="../../ascend-design/epv2-ascend-simt-urma-transport.md">[S11] SIMT to AICore URMA staged transport</a>。</li>
+    <li id="s12"><a href="../../ascend-design/epv2-ascend-production-core-operators.md">[S12] Ascend production core operators</a>。</li>
+    <li id="s13"><a href="../../ascend-design/epv2-ascend-roadmap.md">[S13] Ascend EPv2 roadmap</a>：physical scale-out 和 hybrid 能力边界。</li>
+    <li id="s14"><a href="../../ascend-design/epv2-ascend-benchmark-parity.md">[S14] Ascend benchmark parity</a>：144 cases、720 records 和比较契约。</li>
+    <li id="s15"><a href="../../ascend-design/epv2-ascend-performance-optimization.md">[S15] Ascend performance optimization</a>：当前数值与 8 项设计。</li>
+    <li id="s16"><a href="../../ascend-design/dispatch-simt-parallelization.md">[S16] Dispatch SIMT parallelization</a>：当前单 block 内并行化。</li>
+  </ol>
+
+  <h2>串讲结束后的检查题</h2>
+  <details><summary>为什么先做 P0.1，而不是先给 HCOMM 多开几个 channel？</summary><p>当前主数据路径只用 1/72 AI Vector，数据 copy、route 和 reduce 都被片上并行度限制。没有 stage profiler 前，无法证明 HCOMM submission 是主瓶颈。先建立多 kernel 全局边界和多 block 数据网格，后续优化才有正确的执行载体。</p></details>
+  <details><summary>为什么 physical multi-host 能力仍不能打开？</summary><p>单机上的 logical two-host 只能验证 rank translation 和算法控制流。它没有验证 RoCE 地址、NIC 选择、跨机注册、链路故障、cache visibility 或性能。</p></details>
+  <details><summary>拿到 H800 benchmark.json 后，第一步比什么？</summary><p>先比 schema、formula version、world size、workload fingerprint、case IDs、operation IDs 和 logical bytes。身份不一致时不看性能数字。</p></details>
+  <p>评审或排障时，请附章节号、commit、设备拓扑和相关日志。性能问题还应附上 manifest 与 stage trace，避免不同工作负载的结论混在一起。</p>
+
+  <footer>本材料是代码导读和协作手册，不替代各 phase 的 acceptance 文档。能力状态以当前仓库、TaskQueue 证据和正式 benchmark artifact 为准。</footer>
+</main>
+</body>
+</html>
