@@ -298,6 +298,27 @@ int main() {
                     return 48;
         }
     }
+    for (const std::uint64_t item_count : {
+             0ULL, 1ULL, 15ULL, 16ULL, 17ULL, 511ULL, 512ULL, 513ULL}) {
+        for (const std::uint32_t blocks : {1U, 72U}) {
+            std::uint32_t visits[513][32]{};
+            for (std::uint32_t block = 0; block < blocks; ++block) {
+                for (std::uint32_t thread = 0; thread < 512; ++thread) {
+                    const auto work = direct_subgroup_grid_stride(
+                        block, thread, blocks, 512, 32);
+                    if (work.lane != thread % 32)
+                        return 53;
+                    for (std::uint64_t item = work.first;
+                         item < item_count; item += work.stride)
+                        ++visits[item][work.lane];
+                }
+            }
+            for (std::uint64_t item = 0; item < item_count; ++item)
+                for (std::uint32_t lane = 0; lane < 32; ++lane)
+                    if (visits[item][lane] != 1)
+                        return 54;
+        }
+    }
 #endif
 
     for (const auto operation : {
