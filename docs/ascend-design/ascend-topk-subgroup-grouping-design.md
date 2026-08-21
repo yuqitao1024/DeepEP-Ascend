@@ -842,6 +842,63 @@ comparison. Item 4 is correctness-qualified and retained. Item 5 uses this
 result as its immediate baseline and specializes only the common
 `K=6, H=7168` shape.
 
+### CUDA-alignment item 5: common-shape AOT specialization
+
+Commit `dc35be3` adds one explicit template instance for the representative
+`K=6, H=7168` shape. The item 4 vector reducer now takes `StaticNumTopk` and
+`StaticHiddenElements` as non-type template parameters. `<6, 7168>` supplies
+fixed bounds for the top-k scan, hidden-vector extent, token stride, and output
+address calculation. The template exposes those values as constants when the
+compiler generates the common-shape kernel. Token count, expert count, world
+size, contributor count, bias count, and receive-shard layout stay dynamic.
+
+The staged reduce branch selects `<6, 7168>` only when both runtime fields
+match. Every other aligned `K <= 32` shape uses the `<0, 0>` dynamic instance.
+The item 3 SIMT fallback still handles `kFull`, `K > 32`, one-block launches,
+and hidden sizes that do not satisfy the 16-element DataCopy alignment. Item 5
+does not change the seven stages, tiling ABI 17, workspace, HCOMM order, or
+ascending-rank FP32 accumulation order.
+
+The new public two-rank case uses `K=6`, `H=7168`, and `E=8`. Six top-k lanes
+cannot be validated against the harness's old `E=4` default, because the public
+dispatch preflight requires `K <= E`. The route fixture includes duplicate
+contributors and an inactive `-1` lane, so it checks the specialized path
+without weakening preflight. Task `task_20260821_212042_160760221632` compiled
+and linked the complete ASC target and passed `combine-state-probe`. After the
+fixture correction, task `task_20260821_213939_210129024589` rebuilt the
+production extension on devices `6,7` and passed all ten item 4 cases plus the
+new common-shape case.
+
+Representative tasks `task_20260821_214231_224930514348` and
+`task_20260821_214327_228271326996` both completed on devices `6,7`. Their
+report SHA-256 values are
+`ffc3418b8c6eec7774009f2b4f0db70b547d82cf5029a3687df71d1f5ec7e0f2` and
+`b7131cc571562ac5bbc2813166b4ccf9c9c18d1f0236d5e8b906d5e50d442df5`.
+Both reports retained schema 2, formula 1, case
+`ep-bf16-align128-bias0-hcopy1-prev0-async0-alloc0`, fingerprint
+`da3db00de02d1c93088c159430363bfb8659a8ed2397b6768f41145bfad14522`,
+world size 2, `num_sms=72`, one warmup, three measured iterations, maximum-rank
+latency aggregation, execution protocol, and all five logical-byte objects.
+
+| Operation | Six device samples (ms) | Mean latency | Logical bandwidth | Change from item 4 | Change from P0.1 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Dispatch | 150.222, 148.588, 150.373, 149.108, 150.731, 149.427 | 149.741 ms | 4.657491 GB/s | +0.14% | +0.40% |
+| Expanded dispatch | 151.149, 149.355, 150.862, 150.218, 151.527, 151.343 | 150.742 ms | 9.338080 GB/s | -0.27% | +0.87% |
+| Cached dispatch | 139.150, 142.330, 142.879, 143.084, 141.137, 142.032 | 141.769 ms | 4.919414 GB/s | -1.01% | +0.93% |
+| Combine | 91.186, 93.721, 90.904, 89.947, 89.502, 91.764 | 91.171 ms | 6.372882 GB/s | -1.98% | +7.29% |
+| Reduced combine | 112.540, 111.205, 109.153, 113.094, 114.036, 113.919 | 112.324 ms | 5.172692 GB/s | +0.99% | +7.76% |
+
+The AOT instance did not improve public combine in this measurement. Its
+six-sample bandwidth is 1.98 percent below item 4, 0.98 percent below item 3,
+0.27 percent below item 2, and 0.46 percent below item 1. It remains 7.29
+percent above P0.1. The result does not show that the compiler ignored the
+constants. Confirming constant folding requires generated-code evidence. This
+end-to-end test only shows that fixed `K/H` bounds did not produce a measurable
+gain over item 4; any saving is smaller than the sample variation and the
+remaining public-operation cost. Item 5 is correctness-qualified and retained
+under the threshold-free policy. The dynamic instance remains the fallback for
+every other valid shape.
+
 ## Documentation Updates
 
 When Phase A is qualified, update the teaching guide to:
@@ -871,7 +928,7 @@ When Phase A is qualified, update the teaching guide to:
 8. Close item 4, vector/DataCopy payload movement, with aligned and scalar-tail
    coverage. Completed.
 9. Close item 5, common-shape AOT specialization, while preserving the dynamic
-   fallback.
+   fallback. Completed.
 10. Record qualified evidence in the teaching guide, then design the
     deterministic dispatch count/prefix/scatter slice using the qualified
     adapter.
