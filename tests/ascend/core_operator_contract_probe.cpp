@@ -8,6 +8,7 @@
 #include "csrc/backends/ascend/elastic/layout.hpp"
 #include "csrc/backends/ascend/elastic/kernels.hpp"
 #include "csrc/backends/ascend/elastic/tiling.hpp"
+#include "csrc/backends/ascend/elastic/topk_grouping.hpp"
 
 using namespace deep_ep::ascend::elastic;
 
@@ -46,9 +47,99 @@ bool aligned(std::uint64_t value) {
     return value % kAscendElasticAlignment == 0;
 }
 
+bool topk_grouping_reference_contract() {
+    {
+        const std::int32_t keys[] = {0, 0, 1, 1, 5, -1};
+        const std::int32_t slots[] = {7, -1, 3, -1, 9, -1};
+        const auto result =
+            group_combine_contributors_reference<6>(keys, slots, 6);
+        if (result.contributor_count != 3 ||
+            result.entries[0].contributor_rank != 0 ||
+            result.entries[0].contribution_lane != 0 ||
+            result.entries[0].receive_slot != 7 ||
+            result.entries[1].contributor_rank != 1 ||
+            result.entries[1].contribution_lane != 2 ||
+            result.entries[1].receive_slot != 3 ||
+            result.entries[2].contributor_rank != 5 ||
+            result.entries[2].contribution_lane != 4 ||
+            result.entries[2].receive_slot != 9)
+            return false;
+        const std::int32_t expected_slots[] = {7, 7, 3, 3, 9, -1};
+        for (std::uint32_t lane = 0; lane < 6; ++lane)
+            if (result.resolved_slots[lane] != expected_slots[lane])
+                return false;
+    }
+    {
+        const std::int32_t keys[] = {5, 2, 5, -1, 2, 5};
+        const std::int32_t slots[] = {9, 3, -1, -1, -1, -1};
+        const auto result =
+            group_combine_contributors_reference<6>(keys, slots, 6);
+        if (result.contributor_count != 2 ||
+            result.entries[0].contributor_rank != 2 ||
+            result.entries[0].contribution_lane != 1 ||
+            result.entries[0].receive_slot != 3 ||
+            result.entries[1].contributor_rank != 5 ||
+            result.entries[1].contribution_lane != 0 ||
+            result.entries[1].receive_slot != 9)
+            return false;
+        const std::int32_t expected_slots[] = {9, 3, 9, -1, 3, 9};
+        for (std::uint32_t lane = 0; lane < 6; ++lane)
+            if (result.resolved_slots[lane] != expected_slots[lane])
+                return false;
+    }
+    {
+        const std::int32_t keys[] = {4, 4, -1, 7};
+        const std::int32_t slots[] = {-1, 8, -1, 6};
+        const auto result =
+            group_combine_contributors_reference<4>(keys, slots, 4);
+        if (result.contributor_count != 1 ||
+            result.entries[0].contributor_rank != 7 ||
+            result.entries[0].contribution_lane != 3 ||
+            result.entries[0].receive_slot != 6)
+            return false;
+        const std::int32_t expected_slots[] = {-1, -1, -1, 6};
+        for (std::uint32_t lane = 0; lane < 4; ++lane)
+            if (result.resolved_slots[lane] != expected_slots[lane])
+                return false;
+    }
+    {
+        std::int32_t keys[33]{};
+        std::int32_t slots[33]{};
+        for (std::uint32_t lane = 0; lane < 33; ++lane) {
+            keys[lane] = static_cast<std::int32_t>(lane);
+            slots[lane] = static_cast<std::int32_t>(lane + 10);
+        }
+        const auto result =
+            group_combine_contributors_reference<33>(keys, slots, 33);
+        if (result.contributor_count != 33 ||
+            result.entries[0].contributor_rank != 0 ||
+            result.entries[0].receive_slot != 10 ||
+            result.entries[32].contributor_rank != 32 ||
+            result.entries[32].receive_slot != 42 ||
+            result.resolved_slots[32] != 42)
+            return false;
+    }
+    {
+        const std::int32_t keys[] = {3, 99, 99, 99};
+        const std::int32_t slots[] = {11, 12, 13, 14};
+        const auto result =
+            group_combine_contributors_reference<4>(keys, slots, 1);
+        if (result.contributor_count != 1 ||
+            result.entries[0].contributor_rank != 3 ||
+            result.entries[0].contribution_lane != 0 ||
+            result.resolved_slots[0] != 11 ||
+            result.resolved_slots[1] != -1 ||
+            result.resolved_slots[3] != -1)
+            return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    if (!topk_grouping_reference_contract())
+        return 52;
     std::uint64_t combine_slot = 0;
     if (!combine_record_slot_index(0, 0, 4, 6, &combine_slot) ||
         combine_slot != 0 ||
