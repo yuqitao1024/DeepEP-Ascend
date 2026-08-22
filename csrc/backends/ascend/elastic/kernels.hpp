@@ -11,6 +11,8 @@ struct HybridRouteRecord;
 enum class DirectDispatchStage : std::uint8_t {
     kFull,
     kProducerControl,
+    kProducerGroup,
+    kProducerPrefix,
     kProducerRecord,
     kProducerRelease,
     kEpiloguePrepare,
@@ -19,7 +21,7 @@ enum class DirectDispatchStage : std::uint8_t {
 };
 
 struct DirectDispatchPipeline {
-    DirectDispatchStage stages[6]{};
+    DirectDispatchStage stages[8]{};
     std::uint32_t count = 0;
 };
 
@@ -27,12 +29,14 @@ inline constexpr DirectDispatchPipeline direct_dispatch_pipeline(
     bool cpu_sync) noexcept {
     DirectDispatchPipeline pipeline{{
         DirectDispatchStage::kProducerControl,
+        DirectDispatchStage::kProducerGroup,
+        DirectDispatchStage::kProducerPrefix,
         DirectDispatchStage::kProducerRecord,
         DirectDispatchStage::kProducerRelease,
         DirectDispatchStage::kEpiloguePrepare,
         DirectDispatchStage::kEpilogueCopy,
         DirectDispatchStage::kEpilogueComplete,
-    }, cpu_sync ? 4U : 6U};
+    }, cpu_sync ? 6U : 8U};
     return pipeline;
 }
 
@@ -48,7 +52,8 @@ direct_dispatch_epilogue_pipeline() noexcept {
 
 inline constexpr bool direct_dispatch_data_stage(
     DirectDispatchStage stage) noexcept {
-    return stage == DirectDispatchStage::kProducerRecord ||
+    return stage == DirectDispatchStage::kProducerGroup ||
+           stage == DirectDispatchStage::kProducerRecord ||
            stage == DirectDispatchStage::kEpilogueCopy;
 }
 

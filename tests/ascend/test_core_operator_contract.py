@@ -245,6 +245,61 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             function = source[begin:end]
             self.assertIn("direct_data_grid_stride(", function)
 
+    def test_direct_dispatch_grouping_reuse_contract(self):
+        """Catches restoring destination-by-destination top-k rescans."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        device_macro = "#define DEEP_EP_ASCEND_TOPK_GROUPING_DEVICE 1"
+        self.assertIn(device_macro, source)
+        self.assertLess(
+            source.index(device_macro),
+            source.index('#include "topk_grouping.hpp"'))
+        self.assertIn('#include "topk_grouping.hpp"', source)
+
+        group_signature = (
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_group_vf")
+        prefix_signature = (
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_prefix_vf")
+        group_begin = source.index(group_signature)
+        group_end = source.index("\n}\n", group_begin)
+        grouping = source[group_begin:group_end]
+        for marker in (
+                "direct_subgroup_grid_stride(", "group_topk_subgroup(",
+                "dispatch_group_owner_offset", "dispatch_group_tile_offset",
+                "dispatch_group_error_offset"):
+            self.assertIn(marker, grouping)
+
+        prefix_begin = source.index(prefix_signature)
+        prefix_end = source.index("\n}\n", prefix_begin)
+        prefix = source[prefix_begin:prefix_end]
+        self.assertIn("dispatch_group_tile_offset", prefix)
+        self.assertIn("dispatch_group_error_offset", prefix)
+
+        record_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_record_vf")
+        record_end = source.index("\n}\n", record_begin)
+        record = source[record_begin:record_end]
+        for marker in (
+                "num_topk <= kTopkSubgroupWidth",
+                "transport_world_size <= "
+                "static_cast<int>(kTopkSubgroupWidth)",
+                "dispatch_group_owner_offset",
+                "dispatch_group_tile_offset"):
+            self.assertIn(marker, record)
+        self.assertIn("direct_data_grid_stride(", record)
+
+        grouped_begin = record.index("if (grouped) {")
+        grouped_end = record.index("        return;", grouped_begin)
+        grouped_record = record[grouped_begin:grouped_end]
+        self.assertIn("owners[token * world_size + lane]", grouped_record)
+        self.assertNotIn(
+            "for (int destination_rank = 0;", grouped_record)
+        self.assertNotIn(
+            "for (std::uint64_t lane = 0; lane < num_topk; ++lane)",
+            grouped_record)
+
     def test_direct_combine_launcher_consumes_stage_pipeline(self):
         """Catches keeping direct combine data stages on one AI Vector."""
         source = (ELASTIC / "combine.asc").read_text()

@@ -45,7 +45,7 @@ struct CoreTilingInput {
 };
 
 inline constexpr std::uint32_t kAscendMaxDataBlocks = 72;
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 17;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 18;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -220,6 +220,8 @@ inline bool build_workspace_layout(
     std::uint64_t outbound_ingress_count_bytes = 0;
     std::uint64_t rank_i32_bytes = 0;
     std::uint64_t dispatch_error_bytes = 0;
+    std::uint64_t dispatch_group_owner_entries = 0;
+    std::uint64_t dispatch_group_tile_entries = 0;
     std::uint64_t dispatch_rank_bitmap_words = 0;
     std::uint64_t dispatch_expert_bitmap_words = 0;
     if (parallel_combine &&
@@ -240,6 +242,24 @@ inline bool build_workspace_layout(
         !checked_multiply(
             layout.dispatch_error_count, sizeof(std::uint64_t),
             &dispatch_error_bytes) ||
+        (parallel_dispatch &&
+         (!dispatch_grouping_tile_count(
+              input.num_tokens, &layout.dispatch_group_tile_count) ||
+          !checked_multiply(
+              input.num_tokens, layout.scratch_rank_count,
+              &dispatch_group_owner_entries) ||
+          !checked_multiply(
+              dispatch_group_owner_entries, sizeof(std::int32_t),
+              &layout.dispatch_group_owner_bytes) ||
+          !checked_multiply(
+              layout.dispatch_group_tile_count, layout.scratch_rank_count,
+              &dispatch_group_tile_entries) ||
+          !checked_multiply(
+              dispatch_group_tile_entries, sizeof(std::uint64_t),
+              &layout.dispatch_group_tile_bytes) ||
+          !checked_multiply(
+              layout.dispatch_group_tile_count, sizeof(std::uint64_t),
+              &layout.dispatch_group_error_bytes))) ||
         (parallel_dispatch &&
          (!dispatch_owner_bitmap_words(
               layout.scratch_rank_count, input.num_max_tokens_per_rank,
@@ -298,6 +318,33 @@ inline bool build_workspace_layout(
                 scratch_cursor, layout.dispatch_expert_bitmap_bytes,
                 &scratch_cursor))
             return false;
+        if (layout.dispatch_group_owner_bytes != 0) {
+            if (!checked_align(
+                    scratch_cursor, alignof(std::int32_t), &scratch_cursor))
+                return false;
+            layout.dispatch_group_owner_offset = scratch_cursor;
+            if (!checked_add(
+                    scratch_cursor, layout.dispatch_group_owner_bytes,
+                    &scratch_cursor))
+                return false;
+        }
+        if (layout.dispatch_group_tile_bytes != 0) {
+            if (!checked_align(
+                    scratch_cursor, alignof(std::uint64_t), &scratch_cursor))
+                return false;
+            layout.dispatch_group_tile_offset = scratch_cursor;
+            if (!checked_add(
+                    scratch_cursor, layout.dispatch_group_tile_bytes,
+                    &scratch_cursor))
+                return false;
+        }
+        if (layout.dispatch_group_error_bytes != 0) {
+            layout.dispatch_group_error_offset = scratch_cursor;
+            if (!checked_add(
+                    scratch_cursor, layout.dispatch_group_error_bytes,
+                    &scratch_cursor))
+                return false;
+        }
     }
     if (parallel_combine) {
         if (!checked_align(
@@ -355,7 +402,19 @@ inline bool build_workspace_layout(
               &layout.dispatch_rank_bitmap_offset) ||
           !checked_add(
               layout.scratch_offset, layout.dispatch_expert_bitmap_offset,
-              &layout.dispatch_expert_bitmap_offset))) ||
+              &layout.dispatch_expert_bitmap_offset) ||
+          (layout.dispatch_group_owner_bytes != 0 &&
+           !checked_add(
+               layout.scratch_offset, layout.dispatch_group_owner_offset,
+               &layout.dispatch_group_owner_offset)) ||
+          (layout.dispatch_group_tile_bytes != 0 &&
+           !checked_add(
+               layout.scratch_offset, layout.dispatch_group_tile_offset,
+               &layout.dispatch_group_tile_offset)) ||
+          (layout.dispatch_group_error_bytes != 0 &&
+           !checked_add(
+               layout.scratch_offset, layout.dispatch_group_error_offset,
+               &layout.dispatch_group_error_offset)))) ||
         (parallel_combine &&
          !checked_add(
              layout.scratch_offset, layout.combine_record_slots_offset,

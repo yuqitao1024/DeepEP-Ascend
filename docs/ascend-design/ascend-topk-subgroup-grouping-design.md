@@ -8,9 +8,9 @@ direct pipeline work. The first implementation slice optimizes direct combine;
 the second reuses the same grouping adapter in direct dispatch.
 
 The repository calls the completed multi-AIV work P0.1. Earlier discussion
-called the 72-core slice P0.0. Direct-combine CUDA-alignment items 1 through 4
-are now qualified; item 5 and direct dispatch remain. This document uses the
-repository numbering:
+called the 72-core slice P0.0. Direct-combine CUDA-alignment items 1 through 5
+and the four-token direct dispatch grouping path are now qualified. This
+document uses the repository numbering:
 
 - P0.1: stream-ordered control/data kernels and a configurable 1-to-72 data
   grid, completed at commit `993ba59`;
@@ -461,6 +461,99 @@ load one token's top-k experts
   -> scatter destination slots and broadcast each slot to same-rank lanes
   -> construct records
 ```
+
+### Four-token tile implementation
+
+The direct-dispatch candidate assigns one 32-lane subgroup to a four-token
+tile. For each token, lanes `0..K-1` load one expert and derive its destination
+rank. The vote-ballot adapter groups equal ranks, and the lowest top-k lane in
+each group becomes its owner. The group stage writes:
+
+```text
+owner[token, destination rank] = lowest matching top-k lane
+tile_count[tile, destination rank] = selected tokens in this tile
+tile_error[tile] = deterministic invalid-top-k candidate
+```
+
+Absent owner entries are `-1`. Expert `-1` never enters a group and leaves its
+uncached destination slot at `-1`. A non-`-1` invalid expert contributes only
+an error candidate, not a destination count.
+
+The workspace sizes are checked on the host before launch:
+
+```text
+owners:      T * R * sizeof(int32_t)
+tile counts: ceil(T / 4) * R * sizeof(uint64_t)
+tile errors: ceil(T / 4) * sizeof(uint64_t)
+```
+
+One control block scans `tile_count[:, r]` in tile order for each rank `r`. It
+replaces every count with its exclusive prefix and writes the final rank count.
+The record stage then starts a register-local cursor from that tile base and
+advances it once for every selected token. Therefore the uncached local slot is
+equivalent to:
+
+```text
+slot(t, r) = sum(tile_count[j, r] for j < tile(t))
+           + sum(selected(u, r) for u in tile(t), u < t)
+```
+
+This preserves token-ascending slots without using atomic arrival order. Each
+top-k lane shuffles the cursor and owner from its destination-rank lane. Only
+the owner writes the record; duplicate lanes receive the same encoded slot.
+
+The split direct pipeline now has eight stream-ordered stages:
+
+```text
+producer control -> group -> prefix -> record -> release
+                 -> epilogue prepare -> copy -> complete
+```
+
+Cached dispatch deliberately retains the existing serialized planner and
+bitmap validation. After validation, the group stage creates only the owner
+metadata needed by record construction; its tile count and error outputs are
+not consumed by the cached path. Record construction reuses the already
+validated encoded slots.
+Hybrid dispatch, `K > 32`, `R > 32`, and the operational `num_sms = 1`
+rollback retain the previous paths.
+
+The first CANN 9.2.0 Bisheng resource build for this candidate completed with:
+
+| VF | Registers | Stack |
+| --- | ---: | ---: |
+| `direct_dispatch_producer_group_vf` | 57 | 0 B |
+| `direct_dispatch_producer_prefix_vf` | 26 | 0 B |
+| `direct_dispatch_producer_record_vf` | 64 | 152 B |
+
+The two-rank production matrix passed all 14 cases in TaskQueue task
+`task_20260823_044925_111036914431`. Coverage included duplicate destination
+ranks, expert `-1`, cached reuse, 100 sequential generations, round trip, and
+invalid-expert diagnostics.
+
+The unchanged representative case used `T=4096`, `H=7168`, `K=6`, `E=256`,
+world size 2, BF16, `num_sms=72`, one warmup, and three measured samples. The
+workload fingerprint remained
+`da3db00de02d1c93088c159430363bfb8659a8ed2397b6768f41145bfad14522`.
+The baseline is the two-run `__launch_bounds__(512)` result at commit
+`589ecce`; the candidate is the mean of TaskQueue tasks
+`task_20260823_045607_114494525479` and
+`task_20260823_045705_114794218227`:
+
+| Operation | Baseline latency | Candidate latency | Latency change | Baseline bandwidth | Candidate bandwidth | Bandwidth change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 143.977 ms | 100.620 ms | -30.11% | 4.844 GB/s | 6.931 GB/s | +43.09% |
+| Expanded dispatch | 144.348 ms | 100.582 ms | -30.32% | 9.752 GB/s | 13.995 GB/s | +43.51% |
+| Cached dispatch | 133.245 ms | 105.302 ms | -20.97% | 5.234 GB/s | 6.623 GB/s | +26.54% |
+| Combine control | 88.094 ms | 87.808 ms | -0.32% | 6.595 GB/s | 6.617 GB/s | +0.33% |
+| Reduced combine control | 110.519 ms | 110.098 ms | -0.38% | 5.257 GB/s | 5.277 GB/s | +0.38% |
+
+The two candidate dispatch runs were `6.933/6.929 GB/s`, expanded dispatch
+was `13.978/14.012 GB/s`, and cached dispatch was `6.664/6.583 GB/s`.
+Unrelated combine operations stayed within 0.4% of their launch-bounds
+baseline, which is consistent with the candidate changing only dispatch.
+Raw candidate reports are retained as
+`/tmp/direct-dispatch-grouping-run1.json` and
+`/tmp/direct-dispatch-grouping-run2.json` on the development node.
 
 Uncached slot order remains token ascending within each destination rank.
 Cached mode validates that all lanes in one destination group carry the same

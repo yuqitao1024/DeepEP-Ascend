@@ -223,27 +223,29 @@ int main() {
     const auto direct_pipeline = direct_dispatch_pipeline(false);
     const DirectDispatchStage expected_direct_stages[] = {
         DirectDispatchStage::kProducerControl,
+        DirectDispatchStage::kProducerGroup,
+        DirectDispatchStage::kProducerPrefix,
         DirectDispatchStage::kProducerRecord,
         DirectDispatchStage::kProducerRelease,
         DirectDispatchStage::kEpiloguePrepare,
         DirectDispatchStage::kEpilogueCopy,
         DirectDispatchStage::kEpilogueComplete,
     };
-    if (direct_pipeline.count != 6)
+    if (direct_pipeline.count != 8)
         return 43;
     for (std::uint32_t index = 0; index < direct_pipeline.count; ++index) {
         if (direct_pipeline.stages[index] != expected_direct_stages[index])
             return 44;
         const auto launch = direct_dispatch_stage_launch(
             tiling, direct_pipeline.stages[index]);
-        const bool data_stage = index == 1 || index == 4;
+        const bool data_stage = index == 1 || index == 3 || index == 6;
         if (launch.num_blocks != (data_stage ? 72U : 1U) ||
             launch.num_threads != 512 || launch.dynamic_ub_bytes != 0)
             return 45;
     }
     const auto cpu_sync_pipeline = direct_dispatch_pipeline(true);
-    if (cpu_sync_pipeline.count != 4 ||
-        cpu_sync_pipeline.stages[3] !=
+    if (cpu_sync_pipeline.count != 6 ||
+        cpu_sync_pipeline.stages[5] !=
             DirectDispatchStage::kEpiloguePrepare)
         return 46;
     const auto epilogue_pipeline = direct_dispatch_epilogue_pipeline();
@@ -514,9 +516,9 @@ int main() {
         std::uint64_t combine_bytes;
     };
     for (const auto fixture : {
-             ScratchFixture{2, 160, 4, 16, 32, 352},
-             ScratchFixture{4, 256, 6, 32, 48, 672},
-             ScratchFixture{8, 416, 10, 64, 80, 1248}}) {
+             ScratchFixture{2, 256, 4, 16, 32, 352},
+             ScratchFixture{4, 448, 6, 32, 48, 672},
+             ScratchFixture{8, 800, 10, 64, 80, 1248}}) {
         for (const auto operation : {
                  OperationKind::kDispatch, OperationKind::kCombine}) {
             input = valid_input();
@@ -566,6 +568,10 @@ int main() {
             if (dispatch) {
                 if (rank_scratch.dispatch_error_count !=
                         fixture.dispatch_error_count ||
+                    rank_scratch.dispatch_group_owner_bytes == 0 ||
+                    rank_scratch.dispatch_group_tile_count != 2 ||
+                    rank_scratch.dispatch_group_tile_bytes == 0 ||
+                    rank_scratch.dispatch_group_error_bytes == 0 ||
                     rank_scratch.dispatch_rank_bitmap_bytes !=
                         fixture.dispatch_rank_bitmap_bytes ||
                     rank_scratch.dispatch_expert_bitmap_bytes !=
@@ -598,6 +604,13 @@ int main() {
                                rank_scratch.scratch_bytes ||
                        rank_scratch.dispatch_error_offset != 0 ||
                        rank_scratch.dispatch_error_count != 0 ||
+                       rank_scratch.dispatch_group_owner_offset != 0 ||
+                       rank_scratch.dispatch_group_owner_bytes != 0 ||
+                       rank_scratch.dispatch_group_tile_offset != 0 ||
+                       rank_scratch.dispatch_group_tile_bytes != 0 ||
+                       rank_scratch.dispatch_group_tile_count != 0 ||
+                       rank_scratch.dispatch_group_error_offset != 0 ||
+                       rank_scratch.dispatch_group_error_bytes != 0 ||
                        rank_scratch.dispatch_rank_bitmap_offset != 0 ||
                        rank_scratch.dispatch_rank_bitmap_bytes != 0 ||
                        rank_scratch.dispatch_expert_bitmap_offset != 0 ||
@@ -637,6 +650,13 @@ int main() {
         hybrid_scratch.scratch_bytes != 160 ||
         hybrid_scratch.dispatch_error_offset != 0 ||
         hybrid_scratch.dispatch_error_count != 0 ||
+        hybrid_scratch.dispatch_group_owner_offset != 0 ||
+        hybrid_scratch.dispatch_group_owner_bytes != 0 ||
+        hybrid_scratch.dispatch_group_tile_offset != 0 ||
+        hybrid_scratch.dispatch_group_tile_bytes != 0 ||
+        hybrid_scratch.dispatch_group_tile_count != 0 ||
+        hybrid_scratch.dispatch_group_error_offset != 0 ||
+        hybrid_scratch.dispatch_group_error_bytes != 0 ||
         hybrid_scratch.dispatch_rank_bitmap_offset != 0 ||
         hybrid_scratch.dispatch_rank_bitmap_bytes != 0 ||
         hybrid_scratch.dispatch_expert_bitmap_offset != 0 ||

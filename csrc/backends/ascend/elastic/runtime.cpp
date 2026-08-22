@@ -91,6 +91,16 @@ bool same_workspace_layout(
            lhs.scratch_rank_count == rhs.scratch_rank_count &&
            lhs.dispatch_error_offset == rhs.dispatch_error_offset &&
            lhs.dispatch_error_count == rhs.dispatch_error_count &&
+           lhs.dispatch_group_owner_offset ==
+               rhs.dispatch_group_owner_offset &&
+           lhs.dispatch_group_owner_bytes == rhs.dispatch_group_owner_bytes &&
+           lhs.dispatch_group_tile_offset ==
+               rhs.dispatch_group_tile_offset &&
+           lhs.dispatch_group_tile_bytes == rhs.dispatch_group_tile_bytes &&
+           lhs.dispatch_group_tile_count == rhs.dispatch_group_tile_count &&
+           lhs.dispatch_group_error_offset ==
+               rhs.dispatch_group_error_offset &&
+           lhs.dispatch_group_error_bytes == rhs.dispatch_group_error_bytes &&
            lhs.dispatch_rank_bitmap_offset ==
                rhs.dispatch_rank_bitmap_offset &&
            lhs.dispatch_rank_bitmap_bytes == rhs.dispatch_rank_bitmap_bytes &&

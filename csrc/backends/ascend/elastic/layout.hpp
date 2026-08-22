@@ -21,6 +21,7 @@ inline constexpr std::uint64_t kDirectCombineRecordTrailerBytes =
     kAscendElasticAlignment;
 inline constexpr std::uint64_t kHybridCombineRecordTrailerBytes =
     2 * kAscendElasticAlignment;
+inline constexpr std::uint64_t kDispatchGroupingTokensPerTile = 4;
 
 enum class CoreMode : std::uint8_t {
     kCached,
@@ -92,6 +93,22 @@ constexpr bool checked_multiply(
     return true;
 }
 
+constexpr bool dispatch_grouping_tile_count(
+    std::uint64_t num_tokens, std::uint64_t* result) {
+    if (result == nullptr)
+        return false;
+    if (num_tokens == 0) {
+        *result = 0;
+        return true;
+    }
+    std::uint64_t adjusted = 0;
+    if (!checked_add(
+            num_tokens, kDispatchGroupingTokensPerTile - 1, &adjusted))
+        return false;
+    *result = adjusted / kDispatchGroupingTokensPerTile;
+    return true;
+}
+
 constexpr bool checked_align(
     std::uint64_t value, std::uint64_t alignment, std::uint64_t* result) {
     if (alignment == 0 || (alignment & (alignment - 1)) != 0)
@@ -157,6 +174,13 @@ struct WorkspaceLayout {
     std::uint64_t scratch_rank_count = 0;
     std::uint64_t dispatch_error_offset = 0;
     std::uint64_t dispatch_error_count = 0;
+    std::uint64_t dispatch_group_owner_offset = 0;
+    std::uint64_t dispatch_group_owner_bytes = 0;
+    std::uint64_t dispatch_group_tile_offset = 0;
+    std::uint64_t dispatch_group_tile_bytes = 0;
+    std::uint64_t dispatch_group_tile_count = 0;
+    std::uint64_t dispatch_group_error_offset = 0;
+    std::uint64_t dispatch_group_error_bytes = 0;
     std::uint64_t dispatch_rank_bitmap_offset = 0;
     std::uint64_t dispatch_rank_bitmap_bytes = 0;
     std::uint64_t dispatch_expert_bitmap_offset = 0;
