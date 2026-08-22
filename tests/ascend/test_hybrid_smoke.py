@@ -9,6 +9,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "tests/ascend/production/run_hybrid_smoke.py"
+SIMT_VF_PREFIX = "__simt_vf__ __launch_bounds__(512) inline void "
 
 
 def _load_runner():
@@ -191,20 +192,30 @@ def test_production_exposes_device_only_two_stage_hybrid_contract():
     assert "hybrid_combine_reverse_forward" in combine
     assert "hybrid_combine_return" in combine
     producer = combine[
-        combine.index("__simt_vf__ inline void combine_producer_vf"):
-        combine.index("__simt_vf__ inline void hybrid_combine_return_vf")]
+        combine.index(f"{SIMT_VF_PREFIX}combine_producer_vf"):
+        combine.index(f"{SIMT_VF_PREFIX}hybrid_combine_return_vf")]
     staging = producer[producer.index("// Record counts are derived") :]
     assert "route_record.forwarded_slot" in staging
     dispatch_forward = dispatch[
-        dispatch.index("__simt_vf__ inline void hybrid_dispatch_forward_vf"):
+        dispatch.index(f"{SIMT_VF_PREFIX}hybrid_dispatch_forward_vf"):
         dispatch.index(
-            "__simt_vf__ inline void hybrid_dispatch_prepare_epilogue_vf")]
+            f"{SIMT_VF_PREFIX}hybrid_dispatch_prepare_epilogue_vf")]
     assert dispatch_forward.index("transport.system_fence()") < \
         dispatch_forward.index("transport.put(")
     reverse_return = combine[
-        combine.index("__simt_vf__ inline void hybrid_combine_return_vf"):
+        combine.index(f"{SIMT_VF_PREFIX}hybrid_combine_return_vf"):
         combine.index(
-            "__simt_vf__ inline void hybrid_combine_prepare_epilogue_vf")]
+            f"{SIMT_VF_PREFIX}hybrid_combine_prepare_epilogue_vf")]
     assert "route_metadata.ingress_slot" in reverse_return
     assert reverse_return.index("transport.system_fence()") < \
         reverse_return.index("transport.put(")
+
+
+def test_all_elastic_simt_vfs_use_the_512_thread_register_budget():
+    for filename in ("barrier.asc", "dispatch.asc", "combine.asc"):
+        source = (ROOT / "csrc/backends/ascend/elastic" / filename).read_text()
+        declarations = re.findall(r"__simt_vf__[^\n]*inline void ", source)
+        assert declarations, filename
+        assert set(declarations) == {
+            "__simt_vf__ __launch_bounds__(512) inline void "
+        }, filename

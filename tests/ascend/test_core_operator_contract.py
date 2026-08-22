@@ -240,7 +240,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "direct_dispatch_producer_record_vf",
                 "direct_dispatch_epilogue_copy_outputs_vf"):
             begin = source.index(
-                f"__simt_vf__ inline void {function_name}")
+                f"__simt_vf__ __launch_bounds__(512) inline void {function_name}")
             end = source.index("\n}\n", begin)
             function = source[begin:end]
             self.assertIn("direct_data_grid_stride(", function)
@@ -266,13 +266,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "direct_combine_producer_record_vf",
                 "direct_combine_epilogue_weights_vf"):
             begin = source.index(
-                f"__simt_vf__ inline void {function_name}")
+                f"__simt_vf__ __launch_bounds__(512) inline void {function_name}")
             end = source.index("\n}\n", begin)
             function = source[begin:end]
             self.assertIn("direct_data_grid_stride(", function)
 
         reduce_begin = source.index(
-            "__simt_vf__ inline void direct_combine_epilogue_reduce_vf")
+            "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_reduce_vf")
         reduce_end = source.index("\n}\n", reduce_begin)
         reduction = source[reduce_begin:reduce_end]
         self.assertIn("direct_subgroup_grid_stride(", reduction)
@@ -322,7 +322,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("kCombineDataCopyAlignmentElements = 16", source)
 
         prepare_begin = source.index(
-            "__simt_vf__ inline void "
+            "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_combine_epilogue_prepare_vector_slots_vf")
         prepare_end = source.index("\n}\n", prepare_begin)
         prepare = source[prepare_begin:prepare_end]
@@ -353,7 +353,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                                 "                output_tile"))
 
         tail_signature = (
-            "__simt_vf__ inline void "
+            "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_combine_epilogue_vector_tail_vf")
         self.assertIn(tail_signature, source)
         tail_begin = source.index(tail_signature)
@@ -454,7 +454,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("combine_contributor_entry_offset", source)
 
         reduce_begin = source.index(
-            "__simt_vf__ inline void direct_combine_epilogue_reduce_vf")
+            "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_reduce_vf")
         reduce_end = source.index("\n}\n", reduce_begin)
         reduce = source[reduce_begin:reduce_end]
         for marker in (
@@ -483,7 +483,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertIn(marker, reduce)
 
         weights_begin = source.index(
-            "__simt_vf__ inline void direct_combine_epilogue_weights_vf")
+            "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_weights_vf")
         weights_end = source.index("\n}\n", weights_begin)
         weights = source[weights_begin:weights_end]
         self.assertNotIn("candidate_lane", weights)
@@ -531,13 +531,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
 
         record = source[source.index(
-            "__simt_vf__ inline void direct_combine_producer_record_vf"):
+            "__simt_vf__ __launch_bounds__(512) inline void direct_combine_producer_record_vf"):
             source.index(
-                "__simt_vf__ inline void direct_combine_producer_local_copy_vf")]
+                "__simt_vf__ __launch_bounds__(512) inline void direct_combine_producer_local_copy_vf")]
         reduction = source[source.index(
-            "__simt_vf__ inline void direct_combine_epilogue_reduce_vf"):
+            "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_reduce_vf"):
             source.index(
-                "__simt_vf__ inline void direct_combine_epilogue_weights_vf")]
+                "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_weights_vf")]
         for stage in (record, reduction):
             self.assertIn("threadIdx.x", stage)
             self.assertIn("blockDim.x", stage)
@@ -564,9 +564,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("entry->receive_slot", reduction)
 
         plan = source[source.index(
-            "__simt_vf__ inline void direct_combine_producer_plan_vf"):
+            "__simt_vf__ __launch_bounds__(512) inline void direct_combine_producer_plan_vf"):
             source.index(
-                "__simt_vf__ inline void direct_combine_producer_reduce_errors_vf")]
+                "__simt_vf__ __launch_bounds__(512) inline void direct_combine_producer_reduce_errors_vf")]
         self.assertIn("destination_rank = static_cast<int>(threadIdx.x)", plan)
         self.assertIn("destination_rank += static_cast<int>(blockDim.x)", plan)
         self.assertIn("combine_direct_status_is_clean(", record)
@@ -694,7 +694,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             for suffix in ("producer_vf", "epilogue_vf"):
                 function_name = source_name.removesuffix(".asc") + "_" + suffix
                 signature = re.search(
-                    rf"__simt_vf__\s+inline\s+void\s+{function_name}\s*"
+                rf"__simt_vf__\s+(?:__launch_bounds__\(512\)\s+)?"
+                rf"inline\s+void\s+{function_name}\s*"
                     rf"\((.*?)\)\s*\{{", source, flags=re.DOTALL)
                 self.assertIsNotNone(signature, function_name)
                 for parameter in required_parameters:
@@ -835,7 +836,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         calls_by_function = {}
         for source_name, source in sources.items():
             matches = re.findall(
-                r"__simt_vf__\s+inline\s+void\s+(\w+)\s*\((.*?)\)\s*\{",
+                r"__simt_vf__\s+(?:__launch_bounds__\(512\)\s+)?"
+                r"inline\s+void\s+(\w+)\s*\((.*?)\)\s*\{",
                 source, flags=re.DOTALL)
             self.assertTrue(matches, source_name)
             for function_name, arguments in matches:
@@ -1146,7 +1148,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
              split_arguments(calls_by_function["combine_producer_vf"])],
             expected_combine_producer_call)
         producer_begin = sources["combine.asc"].index(
-            "__simt_vf__ inline void combine_producer_vf")
+            "__simt_vf__ __launch_bounds__(512) inline void combine_producer_vf")
         producer_end = sources["combine.asc"].index(
             "make_hybrid_combine_context", producer_begin)
         producer = sources["combine.asc"][producer_begin:producer_end]
@@ -1211,7 +1213,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         record_source_begin = sources["combine.asc"].index(
             "struct CombineOriginDeviceRecordSource")
         record_source_end = sources["combine.asc"].index(
-            "__simt_vf__ inline void combine_epilogue_vf",
+            "__simt_vf__ __launch_bounds__(512) inline void combine_epilogue_vf",
             record_source_begin)
         record_source = sources["combine.asc"][
             record_source_begin:record_source_end]
@@ -1307,9 +1309,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
         source = (ELASTIC / "combine.asc").read_text()
         producer_begin = source.index(
-            "__simt_vf__ inline void combine_producer_vf")
+            "__simt_vf__ __launch_bounds__(512) inline void combine_producer_vf")
         producer_end = source.index(
-            "__simt_vf__ inline void combine_epilogue_vf", producer_begin)
+            "__simt_vf__ __launch_bounds__(512) inline void combine_epilogue_vf", producer_begin)
         producer = source[producer_begin:producer_end]
         identity_check = producer.index(
             "is_valid_combine_source_identity(")
@@ -1361,8 +1363,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "is_complete_hybrid_route_stage_flags(", table_validator)
         combine = (ELASTIC / "combine.asc").read_text()
         producer = combine[
-            combine.index("__simt_vf__ inline void combine_producer_vf"):
-            combine.index("__simt_vf__ inline void hybrid_combine_return_vf")]
+            combine.index("__simt_vf__ __launch_bounds__(512) inline void combine_producer_vf"):
+            combine.index("__simt_vf__ __launch_bounds__(512) inline void hybrid_combine_return_vf")]
         self.assertIn("is_complete_hybrid_route_stage_flags(", producer)
 
     def test_scale_factor_offset_helper_is_device_callable(self):
@@ -1388,18 +1390,18 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
         source = (ELASTIC / "combine.asc").read_text()
         producer = source[
-            source.index("__simt_vf__ inline void combine_producer_vf"):
-            source.index("__simt_vf__ inline void hybrid_combine_return_vf")]
+            source.index("__simt_vf__ __launch_bounds__(512) inline void combine_producer_vf"):
+            source.index("__simt_vf__ __launch_bounds__(512) inline void hybrid_combine_return_vf")]
         reverse_return = source[
-            source.index("__simt_vf__ inline void hybrid_combine_return_vf"):
+            source.index("__simt_vf__ __launch_bounds__(512) inline void hybrid_combine_return_vf"):
             source.index(
-                "__simt_vf__ inline void hybrid_combine_prepare_epilogue_vf")]
+                "__simt_vf__ __launch_bounds__(512) inline void hybrid_combine_prepare_epilogue_vf")]
         prepare = source[
             source.index(
-                "__simt_vf__ inline void hybrid_combine_prepare_epilogue_vf"):
+                "__simt_vf__ __launch_bounds__(512) inline void hybrid_combine_prepare_epilogue_vf"):
             source.index("struct CombineOriginDeviceRecordSource")]
         epilogue = source[
-            source.index("__simt_vf__ inline void combine_epilogue_vf"):
+            source.index("__simt_vf__ __launch_bounds__(512) inline void combine_epilogue_vf"):
             source.index("__global__ __vector__ void combine_kernel")]
 
         self.assertIn(
@@ -1482,7 +1484,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
         source = (ELASTIC / "combine.asc").read_text()
         epilogue_begin = source.index(
-            "__simt_vf__ inline void combine_epilogue_vf")
+            "__simt_vf__ __launch_bounds__(512) inline void combine_epilogue_vf")
         epilogue_end = source.index(
             "__global__ __vector__ void combine_kernel", epilogue_begin)
         epilogue = source[epilogue_begin:epilogue_end]
@@ -1826,9 +1828,9 @@ int main() {
         dispatch_source = (ELASTIC / "dispatch.asc").read_text()
         dispatch_prepare = dispatch_source[
             dispatch_source.index(
-                "__simt_vf__ inline void hybrid_dispatch_prepare_epilogue_vf"):
+                "__simt_vf__ __launch_bounds__(512) inline void hybrid_dispatch_prepare_epilogue_vf"):
             dispatch_source.index(
-                "__simt_vf__ inline void hybrid_dispatch_record_routes_vf")]
+                "__simt_vf__ __launch_bounds__(512) inline void hybrid_dispatch_record_routes_vf")]
         self.assertIn("dispatch_prepare_release_boundary(", dispatch_prepare)
         self.assertLess(
             dispatch_prepare.index(
@@ -1842,7 +1844,7 @@ int main() {
         self.assertNotIn(
             "direct_control[origin_rank].generation =", dispatch_prepare)
         dispatch_epilogue = dispatch_source[
-            dispatch_source.index("__simt_vf__ inline void dispatch_epilogue_vf"):
+            dispatch_source.index("__simt_vf__ __launch_bounds__(512) inline void dispatch_epilogue_vf"):
             dispatch_source.index(
                 'extern "C" int deep_ep_ascend_launch_dispatch')]
         self.assertIn("dispatch_release_boundary(", dispatch_epilogue)
@@ -1854,7 +1856,7 @@ int main() {
         combine_source = (ELASTIC / "combine.asc").read_text()
         combine_prepare = combine_source[
             combine_source.index(
-                "__simt_vf__ inline void hybrid_combine_prepare_epilogue_vf"):
+                "__simt_vf__ __launch_bounds__(512) inline void hybrid_combine_prepare_epilogue_vf"):
             combine_source.index("struct CombineOriginDeviceRecordSource")]
         self.assertIn("combine_prepare_release_boundary(", combine_prepare)
         self.assertLess(
@@ -1869,7 +1871,7 @@ int main() {
         self.assertNotIn(
             "direct_control[contributor_rank].generation =", combine_prepare)
         combine_epilogue = combine_source[
-            combine_source.index("__simt_vf__ inline void combine_epilogue_vf"):
+            combine_source.index("__simt_vf__ __launch_bounds__(512) inline void combine_epilogue_vf"):
             combine_source.index('extern "C" int deep_ep_ascend_launch_combine')]
         self.assertIn("combine_release_boundary(", combine_epilogue)
         self.assertIn(
@@ -1881,7 +1883,7 @@ int main() {
         """Catches local scratch writes racing remote ingress publication."""
         source = (ELASTIC / "dispatch.asc").read_text()
         producer = source[
-            source.index("__simt_vf__ inline void dispatch_producer_vf"):
+            source.index("__simt_vf__ __launch_bounds__(512) inline void dispatch_producer_vf"):
             source.index(
                 "DEEP_EP_ASCEND_SIMT_CALLEE transport::DeviceTransportContext")]
         self.assertIn(
@@ -1919,9 +1921,9 @@ int main() {
         """Catches a second service reset followed by a silent scratch return."""
         source = (ELASTIC / "dispatch.asc").read_text()
         forward = source[
-            source.index("__simt_vf__ inline void hybrid_dispatch_forward_vf"):
+            source.index("__simt_vf__ __launch_bounds__(512) inline void hybrid_dispatch_forward_vf"):
             source.index(
-                "__simt_vf__ inline void hybrid_dispatch_prepare_epilogue_vf")]
+                "__simt_vf__ __launch_bounds__(512) inline void hybrid_dispatch_prepare_epilogue_vf")]
         self.assertIn("decode_dispatch_protocol_scratch(", forward)
         self.assertIn("DispatchProtocolStage::kProducer", forward)
         self.assertIn("record_dispatch_protocol_error(", forward)
@@ -2181,7 +2183,7 @@ int main() {
         """Catches output publication after failed transport execution."""
         source = (ELASTIC / "combine.asc").read_text()
         epilogue_begin = source.index(
-            "__simt_vf__ inline void combine_epilogue_vf")
+            "__simt_vf__ __launch_bounds__(512) inline void combine_epilogue_vf")
         epilogue = source[epilogue_begin:]
         self.assertIn("is_clean_combine_transport_completion(", epilogue)
         gate_position = epilogue.index(
@@ -2257,7 +2259,7 @@ int main() {
         """Catches device output overflow and undersized shared buffers."""
         source = (ELASTIC / "combine.asc").read_text()
         epilogue_begin = source.index(
-            "__simt_vf__ inline void combine_epilogue_vf")
+            "__simt_vf__ __launch_bounds__(512) inline void combine_epilogue_vf")
         epilogue = source[epilogue_begin:]
         self.assertIn("is_valid_combine_token_extent(", epilogue)
         capacity_position = epilogue.index(
@@ -2366,9 +2368,9 @@ int main() {
         """Catches public count repair and nonlocal cached expert counting."""
         source = (ELASTIC / "dispatch.asc").read_text()
         producer_begin = source.index(
-            "__simt_vf__ inline void dispatch_producer_vf")
+            "__simt_vf__ __launch_bounds__(512) inline void dispatch_producer_vf")
         epilogue_begin = source.index(
-            "__simt_vf__ inline void "
+            "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_epilogue_acquire_vf")
         producer = source[producer_begin:epilogue_begin]
         self.assertNotIn("prefix_per_rank[", producer)
@@ -2410,9 +2412,9 @@ int main() {
         """Catches receiver-ranked slots, receiver token bounds, and global routes."""
         source = (ELASTIC / "dispatch.asc").read_text()
         producer_begin = source.index(
-            "__simt_vf__ inline void dispatch_producer_vf")
+            "__simt_vf__ __launch_bounds__(512) inline void dispatch_producer_vf")
         epilogue_begin = source.index(
-            "__simt_vf__ inline void dispatch_epilogue_vf")
+            "__simt_vf__ __launch_bounds__(512) inline void dispatch_epilogue_vf")
         producer = source[:epilogue_begin]
         epilogue = source[epilogue_begin:]
         self.assertIn("encode_dispatch_source_index(", producer)
@@ -2517,7 +2519,7 @@ int main() {
     def test_single_rank_dispatch_epilogue_publishes_generation(self):
         dispatch = (ELASTIC / "dispatch.asc").read_text()
         epilogue = dispatch[
-            dispatch.index("__simt_vf__ inline void dispatch_epilogue_vf"):
+            dispatch.index("__simt_vf__ __launch_bounds__(512) inline void dispatch_epilogue_vf"):
             dispatch.index("__global__ __vector__ void dispatch_kernel")]
         self.assertIn(
             "__gm__ std::uint8_t* control_base = transport_world_size == 1 ?",
