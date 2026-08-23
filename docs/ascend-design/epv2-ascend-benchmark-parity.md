@@ -695,6 +695,47 @@ This is the Ascend half of the representative precheck, not a 144-case formal
 result. The H800 run must consume this exact `workload.json` and pass the same
 case before the comparison tool can calculate latency and bandwidth ratios.
 
+### P1/P2 two-rank regression measurement
+
+The P1/P2 optimization acceptance used a separate two-rank comparison on
+devices 6 and 7. This section keeps it separate from the eight-rank result
+above. The baseline source is commit `1f27303`; the candidate contains the
+P1/P2 changes through `3e583b8`. The candidate runtime source hashes on NPU8P
+matched the local committed files used for acceptance.
+
+Both runs used case
+`ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0`, 8,192 tokens per rank,
+hidden width 7,168, top-k 8, 256 experts, FP8 dispatch, BF16 combine, and 72 AI
+Vector blocks. The workload fingerprint was
+`e41b7ddf1aa3932aed01d4f2e0caca443f9ec0810a76b79c78b63fc0237ca4be`.
+Task `task_20260824_053739_143009328553` completed with exit code zero; each
+operation used 30 warmups and 30 measured iterations, both cases passed, and
+both reports had empty failure lists.
+
+| Operation | Baseline mean (ms) | Candidate mean (ms) | Latency change | Baseline GB/s | Candidate GB/s | Bandwidth change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `dispatch` | 97.658 | 20.831 | -78.67% | 7.515 | 35.230 | +368.81% |
+| `expanded_dispatch` | 115.040 | 24.087 | -79.06% | 13.813 | 65.973 | +377.61% |
+| `cached_dispatch` | 110.484 | 70.971 | -35.76% | 6.642 | 10.341 | +55.68% |
+| `combine` | 143.442 | 120.135 | -16.25% | 8.186 | 9.774 | +19.40% |
+| `reduced_combine` | 185.667 | 159.516 | -14.08% | 6.324 | 7.361 | +16.39% |
+
+Task `task_20260824_053138_13719282645` ran two baseline/candidate pairs with
+10 warmups and 20 measured iterations, plus the four-case combine correctness
+matrix. All five operations improved in both pairs. The six reports are
+archived on NPU8P under
+`/home/pyptouser/yuqitao/deepep-results/p1p2-two-rank-3e583b8`.
+
+| Formal artifact | SHA-256 |
+| --- | --- |
+| `p1p2-p0-baseline-formal.json` | `716557278a57b34cd7ac243439f912820ebe9f0bee68e9a98692638b0cdd8dea` |
+| `p1p2-p1p2-candidate-formal.json` | `372616ab3ad35f21baa29e3a9c2237cd157a9441907689d35abf7120b74eb4bc` |
+
+This comparison is regression evidence for the optimized code path. Its
+`world_size=2` changes routing volume and logical bytes, so it is not evidence
+of EP8 throughput or H800 parity. Those claims still require matching
+eight-rank reports from the shared manifest.
+
 ## Components
 
 | File | Responsibility |

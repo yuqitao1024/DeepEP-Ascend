@@ -1,6 +1,7 @@
 # Ascend EPv2 Performance Optimization
 
-**Status:** P0/P1/P2 implementation complete; formal EP8 performance acceptance pending
+**Status:** P0/P1/P2 implementation and two-rank regression acceptance complete;
+formal EP8 performance acceptance pending
 
 ## Purpose
 
@@ -86,10 +87,10 @@ cause, but each has a distinct code change and acceptance signal.
 | P0.2 | Implemented | Ballot and shuffle based top-k subgroup grouping, owner election, and owner broadcast are shared by dispatch and combine |
 | P0.3 | Implemented | Dispatch and combine use aligned vector/DataCopy payload paths with scalar tails |
 | P1.4 | Implemented | Commit `20fa915` submits all peer payload puts, flushes once, then publishes controls in deterministic peer order |
-| P1.5 | Implemented | Commit `c06074e` uses receive-record tiles, per-tile expert histograms, ordered expert/tile prefixes, and deterministic scatter |
-| P1.6 | Implemented | Producer planning and receive validation are tiled; build task `task_20260824_031243_78079520953` and two-rank correctness task `task_20260824_031918_79868621126` passed |
+| P1.5 | Implemented | Commit `c06074e` adds receive-record tiles, histograms, ordered prefixes, and deterministic scatter; commit `3e583b8` makes metadata initialization and scatter use the same tile owner |
+| P1.6 | Implemented | Producer planning and receive validation are tiled; build task `task_20260824_031243_78079520953` and two-rank correctness tasks `task_20260824_031918_79868621126` and `task_20260824_053138_13719282645` passed |
 | P2.7 | Implemented and revalidated | Commit `b6c5d0d` supplies grouping, prefix, and record stages; current host contracts and the P1.6 Bisheng build revalidated the path |
-| P2.8 | Implemented | Commit `c06074e` partitions rank-major receive records and reduces private tile errors in order |
+| P2.8 | Implemented | Commit `c06074e` partitions rank-major receive records and reduces private tile errors in order; commit `3e583b8` closes the 72-block metadata race found by the 8K case |
 
 ### P1.4: two-pass HCOMM publication
 
@@ -126,6 +127,23 @@ Expanded dispatch reuses those tiles for expert processing:
 The order remains source rank, source slot, then top-k lane. `-1` lanes do not
 enter the histogram. Cached mode validates the existing destination slot and
 keeps the bitmap fallback instead of replacing its public handle format.
+
+The first 72-block implementation exposed a stage-local ownership race. The
+metadata function initialized every destination lane to `-1` in every block
+using only `threadIdx.x`, while the following scatter function assigned tiles
+with `(blockIdx.x, threadIdx.x)`. Consecutive `asc_vf_call` functions order work
+inside one block, but they do not provide a cross-block barrier. A slower block
+could therefore initialize a record after its real owner had assigned a valid
+destination.
+
+Commit `3e583b8` gives metadata initialization and destination scatter the same
+block-distributed tile mapping. A record is now initialized and assigned only
+by its tile owner, so no cross-block barrier is needed. Cached bitmap validation
+stays on block zero because bitmap words are shared across expert scans. The
+same commit also makes the CPU-sync first half run through
+`EpilogueExpertPrefix`; the host reads expert counts only after validation,
+histogram, and prefix stages have completed. The second epilogue launch then
+runs only metadata, payload copy, and completion.
 
 ### P1.6: combine producer planning
 
@@ -188,6 +206,35 @@ and `ProducerRecord` writes records from those offsets. Cached mode and subgroup
 shapes outside the qualified fast path keep their validated fallback. Current
 stage-order tests, the full host suite, and the Bisheng extension build all
 revalidated this split after the P1/P2 metadata changes.
+
+### P1/P2 two-rank acceptance
+
+Task `task_20260824_052250_1327642780` built the candidate and passed the 8K,
+hidden-7,168, top-k 8 expanded-dispatch preflight with 72 blocks. Task
+`task_20260824_053138_13719282645` then passed four combine cases: normal,
+expanded multiple reduction, duplicate same-rank experts, and the top-k 8 /
+hidden-7,168 specialization. It also ran two ordered baseline/candidate timing
+pairs with 10 warmups and 20 measured iterations per operation. Task
+`task_20260824_053739_143009328553` repeated the comparison with 30 warmups and
+30 measured iterations.
+
+The latency changes were repeatable across the quick-pair average and the
+formal run:
+
+| Operation | Quick-pair device mean change | Formal device mean change |
+| --- | ---: | ---: |
+| `dispatch` | -77.58% | -78.67% |
+| `expanded_dispatch` | -79.32% | -79.06% |
+| `cached_dispatch` | -36.55% | -35.76% |
+| `combine` | -17.69% | -16.25% |
+| `reduced_combine` | -13.92% | -14.08% |
+
+Both sides used the same workload fingerprint
+`e41b7ddf1aa3932aed01d4f2e0caca443f9ec0810a76b79c78b63fc0237ca4be`,
+the same five operations, the same logical-byte formulas, and 72 data blocks.
+These two-rank measurements show that P1/P2 did not regress the representative
+path. They are not EP8 acceptance and must not be compared directly with the
+eight-rank H800 or Ascend tables.
 
 ### Interaction Between P0.2 and the Metadata Findings
 
