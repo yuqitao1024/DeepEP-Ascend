@@ -654,12 +654,13 @@ Hardware acceptance is separate and serialized per environment:
 
 The Ascend side of the representative precheck ran on eight
 `Ascend950PR_9599` devices in TaskQueue task
-`task_20260823_215806_157478527006`. The task started at
-`2026-08-23 22:02:46 +08:00`, finished at `22:05:13`, and exited with code
-zero. It used the source snapshot verified against commit
-`60e3d08c77a0bc23b9831059ca2f19242d3b3e55`. The remote checkout is a source
-directory without Git metadata, so the generated report records
-`git_commit=unknown`; the task and artifact hashes below provide the run
+`task_20260824_061202_16333297801`. The task started at
+`2026-08-24 06:12:06 +08:00`, finished at `06:16:06`, and exited with code
+zero. It force-built the extension before running the benchmark. The nine
+runtime and kernel source hashes recorded with the result matched local commit
+`0a9ff646645ed73767f3112df12ab597097177f3`. The remote source snapshot has no
+Git metadata, so the generated report records `git_commit=unknown`; the task,
+source hashes, workload fingerprint, and report hash below provide the run
 provenance.
 
 The measured case is
@@ -673,23 +674,21 @@ failures list is empty. Its workload fingerprint is
 
 | Operation | Device mean (ms) | Device p50 (ms) | Device p95 (ms) | Wall mean (ms) | Logical GB/s |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `dispatch` | 132.044 | 132.081 | 133.578 | 132.775 | 58.966 |
-| `expanded_dispatch` | 172.368 | 172.348 | 174.175 | 173.146 | 53.673 |
-| `cached_dispatch` | 138.112 | 138.220 | 139.738 | 138.922 | 56.375 |
-| `combine` | 167.894 | 168.044 | 170.512 | 168.762 | 64.929 |
-| `reduced_combine` | 195.801 | 195.729 | 197.242 | 196.716 | 55.675 |
+| `dispatch` | 36.259 | 36.353 | 38.117 | 36.886 | 214.736 |
+| `expanded_dispatch` | 38.641 | 38.612 | 39.923 | 39.369 | 239.422 |
+| `cached_dispatch` | 87.375 | 87.450 | 88.764 | 88.130 | 89.112 |
+| `combine` | 141.718 | 141.761 | 143.880 | 142.569 | 76.922 |
+| `reduced_combine` | 169.704 | 169.688 | 171.402 | 170.472 | 64.237 |
 
-The four source artifacts remain on NPU8P under
-`/home/pyptouser/yuqitao/deepep-results/ascend950-representative-60e3d08`
-and in the local temporary archive
-`/tmp/deepep-ascend-benchmarks/ascend950-representative-60e3d08`.
+The refreshed report and its source-hash record remain on NPU8P under
+`/home/pyptouser/yuqitao/deepep-results/p1p2-ep8-0a9ff64`. The byte-identical
+workload manifest remains under
+`/home/pyptouser/yuqitao/deepep-results/ascend950-representative-60e3d08`.
 
 | Artifact | SHA-256 |
 | --- | --- |
 | `workload.json` | `98d9dc5ff7b8f31afbc9589b037fd658d99b85b739b8572de1751b9e979eb623` |
-| `benchmark.json` | `8b2f921d892a07959ef725b1b998bf699f546ce96be3885f998b8a20cdd48fa8` |
-| `benchmark.md` | `185b2bfd80d55138139337afa3180beec4a3809d6d62a15091c8ba8d64eb645f` |
-| `run.log` | `438f08b906b5bb4c2e1726c936a56b458190d2a6e248a9b44ff1bdcb9d702645` |
+| `benchmark.json` | `ac77494195251b0f36595c67e78bf5aa1d7da6ca5a1d8c1b2525f9b21e21c663` |
 
 This is the Ascend half of the representative precheck, not a 144-case formal
 result. The H800 run must consume this exact `workload.json` and pass the same

@@ -1,7 +1,7 @@
 # Ascend EPv2 Performance Optimization
 
-**Status:** P0/P1/P2 implementation and two-rank regression acceptance complete;
-formal EP8 performance acceptance pending
+**Status:** P0/P1/P2 implementation, two-rank regression, and EP8
+representative-case acceptance complete; 144-case formal acceptance pending
 
 ## Purpose
 
@@ -19,9 +19,11 @@ dropping cases, changing logical-byte formulas, or increasing timeouts.
 ## Current Evidence
 
 The complete eight-rank inventory contains 144 cases and 720 operation
-records. Current formal performance values remain pending until H800 and
-Ascend both generate reports from the 8K/top-k 8 workload and the same manifest.
-No public table or earlier benchmark artifact substitutes for those reports.
+records. The selected 8K/top-k 8 representative case has passed on eight
+Ascend devices with all five operation records. Full formal performance values
+remain pending until H800 and Ascend both pass all 144 cases using matching
+manifests. The representative result is a focused precheck, not a substitute
+for those reports.
 
 An `asys info -r hardware` query on NPU8P reported:
 
@@ -235,6 +237,35 @@ the same five operations, the same logical-byte formulas, and 72 data blocks.
 These two-rank measurements show that P1/P2 did not regress the representative
 path. They are not EP8 acceptance and must not be compared directly with the
 eight-rank H800 or Ascend tables.
+
+### P1/P2 eight-rank representative acceptance
+
+Task `task_20260824_061202_16333297801` force-built the source snapshot whose
+runtime and kernel hashes matched commit `0a9ff64`, then ran the selected case
+on eight `Ascend950PR_9599` devices. The workload used 8,192 tokens per rank,
+hidden width 7,168, top-k 8, 256 experts, FP8 dispatch, BF16 combine, and 72 AI
+Vector blocks. All five operations passed correctness checks and completed 30
+warmups plus 30 measured iterations. The report has `world_size=8`, no
+failures, and workload fingerprint
+`d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`.
+
+The baseline below is the earlier EP8 measurement from source snapshot
+`60e3d08` using the same manifest and timing protocol. Logical byte counts are
+unchanged, so latency and bandwidth changes are directly comparable.
+
+| Operation | P0 mean (ms) | Current mean (ms) | Latency change | P0 GB/s | Current GB/s | Bandwidth change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `dispatch` | 132.044 | 36.259 | -72.54% | 58.966 | 214.736 | +264.17% |
+| `expanded_dispatch` | 172.368 | 38.641 | -77.58% | 53.673 | 239.422 | +346.08% |
+| `cached_dispatch` | 138.112 | 87.375 | -36.74% | 56.375 | 89.112 | +58.07% |
+| `combine` | 167.894 | 141.718 | -15.59% | 64.929 | 76.922 | +18.47% |
+| `reduced_combine` | 195.801 | 169.704 | -13.33% | 55.675 | 64.237 | +15.38% |
+
+The dispatch paths show the main P1/P2 gain. Combine improves, but its 13% to
+16% latency reduction leaves it as the larger residual bottleneck. Detailed
+p50, p95, wall-time, artifact, and provenance fields are recorded in
+`epv2-ascend-benchmark-parity.md`. This acceptance covers one representative
+case; the 144-case EP8 run remains outstanding.
 
 ### Interaction Between P0.2 and the Metadata Findings
 
