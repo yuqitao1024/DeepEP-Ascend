@@ -2518,6 +2518,48 @@ int main() {
         self.assertLess(count_position, generation_position)
         self.assertLess(generation_position, signal_position)
 
+    def test_direct_release_batches_all_payloads_before_controls(self):
+        """Catches per-peer flushes that serialize independent publications."""
+        functions = (
+            ("dispatch.asc", "direct_dispatch_producer_release_vf",
+             "hybrid_dispatch_forward_vf"),
+            ("combine.asc", "direct_combine_producer_release_vf",
+             "hybrid_combine_return_vf"),
+        )
+        for filename, function_name, next_function in functions:
+            source = (ELASTIC / filename).read_text()
+            release = source[
+                source.index(function_name):source.index(next_function)]
+            first_peer_loop = release.index(
+                "for (int destination_rank = 0;")
+            flush = release.index("release_protocol::flush_payload(transport);")
+            second_peer_loop = release.index(
+                "for (int destination_rank = 0;", flush)
+            payload = release.index("transport.put(", first_peer_loop)
+            control = release.index(
+                "release_protocol::publish_control_and_release(",
+                second_peer_loop)
+            barrier = release.index("transport.device_barrier(")
+            self.assertLess(first_peer_loop, payload)
+            self.assertLess(payload, flush)
+            self.assertLess(flush, second_peer_loop)
+            self.assertLess(second_peer_loop, control)
+            self.assertLess(control, barrier)
+            self.assertEqual(
+                release.count("release_protocol::flush_payload(transport);"),
+                1)
+
+        combine = (ELASTIC / "combine.asc").read_text()
+        fallback = combine[
+            combine.index("combine_producer_vf"):
+            combine.index("make_hybrid_combine_context")]
+        flush = fallback.index("release_protocol::flush_payload(transport);")
+        second_peer_loop = fallback.index(
+            "for (int destination_rank = 0;", flush)
+        self.assertIn(
+            "const std::uint64_t count = record_counts[destination_rank];",
+            fallback[second_peer_loop:])
+
         runner = (CORE_OPS / "core_operator_runner.asc").read_text()
         for case_name in ("dispatch-invalid-topk",
                           "dispatch-invalid-cache"):

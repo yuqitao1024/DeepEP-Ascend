@@ -639,9 +639,13 @@ class AscendStubSourceTest(unittest.TestCase):
             self.assertIn(marker, source)
         self.assertGreaterEqual(source.count("scale_factor_byte_offset("), 4)
         zero_padding = source[
-            source.index("if (expanded && zero_padding)"):
-            source.index("std::uint64_t compact_slot")]
+            source.index("direct_dispatch_epilogue_clear_padding_vf"):
+            source.index(
+                "direct_dispatch_epilogue_vector_payload_impl")]
         self.assertIn("recv_scale_factors", zero_padding)
+        self.assertIn("scale_factor_byte_offset(", zero_padding)
+        self.assertIn("recv_scale_factor_pack_stride, 4) + byte] = 0",
+                      zero_padding)
 
     def test_mapped_memory_owner_lifecycle_probe(self):
         """Catches a missing lifetime edge or any out-of-order mapped teardown."""
