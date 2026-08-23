@@ -16,9 +16,9 @@ document uses the repository numbering:
   grid, completed at commit `993ba59`;
 - P0.2: vote-ballot grouping plus token-subgroup execution and register-local
   routing metadata, specified here; and
-- P0.3: vector or DataCopy payload movement and common-shape specialization,
-  tracked here as the final CUDA-alignment steps but implemented only after
-  the P0.2 control-path gates pass.
+- P0.3: vector or DataCopy payload movement and common-shape specialization.
+  The combine and direct-dispatch slices are now qualified; scalar tails and
+  the existing fallback shapes remain in place.
 
 ## Problem
 
@@ -565,6 +565,67 @@ count, deterministic prefix, and scatter stages preserve handle compatibility
 and make block scheduling irrelevant to output order. Phase B therefore
 shares primitives with P2.7 but does not include expert histogram or receive
 validation work from later priorities.
+
+### P0.3 direct-dispatch payload movement
+
+The record stage now leaves the aligned main body of each hidden payload to a
+512-byte AscendC DataCopy loop. The SIMT writer still handles record metadata,
+top-k indices and weights, packed scale factors, and any hidden-byte tail. The
+epilogue uses the same split in reverse: DataCopy moves aligned hidden bytes,
+while the SIMT path handles metadata, scale factors, and tails. Hybrid,
+one-block, and grouping-ineligible paths keep their previous implementation.
+
+The first producer implementation divided `(token, destination rank)` pairs
+over AIV blocks. That partition covered the right records but did not match
+the record VF's grouping-tile partition. One AIV could therefore read a
+destination slot while another AIV was still writing it. A local vector sync
+and DDR barrier could not close a cross-AIV RAW race. A diagnostic global
+`AscendC::SyncAll()` made the representative case pass, confirming the
+ownership mismatch, but it is not part of the production solution.
+
+Production payload movement reuses the record VF's physical-AIV mapping. For
+launch thread count `N`, subgroup width `W=32`, block index `b`, subgroup
+index `s`, and block count `B`:
+
+```text
+subgroups_per_block = N / W
+first_tile(b, s)    = b * subgroups_per_block + s
+tile_stride         = B * subgroups_per_block
+token_begin(tile)   = tile * 4
+```
+
+With `N=512`, the AIV context for each launch block consumes the same 16
+subgroup tile streams that the block's record VF produced. The boundary is:
+
+```text
+record VF writes slots and record metadata
+  -> asc_sync_vec()
+  -> asc_sync_data_barrier(DSB_DDR)
+  -> same AIV copies the aligned hidden payload
+```
+
+This is a local producer-consumer boundary, not a global core barrier. The
+contract test forbids `AscendC::SyncAll()` and checks both the tile mapping and
+the sync order.
+
+Task `task_20260823_184126_82948820449` rebuilt the production extension and
+passed the two-rank BF16 matrix, 14 of 14 cases. Task
+`task_20260823_184358_83801319326` passed the FP8 matrix, 12 of 12 cases, then
+ran the unchanged representative BF16 workload twice. Both reports retained
+the expected fingerprint, schema, operation set, logical bytes, `num_sms=72`,
+one warmup, and three measured samples.
+
+| Operation | P0.2 latency | P0.3 latency | Latency change | P0.2 bandwidth | P0.3 bandwidth | Bandwidth change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 100.620 ms | 47.047 ms | -53.24% | 6.931 GB/s | 14.832 GB/s | +114.00% |
+| Expanded dispatch | 100.582 ms | 54.149 ms | -46.17% | 13.995 GB/s | 26.015 GB/s | +85.89% |
+| Cached dispatch | 105.302 ms | 52.333 ms | -50.30% | 6.623 GB/s | 13.327 GB/s | +101.22% |
+| Combine | 87.808 ms | 87.746 ms | -0.07% | 6.617 GB/s | 6.622 GB/s | +0.07% |
+| Reduced combine | 110.098 ms | 110.392 ms | +0.27% | 5.277 GB/s | 5.263 GB/s | -0.27% |
+
+The combine results are unchanged within short-run variation, as expected for
+a dispatch-only slice. Raw reports are retained under
+`/tmp/deepep-p03-stage-localization/results/` on the development node.
 
 ## Error And Fallback Behavior
 

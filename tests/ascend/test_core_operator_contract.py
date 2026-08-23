@@ -300,6 +300,110 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "for (std::uint64_t lane = 0; lane < num_topk; ++lane)",
             grouped_record)
 
+    def test_direct_dispatch_vector_payload_contract(self):
+        """Catches payload copies racing record writers on another AIV."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        for marker in (
+                '#include "c_api/sync/sync.h"',
+                '#include "simt_api/device_sync_functions.h"',
+                "kDispatchVectorTileBytes",
+                "direct_dispatch_producer_vector_payload_impl",
+                "direct_dispatch_epilogue_vector_payload_impl",
+                "direct_dispatch_store_scale_factor_pack",
+                "direct_dispatch_load_scale_factor_pack"):
+            self.assertIn(marker, source)
+
+        producer_begin = source.index(
+            "__aicore__ inline void "
+            "direct_dispatch_producer_vector_payload_impl")
+        producer_end = source.index("\n}\n", producer_begin)
+        producer = source[producer_begin:producer_end]
+        for marker in (
+                "AscendC::GetBlockIdx()", "AscendC::GetBlockNum()",
+                "AscendC::DataCopy", "dispatch_group_owner_offset",
+                "dispatch_group_tile_count", "launch_num_threads",
+                "subgroups_per_block", "kTopkSubgroupWidth",
+                "kDispatchGroupingTokensPerTile", "destination_slots",
+                "AscendC::TBuf", "EVENT_ID0"):
+            self.assertIn(marker, producer)
+        self.assertIn(
+            "launch_num_threads / kTopkSubgroupWidth", producer)
+        self.assertIn(
+            "block_index * subgroups_per_block + subgroup", producer)
+        self.assertIn(
+            "block_count * subgroups_per_block", producer)
+        self.assertIn("tile < dispatch_group_tile_count", producer)
+        self.assertIn(
+            "tile * kDispatchGroupingTokensPerTile", producer)
+        self.assertNotIn("logical_count = num_tokens * world_size", producer)
+        self.assertNotIn("input_queue", producer)
+        for ready, release in (
+                ("HardEvent::MTE2_MTE3", "HardEvent::MTE3_MTE2"),):
+            self.assertIn(ready, producer)
+            self.assertIn(release, producer)
+            self.assertLess(producer.index(ready), producer.index(release))
+
+        epilogue_begin = source.index(
+            "__aicore__ inline void "
+            "direct_dispatch_epilogue_vector_payload_impl")
+        epilogue_end = source.index("\n}\n", epilogue_begin)
+        epilogue = source[epilogue_begin:epilogue_end]
+        for marker in (
+                "AscendC::GetBlockIdx()", "AscendC::GetBlockNum()",
+                "AscendC::DataCopy", "source_metadata", "expanded",
+                "AscendC::TBuf", "EVENT_ID0"):
+            self.assertIn(marker, epilogue)
+        self.assertNotIn("input_queue", epilogue)
+        self.assertIn("HardEvent::MTE2_MTE3", epilogue)
+        self.assertIn("HardEvent::MTE3_MTE2", epilogue)
+        self.assertLess(
+            epilogue.index("HardEvent::MTE2_MTE3"),
+            epilogue.index("HardEvent::MTE3_MTE2"))
+
+        store_begin = source.index(
+            "direct_dispatch_store_scale_factor_pack")
+        store_end = source.index("\n}", store_begin)
+        self.assertIn("std::uint32_t", source[store_begin:store_end])
+        load_begin = source.index(
+            "direct_dispatch_load_scale_factor_pack")
+        load_end = source.index("\n}", load_begin)
+        self.assertIn("std::uint32_t", source[load_begin:load_end])
+
+        self.assertIn("direct_dispatch_producer_record_vf", source)
+        self.assertIn("direct_dispatch_epilogue_copy_outputs_vf", source)
+        self.assertIn("stage == DirectDispatchStage::kFull", source)
+        self.assertNotIn("AscendC::SyncAll()", source)
+
+        record_call_begin = source.index(
+            "asc_vf_call<direct_dispatch_producer_record_vf>")
+        payload_call_begin = source.index(
+            "direct_dispatch_producer_vector_payload_impl(",
+            record_call_begin)
+        record_payload_boundary = source[
+            record_call_begin:payload_call_begin]
+        self.assertIn("asc_sync_vec();", record_payload_boundary)
+        self.assertIn(
+            "asc_sync_data_barrier(mem_dsb_t::DSB_DDR);",
+            record_payload_boundary)
+        self.assertLess(
+            record_payload_boundary.index("asc_sync_vec();"),
+            record_payload_boundary.index(
+                "asc_sync_data_barrier(mem_dsb_t::DSB_DDR);"))
+
+        writer_begin = source.index(
+            "DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_write_record")
+        writer_body = source.index("{", writer_begin)
+        writer_signature = source[writer_begin:writer_body]
+        self.assertIn(
+            "std::uint64_t hidden_copy_begin", writer_signature)
+
+        hybrid_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "dispatch_producer_vf")
+        hybrid_body = source.index("{", hybrid_begin)
+        hybrid_signature = source[hybrid_begin:hybrid_body]
+        self.assertNotIn("hidden_copy_begin", hybrid_signature)
+
     def test_direct_combine_launcher_consumes_stage_pipeline(self):
         """Catches keeping direct combine data stages on one AI Vector."""
         source = (ELASTIC / "combine.asc").read_text()
