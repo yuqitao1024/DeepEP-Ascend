@@ -201,6 +201,8 @@ struct WorkspaceLayout {
     std::uint64_t combine_receive_tile_error_offset = 0;
     std::uint64_t combine_receive_tile_error_bytes = 0;
     std::uint64_t combine_receive_tile_count = 0;
+    std::uint64_t combine_receive_record_index_offset = 0;
+    std::uint64_t combine_receive_record_index_bytes = 0;
     std::uint64_t total_bytes = 0;
 };
 

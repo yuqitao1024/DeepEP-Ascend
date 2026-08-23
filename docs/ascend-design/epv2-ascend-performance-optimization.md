@@ -1,6 +1,6 @@
 # Ascend EPv2 Performance Optimization
 
-**Status:** Proposed
+**Status:** P0/P1/P2 implementation complete; formal EP8 performance acceptance pending
 
 ## Purpose
 
@@ -32,11 +32,11 @@ An `asys info -r hardware` query on NPU8P reported:
 The device is `Ascend 950PR_9599 V100`. The query completed in TaskQueue task
 `task_20260821_063351_32625357843`.
 
-The current Ascend tiling fixes every dispatch and combine launch at one
-`__vector__` block with 512 SIMT threads. The benchmark also passes
-`num_sms=1`, and the public Ascend backend rejects any other value. The main
-payload path therefore uses one of the 72 available AI Vector execution
-resources on each device.
+The direct Ascend path now separates one-block control stages from data stages.
+Data stages accept 1 through 72 `__vector__` blocks with 512 SIMT threads per
+block; the canonical maximum-performance setting is 72. Hybrid, scale-out, and
+expanded combine without multiple reduction keep their qualified one-block
+fallbacks.
 
 ## Scope
 
@@ -77,6 +77,115 @@ cause, but each has a distinct code change and acceptance signal.
 | P1.6 | Combine planning and record validation use only eight threads | One owner per destination or contributor rank serially scans its rows or received records | Leaves 504 of 512 threads idle during metadata-heavy stages | Row- or record-partitioned validation uses the full data grid and reduces deterministic error candidates afterward |
 | P2.7 | Dispatch route planning uses only eight threads | One owner per destination rank scans all 8,192 tokens and all eight top-k lanes | Repeats the top-k scan once per rank and serializes slot assignment within each owner | Top-k grouping and a count/prefix/scatter pipeline replace per-rank full scans |
 | P2.8 | Dispatch receive validation uses only eight threads | One owner per source rank validates its entire receive shard | Large shards are processed serially per rank | Records are partitioned over the full data grid while deterministic first-error selection is preserved |
+
+## Implementation Status
+
+| Finding | Status | Implementation evidence |
+| --- | --- | --- |
+| P0.1 | Implemented | Direct control and data stages use separate launch shapes; data launches accept up to 72 blocks |
+| P0.2 | Implemented | Ballot and shuffle based top-k subgroup grouping, owner election, and owner broadcast are shared by dispatch and combine |
+| P0.3 | Implemented | Dispatch and combine use aligned vector/DataCopy payload paths with scalar tails |
+| P1.4 | Implemented | Commit `20fa915` submits all peer payload puts, flushes once, then publishes controls in deterministic peer order |
+| P1.5 | Implemented | Commit `c06074e` uses receive-record tiles, per-tile expert histograms, ordered expert/tile prefixes, and deterministic scatter |
+| P1.6 | Implemented | Producer planning and receive validation are tiled; build task `task_20260824_031243_78079520953` and two-rank correctness task `task_20260824_031918_79868621126` passed |
+| P2.7 | Implemented and revalidated | Commit `b6c5d0d` supplies grouping, prefix, and record stages; current host contracts and the P1.6 Bisheng build revalidated the path |
+| P2.8 | Implemented | Commit `c06074e` partitions rank-major receive records and reduces private tile errors in order |
+
+### P1.4: two-pass HCOMM publication
+
+The producer release stage keeps payload-before-control ordering without one
+flush per peer. It first walks peers in world-rank order, copies the local
+payload directly, and submits every non-empty remote payload put. It then
+performs one payload flush. A second peer walk publishes each remote count and
+generation, followed by the existing device barrier. Empty peers still publish
+their control state, so a receiver cannot confuse an empty generation with a
+missing generation.
+
+This change reduces serialization in the HCOMM command stream. The control
+stage remains one block because publication order is part of the protocol; it
+is not a candidate for unordered cross-block atomics.
+
+### P1.5 and P2.8: dispatch receive metadata
+
+Dispatch validation maps each logical record to `(source_rank, source_slot)`
+in rank-major order. Data-stage tiles validate their own bounded records and
+write one private error candidate. The following control stage scans candidates
+in logical order and publishes the first error. No data block writes the shared
+status word.
+
+Expanded dispatch reuses those tiles for expert processing:
+
+1. Each tile scans its records once and writes a histogram for every local
+   expert.
+2. A control stage scans experts, then tiles, producing aligned expert prefixes
+   and converting histogram counts to exclusive tile offsets.
+3. Each tile rescans only its own records and assigns
+   `expert_prefix + tile_prefix + local_occurrence`.
+
+The order remains source rank, source slot, then top-k lane. `-1` lanes do not
+enter the histogram. Cached mode validates the existing destination slot and
+keeps the bitmap fallback instead of replacing its public handle format.
+
+### P1.6: combine producer planning
+
+The producer is four stream-ordered stages:
+
+1. `ProducerControl` validates the complete `prefix_per_rank` array once and
+   stores each rank's row begin. Empty rank ranges are valid; decreasing,
+   negative, out-of-range, or incomplete prefixes fail before data work.
+2. `ProducerPlan` divides source rows into fixed 128-row tiles. A tile validates
+   row metadata, records a rank-local occurrence for every owned row, writes a
+   tile-by-rank count, and emits at most one error candidate.
+3. `ProducerPlanPrefix` scans tile errors in row order, converts tile counts to
+   exclusive rank-local prefixes, and checks receive and staging byte capacity.
+4. `ProducerRecord` computes the final record slot as
+   `tile_rank_prefix + row_local_occurrence` and writes the record.
+
+Producer workspace is sized from the maximum legal source extent, not the
+final output-token count:
+
+```text
+producer_capacity = num_max_tokens_per_rank * world_size
+producer_tile_count = ceil(producer_capacity / 128)
+```
+
+For the 8,192-token EP8 shape this is 65,536 source rows and 512 tiles. Sizing
+from the 8,192 final tokens would allocate only 64 tiles and leave legal source
+rows unplanned.
+
+### P1.6: combine receive validation
+
+The receive extent is also represented in rank-major fixed-capacity space:
+
+```text
+logical_record = contributor_rank * shard_capacity + receive_slot
+```
+
+The data stage partitions that extent into 128-record tiles. Each tile validates
+the record header and top-k lane contract, stores the derived
+`origin_token * topk + contribution_lane` index, and writes one private error
+candidate. It deliberately does not write the public `slots` array because two
+records can derive the same index.
+
+The next one-block control stage scans contributor ranks and receive slots in
+protocol order. It constructs `slots`, detects the first duplicate, and compares
+that position with the earliest tiled validation error. This preserves the old
+rank/slot first-error rule without making atomic completion order observable.
+Only after this stage succeeds does the vector path compact contributor slots.
+
+The focused two-rank matrix passed normal combine, expanded multiple reduction,
+duplicate experts within one rank, and the top-k 8 / hidden 7,168 specialization.
+These runs establish compile and functional correctness, not EP8 performance.
+
+### P2.7: direct dispatch grouping reuse
+
+Normal direct dispatch now reads each token's top-k lanes once in
+`ProducerGroup`. The data stage stores token/rank ownership and tile counts,
+the one-block prefix stage converts them to deterministic rank-local offsets,
+and `ProducerRecord` writes records from those offsets. Cached mode and subgroup
+shapes outside the qualified fast path keep their validated fallback. Current
+stage-order tests, the full host suite, and the Bisheng extension build all
+revalidated this split after the P1/P2 metadata changes.
 
 ### Interaction Between P0.2 and the Metadata Findings
 

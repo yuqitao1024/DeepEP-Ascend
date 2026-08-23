@@ -46,7 +46,7 @@ struct CoreTilingInput {
 };
 
 inline constexpr std::uint32_t kAscendMaxDataBlocks = 72;
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 19;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 20;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -226,6 +226,7 @@ inline bool build_workspace_layout(
     std::uint64_t dispatch_rank_bitmap_words = 0;
     std::uint64_t dispatch_expert_bitmap_words = 0;
     std::uint64_t dispatch_expert_tile_entries = 0;
+    std::uint64_t combine_producer_capacity = 0;
     std::uint64_t combine_producer_tile_entries = 0;
     std::uint64_t combine_receive_capacity = 0;
     if (parallel_combine &&
@@ -278,8 +279,12 @@ inline bool build_workspace_layout(
               dispatch_expert_tile_entries, sizeof(std::uint64_t),
               &layout.dispatch_expert_tile_count_bytes))) ||
         (parallel_combine &&
-         (!combine_tile_count(
-              input.num_tokens, &layout.combine_producer_tile_count) ||
+         (!checked_multiply(
+              input.num_max_tokens_per_rank, layout.scratch_rank_count,
+              &combine_producer_capacity) ||
+          !combine_tile_count(
+              combine_producer_capacity,
+              &layout.combine_producer_tile_count) ||
           !checked_multiply(
               layout.combine_producer_tile_count,
               layout.scratch_rank_count, &combine_producer_tile_entries) ||
@@ -305,7 +310,10 @@ inline bool build_workspace_layout(
               &layout.combine_receive_tile_count) ||
           !checked_multiply(
               layout.combine_receive_tile_count, sizeof(std::uint64_t),
-              &layout.combine_receive_tile_error_bytes))) ||
+              &layout.combine_receive_tile_error_bytes) ||
+          !checked_multiply(
+              combine_receive_capacity, sizeof(std::int32_t),
+              &layout.combine_receive_record_index_bytes))) ||
         (parallel_dispatch &&
          (!dispatch_owner_bitmap_words(
               layout.scratch_rank_count, input.num_max_tokens_per_rank,
@@ -435,6 +443,14 @@ inline bool build_workspace_layout(
                 scratch_cursor, layout.combine_receive_tile_error_bytes,
                 &scratch_cursor))
             return false;
+        if (!checked_align(
+                scratch_cursor, alignof(std::uint64_t), &scratch_cursor))
+            return false;
+        layout.combine_receive_record_index_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, layout.combine_receive_record_index_bytes,
+                &scratch_cursor))
+            return false;
     }
     if (
         !checked_align(
@@ -518,7 +534,11 @@ inline bool build_workspace_layout(
           !checked_add(
               layout.scratch_offset,
               layout.combine_receive_tile_error_offset,
-              &layout.combine_receive_tile_error_offset))))
+              &layout.combine_receive_tile_error_offset) ||
+          !checked_add(
+              layout.scratch_offset,
+              layout.combine_receive_record_index_offset,
+              &layout.combine_receive_record_index_offset))))
         return false;
     *output = layout;
     return true;

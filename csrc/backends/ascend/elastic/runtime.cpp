@@ -140,6 +140,10 @@ bool same_workspace_layout(
                rhs.combine_receive_tile_error_bytes &&
            lhs.combine_receive_tile_count ==
                rhs.combine_receive_tile_count &&
+           lhs.combine_receive_record_index_offset ==
+               rhs.combine_receive_record_index_offset &&
+           lhs.combine_receive_record_index_bytes ==
+               rhs.combine_receive_record_index_bytes &&
            lhs.total_bytes == rhs.total_bytes;
 }
 

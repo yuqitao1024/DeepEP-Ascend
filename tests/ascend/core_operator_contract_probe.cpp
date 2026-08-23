@@ -258,6 +258,11 @@ int main() {
             std::numeric_limits<std::uint64_t>::max(), &destination))
         return 73;
     std::uint64_t combine_index = 0;
+    const std::int32_t uneven_prefix[] = {0, 3, 3, 7};
+    std::uint64_t combine_rank = 0;
+    std::uint64_t combine_begin = 0;
+    std::uint64_t combine_end = 0;
+    std::uint64_t combine_destination_slot = 0;
     if (!combine_tile_rank_index(0, 0, 3, 2, &combine_index) ||
         combine_index != 0 ||
         !combine_tile_rank_index(2, 1, 3, 2, &combine_index) ||
@@ -268,7 +273,34 @@ int main() {
             31, 2, 16, &source_rank, &source_slot) ||
         source_rank != 1 || source_slot != 15 ||
         combine_receive_record_coordinates(
-            32, 2, 16, &source_rank, &source_slot))
+            32, 2, 16, &source_rank, &source_slot) ||
+        !combine_rank_prefix_range(
+            uneven_prefix, 4, 7, 0, &combine_begin, &combine_end) ||
+        combine_begin != 0 || combine_end != 0 ||
+        !combine_rank_prefix_range(
+            uneven_prefix, 4, 7, 1, &combine_begin, &combine_end) ||
+        combine_begin != 0 || combine_end != 3 ||
+        !combine_rank_prefix_range(
+            uneven_prefix, 4, 7, 2, &combine_begin, &combine_end) ||
+        combine_begin != 3 || combine_end != 3 ||
+        !combine_rank_prefix_range(
+            uneven_prefix, 4, 7, 3, &combine_begin, &combine_end) ||
+        combine_begin != 3 || combine_end != 7 ||
+        combine_rank_prefix_range(
+            uneven_prefix, 4, 6, 3, &combine_begin, &combine_end) ||
+        !combine_destination_rank_for_row(
+            0, uneven_prefix, 4, 7, &combine_rank) || combine_rank != 1 ||
+        !combine_destination_rank_for_row(
+            2, uneven_prefix, 4, 7, &combine_rank) || combine_rank != 1 ||
+        !combine_destination_rank_for_row(
+            3, uneven_prefix, 4, 7, &combine_rank) || combine_rank != 3 ||
+        combine_destination_rank_for_row(
+            7, uneven_prefix, 4, 7, &combine_rank) ||
+        !combine_record_destination_slot(
+            5, 2, 8, &combine_destination_slot) ||
+        combine_destination_slot != 7 ||
+        combine_record_destination_slot(
+            5, 3, 8, &combine_destination_slot))
         return 74;
 
     CoreTiling tiling{};
@@ -422,7 +454,7 @@ int main() {
         return offset % alignment == 0 && offset <= combine_workspace_end &&
             bytes <= combine_workspace_end - offset;
     };
-    if (combine_workspace.combine_producer_tile_count != 64 ||
+    if (combine_workspace.combine_producer_tile_count != 512 ||
         combine_workspace.combine_receive_tile_count != 4096 ||
         !combine_region_is_valid(
             combine_workspace.combine_producer_tile_rank_count_offset,
@@ -435,6 +467,10 @@ int main() {
         !combine_region_is_valid(
             combine_workspace.combine_receive_tile_error_offset,
             combine_workspace.combine_receive_tile_error_bytes,
+            alignof(std::uint64_t)) ||
+        !combine_region_is_valid(
+            combine_workspace.combine_receive_record_index_offset,
+            combine_workspace.combine_receive_record_index_bytes,
             alignof(std::uint64_t)))
         return 71;
 #if !defined(DEEP_EP_ASCEND_SIMT_DEVICE)
@@ -673,9 +709,9 @@ int main() {
         std::uint64_t combine_bytes;
     };
     for (const auto fixture : {
-             ScratchFixture{2, 288, 4, 16, 32, 384},
-             ScratchFixture{4, 448, 6, 32, 48, 704},
-             ScratchFixture{8, 800, 10, 64, 80, 1344}}) {
+             ScratchFixture{2, 288, 4, 16, 32, 512},
+             ScratchFixture{4, 448, 6, 32, 48, 960},
+             ScratchFixture{8, 800, 10, 64, 80, 1856}}) {
         for (const auto operation : {
                  OperationKind::kDispatch, OperationKind::kCombine}) {
             input = valid_input();

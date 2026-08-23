@@ -41,6 +41,67 @@ constexpr bool combine_receive_record_coordinates(
     return true;
 }
 
+constexpr bool combine_rank_prefix_range(
+    const std::int32_t* prefix_per_rank, std::uint64_t world_size,
+    std::uint64_t num_rows, std::uint64_t rank, std::uint64_t* begin,
+    std::uint64_t* end) noexcept {
+    if (prefix_per_rank == nullptr || begin == nullptr || end == nullptr ||
+        world_size == 0 || rank >= world_size)
+        return false;
+    std::uint64_t previous = 0;
+    for (std::uint64_t current_rank = 0;
+         current_rank < world_size; ++current_rank) {
+        const std::int32_t encoded_end = prefix_per_rank[current_rank];
+        if (encoded_end < 0 ||
+            static_cast<std::uint64_t>(encoded_end) < previous ||
+            static_cast<std::uint64_t>(encoded_end) > num_rows)
+            return false;
+        if (current_rank == rank) {
+            *begin = previous;
+            *end = static_cast<std::uint64_t>(encoded_end);
+        }
+        previous = static_cast<std::uint64_t>(encoded_end);
+    }
+    return previous == num_rows;
+}
+
+constexpr bool combine_destination_rank_for_row(
+    std::uint64_t row, const std::int32_t* prefix_per_rank,
+    std::uint64_t world_size, std::uint64_t num_rows,
+    std::uint64_t* rank) noexcept {
+    if (rank == nullptr || row >= num_rows || prefix_per_rank == nullptr ||
+        world_size == 0)
+        return false;
+    std::uint64_t previous = 0;
+    for (std::uint64_t current_rank = 0;
+         current_rank < world_size; ++current_rank) {
+        const std::int32_t encoded_end = prefix_per_rank[current_rank];
+        if (encoded_end < 0 ||
+            static_cast<std::uint64_t>(encoded_end) < previous ||
+            static_cast<std::uint64_t>(encoded_end) > num_rows)
+            return false;
+        const auto current_end = static_cast<std::uint64_t>(encoded_end);
+        if (row < current_end) {
+            *rank = current_rank;
+            return prefix_per_rank[world_size - 1] ==
+                static_cast<std::int32_t>(num_rows);
+        }
+        previous = current_end;
+    }
+    return false;
+}
+
+constexpr bool combine_record_destination_slot(
+    std::uint64_t tile_prefix, std::uint64_t local_occurrence,
+    std::uint64_t capacity, std::uint64_t* slot) noexcept {
+    if (slot == nullptr ||
+        local_occurrence >
+            std::numeric_limits<std::uint64_t>::max() - tile_prefix)
+        return false;
+    *slot = tile_prefix + local_occurrence;
+    return *slot < capacity;
+}
+
 constexpr bool combine_record_slot_index(
     std::uint64_t token, std::uint64_t lane, std::uint64_t num_tokens,
     std::uint64_t num_topk, std::uint64_t* index) noexcept {
@@ -67,6 +128,18 @@ combine_simt_receive_record_coordinates(
     *source_rank = logical_record / shard_capacity;
     *source_slot = logical_record % shard_capacity;
     return true;
+}
+
+__SIMT_DEVICE_FUNCTIONS_DECL__ constexpr bool
+combine_simt_record_destination_slot(
+    std::uint64_t tile_prefix, std::uint64_t local_occurrence,
+    std::uint64_t capacity, std::uint64_t* slot) noexcept {
+    if (slot == nullptr ||
+        local_occurrence >
+            std::numeric_limits<std::uint64_t>::max() - tile_prefix)
+        return false;
+    *slot = tile_prefix + local_occurrence;
+    return *slot < capacity;
 }
 
 __SIMT_DEVICE_FUNCTIONS_DECL__ constexpr bool

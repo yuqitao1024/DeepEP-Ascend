@@ -588,7 +588,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         kernel = source[source.index(
             "__global__ __vector__ void combine_kernel"):]
         prepare_stage = kernel.index(
-            "stage == DirectCombineStage::kEpiloguePrepare")
+            "stage == DirectCombineStage::kEpilogueValidateReduce")
         prepare_call = kernel.index(
             "asc_vf_call<"
             "direct_combine_epilogue_prepare_vector_slots_vf>",
@@ -732,7 +732,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         markers = (
             "asc_vf_call<direct_combine_producer_control_vf>",
             "asc_vf_call<direct_combine_producer_plan_vf>",
-            "asc_vf_call<direct_combine_producer_reduce_errors_vf>",
+            "asc_vf_call<direct_combine_producer_plan_prefix_vf>",
             "asc_vf_call<direct_combine_producer_record_vf>",
             "asc_vf_call<direct_combine_producer_local_copy_vf>",
             "asc_vf_call<direct_combine_producer_release_vf>",
@@ -784,10 +784,56 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         plan = source[source.index(
             "__simt_vf__ __launch_bounds__(512) inline void direct_combine_producer_plan_vf"):
             source.index(
-                "__simt_vf__ __launch_bounds__(512) inline void direct_combine_producer_reduce_errors_vf")]
-        self.assertIn("destination_rank = static_cast<int>(threadIdx.x)", plan)
-        self.assertIn("destination_rank += static_cast<int>(blockDim.x)", plan)
+                "__simt_vf__ __launch_bounds__(512) inline void direct_combine_producer_plan_prefix_vf")]
+        self.assertIn("direct_data_grid_stride(", plan)
+        self.assertIn("kCombineRecordsPerTile", plan)
+        self.assertIn("combine_producer_tile_rank_count_offset", plan)
+        self.assertIn("combine_producer_tile_error_offset", plan)
         self.assertIn("combine_direct_status_is_clean(", record)
+
+        validate = source[source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_validate_vf"):
+            source.index(
+                "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_reduce_errors_vf")]
+        self.assertIn("direct_data_grid_stride(", validate)
+        self.assertIn("kCombineRecordsPerTile", validate)
+        self.assertIn("combine_receive_tile_error_offset", validate)
+        self.assertIn("combine_receive_record_index_offset", validate)
+        self.assertIn("combine_simt_receive_record_coordinates(", validate)
+        self.assertNotIn("slots[index] =", validate)
+
+        validate_reduce = source[source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_reduce_errors_vf"):
+            source.index(
+                "DEEP_EP_ASCEND_SIMT_CALLEE std::uint32_t\n"
+                "topk_compact_owner_ordinal")]
+        self.assertIn("combine_receive_tile_error_offset", validate_reduce)
+        self.assertIn("combine_receive_record_index_offset", validate_reduce)
+        self.assertIn("CombineProtocolError::kDuplicateRecord", validate_reduce)
+        self.assertIn("slots[index] =", validate_reduce)
+
+        producer_control = kernel.index(
+            "stage == DirectCombineStage::kProducerControl")
+        producer_plan = kernel.index(
+            "stage == DirectCombineStage::kProducerPlan", producer_control)
+        producer_prefix = kernel.index(
+            "stage == DirectCombineStage::kProducerPlanPrefix", producer_plan)
+        producer_record = kernel.index(
+            "stage == DirectCombineStage::kProducerRecord", producer_prefix)
+        self.assertLess(producer_control, producer_plan)
+        self.assertLess(producer_plan, producer_prefix)
+        self.assertLess(producer_prefix, producer_record)
+
+        epilogue_acquire = kernel.index(
+            "stage == DirectCombineStage::kEpilogueAcquire")
+        epilogue_validate = kernel.index(
+            "stage == DirectCombineStage::kEpilogueValidate",
+            epilogue_acquire)
+        epilogue_reduce = kernel.index(
+            "stage == DirectCombineStage::kEpilogueValidateReduce",
+            epilogue_validate)
+        self.assertLess(epilogue_acquire, epilogue_validate)
+        self.assertLess(epilogue_validate, epilogue_reduce)
 
         producer_branch = kernel[kernel.index("if (direct_parallel)"):
                                  kernel.index("transport::service::execute")]
