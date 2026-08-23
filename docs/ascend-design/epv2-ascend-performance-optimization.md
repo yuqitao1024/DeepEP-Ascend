@@ -111,7 +111,8 @@ Dispatch validation maps each logical record to `(source_rank, source_slot)`
 in rank-major order. Data-stage tiles validate their own bounded records and
 write one private error candidate. The following control stage scans candidates
 in logical order and publishes the first error. No data block writes the shared
-status word.
+status word. Tile owners use the block-distributed stride, so the common
+512-tile receive extent activates all 72 data blocks.
 
 Expanded dispatch reuses those tiles for expert processing:
 
@@ -135,7 +136,8 @@ The producer is four stream-ordered stages:
    negative, out-of-range, or incomplete prefixes fail before data work.
 2. `ProducerPlan` divides source rows into fixed 128-row tiles. A tile validates
    row metadata, records a rank-local occurrence for every owned row, writes a
-   tile-by-rank count, and emits at most one error candidate.
+   tile-by-rank count, and emits at most one error candidate. The first tile of
+   every block is assigned before a second thread in any block receives work.
 3. `ProducerPlanPrefix` scans tile errors in row order, converts tile counts to
    exclusive rank-local prefixes, and checks receive and staging byte capacity.
 4. `ProducerRecord` computes the final record slot as
@@ -225,12 +227,24 @@ the current launch from one to 72 blocks would duplicate transport publication
 and completion stores and would allow later blocks to observe incomplete work.
 
 Control kernels use one block. Data kernels use a configurable block count,
-with 72 selected for the first maximum-performance trial. All data work uses:
+with 72 selected for the first maximum-performance trial. Record-parallel data
+work uses:
 
 ```text
 global_thread = blockIdx.x * blockDim.x + threadIdx.x
 global_stride = gridDim.x * blockDim.x
 ```
+
+Tile-owner work uses a block-distributed first index:
+
+```text
+first_tile = threadIdx.x * gridDim.x + blockIdx.x
+tile_stride = gridDim.x * blockDim.x
+```
+
+This mapping preserves one owner per tile while spreading the first 72 tiles
+over all 72 blocks. With the ordinary block-major mapping, the common 512-tile
+extent would run entirely in block 0 even though the kernel launched 72 blocks.
 
 Kernel launch order on the same stream is the global stage boundary. No
 cross-block spin barrier is introduced. This avoids deadlock assumptions about

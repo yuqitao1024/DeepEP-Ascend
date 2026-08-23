@@ -178,6 +178,16 @@ DEEP_EP_ASCEND_KERNEL_CALLEE DirectDataGridStride direct_data_grid_stride(
     };
 }
 
+DEEP_EP_ASCEND_KERNEL_CALLEE DirectDataGridStride
+direct_block_distributed_grid_stride(
+    std::uint32_t block_index, std::uint32_t thread_index,
+    std::uint32_t num_blocks, std::uint32_t num_threads) noexcept {
+    return {
+        static_cast<std::uint64_t>(thread_index) * num_blocks + block_index,
+        static_cast<std::uint64_t>(num_blocks) * num_threads,
+    };
+}
+
 DEEP_EP_ASCEND_KERNEL_CALLEE DirectSubgroupGridStride
 direct_subgroup_grid_stride(
     std::uint32_t block_index, std::uint32_t thread_index,

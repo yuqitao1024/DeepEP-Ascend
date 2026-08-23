@@ -492,6 +492,31 @@ int main() {
                     return 48;
         }
     }
+    {
+        std::uint64_t visits[512]{};
+        bool active_blocks[72]{};
+        for (std::uint32_t block = 0; block < 72; ++block) {
+            for (std::uint32_t thread = 0; thread < 512; ++thread) {
+                const auto work = direct_block_distributed_grid_stride(
+                    block, thread, 72, 512);
+                for (std::uint64_t tile = work.first;
+                     tile < 512; tile += work.stride) {
+                    ++visits[tile];
+                    active_blocks[block] = true;
+                }
+            }
+        }
+        for (std::uint64_t tile = 0; tile < 512; ++tile)
+            if (visits[tile] != 1)
+                return 75;
+        for (const bool active : active_blocks)
+            if (!active)
+                return 76;
+        const auto second_thread = direct_block_distributed_grid_stride(
+            0, 1, 72, 512);
+        if (second_thread.first != 72 || second_thread.stride != 36864)
+            return 77;
+    }
     for (const std::uint64_t item_count : {
              0ULL, 1ULL, 15ULL, 16ULL, 17ULL, 511ULL, 512ULL, 513ULL}) {
         for (const std::uint32_t blocks : {1U, 72U}) {

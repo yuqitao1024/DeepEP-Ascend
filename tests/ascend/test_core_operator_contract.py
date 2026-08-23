@@ -254,7 +254,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         end = source.index("\n}\n", begin)
         validation = source[begin:end]
         for marker in (
-                "direct_data_grid_stride(",
+                "direct_block_distributed_grid_stride(",
                 "kDispatchReceiveRecordsPerTile",
                 "dispatch_simt_receive_record_coordinates(",
                 "source_slot >= source_counts[source_rank]",
@@ -288,7 +288,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "direct_dispatch_epilogue_prefix_vf", count_begin)
         count = source[count_begin:prefix_begin]
         for marker in (
-                "direct_data_grid_stride(",
+                "direct_block_distributed_grid_stride(",
                 "kDispatchReceiveRecordsPerTile",
                 "tile_counts[tile * local_experts + local_expert]"):
             self.assertIn(marker, count)
@@ -301,6 +301,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         scatter_end = source.index("\n}\n", scatter_begin)
         scatter = source[scatter_begin:scatter_end]
         self.assertIn("if (!cached) {", scatter)
+        self.assertIn("direct_block_distributed_grid_stride(", scatter)
         self.assertIn("tile_cursors[index]++", scatter)
         self.assertIn("owner_bitmap[word] & mask", scatter)
 
@@ -785,7 +786,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "__simt_vf__ __launch_bounds__(512) inline void direct_combine_producer_plan_vf"):
             source.index(
                 "__simt_vf__ __launch_bounds__(512) inline void direct_combine_producer_plan_prefix_vf")]
-        self.assertIn("direct_data_grid_stride(", plan)
+        self.assertIn("direct_block_distributed_grid_stride(", plan)
         self.assertIn("kCombineRecordsPerTile", plan)
         self.assertIn("combine_producer_tile_rank_count_offset", plan)
         self.assertIn("combine_producer_tile_error_offset", plan)
@@ -795,7 +796,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_validate_vf"):
             source.index(
                 "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_reduce_errors_vf")]
-        self.assertIn("direct_data_grid_stride(", validate)
+        self.assertIn("direct_block_distributed_grid_stride(", validate)
         self.assertIn("kCombineRecordsPerTile", validate)
         self.assertIn("combine_receive_tile_error_offset", validate)
         self.assertIn("combine_receive_record_index_offset", validate)
