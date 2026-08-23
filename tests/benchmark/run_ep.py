@@ -15,14 +15,13 @@ import uuid
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests.benchmark.profiles import PROFILES, profile_manifest
+from tests.benchmark.profiles import PROFILES, profile_cases, profile_manifest
 from tests.benchmark.report_markdown import (
     render_backend_markdown,
     validate_complete_report,
     write_text_atomic,
 )
 from tests.utils.ep_benchmark_manifest import (
-    enumerate_ep_mode_cases,
     load_manifest,
     write_manifest,
 )
@@ -56,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--backend", choices=("cuda", "ascend"), required=True)
     parser.add_argument(
-        "--profile", choices=("smoke", "canonical"), default="smoke"
+        "--profile", choices=tuple(PROFILES), default="smoke"
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--workload-manifest", type=Path)
@@ -93,7 +92,7 @@ def build_backend_command(
     except KeyError as error:
         raise ValueError(f"unknown profile: {config.profile}") from error
 
-    case_ids = ",".join(case.case_id for case in enumerate_ep_mode_cases())
+    case_ids = ",".join(case.case_id for case in profile_cases(profile))
     profile_arguments = _profile_arguments(profile)
     common = (
         *profile_arguments,

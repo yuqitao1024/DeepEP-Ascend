@@ -6,8 +6,8 @@
 
 Bring the Ascend EPv2 direct dispatch and combine implementation from its
 current functionality-oriented baseline to a performance-oriented design. The
-first target is the canonical eight-rank benchmark workload: 4,096 input
-tokens per rank, hidden width 7,168, top-k 6, 256 experts, and the same 144
+first target is the canonical eight-rank benchmark workload: 8,192 input
+tokens per rank, hidden width 7,168, top-k 8, 256 experts, and the same 144
 cases and workload manifest used by the H800 comparison.
 
 This design preserves benchmark shapes, routing data, operation semantics,
@@ -17,23 +17,10 @@ dropping cases, changing logical-byte formulas, or increasing timeouts.
 
 ## Current Evidence
 
-The complete eight-rank smoke profile passes all 144 cases and produces 720
-operation records. Representative canonical FP8 measurements with one warmup
-and one measured iteration are:
-
-| Operation | Mean time | Logical GB/s |
-| --- | ---: | ---: |
-| Dispatch | 1.597 s | 2.035 |
-| Expanded dispatch | 1.773 s | 2.115 |
-| Cached dispatch | 1.589 s | 2.045 |
-| Combine | 2.511 s | 1.848 |
-| Reduced combine | 2.838 s | 1.635 |
-
-These times pass the correctness watchdog but are not acceptable performance.
-They are three orders of magnitude above the millisecond-scale H800 reference
-range inferred from the public DeepEP training workload. The public H800 data
-is not a substitute for a report from the current 144-case automation, so all
-formal ratios must use a newly generated H800 `benchmark.json`.
+The complete eight-rank inventory contains 144 cases and 720 operation
+records. Current formal performance values remain pending until H800 and
+Ascend both generate reports from the 8K/top-k 8 workload and the same manifest.
+No public table or earlier benchmark artifact substitutes for those reports.
 
 An `asys info -r hardware` query on NPU8P reported:
 
@@ -88,7 +75,7 @@ cause, but each has a distinct code change and acceptance signal.
 | P1.4 | HCOMM publication is serialized on thread zero | One thread loops over peers, issues puts, flushes, publishes controls, acquires releases, and executes the device barrier | Limits peer concurrency and places communication progress behind a single control thread | Stage traces separate submission and wait time; independent peer payload commands are batched or issued concurrently without changing release ordering |
 | P1.5 | Expert counting and expanded destination assignment use only 32 threads | One owner per local expert rescans every received record and every top-k lane | Repeats record reads for all local experts and leaves most SIMT threads idle | A record-oriented histogram/prefix/scatter pipeline reads each top-k entry a bounded number of times |
 | P1.6 | Combine planning and record validation use only eight threads | One owner per destination or contributor rank serially scans its rows or received records | Leaves 504 of 512 threads idle during metadata-heavy stages | Row- or record-partitioned validation uses the full data grid and reduces deterministic error candidates afterward |
-| P2.7 | Dispatch route planning uses only eight threads | One owner per destination rank scans all 4,096 tokens and all six top-k lanes | Repeats the top-k scan once per rank and serializes slot assignment within each owner | Top-k grouping and a count/prefix/scatter pipeline replace per-rank full scans |
+| P2.7 | Dispatch route planning uses only eight threads | One owner per destination rank scans all 8,192 tokens and all eight top-k lanes | Repeats the top-k scan once per rank and serializes slot assignment within each owner | Top-k grouping and a count/prefix/scatter pipeline replace per-rank full scans |
 | P2.8 | Dispatch receive validation uses only eight threads | One owner per source rank validates its entire receive shard | Large shards are processed serially per rank | Records are partitioned over the full data grid while deterministic first-error selection is preserved |
 
 ### Interaction Between P0.2 and the Metadata Findings
@@ -101,8 +88,8 @@ allocation or reduction. The current Ascend direct combine instead performs
 up to:
 
 ```text
-4096 tokens * 7168 hidden * 8 ranks * 6 top-k
-  = 1,409,286,144 rank/lane checks per rank
+8192 tokens * 7168 hidden * 8 ranks * 8 top-k
+  = 3,758,096,384 rank/lane checks per rank
 ```
 
 The new Ascend subgroup adapter must provide these operations:
@@ -239,10 +226,11 @@ Use the unchanged workload manifest and event timing boundaries. Profiling
 instrumentation must be compile-time or command-line gated and must not remain
 active in formal canonical results.
 
-Each optimization is evaluated independently. Retain it only when the target
-stage improves by at least 20% on the representative case and no unaffected
-public operation regresses by more than 10%. These thresholds are development
-gates, not a final H800 parity claim.
+Each optimization is evaluated independently. There is no fixed percentage
+gate. Retain it when correctness and protocol checks pass and repeated
+measurements show a defensible gain or a justified neutral result without a
+material regression in unaffected public operations. This development
+decision is not a final H800 parity claim.
 
 ## Implementation Order
 

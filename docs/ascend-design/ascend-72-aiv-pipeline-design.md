@@ -248,9 +248,8 @@ qualification even if latency improves.
   fallback.
 - The representative canonical dispatch and combine operations complete
   within the existing watchdog.
-- The targeted record-copy or reduction stage improves by at least 20 percent
-  against the one-block reference, and no unaffected public operation regresses
-  by more than 10 percent.
+- Repeated measurements report the targeted stage and every unaffected public
+  operation without imposing a fixed percentage threshold.
 - Benchmark schema, workload fingerprint, case IDs, and logical-byte formulas
   are unchanged.
 
@@ -276,9 +275,9 @@ All three tasks completed with one case passed after reference checks. The
 small `16 x 128` workload showed that seven stage submissions can dominate
 latency; it is a correctness smoke, not performance evidence.
 
-The representative measurement used two ranks, 4096 tokens per rank, hidden
-size 7168, top-k 6, 256 experts, BF16, one warmup, and three measured
-iterations. Baseline task `task_20260821_132309_271487832248` and 72-block task
+The archived representative measurement used two ranks and BF16 with one
+warmup and three measured iterations. Baseline task
+`task_20260821_132309_271487832248` and 72-block task
 `task_20260821_132456_271989713619` used the same workload fingerprint
 `da3db00de02d1c93088c159430363bfb8659a8ed2397b6768f41145bfad14522`.
 

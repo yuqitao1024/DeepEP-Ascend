@@ -45,6 +45,10 @@ OPERATIONS = (
     "reduced_combine",
 )
 
+REPRESENTATIVE_CASE_ID = (
+    "ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0"
+)
+
 
 def complete_report(platform, profile_name, device_name):
     profile = PROFILES[profile_name]
@@ -70,6 +74,12 @@ def complete_report(platform, profile_name, device_name):
         }
         for operation_id in OPERATIONS
     ]
+    selected_cases = enumerate_ep_mode_cases()
+    if profile_name == "representative":
+        selected_cases = tuple(
+            case for case in selected_cases
+            if case.case_id == REPRESENTATIVE_CASE_ID
+        )
     cases = [
         {
             "case_id": case.case_id,
@@ -78,15 +88,18 @@ def complete_report(platform, profile_name, device_name):
             "reason": "",
             "operations": deepcopy(operations),
         }
-        for case in enumerate_ep_mode_cases()
+        for case in selected_cases
     ]
+    device = {"name": device_name}
+    if platform == "ascend":
+        device.update(num_sms=profile.ascend_num_sms, num_qps=0)
     return {
         "schema_version": 2,
         "formula_version": 1,
         "generated_at": "2026-08-20T00:00:00+00:00",
         "git_commit": "a" * 40,
         "platform": platform,
-        "device": {"name": device_name},
+        "device": device,
         "world_size": 8,
         "workload": asdict(manifest.spec),
         "workload_fingerprint": manifest.fingerprint,
@@ -101,9 +114,9 @@ def complete_report(platform, profile_name, device_name):
             "logical_byte_aggregation": "sum",
         },
         "case_summary": {
-            "total": 144,
+            "total": len(selected_cases),
             "pending": 0,
-            "passed": 144,
+            "passed": len(selected_cases),
             "failed": 0,
         },
         "cases": cases,
@@ -118,13 +131,13 @@ def test_profiles_are_fixed_eight_rank_workloads():
         canonical.world_size, canonical.num_tokens, canonical.hidden,
         canonical.num_topk, canonical.num_experts, canonical.seed,
         canonical.warmups, canonical.iterations,
-    ) == (8, 4096, 7168, 6, 256, 0, 30, 30)
+    ) == (8, 8192, 7168, 8, 256, 0, 30, 30)
     assert (
         smoke.world_size, smoke.num_tokens, smoke.hidden,
         smoke.num_topk, smoke.num_experts, smoke.seed,
         smoke.warmups, smoke.iterations,
     ) == (8, 16, 128, 2, 8, 0, 1, 1)
-    assert profile_manifest(canonical).ranks[7].num_tokens == 4089
+    assert profile_manifest(canonical).ranks[7].num_tokens == 8185
     assert profile_manifest(smoke).ranks[7].num_tokens == 9
 
 
@@ -145,12 +158,115 @@ def test_profiles_keep_fixed_routing_and_reduction_settings():
     ) == (1.0, False, 0.0, 1)
 
 
+def test_representative_profile_selects_upstream_first_fp8_case():
+    representative = PROFILES["representative"]
+
+    assert (
+        representative.world_size,
+        representative.num_tokens,
+        representative.hidden,
+        representative.num_topk,
+        representative.num_experts,
+        representative.seed,
+        representative.warmups,
+        representative.iterations,
+    ) == (8, 8192, 7168, 8, 256, 0, 30, 30)
+    assert representative.case_ids == (REPRESENTATIVE_CASE_ID,)
+
+
 def test_complete_report_requires_144_cases_and_720_operations():
     report = complete_report("cuda", "smoke", device_name="NVIDIA H800")
     validate_complete_report(
         report, platform="cuda", profile=PROFILES["smoke"], require_h800=True
     )
     assert len(operation_records(report)) == 720
+
+
+def test_representative_report_requires_one_case_and_five_operations():
+    report = complete_report(
+        "cuda", "representative", device_name="NVIDIA H800"
+    )
+
+    validate_complete_report(
+        report,
+        platform="cuda",
+        profile=PROFILES["representative"],
+        require_h800=True,
+    )
+    assert identify_profile(report) is PROFILES["representative"]
+    assert len(operation_records(report)) == 5
+
+
+@pytest.mark.parametrize(
+    ("device", "field"),
+    (
+        ({"name": "Ascend 950"}, "device.num_sms"),
+        (
+            {"name": "Ascend 950", "num_sms": 1, "num_qps": 0},
+            "device.num_sms",
+        ),
+        (
+            {"name": "Ascend 950", "num_sms": 72, "num_qps": 1},
+            "device.num_qps",
+        ),
+    ),
+)
+def test_ascend_report_requires_profile_resource_identity(device, field):
+    report = complete_report(
+        "ascend", "representative", device_name="Ascend 950"
+    )
+    report["device"] = device
+
+    with pytest.raises(ValueError, match=field):
+        validate_complete_report(
+            report,
+            platform="ascend",
+            profile=PROFILES["representative"],
+        )
+
+
+def test_representative_markdown_labels_single_case_scope():
+    report = complete_report(
+        "ascend", "representative", device_name="Ascend 950"
+    )
+
+    markdown = render_backend_markdown(report, PROFILES["representative"])
+
+    assert "**DEEPEP V2 PRECHECK: 1 OF 144; NOT A FORMAL PERFORMANCE RESULT**" in markdown
+
+
+def test_representative_comparison_contains_five_rows_and_labels_scope():
+    cuda = complete_report(
+        "cuda", "representative", device_name="NVIDIA H800"
+    )
+    ascend = complete_report(
+        "ascend", "representative", device_name="Ascend 950"
+    )
+
+    rows = comparison_rows(cuda, ascend)
+    markdown = render_comparison_markdown(
+        cuda, ascend, PROFILES["representative"]
+    )
+
+    assert len(rows) == 5
+    assert "**DEEPEP V2 PRECHECK: 1 OF 144; NOT A FORMAL PERFORMANCE RESULT**" in markdown
+
+
+def test_canonical_backend_markdown_labels_complete_performance_matrix():
+    report = complete_report("ascend", "canonical", device_name="Ascend 950")
+
+    markdown = render_backend_markdown(report, PROFILES["canonical"])
+
+    assert "**FORMAL PERFORMANCE MATRIX: ALL 144 CASES / 720 OPERATIONS**" in markdown
+
+
+def test_canonical_comparison_labels_complete_performance_matrix():
+    cuda = complete_report("cuda", "canonical", device_name="NVIDIA H800")
+    ascend = complete_report("ascend", "canonical", device_name="Ascend 950")
+
+    markdown = render_comparison_markdown(cuda, ascend, PROFILES["canonical"])
+
+    assert "**FORMAL PERFORMANCE MATRIX: ALL 144 CASES / 720 OPERATIONS**" in markdown
 
 
 def test_complete_report_rejects_fabricated_profile():
@@ -199,7 +315,7 @@ def test_identify_profile_rejects_unknown_workload_and_timing_tuple():
     report["timing_protocol"]["iterations"] = 2
 
     with pytest.raises(
-        ValueError, match="report does not match canonical or smoke profile"
+        ValueError, match="report does not match a known benchmark profile"
     ):
         identify_profile(report)
 
@@ -209,7 +325,19 @@ def test_identify_profile_rejects_noncanonical_timer():
     report["timing_protocol"]["timer"] = "host_clock"
 
     with pytest.raises(
-        ValueError, match="report does not match canonical or smoke profile"
+        ValueError, match="report does not match a known benchmark profile"
+    ):
+        identify_profile(report)
+
+
+def test_identify_profile_rejects_wrong_ascend_resources():
+    report = complete_report(
+        "ascend", "representative", device_name="Ascend 950"
+    )
+    report["device"].update(num_sms=1, num_qps=99)
+
+    with pytest.raises(
+        ValueError, match="report does not match a known benchmark profile"
     ):
         identify_profile(report)
 
@@ -417,9 +545,9 @@ def test_backend_markdown_renders_canonical_provenance_workload_and_escaped_cell
     assert "| Device | Ascend\\|950\\\\rack\\r\\nnext |" in markdown
     assert "| World size | 8 |" in markdown
     assert "| Workload fingerprint | " + report["workload_fingerprint"] + " |" in markdown
-    assert "| Tokens | 4096 |" in markdown
+    assert "| Tokens | 8192 |" in markdown
     assert "| Hidden | 7168 |" in markdown
-    assert "| Top-k | 6 |" in markdown
+    assert "| Top-k | 8 |" in markdown
     assert "| Experts | 256 |" in markdown
 
 
@@ -465,9 +593,9 @@ def test_canonical_comparison_renders_workload_before_detail_without_warning():
     assert "NON-CANONICAL AUTOMATION VALIDATION" not in markdown
     assert markdown.index("## Provenance") < markdown.index("## Workload")
     assert markdown.index("## Workload") < markdown.index("## Detail")
-    assert "| Tokens | 4096 |" in markdown
+    assert "| Tokens | 8192 |" in markdown
     assert "| Hidden | 7168 |" in markdown
-    assert "| Top-k | 6 |" in markdown
+    assert "| Top-k | 8 |" in markdown
     assert "| Experts | 256 |" in markdown
     assert "| Seed | 0 |" in markdown
     assert "| Warmups | 30 |" in markdown
@@ -814,6 +942,19 @@ def test_run_parser_defaults_to_smoke_without_per_size_overrides(tmp_path):
     assert "--num-experts" not in help_text
 
 
+def test_run_parser_accepts_representative_profile(tmp_path):
+    args = build_parser().parse_args([
+        "--backend",
+        "cuda",
+        "--profile",
+        "representative",
+        "--output-dir",
+        str(tmp_path),
+    ])
+
+    assert args.profile == "representative"
+
+
 def test_cuda_command_expands_canonical_profile_and_all_cases(tmp_path):
     staging = tmp_path / "benchmark.staging.json"
     manifest = tmp_path / "workload.json"
@@ -828,9 +969,9 @@ def test_cuda_command_expands_canonical_profile_and_all_cases(tmp_path):
     pairs = _adjacent_pairs(command)
     assert ("--benchmark-profile", "parity") in pairs
     assert ("--num-processes", "8") in pairs
-    assert ("--num-tokens", "4096") in pairs
+    assert ("--num-tokens", "8192") in pairs
     assert ("--hidden", "7168") in pairs
-    assert ("--num-topk", "6") in pairs
+    assert ("--num-topk", "8") in pairs
     assert ("--num-experts", "256") in pairs
     assert ("--warmups", "30") in pairs
     assert ("--iterations", "30") in pairs
@@ -840,6 +981,24 @@ def test_cuda_command_expands_canonical_profile_and_all_cases(tmp_path):
     assert len(_argument_value(command, "--cases").split(",")) == 144
     assert "--num-sms" not in command
     assert "--num-qps" not in command
+
+
+def test_cuda_command_expands_representative_profile_and_first_case(tmp_path):
+    staging = tmp_path / "benchmark.staging.json"
+    manifest = tmp_path / "workload.json"
+    command = build_backend_command(
+        RunConfig("cuda", "representative", tmp_path, None), staging, manifest
+    )
+
+    pairs = _adjacent_pairs(command)
+    assert ("--num-processes", "8") in pairs
+    assert ("--num-tokens", "8192") in pairs
+    assert ("--hidden", "7168") in pairs
+    assert ("--num-topk", "8") in pairs
+    assert ("--num-experts", "256") in pairs
+    assert ("--warmups", "30") in pairs
+    assert ("--iterations", "30") in pairs
+    assert _argument_value(command, "--cases") == REPRESENTATIVE_CASE_ID
 
 
 def test_ascend_command_uses_current_python_distributed_launcher_and_staging_only(

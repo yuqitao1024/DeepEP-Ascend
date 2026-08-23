@@ -47,11 +47,12 @@ keeps the one-block general algorithm and is not evidence for this optimization.
 The profile and artifact contracts are strict:
 
 - smoke validates automation only and is not performance evidence
-- canonical is the only formal H800/Ascend comparison profile
+- representative is the DeepEP V2 README sample precheck: one case, five operations
+- canonical is the full formal H800/Ascend comparison: 144 cases, 720 operations
 - workload.json must be transferred byte-for-byte to the second host
 - benchmark.json files are comparison inputs; Markdown files are outputs only
 - Ascend launch requires all 144 inventory rows to be supported
-- benchmark reports use schema version 2 and both profiles require multiple
+- benchmark reports use schema version 2 and all profiles require multiple
   reduction enabled
 
 The current Ascend inventory satisfies the strict 144/144/0 launch gate. The
@@ -94,7 +95,51 @@ python3 tests/benchmark/compare_ep.py \
   --output smoke-comparison.md
 ```
 
-For the only formal comparison, run the canonical profile on the H800 host:
+Run the DeepEP V2 representative case on the H800 host first:
+
+```bash
+python3 tests/benchmark/run_ep.py \
+  --backend cuda \
+  --profile representative \
+  --output-dir results/h800-representative
+```
+
+Transfer the representative manifest byte-for-byte:
+
+```bash
+scp results/h800-representative/workload.json \
+  ascend-host:DeepEP-Ascend/results/h800-representative/workload.json
+```
+
+Run the matching one-case profile on Ascend:
+
+```bash
+python3 tests/benchmark/run_ep.py \
+  --backend ascend \
+  --profile representative \
+  --workload-manifest results/h800-representative/workload.json \
+  --output-dir results/ascend-representative
+```
+
+Generate the five-row precheck report before committing resources to the full
+matrix:
+
+```bash
+python3 tests/benchmark/compare_ep.py \
+  --cuda results/h800-representative/benchmark.json \
+  --ascend results/ascend-representative/benchmark.json \
+  --output representative-comparison.md
+```
+
+The representative workload is 8 ranks, 8192 maximum tokens per rank, hidden
+7168, top-k 8, and 256 experts. Its only case is
+`ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0`, the first upstream case and
+the `--test-first-only` selection. It measures FP8 dispatch and BF16 combine
+through the same five operation IDs used by the complete matrix. The generated
+Markdown states that it is a `1 OF 144` precheck and not a formal performance
+result.
+
+After that precheck passes, run canonical on the H800 host:
 
 ```bash
 python3 tests/benchmark/run_ep.py \
@@ -120,7 +165,7 @@ python3 tests/benchmark/run_ep.py \
   --output-dir results/ascend-canonical
 ```
 
-Compare only the two canonical JSON reports for the formal result:
+Compare only the two canonical JSON reports for the full formal result:
 
 ```bash
 python3 tests/benchmark/compare_ep.py \
@@ -153,10 +198,10 @@ top-level object:
 ```
 
 The field is execution identity and is intentionally outside both the workload
-fingerprint and `timing_protocol`. The fixed smoke and canonical automation
-profiles reject value `0`, missing or additional protocol fields, and all
-schema-v1 reports; there is no pre-merge migration path for older automation
-artifacts.
+fingerprint and `timing_protocol`. The fixed smoke, representative, and
+canonical automation profiles reject value `0`, missing or additional protocol
+fields, and all schema-v1 reports; there is no pre-merge migration path for
+older automation artifacts.
 
 ## Suite classification
 
@@ -302,7 +347,7 @@ command with the defaults or these explicit arguments:
 ```bash
 python -m torch.distributed.run --standalone --nproc-per-node=2 \
   tests/ascend/benchmark/bench_ep.py \
-  --num-tokens 4096 --hidden 7168 --num-topk 6 --num-experts 256 \
+  --num-tokens 8192 --hidden 7168 --num-topk 8 --num-experts 256 \
   --warmups 30 --iterations 30 \
   --output /tmp/ascend-ep2-production.json
 ```
@@ -335,7 +380,7 @@ manifest so the exact routing and weights can be used on both machines:
 ```bash
 python3 tests/elastic/test_ep.py \
   --benchmark-profile parity --num-processes 2 \
-  --num-tokens 4096 --hidden 7168 --num-topk 6 --num-experts 256 \
+  --num-tokens 8192 --hidden 7168 --num-topk 8 --num-experts 256 \
   --warmups 30 --iterations 30 \
   --dump-manifest /tmp/ep2-workload.json \
   --benchmark-json /tmp/cuda-ep2.json

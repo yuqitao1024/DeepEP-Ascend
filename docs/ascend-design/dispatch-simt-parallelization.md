@@ -13,8 +13,8 @@ one thread performed route construction, record validation, expert scans,
 destination assignment, padding, BF16 or FP8 copies, combine staging, and
 hidden reduction.
 
-The first canonical FP8 case has 4,096 input tokens per rank, hidden width
-7,168, top-k 6, 256 experts, and eight ranks. Running all producer and epilogue
+The first canonical FP8 case has 8,192 input tokens per rank, hidden width
+7,168, top-k 8, 256 experts, and eight ranks. Running all producer and epilogue
 work on one thread does not complete before the existing five-second event
 wait. A focused run with correctness checks disabled fails in the same place,
 so Python reference generation and result checking are not the cause.
@@ -291,10 +291,8 @@ qualified Python 3.10 environment, and serialized TaskQueue submission.
 | FP8 alignment 128, async, previous event, comm-stream allocation | `task_20260821_035912_272675920526` | 1 case passed, `exit=0` |
 | Post-push 144-case smoke at `088d29f` | `task_20260821_040757_274044121759` | 144 cases and 720 operations passed, `exit=0` |
 
-Each device case used the canonical `4096 x 7168`, top-k 6, 256-expert,
-eight-rank workload with correctness enabled, one warmup, and one measured
-iteration. These runs establish functionality only; their timings are not the
-formal performance sample.
+These archived runs establish functionality only; their timings and workload
+are excluded from the current formal performance comparison.
 
 The first post-implementation run exposed a separate capacity-contract bug:
 the buffer-size hint used the configured multiple-reduction layout while

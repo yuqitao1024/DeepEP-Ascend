@@ -96,9 +96,9 @@ fields preserve all upstream event/stream inputs.
 | Full `do_cpu_sync=0` flow | Supported | Unsupported | Listed, not measured on Ascend |
 | Hybrid routing | Supported | Unsupported | Outside comparable profile |
 | Cross-host scale-out | Supported | Unsupported | Outside comparable profile |
-| Automatic SM/QP tuning | Supported | Unsupported | Record CUDA auto and Ascend fixed `1/0` |
+| Automatic SM/QP tuning | Supported | Unsupported | Record CUDA auto and Ascend fixed `72/0` |
 
-Ascend uses `num_sms=1` and `num_qps=0`. The zero QP value means the CUDA QP
+Ascend uses `num_sms=72` and `num_qps=0`. The zero QP value means the CUDA QP
 argument is unused; Ascend communication still uses HCOMM/URMA resources.
 
 FP8 expanded and cached-expanded dispatch set
@@ -323,17 +323,19 @@ event/stream cases account for the other 600.
 
 ## Workload Parity
 
-### Default Configuration
+### Formal DeepEP V2 Configuration
 
-The parity default copies `tests/elastic/test_ep.py`:
+The formal parity profiles copy the DeepEP V2 README performance workload.
+They explicitly override the smaller `tests/elastic/test_ep.py` command-line
+defaults; the upstream default path itself remains unchanged:
 
 | Parameter | Value |
 | --- | --- |
 | Local processes | 8 |
-| Maximum tokens per rank | 4096 |
-| Tokens on rank `r` | `max(1, 4096 - r)` |
+| Maximum tokens per rank | 8192 |
+| Tokens on rank `r` | `max(1, 8192 - r)` |
 | Hidden width | 7168 |
-| Top-k | 6 |
+| Top-k | 8 |
 | Experts | 256 |
 | Seed | 0 |
 | Unbalanced ratio | 1.0 |
@@ -393,7 +395,7 @@ Each timed operation record contains:
 - minimum, mean, p50, p95, and maximum;
 - logical bytes and logical GB/s using decimal `1e9`;
 - rank-local send and receive byte summaries;
-- backend resource values, including CUDA SM/QP or Ascend fixed `1/0`;
+- backend resource values, including CUDA SM/QP or Ascend fixed `72/0`;
 - optional profiler kernel-stage diagnostics.
 
 Kernel-stage diagnostics are not a comparison gate. CUDA main/copy epilogues
@@ -439,36 +441,71 @@ unsupported performance if the inventory drifts from `144/144/0`.
 
 ### Profiles
 
-The automation exposes only `canonical` and `smoke`; individual workload-size
-overrides are intentionally absent from this entry point.
+The automation exposes `representative`, `canonical`, and `smoke`; individual
+workload-size overrides are intentionally absent from this entry point.
 
-| Setting | `canonical` | `smoke` |
-| --- | ---: | ---: |
-| Local ranks | 8 | 8 |
-| Maximum tokens per rank | 4096 | 16 |
-| Hidden width | 7168 | 128 |
-| Top-k | 6 | 2 |
-| Experts | 256 | 8 |
-| Seed | 0 | 0 |
-| Unbalanced ratio | 1.0 | 1.0 |
-| Precise unbalanced ratio | false | false |
-| Masked ratio | 0.0 | 0.0 |
-| Allow multiple reduction | true | true |
-| Warmups per operation | 30 | 1 |
-| Measured iterations per operation | 30 | 1 |
-| Selected cases | all 144 | all 144 |
-| Intended use | Formal H800/Ascend comparison | Automation validation only |
+| Setting | `representative` | `canonical` | `smoke` |
+| --- | ---: | ---: | ---: |
+| Local ranks | 8 | 8 | 8 |
+| Maximum tokens per rank | 8192 | 8192 | 16 |
+| Hidden width | 7168 | 7168 | 128 |
+| Top-k | 8 | 8 | 2 |
+| Experts | 256 | 256 | 8 |
+| Seed | 0 | 0 | 0 |
+| Unbalanced ratio | 1.0 | 1.0 | 1.0 |
+| Precise unbalanced ratio | false | false | false |
+| Masked ratio | 0.0 | 0.0 | 0.0 |
+| Allow multiple reduction | true | true | true |
+| Warmups per operation | 30 | 30 | 1 |
+| Measured iterations per operation | 30 | 30 | 1 |
+| Selected cases | upstream first FP8 case | all 144 | all 144 |
+| Timed operation records | 5 | 720 | 720 |
+| Intended use | Cross-platform contract precheck | Full formal 144-case performance comparison | Automation validation only |
 
-`canonical` copies the original `tests/elastic/test_ep.py` performance
-defaults. Neither backend may reduce its data size dynamically. `smoke` keeps
-the complete case and operation matrix but uses bounded data and timing counts
-to validate launching, JSON collection, comparison, and Markdown generation.
-Every smoke artifact and Markdown report is labeled non-canonical and must not
-be presented as formal performance evidence.
+`representative` selects
+`ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0`, the first case selected by
+the upstream `--test-first-only` path. It matches the README's FP8 dispatch and
+BF16 combine workload and is the cross-platform precheck. Its Markdown is
+explicitly labeled `PRECHECK: 1 OF 144; NOT A FORMAL PERFORMANCE RESULT`.
+`canonical` uses the same workload and timing protocol across all 144 modes;
+every matching case and operation is compared individually in the formal
+result, whose Markdown is labeled `ALL 144 CASES / 720 OPERATIONS`. Neither
+backend may reduce the data size dynamically. `smoke` keeps the complete case and
+operation matrix but uses bounded data and timing counts to validate
+automation. Every smoke artifact is labeled non-canonical and must not be
+presented as performance evidence.
 
 ### Run Interface
 
-The cross-platform entry point is:
+Run the representative case first on H800:
+
+```bash
+python3 tests/benchmark/run_ep.py \
+  --backend cuda \
+  --profile representative \
+  --output-dir results/h800-representative
+```
+
+Use that exact manifest on Ascend:
+
+```bash
+python3 tests/benchmark/run_ep.py \
+  --backend ascend \
+  --profile representative \
+  --workload-manifest results/h800-representative/workload.json \
+  --output-dir results/ascend-representative
+```
+
+Compare the two reports to qualify the cross-platform measurement path:
+
+```bash
+python3 tests/benchmark/compare_ep.py \
+  --cuda results/h800-representative/benchmark.json \
+  --ascend results/ascend-representative/benchmark.json \
+  --output representative-comparison.md
+```
+
+After the precheck passes, run the formal canonical H800 matrix:
 
 ```bash
 python3 tests/benchmark/run_ep.py \
@@ -488,24 +525,24 @@ python3 tests/benchmark/run_ep.py \
   --output-dir results/ascend-canonical
 ```
 
-`--backend` accepts only `cuda` or `ascend`; `--profile` accepts only
-`canonical` or `smoke`. The default profile is `smoke` so an omitted profile
-cannot accidentally start a formal, long-running benchmark. The output
-directory must not be the repository root and must contain no completed
-benchmark artifacts unless the caller explicitly selects a new directory.
+`--backend` accepts only `cuda` or `ascend`; `--profile` accepts
+`representative`, `canonical`, or `smoke`. The default profile is `smoke` so an
+omitted profile cannot accidentally start a formal, long-running benchmark.
+The output directory must not be the repository root and must contain no
+completed benchmark artifacts unless the caller explicitly selects a new
+directory.
 
 The CUDA adapter launches `tests/elastic/test_ep.py` with parity mode and
-`--num-processes 8`. It passes all 144 canonical case IDs, retains automatic
-SM/QP selection, and validates that the emitted report has platform `cuda`,
-world size eight, and an H800 device name. The existing upstream profile and
-its defaults remain unchanged.
+`--num-processes 8`. It passes the profile's exact case sequence, retains
+automatic SM/QP selection, and validates that the emitted report has platform
+`cuda`, world size eight, and an H800 device name. The existing upstream
+profile and its defaults remain unchanged.
 
 The Ascend adapter launches `tests/ascend/benchmark/bench_ep.py` through the
 current interpreter's `torch.distributed.run` module with `--standalone` and
 `--nproc-per-node=8`. Before importing runtime libraries or reserving benchmark
 output, it requires the Ascend inventory to contain 144 supported rows. It
-retains the Ascend fixed `num_sms=1`, `num_qps=0`, and single-host pure-scale-up
-behavior.
+uses `num_sms=72`, `num_qps=0`, and single-host pure-scale-up behavior.
 
 Both adapters use argument arrays rather than interpolated shell commands,
 inherit the prepared environment, and stream combined stdout/stderr to the
@@ -538,7 +575,7 @@ After the backend exits successfully, the automation rejects the run unless:
 - platform, eight-rank world size, workload, fingerprint, execution protocol,
   warmups, iterations, and aggregation rules match the selected profile and
   manifest;
-- all 144 expected case IDs appear once in canonical enumeration order;
+- the profile's exact case IDs appear once in canonical enumeration order;
 - all cases passed with no failures; and
 - every case contains the same five expected timed operation IDs with positive
   finite latency and logical-bandwidth metrics.
@@ -562,15 +599,17 @@ The command runs on a machine with only Python and the repository. It does not
 import CUDA, Torch-NPU, DeepEP runtime modules, or model services. It rejects
 reports unless both are the same profile and match on schema/formula version,
 world size, workload fingerprint, execution protocol, timing counts and
-aggregation, complete 144-case sequence, five operation IDs per case, and
+aggregation, exact profile case sequence, five operation IDs per case, and
 logical bytes for every matched operation. Profile identity is derived from
-the exact workload, execution-protocol, and timing values in each JSON report,
-not from its filename or Markdown text. The comparison rejects an output path
-that resolves to either input report, including an existing filesystem alias.
+the exact workload, execution protocol, timing values, and case sequence in
+each JSON report, not from its filename or Markdown text. The comparison
+rejects an output path that resolves to either input report, including an
+existing filesystem alias.
 
 The comparison Markdown starts with provenance and workload tables, followed
-by exactly 720 detail rows in canonical case order and fixed operation order.
-Each row represents one operation from one case:
+by 5 precheck rows or 720 canonical/smoke rows in fixed case and operation
+order. Only the 720-row canonical report is formal performance evidence. Each
+row represents one operation from one case:
 
 | Column | Definition |
 | --- | --- |
@@ -603,10 +642,13 @@ Hardware acceptance is separate and serialized per environment:
 2. An eight-rank Ascend smoke run passes the same 144 cases and writes the same
    operation-key sequence.
 3. Offline smoke comparison produces 720 rows and is labeled non-canonical.
-4. Formal H800 and Ascend canonical runs reuse one manifest and each pass all
+4. H800 and Ascend representative runs reuse one 8K/top-k 8 manifest, each
+   pass the upstream first FP8 case, and validate five operation records as a
+   non-formal precheck.
+5. Formal H800 and Ascend canonical runs reuse one manifest and each pass all
    144 cases with 720 operation records.
-5. Canonical comparison validates every identity field before atomically
-   writing the final Markdown report.
+6. Both comparisons validate every identity field before atomically writing
+   their final Markdown reports.
 
 ## Components
 
@@ -702,10 +744,10 @@ Benchmark reports use schema version 2. `execution_protocol` is exactly:
 or the same object with value `1`, populated from the backend's actual CLI
 argument. This setting is execution identity, not routing identity or timing,
 so it is deliberately absent from the workload fingerprint and
-`timing_protocol`. The fixed `canonical` and `smoke` automation profiles require
-value `1`; schema-v1 reports and direct-run reports with value `0` are rejected
-by automation identification, validation, and comparison. No schema-v1
-migration is provided before merge.
+`timing_protocol`. The fixed `representative`, `canonical`, and `smoke`
+automation profiles require value `1`; schema-v1 reports and direct-run reports
+with value `0` are rejected by automation identification, validation, and
+comparison. No schema-v1 migration is provided before merge.
 
 `git_commit` records the repository `HEAD` that generated the report. Source
 archives without Git metadata use the explicit value `unknown`.

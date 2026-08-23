@@ -9,9 +9,17 @@ from tests.ascend.benchmark.report import (
     SCHEMA_VERSION,
     validate_execution_protocol,
 )
-from tests.benchmark.profiles import BenchmarkProfile, PROFILES, profile_manifest
+from tests.benchmark.profiles import (
+    BenchmarkProfile,
+    PROFILES,
+    profile_cases,
+    profile_manifest,
+)
 from tests.utils.ep_benchmark_core import PERFORMANCE_OPERATIONS
-from tests.utils.ep_benchmark_manifest import EPModeCase, enumerate_ep_mode_cases
+from tests.utils.ep_benchmark_manifest import EPModeCase
+
+
+PROFILE_MISMATCH = "report does not match a known benchmark profile"
 
 
 def _require_equal(actual: Any, expected: Any, field: str) -> None:
@@ -56,12 +64,22 @@ def _expected_timing(platform: str, profile: BenchmarkProfile) -> dict[str, Any]
 
 def identify_profile(report: dict) -> BenchmarkProfile:
     if not isinstance(report, dict):
-        raise ValueError("report does not match canonical or smoke profile")
+        raise ValueError(PROFILE_MISMATCH)
     _require_equal(report.get("schema_version"), SCHEMA_VERSION, "schema_version")
     platform = report.get("platform")
     if platform not in ("cuda", "ascend"):
-        raise ValueError("report does not match canonical or smoke profile")
+        raise ValueError(PROFILE_MISMATCH)
     matches = []
+    report_cases = report.get("cases")
+    report_case_ids = (
+        tuple(
+            case.get("case_id") if isinstance(case, dict) else None
+            for case in report_cases
+        )
+        if isinstance(report_cases, list)
+        else None
+    )
+    device = report.get("device")
     for profile in PROFILES.values():
         manifest = profile_manifest(profile)
         if (
@@ -69,10 +87,20 @@ def identify_profile(report: dict) -> BenchmarkProfile:
             and report.get("workload") == asdict(manifest.spec)
             and report.get("workload_fingerprint") == manifest.fingerprint
             and report.get("timing_protocol") == _expected_timing(platform, profile)
+            and report_case_ids
+            == tuple(case.case_id for case in profile_cases(profile))
+            and (
+                platform != "ascend"
+                or (
+                    isinstance(device, dict)
+                    and device.get("num_sms") == profile.ascend_num_sms
+                    and device.get("num_qps") == 0
+                )
+            )
         ):
             matches.append(profile)
     if len(matches) != 1:
-        raise ValueError("report does not match canonical or smoke profile")
+        raise ValueError(PROFILE_MISMATCH)
     profile = matches[0]
     validate_execution_protocol(
         report.get("execution_protocol"),
@@ -165,11 +193,22 @@ def validate_complete_report(
         name = device.get("name")
         if not isinstance(name, str) or "h800" not in name.lower():
             raise ValueError("device.name")
+    if platform == "ascend":
+        _require_equal(
+            device.get("num_sms"), profile.ascend_num_sms, "device.num_sms"
+        )
+        _require_equal(device.get("num_qps"), 0, "device.num_qps")
 
-    expected_cases = enumerate_ep_mode_cases()
+    expected_cases = profile_cases(profile)
+    expected_case_count = len(expected_cases)
     _require_equal(
         report.get("case_summary"),
-        {"total": 144, "pending": 0, "passed": 144, "failed": 0},
+        {
+            "total": expected_case_count,
+            "pending": 0,
+            "passed": expected_case_count,
+            "failed": 0,
+        },
         "case_summary",
     )
     _require_equal(report.get("failures"), [], "failures")
@@ -195,7 +234,7 @@ def validate_complete_report(
 
 def operation_records(report: dict) -> tuple[tuple[EPModeCase, dict], ...]:
     cases = report.get("cases")
-    expected_cases = enumerate_ep_mode_cases()
+    expected_cases = profile_cases(identify_profile(report))
     if not isinstance(cases, list) or len(cases) != len(expected_cases):
         raise ValueError("cases")
     records = []
@@ -285,6 +324,16 @@ def render_backend_markdown(report: dict, profile: BenchmarkProfile) -> str:
     lines = [f"# EP Benchmark: {_backend_title(platform)} / {profile.name}"]
     if profile.name == "smoke":
         lines.extend(("", "**NON-CANONICAL AUTOMATION VALIDATION**"))
+    elif profile.name == "representative":
+        lines.extend((
+            "",
+            "**DEEPEP V2 PRECHECK: 1 OF 144; NOT A FORMAL PERFORMANCE RESULT**",
+        ))
+    elif profile.name == "canonical":
+        lines.extend((
+            "",
+            "**FORMAL PERFORMANCE MATRIX: ALL 144 CASES / 720 OPERATIONS**",
+        ))
     lines.extend(("", *_backend_metadata_lines(report, profile), "", "## Detail"))
     lines.extend((
         "| Case | Operation | Mean us | P50 us | P95 us | Logical GB/s |",
@@ -420,6 +469,16 @@ def render_comparison_markdown(
     lines = ["# EP Benchmark Comparison: H800 vs Ascend"]
     if profile.name == "smoke":
         lines.extend(("", "**NON-CANONICAL AUTOMATION VALIDATION**"))
+    elif profile.name == "representative":
+        lines.extend((
+            "",
+            "**DEEPEP V2 PRECHECK: 1 OF 144; NOT A FORMAL PERFORMANCE RESULT**",
+        ))
+    elif profile.name == "canonical":
+        lines.extend((
+            "",
+            "**FORMAL PERFORMANCE MATRIX: ALL 144 CASES / 720 OPERATIONS**",
+        ))
     lines.extend((
         "",
         "## Provenance",
