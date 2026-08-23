@@ -237,6 +237,7 @@ Y_t = shared_experts(X_t) + sum(weight[t,k] * expert[topk_idx[t,k]](X_t))</code>
   <p>CANN 9.2.0 的 AIN 提供 window、team、Put、Get、PutValue、Signal、Flush、Wait 和 barrier 等语义，表面上接近 Gin。但其 device 方法带 <code>__aicore__</code> 资格，DeepEP 当前 operator 的通信生产者是 <code>__simt_vf__</code>。更关键的是，URMA SQ/CQ doorbell 需要 <code>st_dev/ld_dev</code>，这些 builtin 不能从 SIMT VF 安全调用。用普通非缓存 global store 假装 doorbell 没有 CANN 参考实现支持，存在静默丢命令风险。<a class="source" href="#s10">[S10]</a><a class="source" href="#s11">[S11]</a></p>
 
   <h3>6.2 本仓的类 Gin 分层</h3>
+  <div class="band evidence"><strong>通信专题：</strong>HCOMM host 接口、ABI 结构体、SIMT command、AICore URMA service、release/acquire 协议和下一阶段 overlap 任务，见 <a href="ascend-hcomm-simt-communication-overlap.html">《通信不是一次拷贝：HCOMM、SIMT 与计算如何配合》</a>。</div>
   <div class="lane"><div>Operator</div><div>Ascend dispatch/combine/barrier 只依赖 backend-neutral <code>DeviceTransportFacade</code></div></div>
   <div class="lane"><div>SIMT producer</div><div>把 put、put-value、signal、flush、barrier 编码为固定大小命令，发布到 GM command buffer</div></div>
   <div class="lane"><div>AICore service</div><div>解析命令，构造 URMA WQE/SGE，敲 SQ doorbell，轮询 CQ，写结构化诊断</div></div>

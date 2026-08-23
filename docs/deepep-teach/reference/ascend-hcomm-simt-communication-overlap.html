@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="DeepEP Ascend 通信专题：HCOMM、SIMT staged transport、内存序与通信计算重叠">
+  <title>DeepEP Ascend 通信：HCOMM、SIMT 与计算重叠</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main class="page">
+  <header class="cover">
+    <p class="eyebrow">DeepEP Ascend 专题课 · 面向开发和性能调优</p>
+    <h1>通信不是一次拷贝：HCOMM、SIMT 与计算如何配合</h1>
+    <p class="lead">先跟着一个 token 完成远端写入：HCCL communicator 从哪里来，HCOMM 怎样创建 team/window/channel，SIMT command 又怎样经过 AICore service 进入 URMA 队列。后半部分讲清现有 overlap、尚未补齐的能力，以及可以直接认领的 P3 任务。</p>
+    <div class="meta">
+      <span>适用代码：DeepEP-Ascend 当前 main</span>
+      <span>建议串讲：60 分钟</span>
+      <span>阅读前提：了解 MoE dispatch/combine</span>
+    </div>
+  </header>
+
+  <nav aria-label="目录">
+    <h2>目录</h2>
+    <ol class="toc">
+      <li><a href="#mental-model">先建立通信心智模型</a></li>
+      <li><a href="#hcomm-host">HCOMM host 资源和接口</a></li>
+      <li><a href="#abi">HCOMM/URMA ABI 结构体</a></li>
+      <li><a href="#simt-api">SIMT device 通信接口</a></li>
+      <li><a href="#staged-path">staged transport 怎么执行</a></li>
+      <li><a href="#ordering">payload、control 与内存序</a></li>
+      <li><a href="#operators">dispatch/combine 中的实际用法</a></li>
+      <li><a href="#overlap">通信与计算怎么配合</a></li>
+      <li><a href="#boundaries">当前能力边界</a></li>
+      <li><a href="#roadmap">下一批高优先级任务</a></li>
+      <li><a href="#measurement">性能验证与分工规则</a></li>
+      <li><a href="#sources">源码索引和自测题</a></li>
+    </ol>
+  </nav>
+
+  <section>
+    <h2 id="mental-model">1. 先建立通信心智模型</h2>
+    <p>MoE 的 router 只决定 token 应该去哪个 expert。expert 分散在不同 rank 上时，DeepEP 还要把 token 发过去，再把 expert 输出送回原 rank。前一程是 <code>dispatch</code>，后一程是 <code>combine</code>。这两程都不是规则的矩阵 collective：每个 rank 发给谁、发多少，由这轮 top-k 路由结果决定。</p>
+
+    <div class="grid">
+      <article class="card">
+        <h3>Collective</h3>
+        <p>所有参与者调用同一个集体操作。库通常知道完整参与集合和数据形状，例如 all-to-all。控制简单，但不一定适合细粒度、稀疏且动态的 token 流量。</p>
+      </article>
+      <article class="card">
+        <h3>One-sided</h3>
+        <p>发送端直接描述“把本地这段数据写到 peer 的某个 offset”。接收端不必同时调用匹配的 recv，但双方必须先约定窗口布局、完成通知和内存序。</p>
+      </article>
+    </div>
+
+    <h3>1.1 七个最常见的名词</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>名词</th><th>在本仓里的含义</th><th>容易混淆的点</th></tr></thead>
+      <tbody>
+        <tr><td><strong>communicator</strong></td><td>PyTorch ProcessGroupHCCL 已建立的通信上下文，带 rank、world size 和 bootstrap 资源。</td><td>DeepEP 借用 handle，不拥有 ProcessGroup 的生命周期。</td></tr>
+        <tr><td><strong>team</strong></td><td>一组 rank 和 rank 映射。语义上可分 world、scale-up、scale-out。</td><td>team 内 peer 编号不一定等于 world rank，必须翻译。</td></tr>
+        <tr><td><strong>window</strong></td><td>各 rank 按相同逻辑布局注册的一段 device buffer。</td><td>“对称”指布局和 offset 可复用，不要求虚拟地址数值相同。</td></tr>
+        <tr><td><strong>channel</strong></td><td>HCOMM 为 AIV/UBC_CTP 建立的通信执行资源，内部关联 SQ/CQ、doorbell 和远端信息。</td><td>channel 不是 stream；当前生产配置固定为 1 个。</td></tr>
+        <tr><td><strong>request</strong></td><td>一批异步通信的完成句柄。</td><td><code>DeviceRequest</code> 已定义，但当前 staged 路径还没有真实状态机。</td></tr>
+        <tr><td><strong>signal</strong></td><td>接收端可轮询的控制值，用 generation 表示本轮 payload 可见。</td><td>signal 本身不能替代 payload 完成和 release/acquire。</td></tr>
+        <tr><td><strong>flush / barrier</strong></td><td>flush 完成某个通信作用域内的已提交操作；barrier 让 team 成员在同一代际会合。</td><td>flush 是操作完成边界，barrier 是参与者会合边界，不能互换。</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>1.2 为什么要用 symmetric window</h3>
+    <p>假设每个 rank 都把接收区按 <code>[source_rank][token_slot][hidden]</code> 排列。发送端拿到本地窗口基址 <code>B_local</code> 和目标字段地址 <code>P_local</code> 后，先算偏移：</p>
+    <pre><code>offset = P_local - B_local
+remote_address(peer) = peer_window_base(peer) + offset</code></pre>
+    <p>operator 只需要保存一个 offset，不必把每个 peer 的完整指针塞进路由元数据。窗口布局一旦变化，所有 rank 必须一起变化；这也是注册窗口和 topology epoch 要受生命周期约束的原因。</p>
+  </section>
+
+  <section>
+    <h2 id="hcomm-host">2. HCOMM host 资源和接口</h2>
+    <p>Host 端先从 ProcessGroupHCCL 取 communicator，再用它创建 HCOMM 资源。入口在 <a href="../../../deep_ep/utils/hccl.py"><code>deep_ep/utils/hccl.py</code></a>：代码依次尝试 group 本身和 NPU backend 的 <code>get_hccl_comm(local_rank)</code>，只接受一个非零 communicator。这样可以复用框架已经完成的 rank bootstrap。</p>
+
+    <figure class="explainer" id="fig-hcomm-lifecycle">
+      <p class="figure-title">图 1：HCOMM 资源必须按相反顺序释放</p>
+      <p class="figure-note">上半行是建立路径，下半行是销毁路径。window 和 team 销毁前，所有使用它们的 kernel、channel 和 staged storage 都必须停止。</p>
+      <div class="flow">
+        <div><strong>1. communicator</strong>校验 rank / size</div>
+        <div><strong>2. world team</strong>声明成员和同步资源</div>
+        <div><strong>3. window</strong>注册持久 device buffer</div>
+        <div><strong>4. channel</strong>AIV + UBC_CTP</div>
+        <div><strong>5. staged storage</strong>command / queue / service / diagnostic / context</div>
+      </div>
+      <div class="flow">
+        <div><strong>5. 停用 channel</strong>禁止新命令进入</div>
+        <div><strong>4. 释放 storage</strong>context 到 commands</div>
+        <div><strong>3. deregister window</strong>撤销远端寻址</div>
+        <div><strong>2. destroy team</strong>释放同步和连接资源</div>
+        <div><strong>1. ProcessGroup</strong>最后才可销毁</div>
+      </div>
+      <figcaption>源码入口：<a href="../../../csrc/backends/ascend/transport/cann_transport.cpp"><code>cann_transport.cpp</code></a>。析构函数会调用 <code>destroy()</code>，但正确性仍依赖上层不在未完成操作期间销毁 buffer。</figcaption>
+    </figure>
+
+    <h3>2.1 仓库实际调用的 HCOMM/HCCL host API</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>接口</th><th>输入与产物</th><th>本仓用途</th></tr></thead>
+      <tbody>
+        <tr><td><code>HcclGetRankId</code></td><td>communicator → rank</td><td>验证 <code>TransportConfig.rank</code> 与已有 communicator 一致。</td></tr>
+        <tr><td><code>HcclGetRankSize</code></td><td>communicator → world size</td><td>验证拓扑大小，避免用错误 group 注册窗口。</td></tr>
+        <tr><td><code>HcclTeamCreateDescInit</code></td><td>初始化 team descriptor</td><td>先取得 ABI 兼容的默认值，再填写 rank 和同步资源。</td></tr>
+        <tr><td><code>HcclWorldTeamCreate</code></td><td>communicator + descriptor → team</td><td>建立 HCOMM world team。协议为 <code>COMM_PROTOCOL_UBC_CTP</code>。</td></tr>
+        <tr><td><code>HcclTeamWindowRegister</code></td><td>team + <code>CommMem</code> → window</td><td>注册一段持久 device buffer，供 one-sided 远端寻址。</td></tr>
+        <tr><td><code>HcclTeamCreateChannelsDescInit</code></td><td>初始化 channel descriptor</td><td>取得 channel 默认配置。</td></tr>
+        <tr><td><code>HcclTeamChannelsCreate</code></td><td>team + descriptor → participant channels</td><td>创建 <code>COMM_ENGINE_AIV</code>、<code>UBC_CTP</code> channel。当前 <code>channelCnt=1</code>。</td></tr>
+        <tr><td><code>HcclBarrier</code></td><td>communicator + stream</td><td>host 生命周期或测试边界上的全员会合，不应塞进每个 token hot path。</td></tr>
+        <tr><td><code>HcclTeamWindowDeregister</code></td><td>team + window</td><td>停止远端通过该 window 访问内存。</td></tr>
+        <tr><td><code>HcclTeamDestroy</code></td><td>team</td><td>最后释放 team 资源。</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>2.2 创建时填了哪些关键字段</h3>
+    <pre><code>// team
+desc.rankIds = rank_ids;
+desc.rankNum = size;
+desc.selfRankId = rank;
+desc.protocol = COMM_PROTOCOL_UBC_CTP;
+desc.requirement.signalCount = 0;
+desc.requirement.counterCount = 0;
+desc.requirement.barrierCount = 6;
+
+// channels
+desc.engine = COMM_ENGINE_AIV;
+desc.notifyNum = 0;
+desc.protocol = COMM_PROTOCOL_UBC_CTP;
+desc.channelCnt = 1;</code></pre>
+    <p>这里看起来没有 signal，却仍能提供四个逻辑 signal：本仓把它们映射进 HCOMM 的 barrier-backed storage，另留两个位置给 scale-out 和 scale-up barrier。索引定义在 <a href="../../../csrc/backends/ascend/transport/sync_layout.hpp"><code>sync_layout.hpp</code></a>。</p>
+
+    <h3>2.3 host wrapper 各自负责什么</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>类型</th><th>职责</th><th>使用时注意</th></tr></thead>
+      <tbody>
+        <tr><td><code>CannHostApi</code></td><td>HCOMM、ACL 调用的函数表，便于 production binding 和 host probe 注入。</td><td>函数表不完整时 fail closed，不能半初始化。</td></tr>
+        <tr><td><code>HostTransport</code></td><td>注册窗口、创建 channel、查询拓扑、导出 device context、同步和销毁的抽象接口。</td><td>operator 不直接持有 HCOMM host handle。</td></tr>
+        <tr><td><code>TransportConfig</code></td><td>rank、world size、communicator、buffer 字节数、channel 数和拓扑模式。</td><td>生产路径要求 CPU buffer 为 0、communicator 非零、恰好一个 channel。</td></tr>
+        <tr><td><code>TransportCreateResult</code></td><td>返回 status 和 transport ownership。</td><td>先检查 status，再发布给 ElasticBuffer。</td></tr>
+        <tr><td><code>TransportTopology</code></td><td>描述 flat scale-up 或 2D topology，以及 epoch。</td><td>world/scale-up/scale-out peer 必须通过统一翻译函数转换。</td></tr>
+        <tr><td><code>TeamPeer</code></td><td>一个逻辑目标的 team + team-local peer。</td><td>不可把 <code>peer</code> 当 world rank 使用。</td></tr>
+        <tr><td><code>DeviceTransportContext</code></td><td>传入 device 的 POD：capability、topology、window、address/channel table、backend context。</td><td>只保存 device 可解引用的地址和稳定 ABI 字段。</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2 id="abi">3. HCOMM/URMA ABI 结构体</h2>
+    <p><a href="../../../csrc/backends/ascend/transport/cann_compat.hpp"><code>cann_compat.hpp</code></a> 不是另一套业务抽象，而是 device service 读取 HCOMM 结构时使用的 ABI 镜像。所有结构都有 <code>static_assert(sizeof(...))</code>。升级 CANN 后，如果字段布局或结构大小变化，必须先重新验证兼容性，不能只改版本常量。</p>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>结构体</th><th>大小</th><th>service 读取的内容</th></tr></thead>
+      <tbody>
+        <tr><td><code>AbiHeader</code></td><td class="metric">16 B</td><td>version、magic、struct size，用于拒绝错误 ABI。</td></tr>
+        <tr><td><code>Memory</code></td><td class="metric">24 B</td><td>内存类型、地址、长度。</td></tr>
+        <tr><td><code>RegisteredBuffer</code></td><td class="metric">64 B</td><td>已注册地址、长度和远端访问 token。</td></tr>
+        <tr><td><code>SqContext</code></td><td class="metric">128 B</td><td>SQ base/head/tail/doorbell、深度、entry 大小、path 和 remote EID。</td></tr>
+        <tr><td><code>CqContext</code></td><td class="metric">128 B</td><td>CQ base/head/tail/doorbell、深度和 entry 大小。</td></tr>
+        <tr><td><code>Channel</code></td><td class="metric">256 B</td><td>engine/protocol、buffer、SQ/CQ 数量及其地址。</td></tr>
+        <tr><td><code>Window</code></td><td class="metric">72 B</td><td>窗口内 memory 列表和 world team。</td></tr>
+        <tr><td><code>Team</code></td><td class="metric">200 B</td><td>成员、channel、world rank 映射、远端同步内存和 signal/counter/barrier 布局。</td></tr>
+        <tr><td><code>UrmaSqe</code></td><td class="metric">48 B</td><td>URMA opcode、remote EID/token/address 等发送描述。</td></tr>
+        <tr><td><code>UrmaSge</code></td><td class="metric">16 B</td><td>本地 scatter-gather 的 bytes、token id 和 address。</td></tr>
+        <tr><td><code>UrmaCqe</code></td><td class="metric">64 B</td><td>完成队列条目，供 service 判断成功、失败和 head 推进。</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="band warning"><strong>ABI 镜像的使用原则：</strong>host 仍通过公开 HCOMM API 创建资源；device service 只读取已经建立好的 descriptor，并用经过验证的 URMA 格式提交。它不是让业务代码随意改 HCOMM 私有内存。</div>
+  </section>
+
+  <section>
+    <h2 id="simt-api">4. SIMT device 通信接口</h2>
+    <p>dispatch/combine 的数据生产者运行在 <code>__simt_vf__</code>。它通过 <code>DeviceTransportFacade</code> 使用后端中立的通信语义，不直接接触 HCOMM descriptor。facade 当前总是由 <code>DeviceTransportFacade(context, 0)</code> 构造，也就是 channel 0。</p>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>接口</th><th>语义</th><th>当前 staged 实现</th><th>典型用途</th></tr></thead>
+      <tbody>
+        <tr><td><code>is_peer_directly_accessible</code></td><td>peer 是否可直接 load/store</td><td>依据 capability 和 address table 判断</td><td>选择节点内直访或 window 通信路径。</td></tr>
+        <tr><td><code>get_symmetric_offset</code></td><td>本地 pointer → window offset</td><td>检查本地 window base 后做差</td><td>构造跨 rank 稳定地址。</td></tr>
+        <tr><td><code>get_symmetric_pointer</code></td><td>offset + peer → peer pointer</td><td>仅 direct peer 可用</td><td>节点内直接访问快路径。</td></tr>
+        <tr><td><code>put</code></td><td>本地 payload 写到远端 window</td><td>thread 0 追加 <code>kPut</code> command</td><td>dispatch hidden、combine expert output。</td></tr>
+        <tr><td><code>get</code></td><td>从远端 window 拉取数据</td><td><strong>当前为空实现</strong></td><td>接口预留，不能作为已支持能力使用。</td></tr>
+        <tr><td><code>put_value</code></td><td>远端写 32/64 位控制值</td><td>追加 <code>kPutValue64</code></td><td>发布 count、generation。</td></tr>
+        <tr><td><code>remote_add_release</code></td><td>远端原子加并带 release 语义</td><td>追加 <code>kRemoteAdd64</code></td><td>多 producer 汇总完成计数。</td></tr>
+        <tr><td><code>signal</code></td><td>更新远端同步槽</td><td>追加 <code>kSignal</code></td><td>通知接收端本轮数据可检查。</td></tr>
+        <tr><td><code>read_signal</code></td><td>读取本地同步槽</td><td>读取 barrier-backed signal storage</td><td>诊断或非阻塞观察。</td></tr>
+        <tr><td><code>wait_signal</code></td><td>等待 signal 达到期望 generation</td><td>带 timeout 的 device 轮询</td><td>接收端进入 consumer 前等待所有 peer。</td></tr>
+        <tr><td><code>flush</code></td><td>完成指定 peer/scope 的已录命令</td><td>追加 <code>kFlush</code>，service drain CQ</td><td>保证 payload 已远端完成。</td></tr>
+        <tr><td><code>flush_async</code></td><td>提交后返回 request</td><td><strong>当前为空实现</strong></td><td>P3.1 要补齐的基础能力。</td></tr>
+        <tr><td><code>wait</code></td><td>等待 request 完成</td><td><strong>当前为空实现</strong></td><td>P3.1 要补齐的基础能力。</td></tr>
+        <tr><td><code>load_acquire</code></td><td>acquire 读取控制字</td><td>device acquire load</td><td>看到 generation 后再读取 payload/count。</td></tr>
+        <tr><td><code>store_release</code></td><td>release 写本地控制字</td><td>device release store</td><td>本 rank 内生产者/消费者交接。</td></tr>
+        <tr><td><code>system_fence</code></td><td>系统范围内存顺序边界</td><td>device fence</td><td>远端发布前约束本地 payload store。</td></tr>
+        <tr><td><code>consumed_generation</code></td><td>service 已消费到哪一代命令</td><td>读取 <code>TransportServiceState</code></td><td>复用 command queue 前确认代际。</td></tr>
+        <tr><td><code>device_barrier</code></td><td>team 级 device barrier</td><td>追加 <code>kBarrier</code></td><td>scale-up/scale-out 代际同步。</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>4.1 facade 的典型调用方式</h3>
+    <pre><code>DeviceTransportFacade transport(context, 0);  // 当前固定 channel 0
+TeamPeer route = ...;                         // team + team-local peer
+
+transport.system_fence();
+transport.put(
+    route.team, route.peer, remote_destination, local_source, bytes,
+    CooperationScope::kParticipant, MemorySegment::kDevice,
+    kDefaultOptions, RemoteAction::none());
+transport.flush(CooperationScope::kDevice);
+transport.put_value(
+    route.team, route.peer, remote_count_address, count,
+    sizeof(std::uint64_t), kDefaultOptions);
+transport.signal(
+    route.team, route.peer,
+    RemoteAction::signal_set(release_signal_index, generation));
+
+transport.wait_signal(
+    source_route.team, source_route.peer, release_signal_index,
+    generation, timeout_cycles);
+auto ready_generation = transport.load_acquire(local_generation_address);</code></pre>
+    <p>示例省略了地址边界、错误和零字节处理，但 facade 的参数顺序与源码一致。真实 kernel 还要为 world rank 选择 team、校验 offset、处理每个 peer 的 count，并让确定的 SIMT thread 负责 command publication。</p>
+  </section>
+
+  <section>
+    <h2 id="staged-path">5. staged transport 怎么执行</h2>
+    <p>为什么多一层 staged service？CANN 9.2.0 的 AIN device 方法和 URMA doorbell 操作属于 AICore 执行环境；当前 DeepEP producer 是 SIMT VF，不能安全地直接调用 <code>st_dev/ld_dev</code> 敲 doorbell。因此 SIMT 只录制固定 ABI 的命令，AICore service 再翻译和执行。</p>
+
+    <figure class="explainer" id="fig-staged-path">
+      <p class="figure-title">图 2：SIMT producer 到远端 window 的真实路径</p>
+      <p class="figure-note">实线是数据/命令流，虚线表示完成状态返回。producer 不直接操作 URMA doorbell。</p>
+      <div class="stack-diagram">
+        <div class="stack-layer"><strong>SIMT producer</strong><span><code>put / put_value / signal / flush</code>，由 thread 0 把参数编码成 128 B command</span></div>
+        <div class="stack-layer"><strong>GM command queue</strong><span>commands + count + generation；越界或 ABI 错误写 diagnostic</span></div>
+        <div class="stack-layer focus"><strong>AICore service</strong><span><code>reset(generation)</code> → <code>execute(context)</code>，做 route、descriptor、WQE 翻译</span></div>
+        <div class="stack-layer"><strong>HCOMM / URMA</strong><span>选择 channel/SQ/CQ，构造 SQE/SGE，<code>st_dev</code> doorbell，轮询 CQ</span></div>
+        <div class="stack-layer"><strong>remote window</strong><span>payload 和 control 落到 peer 的对称 offset；signal 唤醒 consumer</span></div>
+      </div>
+      <figcaption>完整 operator 顺序是 <code>service::reset</code> → SIMT producer → <code>service::execute</code> → SIMT consumer → epilogue。这个边界是后续做 tile pipeline 时必须改造的地方。</figcaption>
+    </figure>
+
+    <h3>5.1 staged transport 自己的 POD</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>结构体</th><th>大小</th><th>关键字段与作用</th></tr></thead>
+      <tbody>
+        <tr><td><code>TransportCommand</code></td><td class="metric">128 B</td><td><code>opcode/team/scope/segment/action</code>，peer/world peer/channel，source/destination/bytes/value，signal index、offset、timeout。</td></tr>
+        <tr><td><code>TransportCommandQueue</code></td><td class="metric">64 B</td><td>ABI、capacity、count、generation，以及 commands/service/diagnostic 的 device 地址。</td></tr>
+        <tr><td><code>TransportServiceState</code></td><td class="metric">64 B</td><td>consumed count、active、consumed generation、barrier generation 和 retry limit。</td></tr>
+        <tr><td><code>DeviceTransportDiagnostic</code></td><td class="metric">64 B</td><td>只记录首个错误：command、opcode、peer、channel、SQ/CQ head、backend status 和 generation。</td></tr>
+        <tr><td><code>StagedTransportContext</code></td><td class="metric">64 B</td><td>CANN compatibility、command queue、team、window 和 fetch result 地址。</td></tr>
+        <tr><td><code>DeviceRequest</code></td><td class="metric">32 B</td><td>四个 64 位 word 的预留状态。目前没有 pending/completed/error 生命周期。</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>5.2 AICore service 的工作顺序</h3>
+    <ol>
+      <li>校验 staged context、queue、service 和 diagnostic 的 ABI/version/size。</li>
+      <li>读取本轮 <code>generation</code> 和 command count，拒绝 overflow 或重复执行。</li>
+      <li>把 team-local peer 翻译为 world peer，检查 channel、window 和 remote buffer。</li>
+      <li>把 put/value/atomic/signal 转为 URMA SQE/SGE，写入 SQ 并敲 doorbell。</li>
+      <li>在 flush/barrier 边界 drain completion，轮询 CQ；超时或失败时只发布首个结构化错误。</li>
+      <li>全部命令消费完后更新 <code>consumed_count</code> 和 <code>consumed_generation</code>。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="ordering">6. payload、control 与内存序</h2>
+    <p>one-sided 通信最危险的 bug 不是“没发出去”，而是接收端先看到了 ready 标记，随后读到上一轮或未写完的 payload。DeepEP 用 generation 隔离轮次，并明确规定 payload 必须先于 count/generation/signal 对远端可见。</p>
+
+    <figure class="explainer" id="fig-release-protocol">
+      <p class="figure-title">图 3：一次远端 payload 发布的 happens-before 链</p>
+      <div class="mapping-diagram">
+        <div class="mapping-row"><div class="mapping-head">发送端</div><div class="semantic">顺序边界</div><div class="mapping-head">接收端</div></div>
+        <div class="mapping-row"><div>写本地 payload，执行 <code>system_fence</code></div><div class="semantic">本地 store 有序</div><div>还不能消费</div></div>
+        <div class="mapping-row"><div><code>put(payload)</code> 后 <code>flush</code></div><div class="semantic">payload 远端完成</div><div>远端 inbox 已完整</div></div>
+        <div class="mapping-row"><div><code>put_value(count)</code>、<code>put_value(generation)</code></div><div class="semantic">control 晚于 payload</div><div>元数据属于当前 generation</div></div>
+        <div class="mapping-row"><div><code>signal(generation)</code></div><div class="semantic">release → acquire</div><div><code>wait_signal</code> 后 <code>load_acquire</code></div></div>
+        <div class="mapping-row"><div>本轮发布完成</div><div class="semantic">happens-before</div><div>读取 count，再读取 payload</div></div>
+      </div>
+      <figcaption>核心规则只有一句：<strong>控制字不能跑到 payload 前面。</strong>实现依据在 <a href="../../../csrc/backends/ascend/elastic/release_protocol.hpp"><code>release_protocol.hpp</code></a>。</figcaption>
+    </figure>
+
+    <h3>6.1 generation 为什么不能省</h3>
+    <p>设 rank A 连续执行两轮，第 <code>g</code> 轮 signal 的值是 <code>g</code>。如果只有一个布尔 ready，第二轮可能读到第一轮遗留的 <code>true</code>。使用单调 generation 后，接收条件变成：</p>
+    <pre><code>consume(g) only if acquire(signal) &gt;= g
+and acquire(remote_generation) == g</code></pre>
+    <p>即使各 rank 到达时间不同，上一轮的通知也不会满足下一轮的条件。generation 还会进入 diagnostic，超时报告才能指出卡在哪一轮。</p>
+
+    <h3>6.2 当前同步槽布局</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>逻辑对象</th><th>索引</th><th>使用位置</th></tr></thead>
+      <tbody>
+        <tr><td>dispatch release signal</td><td class="metric">0</td><td>dispatch payload/count 发布完毕。</td></tr>
+        <tr><td>combine release signal</td><td class="metric">1</td><td>combine contribution 发布完毕。</td></tr>
+        <tr><td>保留 signal</td><td class="metric">2, 3</td><td>后续协议扩展，不能与 barrier 索引重叠。</td></tr>
+        <tr><td>scale-out barrier</td><td class="metric">0</td><td>跨节点逻辑 team 会合。</td></tr>
+        <tr><td>scale-up barrier</td><td class="metric">1</td><td>节点内 team 会合。</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2 id="operators">7. dispatch/combine 中的实际用法</h2>
+    <h3>7.1 Dispatch：把 router 输出变成 expert 输入</h3>
+    <ol>
+      <li>根据 top-k 和 rank/expert layout 算每个 token 的目标 peer、目标 expert 和 slot。</li>
+      <li>producer 把 hidden、FP8 scale、top-k metadata 等写入对应 peer 的 dispatch inbox。</li>
+      <li>对 payload 做 flush，再发布 count/generation/signal。</li>
+      <li>接收端等所有所需 source 的 signal，consumer 校验 record 并排成 local expert 输入。</li>
+      <li>epilogue 生成 tensor 和 handle；上层 grouped GEMM 使用这个布局做 expert 计算。</li>
+    </ol>
+
+    <h3>7.2 Combine：把 expert 输出送回原 token</h3>
+    <ol>
+      <li>expert GEMM 完成后，handle 提供 origin rank、origin token 和 contributor 位置。</li>
+      <li>producer 把 BF16 expert output 写回 origin rank 的 combine inbox。</li>
+      <li>payload flush 后发布 contributor count/generation/signal。</li>
+      <li>origin rank 等待所需 contributor，按 token 和 top-k 权重做 reduction，必要时加 bias。</li>
+      <li>输出恢复为进入 MoE 层前的 token 顺序，交给后续网络层。</li>
+    </ol>
+
+    <div class="band warning"><strong>为什么 combine 更难藏：</strong>combine 除了通信，还要等待 expert GEMM 的真实依赖，并执行回写后的多 contributor reduction。当前代表 case 的 combine 为 141.718 ms、reduced combine 为 169.704 ms，明显长于 dispatch 的 36.259 ms。只让网络异步，并不会自动消掉接收端归约和 epilogue。</div>
+  </section>
+
+  <section>
+    <h2 id="overlap">8. 通信与计算怎么配合</h2>
+    <p>“overlap”至少有三层，讨论时必须说清楚是哪一层。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>层次</th><th>做法</th><th>本仓状态</th></tr></thead>
+      <tbody>
+        <tr><td>同步执行</td><td>compute stream 等整个 dispatch/combine 返回后再启动下一段计算。</td><td>功能基线，也是当前代表性能 case 的口径。</td></tr>
+        <tr><td>算子级 stream overlap</td><td>EP kernel 在 communication stream，上层独立计算在 compute stream；event 表达输入依赖和完成。</td><td><strong>已实现并完成双 rank 实机验收。</strong></td></tr>
+        <tr><td>算子内部流水</td><td>把 payload 切成 chunk，chunk 0 通信时生产 chunk 1；用 request/channel/CQ 独立推进。</td><td><strong>尚未实现。</strong>当前 staged service 仍按一个命令批次串行执行。</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>8.1 已经交付的算子级异步</h3>
+    <p>Ascend ElasticBuffer 支持 <code>previous_event</code>、<code>async_with_compute_stream</code> 和 <code>allocate_on_comm_stream</code>。EP 工作进入独立 communication stream，返回的 event 持有 tensor、generation、diagnostic 和完成状态。上层可以在默认 compute stream 上安排不依赖 EP 输出的工作，再通过 event 建立消费边界。</p>
+    <pre><code>previous = record_event(compute_stream)
+outputs, event = buffer.dispatch(
+    ...,
+    previous_event=previous,
+    async_with_compute_stream=True,
+    allocate_on_comm_stream=True,
+)
+
+# compute stream 上运行与 dispatch 输出无关的计算
+run_shared_expert_or_independent_compute()
+event.current_stream_wait()  # 真正消费 outputs 前建立依赖</code></pre>
+    <p>Phase 3E 最终任务 <code>task_20260820_115539_278562813437</code> 在两张卡上通过 21/21 用例。三次 warmup、七次测量的 median wall-time 收益分别为 8.6122% 和 8.1679%；profiler 看到不同物理 stream 上的 Conv3D 与 dispatch kernel 存在正重叠区间。这里证明的是“两个 stream 确实同时执行”，不是传输内部已有多 flight。</p>
+
+    <figure class="explainer" id="fig-overlap-timeline">
+      <p class="figure-title">图 4：当前批次执行与目标 chunk pipeline</p>
+      <p class="figure-note">每个方块代表一段时间。目标不是删除依赖，而是把可独立的 producer、network 和 consumer 放到相邻 chunk 上。</p>
+      <div class="lane"><div>当前 operator 内</div><div><span class="tag">全部 producer</span> → <span class="tag">一次 service execute / drain</span> → <span class="tag">全部 consumer</span> → <span class="tag">epilogue</span></div></div>
+      <div class="lane"><div>现有双 stream</div><div><span class="tag p1">EP communication stream</span> 与 <span class="tag p2">独立 compute stream</span> 可并行；event 只在真实依赖处等待</div></div>
+      <div class="lane"><div>目标 batch 内</div><div><span class="tag">producer C1</span> ∥ <span class="tag p1">network C0</span>；随后 <span class="tag">producer C2</span> ∥ <span class="tag p1">network C1</span> ∥ <span class="tag p2">consumer C0</span></div></div>
+      <div class="lane"><div>需要的地基</div><div>真实 request 状态机、双 command/workspace slot、chunk generation、多个可独立推进的 channel 或 queue</div></div>
+      <figcaption>先做 stage timing，再决定 chunk 大小和并行资源。combine 的 reduction 若占主导，单纯增加 channel 可能只会增加争用。</figcaption>
+    </figure>
+
+    <h3>8.2 事件解决的是依赖，不是传输吞吐</h3>
+    <p>event 能避免 host 同步，也能让不相关计算与 EP 同时在设备上运行。但当前一个 buffer 同时只允许一个 active operation；同一操作内部仍是 <code>reset → producer → execute → consumer</code>。因此“async API 返回得快”和“网络与本算子的 producer/consumer 已流水化”是两件事。</p>
+  </section>
+
+  <section>
+    <h2 id="boundaries">9. 当前能力边界</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>边界</th><th>源码事实</th><th>工程影响</th></tr></thead>
+      <tbody>
+        <tr><td>异步 request</td><td><code>flush_async()</code>、<code>wait()</code> 是空实现，<code>kAsyncCompletion</code> 未启用。</td><td>不能在 operator 内提交多个独立 flight 后择机等待。</td></tr>
+        <tr><td>远端 get</td><td>staged <code>get()</code> 是空实现。</td><td>当前生产协议应坚持 push，不得静默调用 get。</td></tr>
+        <tr><td>channel 数</td><td><code>requested_channels == 1</code>，facade 使用 channel 0。</td><td>多个 chunk 无法自然映射到独立队列。</td></tr>
+        <tr><td>批次复用</td><td>command queue 依赖单 generation 和 <code>consumed_generation</code>。</td><td>下一轮覆盖前必须等本轮 service 消费，无法形成 ring。</td></tr>
+        <tr><td>buffer 并发</td><td>一个 buffer 只允许一个 active operation。</td><td>same-buffer multiflight 尚不支持。</td></tr>
+        <tr><td>epilogue 前依赖</td><td><code>previous_event_before_epilogue</code> 在 Ascend 路径被拒绝。</td><td>不能在 producer/service 和 epilogue 之间插入外部 event。</td></tr>
+        <tr><td>多机物理路径</td><td>有 2D topology 和 staged 协议，但 physical scale-out capability 未作为生产能力开放。</td><td>单机逻辑模拟不能替代 RoCE/NIC/故障/teardown 验收。</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>9.1 当前性能数据回答不了 overlap 收益</h3>
+    <p>现有 EP8 代表 case 是 <code>ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0</code>。名字里的 <code>async0-alloc0</code> 表示它走同步口径，因此下表可用于判断五个操作的相对瓶颈，不能拿来宣称 stream overlap 的收益。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Operation</th><th>Device mean</th><th>Logical bandwidth</th><th>下一步关注</th></tr></thead>
+      <tbody>
+        <tr><td><code>dispatch</code></td><td class="metric">36.259 ms</td><td class="metric">214.736 GB/s</td><td>拆 producer/service/wait，判断通信是否还能藏。</td></tr>
+        <tr><td><code>expanded_dispatch</code></td><td class="metric">38.641 ms</td><td class="metric">239.422 GB/s</td><td>确认 padding/copy 与 network 的资源关系。</td></tr>
+        <tr><td><code>cached_dispatch</code></td><td class="metric">87.375 ms</td><td class="metric">89.112 GB/s</td><td>handle/cached metadata 和通信分别计时。</td></tr>
+        <tr><td><code>combine</code></td><td class="metric">141.718 ms</td><td class="metric">76.922 GB/s</td><td>优先拆 remote wait、reduction、copy epilogue。</td></tr>
+        <tr><td><code>reduced_combine</code></td><td class="metric">169.704 ms</td><td class="metric">64.237 GB/s</td><td>先证实 reduction 占比，再决定网络并发度。</td></tr>
+      </tbody>
+    </table></div>
+    <p>这是一组代表 case，不是 144-case 的完整性能验收。后续改通信状态机时，功能回归仍要覆盖完整 case 矩阵。</p>
+  </section>
+
+  <section>
+    <h2 id="roadmap">10. 下一批高优先级任务</h2>
+    <div class="band evidence"><strong>结论：</strong>下一阶段确实应该转向通信与计算 overlap，但不是直接“多开 channel”。算子级 overlap 已有；现在要从 P3.0 的阶段测量开始，再补 request 生命周期，最后做 chunk pipeline。combine 是首要观测对象，因为它在当前代表 case 中耗时最高。</div>
+
+    <article class="task">
+      <h3><span class="tag p0">P3.0</span>阶段 profiler 与 overlap accounting</h3>
+      <dl>
+        <dt>目标</dt><dd>回答 producer、command publication、AICore service submit、CQ wait、consumer reduction 和 epilogue 各占多少时间。</dd>
+        <dt>具体操作</dt><dd>在不改变默认热路径的前提下，为 dispatch/combine 添加 generation-qualified device timing；记录 command count/bytes、SQ/CQ 深度、高水位、wait cycles 和 AIV/AIC 资源占用。报告同时给串行总和、实际 wall time和可重叠上界。</dd>
+        <dt>交付边界</dt><dd>独立 profiler 结构、host 导出和 benchmark JSON 字段；不要在本任务改 channel 数或协议。</dd>
+        <dt>验收</dt><dd>关闭 profiler 时性能变化在噪声内；开启后五个操作的 stage sum 可解释 device time，超时报告能定位 peer/channel/generation/stage。</dd>
+        <dt>预期收益</dt><dd>不承诺直接提速。它决定 P3.1/P3.2 是否值得做，以及 combine 应先优化通信还是 reduction。</dd>
+      </dl>
+    </article>
+
+    <article class="task">
+      <h3><span class="tag p0">P3.1</span>真实 <code>DeviceRequest</code>、<code>flush_async</code> 和 <code>wait</code></h3>
+      <dl>
+        <dt>目标</dt><dd>让一个通信批次能处于 pending/completed/error 状态，而不是每次 flush 都同步 drain。</dd>
+        <dt>具体操作</dt><dd>定义 request ABI：slot、generation、提交 command 范围、目标 CQ tail、状态和错误；<code>flush_async</code> 发布批次并返回 request，<code>wait</code> 只等待该 request。补 stale/double-wait/reuse/timeout 规则，并启用 <code>kAsyncCompletion</code>。</dd>
+        <dt>交付边界</dt><dd>先支持单 channel、最多一个 pending request，把状态机做对；不要同时引入多 channel。</dd>
+        <dt>验收</dt><dd>host probe、device probe、错误注入和 production lifecycle 全通过；request 未完成时不能覆盖 command；错误稳定归因到 request generation。</dd>
+        <dt>预期收益</dt><dd>单独可能没有收益，甚至有少量管理开销。它是 P3.2 的必要依赖。</dd>
+      </dl>
+    </article>
+
+    <article class="task">
+      <h3><span class="tag p0">P3.2</span>chunked / double-buffer 算子内部流水</h3>
+      <dl>
+        <dt>目标</dt><dd>让 chunk <code>i+1</code> 的 producer、chunk <code>i</code> 的网络传输和 chunk <code>i-1</code> 的 consumer 同时推进。</dd>
+        <dt>具体操作</dt><dd>按 bytes 或 token slot 切 chunk；建立两个 command slot、两个 workspace/inbox staging slot 和独立 chunk generation；先在 dispatch 做双缓冲，再移植到 combine。尾 chunk 和零 token peer 要走同一状态机。</dd>
+        <dt>交付边界</dt><dd>第一版保持一个 operator active、一个 channel；通过 request 轮换 slot。不要提前开放 same-buffer multiflight。</dd>
+        <dt>验收</dt><dd>profiler 必须显示不同 chunk 的 producer/network/consumer 正重叠；所有 shape 与同步基线逐元素一致；收益按 144 cases 分布报告，不能只报最佳 case。</dd>
+        <dt>预期收益</dt><dd>取决于 P3.0 测得的可重叠比例。理论上限由 <code>Tserial = Tp + Tn + Tc</code> 与稳态 <code>Tpipe ≈ max(Tp,Tn,Tc)</code> 的差决定，还要扣除填充、排空和争用。</dd>
+      </dl>
+    </article>
+
+    <article class="task">
+      <h3><span class="tag p1">P3.3</span>多 channel command/service 执行</h3>
+      <dl>
+        <dt>目标</dt><dd>当单 channel 的 SQ/CQ 或 service drain 已被 P3.0 证明为瓶颈时，允许 peer/chunk 分散到多 channel。</dd>
+        <dt>具体操作</dt><dd>放开 <code>requested_channels</code> 校验；host 创建并发布 channel table；制定稳定映射，例如 <code>channel = hash(peer, chunk) % C</code>；每个 channel 维护独立 queue head、CQ target、diagnostic 和 backpressure。</dd>
+        <dt>交付边界</dt><dd>先做 1/2/4 channel sweep。不要把 channel 数与 AIV block 数绑定，也不要默认越多越快。</dd>
+        <dt>验收</dt><dd>channel 间无乱序破坏 release protocol；队列满时 fail closed 或 backpressure；同一 workload 下给出吞吐、尾延迟、SQ/CQ 高水位和资源占用。</dd>
+        <dt>预期收益</dt><dd>只有单 channel 饱和时才有直接收益。若瓶颈在 combine reduction，多 channel 可能无收益。</dd>
+      </dl>
+    </article>
+
+    <article class="task">
+      <h3><span class="tag p1">P3.4</span>资源分区与端到端 expert compute overlap</h3>
+      <dl>
+        <dt>目标</dt><dd>让 EP 的 AIV/service 资源与 expert GEMM、shared expert 或其他 AIC 计算互不挤占关键资源。</dd>
+        <dt>具体操作</dt><dd>分别 sweep EP blocks、service blocks、channel 数和 chunk 大小；记录 AIV/AIC、HBM、NoC、URMA 利用率。针对 dispatch→expert GEMM→combine 做端到端 timeline，不只测单个 operator。</dd>
+        <dt>交付边界</dt><dd>先固定可复现的 expert workload，再调资源；不要用纯 Conv3D capability case 替代真实 MoE 结论。</dd>
+        <dt>验收</dt><dd>端到端 MoE layer wall time 下降，p95 不回退；profiler 证明重叠，且 EP/compute 各自单独耗时的拉长在可解释范围内。</dd>
+        <dt>预期收益</dt><dd>现有双 stream 验收中位数约 8%，但真实 expert workload 的收益必须重新测，不能直接套用该数字。</dd>
+      </dl>
+    </article>
+
+    <article class="task">
+      <h3><span class="tag p2">P3.5</span>same-buffer multiflight 与 epilogue 前依赖</h3>
+      <dl>
+        <dt>目标</dt><dd>允许多 operation generation 同时在飞，并支持 <code>previous_event_before_epilogue</code> 这类更细依赖。</dd>
+        <dt>具体操作</dt><dd>为 queue、workspace、inbox control、diagnostic 和 retained tensor 建立 ring slot ownership；event 绑定 slot + generation；销毁时逐 slot 有界等待。</dd>
+        <dt>交付边界</dt><dd>必须在 P3.1/P3.2 的 request 和双 slot 已稳定后开始。</dd>
+        <dt>验收</dt><dd>覆盖乱序完成、异常、超时、destroy-pending、generation wrap 防护和 graph capture fail-closed；任何 slot 都不能被未完成 generation 覆盖。</dd>
+        <dt>预期收益</dt><dd>主要改善调度自由度和连续层吞吐，单次 operator latency 未必下降。</dd>
+      </dl>
+    </article>
+  </section>
+
+  <section>
+    <h2 id="measurement">11. 性能验证与分工规则</h2>
+    <h3>11.1 建议分工顺序</h3>
+    <div class="roadmap">
+      <section class="roadmap-wave"><h4>Wave 0</h4><div class="roadmap-item"><strong>P3.0</strong> stage profiler</div><div class="roadmap-item">先跑五操作代表 case</div><div class="roadmap-item">输出瓶颈证据</div></section>
+      <section class="roadmap-wave"><h4>Wave 1</h4><div class="roadmap-item"><strong>P3.1</strong> request 状态机</div><div class="roadmap-item">host/device probes</div><div class="roadmap-item">不追性能门槛</div></section>
+      <section class="roadmap-wave"><h4>Wave 2</h4><div class="roadmap-item"><strong>P3.2</strong> 双缓冲</div><div class="roadmap-item"><strong>P3.3</strong> 有证据才并行启动</div><div class="roadmap-item">dispatch 后 combine</div></section>
+      <section class="roadmap-wave"><h4>Wave 3</h4><div class="roadmap-item"><strong>P3.4</strong> 端到端资源调优</div><div class="roadmap-item">144-case 回归</div><div class="roadmap-item"><strong>P3.5</strong> 最后开放 multiflight</div></section>
+    </div>
+
+    <h3>11.2 每个优化任务都要留下什么证据</h3>
+    <ul>
+      <li>同一 commit、同一 extension hash、同一 workload fingerprint、同一设备拓扑。</li>
+      <li>功能结果：输出一致性、边界 shape、零 token peer、timeout/error/teardown。</li>
+      <li>性能结果：device mean/p50/p95、wall time、logical bytes、stage timing 和 profiler timeline。</li>
+      <li>资源结果：block 数、channel 数、command count、SQ/CQ 高水位、AIV/AIC 与 HBM/NoC 指标。</li>
+      <li>先报告一组五操作代表 case，再跑 144 cases。代表 case 用来快速定位，不替代完整验收。</li>
+    </ul>
+
+    <h3>11.3 如何判断“真的 overlap 了”</h3>
+    <p>至少同时满足三条：profiler 的两段工作在物理时间轴上有正交集；overlapped wall time 小于同轮 serialized wall time；结果和同步基线一致。只看到两个 stream id、API 提前返回或单项 kernel 变短，都不够。</p>
+    <pre><code>overlap_interval = max(0,
+    min(comm_end, compute_end) - max(comm_start, compute_start))
+
+wall_gain = (T_serialized - T_overlapped) / T_serialized</code></pre>
+    <p>资源争用会让并行后的单项耗时变长，因此还要记录：</p>
+    <pre><code>T_overlapped can be greater than max(T_comm_only, T_compute_only)
+yet still be less than T_serialized.</code></pre>
+  </section>
+
+  <section>
+    <h2 id="sources">12. 源码索引和自测题</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>主题</th><th>源码或证据</th></tr></thead>
+      <tbody>
+        <tr><td>HCCL communicator 提取</td><td><a href="../../../deep_ep/utils/hccl.py"><code>deep_ep/utils/hccl.py</code></a></td></tr>
+        <tr><td>HCOMM host 创建/销毁</td><td><a href="../../../csrc/backends/ascend/transport/cann_transport.cpp"><code>cann_transport.cpp</code></a>、<a href="../../../csrc/backends/ascend/transport/cann_transport.hpp"><code>cann_transport.hpp</code></a></td></tr>
+        <tr><td>host abstraction 与通用类型</td><td><a href="../../../csrc/backends/ascend/transport/host_transport.hpp"><code>host_transport.hpp</code></a>、<a href="../../../csrc/backends/ascend/transport/types.hpp"><code>types.hpp</code></a></td></tr>
+        <tr><td>HCOMM/URMA ABI 镜像</td><td><a href="../../../csrc/backends/ascend/transport/cann_compat.hpp"><code>cann_compat.hpp</code></a></td></tr>
+        <tr><td>SIMT API 与 facade</td><td><a href="../../../csrc/backends/ascend/transport/device_transport.hpp"><code>device_transport.hpp</code></a>、<a href="../../../csrc/backends/ascend/transport/device_transport_facade.hpp"><code>device_transport_facade.hpp</code></a></td></tr>
+        <tr><td>SIMT command 实现</td><td><a href="../../../csrc/backends/ascend/transport/device_transport_commands.hpp"><code>device_transport_commands.hpp</code></a></td></tr>
+        <tr><td>staged command POD</td><td><a href="../../../csrc/backends/ascend/transport/transport_commands.hpp"><code>transport_commands.hpp</code></a></td></tr>
+        <tr><td>AICore URMA service</td><td><a href="../../../csrc/backends/ascend/transport/aicore_transport_service.hpp"><code>aicore_transport_service.hpp</code></a></td></tr>
+        <tr><td>release protocol 和同步槽</td><td><a href="../../../csrc/backends/ascend/elastic/release_protocol.hpp"><code>release_protocol.hpp</code></a>、<a href="../../../csrc/backends/ascend/transport/sync_layout.hpp"><code>sync_layout.hpp</code></a></td></tr>
+        <tr><td>stream/event overlap 验收</td><td><a href="../../ascend-design/epv2-ascend-async-events-streams.md"><code>epv2-ascend-async-events-streams.md</code></a></td></tr>
+        <tr><td>EP8 代表性能</td><td><a href="../../ascend-design/epv2-ascend-benchmark-parity.md"><code>epv2-ascend-benchmark-parity.md</code></a></td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>讲完后应该能回答</h3>
+    <details><summary>为什么 SIMT producer 不直接操作 URMA SQ doorbell？</summary><p>CANN 9.2.0 中相关 AIN/doorbell 能力属于 AICore 执行环境。当前 producer 是 <code>__simt_vf__</code>，所以先录 GM command，再由 AICore service 用支持的 builtin 提交。</p></details>
+    <details><summary>为什么 <code>signal(generation)</code> 前必须先 flush payload？</summary><p>否则接收端可能先观察到当前 generation，再读到未完成或上一轮的 payload。flush 和 release/acquire 共同建立 payload-before-control。</p></details>
+    <details><summary>仓库是不是还没有通信计算 overlap？</summary><p>不是。双 stream + event 的算子级 overlap 已实现并通过双 rank 实机验收。缺少的是 request 驱动的算子内部 chunk pipeline，以及多 channel/multiflight 等更细能力。</p></details>
+    <details><summary>为什么 P3.0 排在多 channel 前面？</summary><p>当前 combine 还包含 reduction 和 epilogue。没有 stage timing 就不知道瓶颈在 SQ/CQ、网络等待还是数据归约；盲目增加 channel 可能只会放大资源争用。</p></details>
+    <details><summary>为什么 P3.1 单独完成时可能没有性能收益？</summary><p>request 是表达 pending/completed/error 的控制能力。只有 P3.2 真正把相邻 chunk 的 producer、network 和 consumer 排成流水后，它才有机会转化为 wall-time 收益。</p></details>
+  </section>
+
+  <footer>
+    <p>本专题是 <a href="deepep-v2-ascend-950-guide.html">DeepEP v2：从 MoE 专家并行到 Ascend 950 性能优化</a> 的通信补充材料。结论以仓库源码和已归档实机证据为准；CANN/HCOMM 升级后应重新检查 ABI、capability 和性能数据。</p>
+  </footer>
+</main>
+</body>
+</html>
