@@ -237,6 +237,10 @@ int main() {
         dispatch_receive_record_coordinates(
             0, 2, 16, &source_rank, nullptr))
         return 72;
+    if (!direct_dispatch_cached_bitmap_owner(0) ||
+        direct_dispatch_cached_bitmap_owner(1) ||
+        direct_dispatch_cached_bitmap_owner(71))
+        return 78;
     std::uint64_t expert_tile_index = 0;
     std::uint64_t destination = 0;
     if (!dispatch_expert_tile_index(
@@ -354,29 +358,40 @@ int main() {
             return 45;
     }
     const auto cpu_sync_pipeline = direct_dispatch_pipeline(true);
-    if (cpu_sync_pipeline.count != 6 ||
-        cpu_sync_pipeline.stages[5] !=
-            DirectDispatchStage::kEpilogueAcquire)
+    if (cpu_sync_pipeline.count != 10 ||
+        cpu_sync_pipeline.stages[9] !=
+            DirectDispatchStage::kEpilogueExpertPrefix)
         return 46;
     const auto epilogue_pipeline = direct_dispatch_epilogue_pipeline();
-    if (epilogue_pipeline.count != 8 ||
+    if (epilogue_pipeline.count != 3 ||
         epilogue_pipeline.stages[0] !=
-            DirectDispatchStage::kEpilogueAcquire ||
-        epilogue_pipeline.stages[1] !=
-            DirectDispatchStage::kEpilogueValidate ||
-        epilogue_pipeline.stages[2] !=
-            DirectDispatchStage::kEpilogueValidateReduce ||
-        epilogue_pipeline.stages[3] !=
-            DirectDispatchStage::kEpilogueExpertCount ||
-        epilogue_pipeline.stages[4] !=
-            DirectDispatchStage::kEpilogueExpertPrefix ||
-        epilogue_pipeline.stages[5] !=
             DirectDispatchStage::kEpilogueMetadata ||
-        epilogue_pipeline.stages[6] !=
+        epilogue_pipeline.stages[1] !=
             DirectDispatchStage::kEpilogueCopy ||
-        epilogue_pipeline.stages[7] !=
+        epilogue_pipeline.stages[2] !=
             DirectDispatchStage::kEpilogueComplete)
         return 47;
+#if !defined(DEEP_EP_ASCEND_SIMT_DEVICE)
+    if (direct_dispatch_epilogue_stage(
+            DirectDispatchStage::kProducerRelease) ||
+        !direct_dispatch_epilogue_stage(
+            DirectDispatchStage::kEpilogueAcquire) ||
+        !direct_dispatch_epilogue_stage(
+            DirectDispatchStage::kEpilogueValidate) ||
+        !direct_dispatch_epilogue_stage(
+            DirectDispatchStage::kEpilogueValidateReduce) ||
+        !direct_dispatch_epilogue_stage(
+            DirectDispatchStage::kEpilogueExpertCount) ||
+        !direct_dispatch_epilogue_stage(
+            DirectDispatchStage::kEpilogueExpertPrefix) ||
+        !direct_dispatch_epilogue_stage(
+            DirectDispatchStage::kEpilogueMetadata) ||
+        !direct_dispatch_epilogue_stage(
+            DirectDispatchStage::kEpilogueCopy) ||
+        !direct_dispatch_epilogue_stage(
+            DirectDispatchStage::kEpilogueComplete))
+        return 48;
+#endif
     const auto combine_pipeline = direct_combine_pipeline();
     const DirectCombineStage expected_combine_stages[] = {
         DirectCombineStage::kProducerControl,

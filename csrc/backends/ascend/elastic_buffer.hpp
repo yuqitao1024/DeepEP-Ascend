@@ -2098,7 +2098,11 @@ public:
                                 aligned_actual <= static_cast<std::uint64_t>(
                                     std::numeric_limits<int>::max() -
                                     expanded_tail),
-                            "DeepEP Ascend backend: dispatch returned invalid expert counts");
+                            "DeepEP Ascend backend: dispatch returned invalid expert counts: expert=",
+                            expert, ", actual=", actual, ", local=", local,
+                            ", prefix=", host_kernel_expert_prefix[expert],
+                            ", expected_prefix=", expanded_tail,
+                            ", alignment=", alignment);
                 if (local) {
                     const int local_expert = expert - first_local_expert;
                     host_unaligned[local_expert] = actual;
@@ -2113,7 +2117,9 @@ public:
             }
             TORCH_CHECK(host_kernel_expert_prefix[num_experts] ==
                             expanded_tail,
-                        "DeepEP Ascend backend: dispatch returned invalid expert counts");
+                        "DeepEP Ascend backend: dispatch returned invalid expert counts: tail=",
+                        host_kernel_expert_prefix[num_experts],
+                        ", expected_tail=", expanded_tail);
             num_expanded_tokens = expanded_tail;
             status = resources_->copy_from_host(
                 expert_prefix.data_ptr(), host_expert_prefix.data(),

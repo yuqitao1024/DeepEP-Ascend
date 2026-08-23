@@ -26,6 +26,11 @@ enum class DirectDispatchStage : std::uint8_t {
     kEpilogueComplete,
 };
 
+inline constexpr DirectDispatchStage kFirstDirectDispatchEpilogueStage =
+    DirectDispatchStage::kEpilogueAcquire;
+inline constexpr DirectDispatchStage kLastDirectDispatchEpilogueStage =
+    DirectDispatchStage::kEpilogueComplete;
+
 struct DirectDispatchPipeline {
     DirectDispatchStage stages[13]{};
     std::uint32_t count = 0;
@@ -47,23 +52,28 @@ inline constexpr DirectDispatchPipeline direct_dispatch_pipeline(
         DirectDispatchStage::kEpilogueMetadata,
         DirectDispatchStage::kEpilogueCopy,
         DirectDispatchStage::kEpilogueComplete,
-    }, cpu_sync ? 6U : 13U};
+    }, cpu_sync ? 10U : 13U};
     return pipeline;
 }
 
 inline constexpr DirectDispatchPipeline
 direct_dispatch_epilogue_pipeline() noexcept {
     DirectDispatchPipeline pipeline{{
-        DirectDispatchStage::kEpilogueAcquire,
-        DirectDispatchStage::kEpilogueValidate,
-        DirectDispatchStage::kEpilogueValidateReduce,
-        DirectDispatchStage::kEpilogueExpertCount,
-        DirectDispatchStage::kEpilogueExpertPrefix,
         DirectDispatchStage::kEpilogueMetadata,
         DirectDispatchStage::kEpilogueCopy,
         DirectDispatchStage::kEpilogueComplete,
-    }, 8U};
+    }, 3U};
     return pipeline;
+}
+
+inline constexpr bool direct_dispatch_epilogue_stage(
+    DirectDispatchStage stage) noexcept {
+    return static_cast<std::uint8_t>(stage) >=
+               static_cast<std::uint8_t>(
+                   kFirstDirectDispatchEpilogueStage) &&
+           static_cast<std::uint8_t>(stage) <=
+               static_cast<std::uint8_t>(
+                   kLastDirectDispatchEpilogueStage);
 }
 
 inline constexpr bool direct_dispatch_data_stage(

@@ -8,6 +8,19 @@ namespace deep_ep::ascend::elastic {
 inline constexpr std::uint64_t kDispatchBitmapWordBits = 64;
 inline constexpr std::uint64_t kDispatchReceiveRecordsPerTile = 128;
 
+constexpr bool direct_dispatch_cached_bitmap_owner(
+    std::uint32_t block_index) noexcept {
+    return block_index == 0;
+}
+
+#if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
+__SIMT_DEVICE_FUNCTIONS_DECL__ constexpr bool
+direct_dispatch_simt_cached_bitmap_owner(
+    std::uint32_t block_index) noexcept {
+    return block_index == 0;
+}
+#endif
+
 constexpr bool dispatch_receive_tile_count(
     std::uint64_t world_size, std::uint64_t shard_capacity,
     std::uint64_t* tile_count) noexcept {
