@@ -17,8 +17,8 @@ document uses the repository numbering:
 - P0.2: vote-ballot grouping plus token-subgroup execution and register-local
   routing metadata, specified here; and
 - P0.3: vector or DataCopy payload movement. The combine and direct-dispatch
-  slices are qualified; the formal top-k-8 AOT specialization remains a
-  separate optimization, and scalar tails and dynamic fallbacks stay in place.
+  slices are qualified, including the formal top-k-8 AOT combine instance.
+  Scalar tails and dynamic fallbacks stay in place.
 
 ## Problem
 
@@ -696,9 +696,49 @@ may be dropped, resized, or given a longer watchdog to improve the result.
 
 The subgroup grouping, fused reduction, vector/DataCopy movement, and direct
 dispatch count/prefix/scatter path have focused host, compiler, and device
-coverage. The formal top-k-8 shape currently uses the dynamic aligned combine
-instance; an explicit top-k-8 AOT specialization remains a separate
-optimization and must keep the dynamic fallback.
+coverage. Direct combine now selects the explicit `<8, 7168>` vector reducer
+when both dimensions match. Other aligned shapes still select `<0, 0>`, and
+unaligned or unsupported vector shapes keep the SIMT fallback.
+
+The top-k-8 specialization was qualified on Ascend950PR_9599 with CANN 9.2.0
+and the pinned `hcomm-deepep-current` package:
+
+- Task `task_20260823_205150_407935813304` compiled and linked the full ASC
+  probe on `dav-3510`, then passed `combine-state-probe`. Bisheng reported no
+  spill or stack failure.
+- Task `task_20260823_205425_409417915254` forced a production extension build
+  and passed 11 two-rank public combine cases. The matrix includes compact and
+  expanded reduction, weights, duplicate same-rank experts, `-1` lanes, empty
+  input, one and two biases, aligned vectors, scalar tails, and
+  `specialized-k8-hidden7168`.
+- Task `task_20260823_205803_16104318043` measured the AOT branch twice. Task
+  `task_20260823_210112_17419324610` rebuilt a temporary control with the
+  top-k-8 match disabled, measured the dynamic branch twice, then restored and
+  rebuilt the AOT source. The restored remote source SHA-256 is
+  `4c5a473046b858e40e41e4b61839144e85165e5c14da6a60b33042d164e74362`.
+  Task `task_20260823_211105_5702955957` then passed the focused
+  `specialized-k8-hidden7168` case against that restored production extension.
+
+Both measurements used two ranks, 8,192 maximum tokens per rank, hidden 7,168,
+top-k 8, 256 experts, 72 AI Vector blocks, one warmup, three samples per run,
+and case `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0`. All four reports
+have schema 2, formula 1, `allow_multiple_reduction=1`, and workload fingerprint
+`e41b7ddf1aa3932aed01d4f2e0caca443f9ec0810a76b79c78b63fc0237ca4be`.
+
+```text
+AOT samples (ms):     146.402, 145.887, 147.899, 147.233, 147.097, 146.310
+Dynamic samples (ms): 147.787, 145.922, 144.836, 145.507, 146.259, 148.680
+
+AOT mean:             146.805 ms, 7.998 GB/s
+Dynamic mean:         146.499 ms, 8.015 GB/s
+AOT versus dynamic:   0.209% higher latency, 0.208% lower logical bandwidth
+```
+
+This focused result is neutral: the difference is smaller than the run-to-run
+spread, so it does not establish a speedup or a regression. The AOT instance
+stays because it matches the formal shape, passes production correctness, and
+does not remove the general path. These two-rank samples are local optimization
+evidence, not an eight-rank H800/Ascend performance result.
 
 A fresh H800 canonical report and a matching Ascend canonical report are still
 required before stating a cross-platform bandwidth or latency ratio. Until
@@ -713,8 +753,8 @@ evidence only.
 4. Keep token-subgroup execution and owner-lane metadata broadcast.
 5. Keep fused grouping/reduction and the reduced workspace ABI.
 6. Keep vector/DataCopy payload movement with aligned and scalar-tail coverage.
-7. Add and qualify the formal top-k-8, hidden-7,168 AOT path if profiler data
-   shows the dynamic instance is material.
+7. Keep the qualified formal top-k-8, hidden-7,168 AOT path and its dynamic
+   fallback; treat the focused two-rank performance result as neutral.
 8. Run the eight-rank representative precheck on H800 and Ascend.
 9. Run canonical on both platforms with the H800 manifest, then compare all
    144 cases and 720 operation records.

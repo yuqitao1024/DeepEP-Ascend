@@ -58,7 +58,7 @@ ADDITIONAL_CASE_NAMES = (
     "odd-hidden-weighted",
     "vector-hidden-256",
     "vector-tail-hidden-272-two-bias",
-    "specialized-k6-hidden7168",
+    "specialized-k8-hidden7168",
 )
 
 INTERLEAVED_CASE_NAMES = (
@@ -187,12 +187,14 @@ def _case_specs():
             "vector-tail-hidden-272-two-bias",
             _payloads((2, 2), 47, hidden=272), normal_routes,
             bias_count=2, hidden=272),
-        "specialized-k6-hidden7168": CaseSpec(
-            "specialized-k6-hidden7168",
+        "specialized-k8-hidden7168": CaseSpec(
+            "specialized-k8-hidden7168",
             _payloads((2, 2), 49, hidden=7168),
-            (((0, 1, 4, 5, -1, 0), (3, 7, 4, -1, 1, 5)),
-             ((4, 5, 0, 1, -1, 4), (7, 3, 0, -1, 5, 1))),
-            num_topk=6, hidden=7168, num_experts=8),
+            (((0, 1, 4, 5, -1, 0, 6, 2),
+              (3, 7, 4, -1, 1, 5, 2, 6)),
+             ((4, 5, 0, 1, -1, 4, 2, 6),
+              (7, 3, 0, -1, 5, 1, 6, 2))),
+            num_topk=8, hidden=7168, num_experts=8),
         "cached-dispatch-changed-outputs": CaseSpec(
             "cached-dispatch-changed-outputs", _payloads((2, 2), 25),
             normal_routes,
@@ -480,7 +482,7 @@ def _behavior_fixtures():
         order_routes, 0, ORDER_VARIANT, contributor_order=(1, 0))[0]
 
     same_contributor_spec = _case_specs()["duplicate-same-rank-experts"]
-    common_shape_spec = _case_specs()["specialized-k6-hidden7168"]
+    common_shape_spec = _case_specs()["specialized-k8-hidden7168"]
     same_contributor_routes = (
         ((0, 1), (2, 3)),
         ((1, 0), (3, 2)),
@@ -863,8 +865,8 @@ def _contract():
            specs["vector-tail-hidden-272-two-bias"].hidden == 272 and
            specs["vector-tail-hidden-272-two-bias"].bias_count == 2,
            "vector payload and scalar-tail coverage is incomplete")
-    common_shape = specs["specialized-k6-hidden7168"]
-    _check(common_shape.num_topk == 6 and common_shape.hidden == 7168 and
+    common_shape = specs["specialized-k8-hidden7168"]
+    _check(common_shape.num_topk == 8 and common_shape.hidden == 7168 and
            common_shape.num_experts == 8 and
            common_shape.allow_multiple_reduction and
            any(expert == -1 for rank_routes in common_shape.routes

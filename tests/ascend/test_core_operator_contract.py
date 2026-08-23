@@ -569,9 +569,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("combine_contributor_entry_offset", source)
 
     def test_direct_combine_common_shape_specialization_contract(self):
-        """Catches losing the K=6/H=7168 AOT path or dynamic fallback."""
+        """Catches losing the K=8/H=7168 AOT path or dynamic fallback."""
         source = (ELASTIC / "combine.asc").read_text()
-        self.assertIn("kCombineCommonTopk = 6", source)
+        self.assertIn("kCombineCommonTopk = 8", source)
         self.assertIn("kCombineCommonHidden = 7168", source)
         self.assertIn(
             "template <std::uint64_t StaticNumTopk,\n"
@@ -5162,7 +5162,7 @@ int main() {
             "odd-hidden-weighted",
             "vector-hidden-256",
             "vector-tail-hidden-272-two-bias",
-            "specialized-k6-hidden7168",
+            "specialized-k8-hidden7168",
             "cached-dispatch-changed-outputs",
             "sequential-100-generations",
             "cross-buffer-handle",
@@ -5244,7 +5244,7 @@ int main() {
                         "has_inactive_lane": True,
                         "hidden": 7168,
                         "num_experts": 8,
-                        "num_topk": 6,
+                        "num_topk": 8,
                     },
                     "expanded": {
                         "mapped_rows": [2],
@@ -5358,13 +5358,13 @@ int main() {
             })
 
     def test_two_rank_combine_common_shape_case_contract(self):
-        """Catches losing public K=6/H=7168 specialization coverage."""
+        """Catches losing public K=8/H=7168 specialization coverage."""
         result = subprocess.run(
             ["python3", str(TWO_RANK_COMBINE), "--contract"],
             cwd=ROOT, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         contract = json.loads(result.stdout)
-        self.assertIn("specialized-k6-hidden7168", contract["case_names"])
+        self.assertIn("specialized-k8-hidden7168", contract["case_names"])
         self.assertIn(
             "common-shape-specialization",
             contract["contract_checks"])
@@ -5376,7 +5376,7 @@ int main() {
                 "has_inactive_lane": True,
                 "hidden": 7168,
                 "num_experts": 8,
-                "num_topk": 6,
+                "num_topk": 8,
             })
 
     def test_rank_parameterized_scale_up_smoke_contract(self):
