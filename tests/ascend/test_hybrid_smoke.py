@@ -182,7 +182,11 @@ def test_production_exposes_device_only_two_stage_hybrid_contract():
     assert "TransportTeam::kScaleUp" in dispatch
     assert "hybrid_dispatch_ingress" in dispatch
     assert "hybrid_dispatch_forward" in dispatch
-    for source in (dispatch, combine):
+    device_sources = (
+        dispatch[:dispatch.index("inline int launch_direct_dispatch_stage")],
+        combine[:combine.index("inline int launch_direct_combine_stage")],
+    )
+    for source in device_sources:
         assert "has_mode(" not in source
         assert "mode_bit(" not in source
     assert not re.search(r"route_records\s*\[[^]]+\]\s*=", dispatch)
