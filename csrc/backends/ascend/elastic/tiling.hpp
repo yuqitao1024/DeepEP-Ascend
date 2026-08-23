@@ -2,6 +2,7 @@
 
 #include <cstdint>
 
+#include "combine_parallel.hpp"
 #include "dispatch_parallel.hpp"
 #include "layout.hpp"
 #include "../transport/types.hpp"
@@ -45,7 +46,7 @@ struct CoreTilingInput {
 };
 
 inline constexpr std::uint32_t kAscendMaxDataBlocks = 72;
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 18;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 19;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -224,6 +225,9 @@ inline bool build_workspace_layout(
     std::uint64_t dispatch_group_tile_entries = 0;
     std::uint64_t dispatch_rank_bitmap_words = 0;
     std::uint64_t dispatch_expert_bitmap_words = 0;
+    std::uint64_t dispatch_expert_tile_entries = 0;
+    std::uint64_t combine_producer_tile_entries = 0;
+    std::uint64_t combine_receive_capacity = 0;
     if (parallel_combine &&
         !checked_multiply(
             dispatch_output_capacity, sizeof(std::int32_t),
@@ -261,6 +265,48 @@ inline bool build_workspace_layout(
               layout.dispatch_group_tile_count, sizeof(std::uint64_t),
               &layout.dispatch_group_error_bytes))) ||
         (parallel_dispatch &&
+         (!dispatch_receive_tile_count(
+              layout.scratch_rank_count, input.num_max_tokens_per_rank,
+              &layout.dispatch_receive_tile_count) ||
+          !checked_multiply(
+              layout.dispatch_receive_tile_count, sizeof(std::uint64_t),
+              &layout.dispatch_receive_tile_error_bytes) ||
+          !checked_multiply(
+              layout.dispatch_receive_tile_count, local_experts,
+              &dispatch_expert_tile_entries) ||
+          !checked_multiply(
+              dispatch_expert_tile_entries, sizeof(std::uint64_t),
+              &layout.dispatch_expert_tile_count_bytes))) ||
+        (parallel_combine &&
+         (!combine_tile_count(
+              input.num_tokens, &layout.combine_producer_tile_count) ||
+          !checked_multiply(
+              layout.combine_producer_tile_count,
+              layout.scratch_rank_count, &combine_producer_tile_entries) ||
+          !checked_multiply(
+              combine_producer_tile_entries, sizeof(std::uint64_t),
+              &layout.combine_producer_tile_rank_count_bytes) ||
+          !checked_multiply(
+              layout.combine_producer_tile_count, sizeof(std::uint64_t),
+              &layout.combine_producer_tile_error_bytes) ||
+          !checked_multiply(
+              input.num_max_tokens_per_rank,
+              has_mode(input.mode_flags, CoreMode::kExpanded) &&
+                      !has_mode(
+                          input.mode_flags,
+                          CoreMode::kAllowMultipleReduction) ?
+                  input.num_topk : 1,
+              &combine_receive_capacity) ||
+          !checked_multiply(
+              combine_receive_capacity, layout.scratch_rank_count,
+              &combine_receive_capacity) ||
+          !combine_tile_count(
+              combine_receive_capacity,
+              &layout.combine_receive_tile_count) ||
+          !checked_multiply(
+              layout.combine_receive_tile_count, sizeof(std::uint64_t),
+              &layout.combine_receive_tile_error_bytes))) ||
+        (parallel_dispatch &&
          (!dispatch_owner_bitmap_words(
               layout.scratch_rank_count, input.num_max_tokens_per_rank,
               &dispatch_rank_bitmap_words) ||
@@ -276,6 +322,8 @@ inline bool build_workspace_layout(
         !checked_add(scratch_cursor, sizeof(std::uint64_t),
                      &scratch_cursor))
         return false;
+    layout.dispatch_expert_tile_count =
+        layout.dispatch_receive_tile_count;
     layout.scratch_local_count_offset = scratch_cursor;
     if (!checked_add(scratch_cursor, sizeof(std::uint64_t),
                      &scratch_cursor))
@@ -345,6 +393,19 @@ inline bool build_workspace_layout(
                     &scratch_cursor))
                 return false;
         }
+        if (!checked_align(
+                scratch_cursor, alignof(std::uint64_t), &scratch_cursor))
+            return false;
+        layout.dispatch_receive_tile_error_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, layout.dispatch_receive_tile_error_bytes,
+                &scratch_cursor))
+            return false;
+        layout.dispatch_expert_tile_count_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, layout.dispatch_expert_tile_count_bytes,
+                &scratch_cursor))
+            return false;
     }
     if (parallel_combine) {
         if (!checked_align(
@@ -353,6 +414,25 @@ inline bool build_workspace_layout(
         layout.combine_record_slots_offset = scratch_cursor;
         if (!checked_add(
                 scratch_cursor, layout.combine_record_slots_bytes,
+                &scratch_cursor))
+            return false;
+        if (!checked_align(
+                scratch_cursor, alignof(std::uint64_t), &scratch_cursor))
+            return false;
+        layout.combine_producer_tile_rank_count_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor,
+                layout.combine_producer_tile_rank_count_bytes,
+                &scratch_cursor))
+            return false;
+        layout.combine_producer_tile_error_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, layout.combine_producer_tile_error_bytes,
+                &scratch_cursor))
+            return false;
+        layout.combine_receive_tile_error_offset = scratch_cursor;
+        if (!checked_add(
+                scratch_cursor, layout.combine_receive_tile_error_bytes,
                 &scratch_cursor))
             return false;
     }
@@ -414,11 +494,31 @@ inline bool build_workspace_layout(
           (layout.dispatch_group_error_bytes != 0 &&
            !checked_add(
                layout.scratch_offset, layout.dispatch_group_error_offset,
-               &layout.dispatch_group_error_offset)))) ||
+               &layout.dispatch_group_error_offset)) ||
+          !checked_add(
+              layout.scratch_offset,
+              layout.dispatch_receive_tile_error_offset,
+              &layout.dispatch_receive_tile_error_offset) ||
+          !checked_add(
+              layout.scratch_offset,
+              layout.dispatch_expert_tile_count_offset,
+              &layout.dispatch_expert_tile_count_offset))) ||
         (parallel_combine &&
-         !checked_add(
-             layout.scratch_offset, layout.combine_record_slots_offset,
-             &layout.combine_record_slots_offset)))
+         (!checked_add(
+              layout.scratch_offset, layout.combine_record_slots_offset,
+              &layout.combine_record_slots_offset) ||
+          !checked_add(
+              layout.scratch_offset,
+              layout.combine_producer_tile_rank_count_offset,
+              &layout.combine_producer_tile_rank_count_offset) ||
+          !checked_add(
+              layout.scratch_offset,
+              layout.combine_producer_tile_error_offset,
+              &layout.combine_producer_tile_error_offset) ||
+          !checked_add(
+              layout.scratch_offset,
+              layout.combine_receive_tile_error_offset,
+              &layout.combine_receive_tile_error_offset))))
         return false;
     *output = layout;
     return true;

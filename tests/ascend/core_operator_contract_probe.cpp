@@ -200,6 +200,77 @@ int main() {
             0, 3, 65, &owner_word, nullptr))
         return 34;
 
+    std::uint64_t logical_record = 0;
+    std::uint64_t source_rank = 0;
+    std::uint64_t source_slot = 0;
+    if (!dispatch_receive_logical_record(
+            0, 0, 2, 16, &logical_record) || logical_record != 0 ||
+        !dispatch_receive_logical_record(
+            1, 0, 2, 16, &logical_record) || logical_record != 16 ||
+        !dispatch_receive_logical_record(
+            1, 15, 2, 16, &logical_record) || logical_record != 31 ||
+        dispatch_receive_logical_record(
+            2, 0, 2, 16, &logical_record) ||
+        dispatch_receive_logical_record(
+            0, 16, 2, 16, &logical_record) ||
+        dispatch_receive_logical_record(
+            0, 0, 2, 0, &logical_record) ||
+        dispatch_receive_logical_record(
+            std::numeric_limits<std::uint64_t>::max() - 1, 1,
+            std::numeric_limits<std::uint64_t>::max(), 2,
+            &logical_record) ||
+        !dispatch_receive_record_coordinates(
+            0, 2, 16, &source_rank, &source_slot) ||
+        source_rank != 0 || source_slot != 0 ||
+        !dispatch_receive_record_coordinates(
+            16, 2, 16, &source_rank, &source_slot) ||
+        source_rank != 1 || source_slot != 0 ||
+        !dispatch_receive_record_coordinates(
+            31, 2, 16, &source_rank, &source_slot) ||
+        source_rank != 1 || source_slot != 15 ||
+        dispatch_receive_record_coordinates(
+            32, 2, 16, &source_rank, &source_slot) ||
+        dispatch_receive_record_coordinates(
+            0, 2, 0, &source_rank, &source_slot) ||
+        dispatch_receive_record_coordinates(
+            0, 2, 16, nullptr, &source_slot) ||
+        dispatch_receive_record_coordinates(
+            0, 2, 16, &source_rank, nullptr))
+        return 72;
+    std::uint64_t expert_tile_index = 0;
+    std::uint64_t destination = 0;
+    if (!dispatch_expert_tile_index(
+            0, 0, 3, 2, &expert_tile_index) || expert_tile_index != 0 ||
+        !dispatch_expert_tile_index(
+            1, 0, 3, 2, &expert_tile_index) || expert_tile_index != 2 ||
+        !dispatch_expert_tile_index(
+            2, 1, 3, 2, &expert_tile_index) || expert_tile_index != 5 ||
+        dispatch_expert_tile_index(
+            3, 0, 3, 2, &expert_tile_index) ||
+        dispatch_expert_tile_index(
+            0, 2, 3, 2, &expert_tile_index) ||
+        !dispatch_expert_destination(
+            128, 3, 2, 256, &destination) || destination != 133 ||
+        dispatch_expert_destination(
+            128, 3, 2, 133, &destination) ||
+        dispatch_expert_destination(
+            std::numeric_limits<std::uint64_t>::max(), 1, 0,
+            std::numeric_limits<std::uint64_t>::max(), &destination))
+        return 73;
+    std::uint64_t combine_index = 0;
+    if (!combine_tile_rank_index(0, 0, 3, 2, &combine_index) ||
+        combine_index != 0 ||
+        !combine_tile_rank_index(2, 1, 3, 2, &combine_index) ||
+        combine_index != 5 ||
+        combine_tile_rank_index(3, 0, 3, 2, &combine_index) ||
+        combine_tile_rank_index(0, 2, 3, 2, &combine_index) ||
+        !combine_receive_record_coordinates(
+            31, 2, 16, &source_rank, &source_slot) ||
+        source_rank != 1 || source_slot != 15 ||
+        combine_receive_record_coordinates(
+            32, 2, 16, &source_rank, &source_slot))
+        return 74;
+
     CoreTiling tiling{};
     auto input = valid_input();
     auto status = build_core_tiling(input, &tiling);
@@ -227,18 +298,25 @@ int main() {
         DirectDispatchStage::kProducerPrefix,
         DirectDispatchStage::kProducerRecord,
         DirectDispatchStage::kProducerRelease,
-        DirectDispatchStage::kEpiloguePrepare,
+        DirectDispatchStage::kEpilogueAcquire,
+        DirectDispatchStage::kEpilogueValidate,
+        DirectDispatchStage::kEpilogueValidateReduce,
+        DirectDispatchStage::kEpilogueExpertCount,
+        DirectDispatchStage::kEpilogueExpertPrefix,
+        DirectDispatchStage::kEpilogueMetadata,
         DirectDispatchStage::kEpilogueCopy,
         DirectDispatchStage::kEpilogueComplete,
     };
-    if (direct_pipeline.count != 8)
+    if (direct_pipeline.count != 13)
         return 43;
     for (std::uint32_t index = 0; index < direct_pipeline.count; ++index) {
         if (direct_pipeline.stages[index] != expected_direct_stages[index])
             return 44;
         const auto launch = direct_dispatch_stage_launch(
             tiling, direct_pipeline.stages[index]);
-        const bool data_stage = index == 1 || index == 3 || index == 6;
+        const bool data_stage =
+            index == 1 || index == 3 || index == 6 || index == 8 ||
+            index == 10 || index == 11;
         if (launch.num_blocks != (data_stage ? 72U : 1U) ||
             launch.num_threads != 512 || launch.dynamic_ub_bytes != 0)
             return 45;
@@ -246,28 +324,42 @@ int main() {
     const auto cpu_sync_pipeline = direct_dispatch_pipeline(true);
     if (cpu_sync_pipeline.count != 6 ||
         cpu_sync_pipeline.stages[5] !=
-            DirectDispatchStage::kEpiloguePrepare)
+            DirectDispatchStage::kEpilogueAcquire)
         return 46;
     const auto epilogue_pipeline = direct_dispatch_epilogue_pipeline();
-    if (epilogue_pipeline.count != 3 ||
+    if (epilogue_pipeline.count != 8 ||
         epilogue_pipeline.stages[0] !=
-            DirectDispatchStage::kEpiloguePrepare ||
+            DirectDispatchStage::kEpilogueAcquire ||
         epilogue_pipeline.stages[1] !=
-            DirectDispatchStage::kEpilogueCopy ||
+            DirectDispatchStage::kEpilogueValidate ||
         epilogue_pipeline.stages[2] !=
+            DirectDispatchStage::kEpilogueValidateReduce ||
+        epilogue_pipeline.stages[3] !=
+            DirectDispatchStage::kEpilogueExpertCount ||
+        epilogue_pipeline.stages[4] !=
+            DirectDispatchStage::kEpilogueExpertPrefix ||
+        epilogue_pipeline.stages[5] !=
+            DirectDispatchStage::kEpilogueMetadata ||
+        epilogue_pipeline.stages[6] !=
+            DirectDispatchStage::kEpilogueCopy ||
+        epilogue_pipeline.stages[7] !=
             DirectDispatchStage::kEpilogueComplete)
         return 47;
     const auto combine_pipeline = direct_combine_pipeline();
     const DirectCombineStage expected_combine_stages[] = {
         DirectCombineStage::kProducerControl,
+        DirectCombineStage::kProducerPlan,
+        DirectCombineStage::kProducerPlanPrefix,
         DirectCombineStage::kProducerRecord,
         DirectCombineStage::kProducerRelease,
-        DirectCombineStage::kEpiloguePrepare,
+        DirectCombineStage::kEpilogueAcquire,
+        DirectCombineStage::kEpilogueValidate,
+        DirectCombineStage::kEpilogueValidateReduce,
         DirectCombineStage::kEpilogueReduce,
         DirectCombineStage::kEpilogueWeights,
         DirectCombineStage::kEpilogueComplete,
     };
-    if (combine_pipeline.count != 7)
+    if (combine_pipeline.count != 11)
         return 49;
     for (std::uint32_t index = 0; index < combine_pipeline.count; ++index) {
         if (combine_pipeline.stages[index] != expected_combine_stages[index])
@@ -275,11 +367,76 @@ int main() {
         const auto launch = direct_combine_stage_launch(
             tiling, combine_pipeline.stages[index]);
         const bool data_stage =
-            index == 1 || index == 4 || index == 5;
+            index == 1 || index == 3 || index == 6 || index == 8 ||
+            index == 9;
         if (launch.num_blocks != (data_stage ? 72U : 1U) ||
             launch.num_threads != 512 || launch.dynamic_ub_bytes != 0)
             return 51;
     }
+    auto representative_input = input;
+    representative_input.num_tokens = 8192;
+    representative_input.num_max_tokens_per_rank = 8192;
+    representative_input.num_experts = 256;
+    representative_input.num_topk = 8;
+    representative_input.expert_alignment = 128;
+    representative_input.topology.world_size = 8;
+    representative_input.topology.scale_up_size = 8;
+    representative_input.topology.world_rank = 0;
+    representative_input.topology.scale_up_rank = 0;
+    status = build_core_tiling(representative_input, &tiling);
+    if (!status.ok())
+        return 68;
+    const auto& workspace_layout = tiling.workspace_layout;
+    const auto workspace_end = workspace_layout.scratch_offset +
+        workspace_layout.scratch_bytes;
+    const auto region_is_valid = [workspace_end](
+        std::uint64_t offset, std::uint64_t bytes,
+        std::uint64_t alignment) {
+        return offset % alignment == 0 && offset <= workspace_end &&
+            bytes <= workspace_end - offset;
+    };
+    if (workspace_layout.dispatch_receive_tile_count != 512 ||
+        workspace_layout.dispatch_expert_tile_count != 512 ||
+        !region_is_valid(
+            workspace_layout.dispatch_receive_tile_error_offset,
+            workspace_layout.dispatch_receive_tile_error_bytes,
+            alignof(std::uint64_t)) ||
+        !region_is_valid(
+            workspace_layout.dispatch_expert_tile_count_offset,
+            workspace_layout.dispatch_expert_tile_count_bytes,
+            alignof(std::uint64_t)))
+        return 69;
+
+    auto combine_input = representative_input;
+    combine_input.operation = OperationKind::kCombine;
+    combine_input.mode_flags = mode_bit(CoreMode::kExpanded);
+    status = build_core_tiling(combine_input, &tiling);
+    if (!status.ok())
+        return 70;
+    const auto& combine_workspace = tiling.workspace_layout;
+    const auto combine_workspace_end = combine_workspace.scratch_offset +
+        combine_workspace.scratch_bytes;
+    const auto combine_region_is_valid = [combine_workspace_end](
+        std::uint64_t offset, std::uint64_t bytes,
+        std::uint64_t alignment) {
+        return offset % alignment == 0 && offset <= combine_workspace_end &&
+            bytes <= combine_workspace_end - offset;
+    };
+    if (combine_workspace.combine_producer_tile_count != 64 ||
+        combine_workspace.combine_receive_tile_count != 4096 ||
+        !combine_region_is_valid(
+            combine_workspace.combine_producer_tile_rank_count_offset,
+            combine_workspace.combine_producer_tile_rank_count_bytes,
+            alignof(std::uint64_t)) ||
+        !combine_region_is_valid(
+            combine_workspace.combine_producer_tile_error_offset,
+            combine_workspace.combine_producer_tile_error_bytes,
+            alignof(std::uint64_t)) ||
+        !combine_region_is_valid(
+            combine_workspace.combine_receive_tile_error_offset,
+            combine_workspace.combine_receive_tile_error_bytes,
+            alignof(std::uint64_t)))
+        return 71;
 #if !defined(DEEP_EP_ASCEND_SIMT_DEVICE)
     for (const std::uint64_t item_count : {
              0ULL, 1ULL, 511ULL, 512ULL, 513ULL, 36871ULL}) {
@@ -516,9 +673,9 @@ int main() {
         std::uint64_t combine_bytes;
     };
     for (const auto fixture : {
-             ScratchFixture{2, 256, 4, 16, 32, 352},
-             ScratchFixture{4, 448, 6, 32, 48, 672},
-             ScratchFixture{8, 800, 10, 64, 80, 1248}}) {
+             ScratchFixture{2, 288, 4, 16, 32, 384},
+             ScratchFixture{4, 448, 6, 32, 48, 704},
+             ScratchFixture{8, 800, 10, 64, 80, 1344}}) {
         for (const auto operation : {
                  OperationKind::kDispatch, OperationKind::kCombine}) {
             input = valid_input();

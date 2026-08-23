@@ -15,13 +15,19 @@ enum class DirectDispatchStage : std::uint8_t {
     kProducerPrefix,
     kProducerRecord,
     kProducerRelease,
-    kEpiloguePrepare,
+    kEpilogueAcquire,
+    kEpiloguePrepare = kEpilogueAcquire,
+    kEpilogueValidate,
+    kEpilogueValidateReduce,
+    kEpilogueExpertCount,
+    kEpilogueExpertPrefix,
+    kEpilogueMetadata,
     kEpilogueCopy,
     kEpilogueComplete,
 };
 
 struct DirectDispatchPipeline {
-    DirectDispatchStage stages[8]{};
+    DirectDispatchStage stages[13]{};
     std::uint32_t count = 0;
 };
 
@@ -33,20 +39,30 @@ inline constexpr DirectDispatchPipeline direct_dispatch_pipeline(
         DirectDispatchStage::kProducerPrefix,
         DirectDispatchStage::kProducerRecord,
         DirectDispatchStage::kProducerRelease,
-        DirectDispatchStage::kEpiloguePrepare,
+        DirectDispatchStage::kEpilogueAcquire,
+        DirectDispatchStage::kEpilogueValidate,
+        DirectDispatchStage::kEpilogueValidateReduce,
+        DirectDispatchStage::kEpilogueExpertCount,
+        DirectDispatchStage::kEpilogueExpertPrefix,
+        DirectDispatchStage::kEpilogueMetadata,
         DirectDispatchStage::kEpilogueCopy,
         DirectDispatchStage::kEpilogueComplete,
-    }, cpu_sync ? 6U : 8U};
+    }, cpu_sync ? 6U : 13U};
     return pipeline;
 }
 
 inline constexpr DirectDispatchPipeline
 direct_dispatch_epilogue_pipeline() noexcept {
     DirectDispatchPipeline pipeline{{
-        DirectDispatchStage::kEpiloguePrepare,
+        DirectDispatchStage::kEpilogueAcquire,
+        DirectDispatchStage::kEpilogueValidate,
+        DirectDispatchStage::kEpilogueValidateReduce,
+        DirectDispatchStage::kEpilogueExpertCount,
+        DirectDispatchStage::kEpilogueExpertPrefix,
+        DirectDispatchStage::kEpilogueMetadata,
         DirectDispatchStage::kEpilogueCopy,
         DirectDispatchStage::kEpilogueComplete,
-    }, 3U};
+    }, 8U};
     return pipeline;
 }
 
@@ -54,6 +70,9 @@ inline constexpr bool direct_dispatch_data_stage(
     DirectDispatchStage stage) noexcept {
     return stage == DirectDispatchStage::kProducerGroup ||
            stage == DirectDispatchStage::kProducerRecord ||
+           stage == DirectDispatchStage::kEpilogueValidate ||
+           stage == DirectDispatchStage::kEpilogueExpertCount ||
+           stage == DirectDispatchStage::kEpilogueMetadata ||
            stage == DirectDispatchStage::kEpilogueCopy;
 }
 
@@ -66,34 +85,45 @@ inline constexpr CoreLaunchShape direct_dispatch_stage_launch(
 enum class DirectCombineStage : std::uint8_t {
     kFull,
     kProducerControl,
+    kProducerPlan,
+    kProducerPlanPrefix,
     kProducerRecord,
     kProducerRelease,
-    kEpiloguePrepare,
+    kEpilogueAcquire,
+    kEpiloguePrepare = kEpilogueAcquire,
+    kEpilogueValidate,
+    kEpilogueValidateReduce,
     kEpilogueReduce,
     kEpilogueWeights,
     kEpilogueComplete,
 };
 
 struct DirectCombinePipeline {
-    DirectCombineStage stages[7]{};
+    DirectCombineStage stages[11]{};
     std::uint32_t count = 0;
 };
 
 inline constexpr DirectCombinePipeline direct_combine_pipeline() noexcept {
     return {{
         DirectCombineStage::kProducerControl,
+        DirectCombineStage::kProducerPlan,
+        DirectCombineStage::kProducerPlanPrefix,
         DirectCombineStage::kProducerRecord,
         DirectCombineStage::kProducerRelease,
-        DirectCombineStage::kEpiloguePrepare,
+        DirectCombineStage::kEpilogueAcquire,
+        DirectCombineStage::kEpilogueValidate,
+        DirectCombineStage::kEpilogueValidateReduce,
         DirectCombineStage::kEpilogueReduce,
         DirectCombineStage::kEpilogueWeights,
         DirectCombineStage::kEpilogueComplete,
-    }, 7U};
+    }, 11U};
 }
 
 inline constexpr bool direct_combine_data_stage(
     DirectCombineStage stage) noexcept {
-    return stage == DirectCombineStage::kProducerRecord ||
+    return stage == DirectCombineStage::kProducerPlan ||
+           stage == DirectCombineStage::kProducerRecord ||
+           stage == DirectCombineStage::kEpilogueValidate ||
            stage == DirectCombineStage::kEpilogueReduce ||
            stage == DirectCombineStage::kEpilogueWeights;
 }

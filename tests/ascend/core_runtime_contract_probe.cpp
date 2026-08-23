@@ -383,11 +383,12 @@ bool combine_runner_allocation_contract_matches() {
         required_core_launch_storage(dispatch),
         required_core_launch_storage(combine));
     return dispatch.communication_buffer_bytes == 3584 &&
-           dispatch.workspace_bytes == 576 &&
+           dispatch.workspace_bytes == dispatch.workspace_layout.total_bytes &&
            combine.communication_buffer_bytes == 2097152 &&
-           combine.workspace_bytes == 736 &&
+           combine.workspace_bytes == combine.workspace_layout.total_bytes &&
            allocation.communication_buffer_bytes == 2097152 &&
-           allocation.workspace_bytes == 736 &&
+           allocation.workspace_bytes ==
+               std::max(dispatch.workspace_bytes, combine.workspace_bytes) &&
            combine.topology.world_size == 2;
 }
 
@@ -437,7 +438,7 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 }
 
 int main() {
-    static_assert(kCoreTilingAbiVersion == 18);
+    static_assert(kCoreTilingAbiVersion == 19);
     auto hybrid_tiling = valid_two_dimensional_tiling(
         OperationKind::kDispatch, 0,
         transport::TransportTopologyKind::kLogicalSimulation,

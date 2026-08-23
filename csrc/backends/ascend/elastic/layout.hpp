@@ -185,8 +185,22 @@ struct WorkspaceLayout {
     std::uint64_t dispatch_rank_bitmap_bytes = 0;
     std::uint64_t dispatch_expert_bitmap_offset = 0;
     std::uint64_t dispatch_expert_bitmap_bytes = 0;
+    std::uint64_t dispatch_receive_tile_error_offset = 0;
+    std::uint64_t dispatch_receive_tile_error_bytes = 0;
+    std::uint64_t dispatch_receive_tile_count = 0;
+    std::uint64_t dispatch_expert_tile_count_offset = 0;
+    std::uint64_t dispatch_expert_tile_count_bytes = 0;
+    std::uint64_t dispatch_expert_tile_count = 0;
     std::uint64_t combine_record_slots_offset = 0;
     std::uint64_t combine_record_slots_bytes = 0;
+    std::uint64_t combine_producer_tile_rank_count_offset = 0;
+    std::uint64_t combine_producer_tile_rank_count_bytes = 0;
+    std::uint64_t combine_producer_tile_error_offset = 0;
+    std::uint64_t combine_producer_tile_error_bytes = 0;
+    std::uint64_t combine_producer_tile_count = 0;
+    std::uint64_t combine_receive_tile_error_offset = 0;
+    std::uint64_t combine_receive_tile_error_bytes = 0;
+    std::uint64_t combine_receive_tile_count = 0;
     std::uint64_t total_bytes = 0;
 };
 

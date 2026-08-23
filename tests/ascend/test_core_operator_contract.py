@@ -245,6 +245,65 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             function = source[begin:end]
             self.assertIn("direct_data_grid_stride(", function)
 
+    def test_direct_dispatch_receive_validation_is_rank_major_tiled(self):
+        """Catches restoring one serial scan per source rank."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_epilogue_validate_records_vf")
+        end = source.index("\n}\n", begin)
+        validation = source[begin:end]
+        for marker in (
+                "direct_data_grid_stride(",
+                "kDispatchReceiveRecordsPerTile",
+                "dispatch_simt_receive_record_coordinates(",
+                "source_slot >= source_counts[source_rank]",
+                "tile_errors[tile] ="):
+            self.assertIn(marker, validation)
+        self.assertNotIn("record_dispatch_protocol_error(", validation)
+
+        launch = source[source.index(
+            "#define DEEP_EP_ASCEND_DIRECT_DISPATCH_EPILOGUE"):]
+        validate = launch.index(
+            "(STAGE) == DirectDispatchStage::kEpilogueValidate")
+        validate_call = launch.index(
+            "asc_vf_call<direct_dispatch_epilogue_validate_records_vf>",
+            validate)
+        reduce = launch.index(
+            "(STAGE) == DirectDispatchStage::kEpilogueValidateReduce",
+            validate_call)
+        reduce_call = launch.index(
+            "asc_vf_call<direct_dispatch_reduce_errors_vf>", reduce)
+        self.assertLess(validate, validate_call)
+        self.assertLess(validate_call, reduce)
+        self.assertLess(reduce, reduce_call)
+
+    def test_direct_dispatch_expert_histogram_prefix_scatter_is_tiled(self):
+        source = (ELASTIC / "dispatch.asc").read_text()
+        count_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_epilogue_count_experts_vf")
+        prefix_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_epilogue_prefix_vf", count_begin)
+        count = source[count_begin:prefix_begin]
+        for marker in (
+                "direct_data_grid_stride(",
+                "kDispatchReceiveRecordsPerTile",
+                "tile_counts[tile * local_experts + local_expert]"):
+            self.assertIn(marker, count)
+        self.assertNotIn(
+            "for (std::uint64_t local_expert = threadIdx.x", count)
+
+        scatter_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_epilogue_assign_destinations_vf")
+        scatter_end = source.index("\n}\n", scatter_begin)
+        scatter = source[scatter_begin:scatter_end]
+        self.assertIn("if (!cached) {", scatter)
+        self.assertIn("tile_cursors[index]++", scatter)
+        self.assertIn("owner_bitmap[word] & mask", scatter)
+
     def test_direct_dispatch_grouping_reuse_contract(self):
         """Catches restoring destination-by-destination top-k rescans."""
         source = (ELASTIC / "dispatch.asc").read_text()

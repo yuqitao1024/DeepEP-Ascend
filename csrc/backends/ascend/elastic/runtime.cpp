@@ -108,10 +108,38 @@ bool same_workspace_layout(
                rhs.dispatch_expert_bitmap_offset &&
            lhs.dispatch_expert_bitmap_bytes ==
                rhs.dispatch_expert_bitmap_bytes &&
+           lhs.dispatch_receive_tile_error_offset ==
+               rhs.dispatch_receive_tile_error_offset &&
+           lhs.dispatch_receive_tile_error_bytes ==
+               rhs.dispatch_receive_tile_error_bytes &&
+           lhs.dispatch_receive_tile_count ==
+               rhs.dispatch_receive_tile_count &&
+           lhs.dispatch_expert_tile_count_offset ==
+               rhs.dispatch_expert_tile_count_offset &&
+           lhs.dispatch_expert_tile_count_bytes ==
+               rhs.dispatch_expert_tile_count_bytes &&
+           lhs.dispatch_expert_tile_count ==
+               rhs.dispatch_expert_tile_count &&
            lhs.combine_record_slots_offset ==
                rhs.combine_record_slots_offset &&
            lhs.combine_record_slots_bytes ==
                rhs.combine_record_slots_bytes &&
+           lhs.combine_producer_tile_rank_count_offset ==
+               rhs.combine_producer_tile_rank_count_offset &&
+           lhs.combine_producer_tile_rank_count_bytes ==
+               rhs.combine_producer_tile_rank_count_bytes &&
+           lhs.combine_producer_tile_error_offset ==
+               rhs.combine_producer_tile_error_offset &&
+           lhs.combine_producer_tile_error_bytes ==
+               rhs.combine_producer_tile_error_bytes &&
+           lhs.combine_producer_tile_count ==
+               rhs.combine_producer_tile_count &&
+           lhs.combine_receive_tile_error_offset ==
+               rhs.combine_receive_tile_error_offset &&
+           lhs.combine_receive_tile_error_bytes ==
+               rhs.combine_receive_tile_error_bytes &&
+           lhs.combine_receive_tile_count ==
+               rhs.combine_receive_tile_count &&
            lhs.total_bytes == rhs.total_bytes;
 }
 
