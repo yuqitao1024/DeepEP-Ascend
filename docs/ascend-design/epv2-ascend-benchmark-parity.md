@@ -650,6 +650,51 @@ Hardware acceptance is separate and serialized per environment:
 6. Both comparisons validate every identity field before atomically writing
    their final Markdown reports.
 
+### Ascend 950 representative measurement
+
+The Ascend side of the representative precheck ran on eight
+`Ascend950PR_9599` devices in TaskQueue task
+`task_20260823_215806_157478527006`. The task started at
+`2026-08-23 22:02:46 +08:00`, finished at `22:05:13`, and exited with code
+zero. It used the source snapshot verified against commit
+`60e3d08c77a0bc23b9831059ca2f19242d3b3e55`. The remote checkout is a source
+directory without Git metadata, so the generated report records
+`git_commit=unknown`; the task and artifact hashes below provide the run
+provenance.
+
+The measured case is
+`ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0`. Each rank used 8,192
+tokens, hidden width 7,168, top-k 8, and 256 experts. Dispatch used FP8,
+combine used BF16, multiple reduction was enabled, and the kernels used 72 AI
+Vector blocks. Each operation ran 30 warmups followed by 30 measured
+iterations. The case passed and produced all five operation records. The
+failures list is empty. Its workload fingerprint is
+`d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`.
+
+| Operation | Device mean (ms) | Device p50 (ms) | Device p95 (ms) | Wall mean (ms) | Logical GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `dispatch` | 132.044 | 132.081 | 133.578 | 132.775 | 58.966 |
+| `expanded_dispatch` | 172.368 | 172.348 | 174.175 | 173.146 | 53.673 |
+| `cached_dispatch` | 138.112 | 138.220 | 139.738 | 138.922 | 56.375 |
+| `combine` | 167.894 | 168.044 | 170.512 | 168.762 | 64.929 |
+| `reduced_combine` | 195.801 | 195.729 | 197.242 | 196.716 | 55.675 |
+
+The four source artifacts remain on NPU8P under
+`/home/pyptouser/yuqitao/deepep-results/ascend950-representative-60e3d08`
+and in the local temporary archive
+`/tmp/deepep-ascend-benchmarks/ascend950-representative-60e3d08`.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `workload.json` | `98d9dc5ff7b8f31afbc9589b037fd658d99b85b739b8572de1751b9e979eb623` |
+| `benchmark.json` | `8b2f921d892a07959ef725b1b998bf699f546ce96be3885f998b8a20cdd48fa8` |
+| `benchmark.md` | `185b2bfd80d55138139337afa3180beec4a3809d6d62a15091c8ba8d64eb645f` |
+| `run.log` | `438f08b906b5bb4c2e1726c936a56b458190d2a6e248a9b44ff1bdcb9d702645` |
+
+This is the Ascend half of the representative precheck, not a 144-case formal
+result. The H800 run must consume this exact `workload.json` and pass the same
+case before the comparison tool can calculate latency and bandwidth ratios.
+
 ## Components
 
 | File | Responsibility |
