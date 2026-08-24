@@ -44,6 +44,7 @@ struct State {
     TransportTopology topology{};
     std::uint64_t retry_limit = 1;
     bool completions_enabled = true;
+    std::uint32_t consumed_count = 0;
     std::uint32_t executed_count = 0;
     std::uint32_t event_count = 0;
     TransportCommandOpcode events[64]{};
@@ -109,7 +110,13 @@ inline bool drain(
 inline bool execute(
     const TransportCommand* commands, std::uint32_t count, State& state,
     DeviceTransportDiagnostic& diagnostic) {
-    for (std::uint32_t index = 0; index < count; ++index) {
+    if (state.consumed_count > count) {
+        command::record_first_error(
+            diagnostic, DeviceTransportError::kInvalidQueue,
+            state.consumed_count, TransportCommandOpcode::kNone, 0, 0);
+        return false;
+    }
+    for (std::uint32_t index = state.consumed_count; index < count; ++index) {
         const auto& current = commands[index];
         DeviceTransportError error = DeviceTransportError::kNone;
         if (!validate(current, state, error)) {
@@ -153,6 +160,7 @@ inline bool execute(
         if (state.event_count < 64)
             state.events[state.event_count++] = current.opcode;
         ++state.executed_count;
+        state.consumed_count = index + 1;
     }
     return true;
 }
@@ -1184,8 +1192,10 @@ __aicore__ inline void record_stage_start(
         return;
     profile->operation = operation;
     profile->generation = generation;
-    profile->stages[stage].blocks[block].start =
-        static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+    auto* cycles = &profile->stages[stage].blocks[block];
+    cycles->start = record_transport_stage_start(
+        cycles->start,
+        static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
     if (block == 0)
         profile->stages[stage].block_count = block_count;
 }
@@ -1202,8 +1212,10 @@ __aicore__ inline void record_stage_end(
         stage >= kTransportProfileStageCount ||
         block >= kTransportProfileMaxBlocks)
         return;
-    profile->stages[stage].blocks[block].end =
-        static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+    auto* cycles = &profile->stages[stage].blocks[block];
+    cycles->end = record_transport_stage_end(
+        cycles->start, cycles->end,
+        static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
     aicore::system_fence();
     aicore::flush_cacheline(&profile->stages[stage].blocks[block]);
     if (block == 0)
@@ -1269,22 +1281,32 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
     const auto wqe_scratch = scratch_buffer.Get<std::uint32_t>();
     const std::uint64_t retry_limit = state->default_retry_limit == 0 ?
         detail::kDefaultRetryLimit : state->default_retry_limit;
+    aicore::flush_cacheline(queue);
+    const std::uint32_t command_begin = state->consumed_count;
+    if (command_begin > queue->count) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidQueue, command_begin,
+            TransportCommandOpcode::kNone, 0, 0);
+        return;
+    }
     state->active = 1;
+    state->consumed_generation = 0;
+    aicore::system_fence();
+    aicore::flush_cacheline(state);
     auto* commands = reinterpret_cast<__gm__ TransportCommand*>(
         queue->commands);
     const std::uint32_t count = queue->count;
     __gm__ TransportStageProfile* profile = nullptr;
+    std::uint64_t service_start_cycles = 0;
     if constexpr (ProfileEnabled)
         profile = detail::profile_buffer<ProfileEnabled>(context);
     if constexpr (ProfileEnabled) {
-        if (profile != nullptr) {
-            profile->command_count = count;
-            profile->service_start_cycles = static_cast<std::uint64_t>(
+        if (profile != nullptr)
+            service_start_cycles = static_cast<std::uint64_t>(
                 AscendC::GetSystemCycle());
-        }
     }
 
-    for (std::uint32_t index = 0; index < count; ++index) {
+    for (std::uint32_t index = command_begin; index < count; ++index) {
         auto* current = commands + index;
         aicore::flush_cacheline(current);
         if constexpr (ProfileEnabled) {
@@ -1447,8 +1469,17 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
     state->consumed_generation = queue->generation;
     if constexpr (ProfileEnabled) {
         if (profile != nullptr) {
-            profile->service_end_cycles = static_cast<std::uint64_t>(
-                AscendC::GetSystemCycle());
+            const auto accumulated = accumulate_transport_service_interval(
+                profile->command_count, profile->service_start_cycles,
+                profile->service_end_cycles, command_begin, count,
+                service_start_cycles,
+                static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+            if (accumulated.valid) {
+                profile->command_count = accumulated.command_count;
+                profile->service_start_cycles =
+                    accumulated.service_start_cycles;
+                profile->service_end_cycles = accumulated.service_end_cycles;
+            }
             detail::update_queue_profile<ProfileEnabled>(context, profile);
             aicore::flush_stage_profile_header(profile);
         }

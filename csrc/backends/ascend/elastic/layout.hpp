@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 
 #include "../transport/types.hpp"
 
@@ -22,6 +23,8 @@ inline constexpr std::uint64_t kDirectCombineRecordTrailerBytes =
 inline constexpr std::uint64_t kHybridCombineRecordTrailerBytes =
     2 * kAscendElasticAlignment;
 inline constexpr std::uint64_t kDispatchGroupingTokensPerTile = 4;
+inline constexpr std::uint32_t kDispatchPipelineAbiVersion = 1;
+inline constexpr std::uint32_t kDispatchPipelineSlotCount = 2;
 
 enum class CoreMode : std::uint8_t {
     kCached,
@@ -191,6 +194,8 @@ struct WorkspaceLayout {
     std::uint64_t dispatch_expert_tile_count_offset = 0;
     std::uint64_t dispatch_expert_tile_count_bytes = 0;
     std::uint64_t dispatch_expert_tile_count = 0;
+    std::uint64_t dispatch_pipeline_offset = 0;
+    std::uint64_t dispatch_pipeline_bytes = 0;
     std::uint64_t combine_record_slots_offset = 0;
     std::uint64_t combine_record_slots_bytes = 0;
     std::uint64_t combine_producer_tile_rank_count_offset = 0;
@@ -205,6 +210,43 @@ struct WorkspaceLayout {
     std::uint64_t combine_receive_record_index_bytes = 0;
     std::uint64_t total_bytes = 0;
 };
+
+enum class DispatchPipelineSlotState : std::uint32_t {
+    kEmpty,
+    kProducing,
+    kReady,
+    kInFlight,
+    kCompleted,
+    kFailed,
+};
+
+struct alignas(64) DispatchPipelineSlot {
+    transport::DeviceRequest request{};
+    std::uint64_t chunk_begin = 0;
+    std::uint64_t chunk_end = 0;
+    std::uint32_t chunk_index = 0;
+    DispatchPipelineSlotState state = DispatchPipelineSlotState::kEmpty;
+    std::uint64_t reserved = 0;
+};
+
+struct alignas(64) DispatchPipelineState {
+    std::uint32_t abi_version = kDispatchPipelineAbiVersion;
+    std::uint32_t struct_size = sizeof(DispatchPipelineState);
+    std::uint64_t generation = 0;
+    std::uint32_t chunk_count = 0;
+    std::uint32_t completed_chunks = 0;
+    std::uint64_t chunk_slots = 0;
+    transport::DeviceTransportError terminal_error =
+        transport::DeviceTransportError::kNone;
+    std::uint32_t reserved0 = 0;
+    std::uint64_t reserved1[3]{};
+    DispatchPipelineSlot slots[kDispatchPipelineSlotCount]{};
+};
+
+static_assert(sizeof(DispatchPipelineSlot) == 64);
+static_assert(sizeof(DispatchPipelineState) == 192);
+static_assert(std::is_standard_layout_v<DispatchPipelineState>);
+static_assert(std::is_trivially_copyable_v<DispatchPipelineState>);
 
 struct alignas(32) SymmetricControlHeader {
     std::uint64_t dispatch_generation = 0;

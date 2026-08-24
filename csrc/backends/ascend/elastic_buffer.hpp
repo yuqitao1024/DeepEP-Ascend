@@ -31,6 +31,7 @@
 #include "elastic/barrier_state.hpp"
 #include "elastic/combine_state.hpp"
 #include "elastic/dispatch_state.hpp"
+#include "elastic/dispatch_pipeline_config.hpp"
 #include "elastic/async_state.hpp"
 #include "elastic/operation_coordinator.hpp"
 #include "elastic/runtime.hpp"
@@ -1677,6 +1678,21 @@ public:
         const auto capacity = static_cast<std::uint64_t>(num_max_tokens_per_rank);
         const auto experts = static_cast<std::uint64_t>(num_experts);
         const auto alignment = static_cast<std::uint64_t>(expert_alignment);
+        elastic::DispatchPipelineConfig pipeline_config{};
+        const auto pipeline_config_status =
+            elastic::select_dispatch_pipeline_config(
+                std::getenv(
+                    "DEEP_EP_ASCEND_DISPATCH_PIPELINE_CHUNK_SLOTS"),
+                cached_mode, split_dispatch, stream_mode, allow_hybrid_mode_,
+                num_ranks_, capacity, &pipeline_config);
+        TORCH_CHECK(
+            pipeline_config_status !=
+                elastic::DispatchPipelineConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_DISPATCH_PIPELINE_CHUNK_SLOTS must be a "
+            "positive decimal integer");
+        if (pipeline_config.enabled)
+            mode_flags |= elastic::mode_bit(elastic::CoreMode::kPipeline);
         const auto tiling = build_dispatch_tiling(
             num_tokens, hidden, experts, num_topk, alignment, capacity,
             mode_flags,
@@ -1694,7 +1710,8 @@ public:
               elastic::mode_bit(
                   elastic::CoreMode::kAllowMultipleReduction) |
               elastic::mode_bit(elastic::CoreMode::kCpuSync) |
-              elastic::mode_bit(elastic::CoreMode::kAsyncEvent));
+              elastic::mode_bit(elastic::CoreMode::kAsyncEvent) |
+              elastic::mode_bit(elastic::CoreMode::kPipeline));
         const auto routing_mode = allow_hybrid_mode_ ?
             elastic::DispatchRoutingMode::kHybrid :
             elastic::DispatchRoutingMode::kDirect;
@@ -2159,6 +2176,7 @@ public:
                 cached_route_count : tiling.hybrid_route_capacity;
         }
         arguments.timeout_cycles = barrier_timeout_cycles_;
+        arguments.pipeline_chunk_slots = pipeline_config.chunk_slots;
         runtime::StreamIdentity stream = dispatch_stream;
         if (!use_comm_stream) {
             status = resources_->current_stream(&stream);
@@ -2204,8 +2222,12 @@ public:
                 dispatch_descriptor_snapshot(
                     committed_descriptor, host_route_records));
         }
-        const auto launch_status = elastic::launch_internal_dispatch(
-            arguments, tiling, storage, stream.raw);
+        const auto launch_status = pipeline_config.enabled ?
+            elastic::launch_internal_dispatch_pipeline(
+                arguments, tiling, storage, stream.raw,
+                resources_->comm_stream().raw) :
+            elastic::launch_internal_dispatch(
+                arguments, tiling, storage, stream.raw);
         if (!launch_status.ok())
             raise_launch_status(launch_status, rank_idx_);
         if (cached_mode) {

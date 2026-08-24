@@ -67,6 +67,43 @@ void check_order_flush_and_barrier() {
     CHECK(diagnostic.error == transport::DeviceTransportError::kNone);
 }
 
+void check_incremental_append_does_not_replay() {
+    transport::TransportCommand commands[4]{};
+    commands[0] = transport::command::make_put(
+        transport::TransportTeam::kWorld, 1, 1, 0, 0x1000, 0x2000, 64,
+        transport::CooperationScope::kParticipant,
+        transport::MemorySegment::kDevice, transport::kDefaultOptions);
+    commands[1] = transport::command::make_flush(
+        0, transport::CooperationScope::kParticipant);
+    commands[2] = transport::command::make_put(
+        transport::TransportTeam::kWorld, 1, 1, 0, 0x1040, 0x2040, 32,
+        transport::CooperationScope::kParticipant,
+        transport::MemorySegment::kDevice, transport::kDefaultOptions);
+    commands[3] = transport::command::make_flush(
+        0, transport::CooperationScope::kParticipant);
+
+    auto state = service::model::make_state(2, 0, 8);
+    transport::DeviceTransportDiagnostic diagnostic{};
+    CHECK(service::model::execute(commands, 2, state, diagnostic));
+    CHECK(state.consumed_count == 2);
+    CHECK(state.executed_count == 2);
+    CHECK(state.event_count == 2);
+
+    CHECK(service::model::execute(commands, 4, state, diagnostic));
+    CHECK(state.consumed_count == 4);
+    CHECK(state.executed_count == 4);
+    CHECK(state.event_count == 4);
+    CHECK(state.events[0] == transport::TransportCommandOpcode::kPut);
+    CHECK(state.events[1] == transport::TransportCommandOpcode::kFlush);
+    CHECK(state.events[2] == transport::TransportCommandOpcode::kPut);
+    CHECK(state.events[3] == transport::TransportCommandOpcode::kFlush);
+
+    CHECK(service::model::execute(commands, 4, state, diagnostic));
+    CHECK(state.consumed_count == 4);
+    CHECK(state.executed_count == 4);
+    CHECK(state.event_count == 4);
+}
+
 void check_validation_stops_before_later_commands() {
     transport::TransportCommand commands[2]{};
     commands[0] = transport::command::make_put_value64(
@@ -554,6 +591,7 @@ void check_release_acquire_and_selected_barrier_sequence() {
 
 int main() {
     check_order_flush_and_barrier();
+    check_incremental_append_does_not_replay();
     check_validation_stops_before_later_commands();
     check_completion_timeout_is_finite();
     check_barrier_failure_preserves_failed_world_peer();

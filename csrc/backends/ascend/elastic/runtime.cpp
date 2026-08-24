@@ -34,9 +34,7 @@ CoreRuntimeStatus launch_failure(int backend_code, const char* message) {
 }
 
 bool has_deferred_mode(CoreModeFlags flags) {
-    constexpr CoreModeFlags deferred =
-        mode_bit(CoreMode::kPipeline) |
-        mode_bit(CoreMode::kEngram);
+    constexpr CoreModeFlags deferred = mode_bit(CoreMode::kEngram);
     return (flags & deferred) != 0;
 }
 
@@ -122,6 +120,8 @@ bool same_workspace_layout(
                rhs.dispatch_expert_tile_count_bytes &&
            lhs.dispatch_expert_tile_count ==
                rhs.dispatch_expert_tile_count &&
+           lhs.dispatch_pipeline_offset == rhs.dispatch_pipeline_offset &&
+           lhs.dispatch_pipeline_bytes == rhs.dispatch_pipeline_bytes &&
            lhs.combine_record_slots_offset ==
                rhs.combine_record_slots_offset &&
            lhs.combine_record_slots_bytes ==
@@ -366,6 +366,7 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
                 "requested mode is deferred until a real transport exists"};
     const bool cpu_sync = has_mode(tiling.mode_flags, CoreMode::kCpuSync);
     const bool async_event = has_mode(tiling.mode_flags, CoreMode::kAsyncEvent);
+    const bool pipeline = has_mode(tiling.mode_flags, CoreMode::kPipeline);
     if (async_event && !cpu_sync)
         return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
                 "async dispatch requires the CPU-count split"};
@@ -378,6 +379,14 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
          tiling.topology.scale_out_size != 1))
         return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
                 "split dispatch supports uncached BF16 or FP8 pure scale-up only"};
+    if (pipeline &&
+        (tiling.operation != OperationKind::kDispatch ||
+         has_mode(tiling.mode_flags, CoreMode::kCached) ||
+         has_mode(tiling.mode_flags, CoreMode::kHybrid) || !cpu_sync ||
+         async_event || tiling.topology.world_size < 2 ||
+         tiling.topology.scale_out_size != 1))
+        return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
+                "pipeline dispatch supports uncached CPU-split scale-up only"};
 
     constexpr CoreModeFlags known_modes =
         mode_bit(CoreMode::kCached) | mode_bit(CoreMode::kExpanded) |
@@ -400,7 +409,8 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
                               mode_bit(CoreMode::kAllowMultipleReduction) |
                               mode_bit(CoreMode::kAsyncEvent) |
                               mode_bit(CoreMode::kCpuSync) |
-                              mode_bit(CoreMode::kHybrid);
+                              mode_bit(CoreMode::kHybrid) |
+                              mode_bit(CoreMode::kPipeline);
             break;
         case OperationKind::kCombine:
             operation_modes = mode_bit(CoreMode::kExpanded) |
@@ -504,9 +514,10 @@ CoreRuntimeStatus launch_internal_barrier(
         launch_failure(result, "barrier kernel launch failed");
 }
 
-CoreRuntimeStatus launch_internal_dispatch(
+CoreRuntimeStatus launch_internal_dispatch_impl(
     const DispatchArguments& arguments, const CoreTiling& tiling,
-    const CoreLaunchStorage& storage, void* stream) {
+    const CoreLaunchStorage& storage, void* stream,
+    void* communication_stream) {
     const auto status = validate_internal_launch(tiling, storage);
     if (!status.ok())
         return status;
@@ -569,9 +580,34 @@ CoreRuntimeStatus launch_internal_dispatch(
     if (!is_aligned(arguments.communication_buffer) ||
         !is_aligned(arguments.workspace))
         return invalid("dispatch storage is misaligned");
-    const int result = deep_ep_ascend_launch_dispatch(arguments, tiling, stream);
+    const int result = communication_stream == nullptr ?
+        deep_ep_ascend_launch_dispatch(arguments, tiling, stream) :
+        deep_ep_ascend_launch_dispatch_pipeline(
+            arguments, tiling, stream, communication_stream);
     return result == 0 ? CoreRuntimeStatus{} :
         launch_failure(result, "dispatch kernel launch failed");
+}
+
+CoreRuntimeStatus launch_internal_dispatch(
+    const DispatchArguments& arguments, const CoreTiling& tiling,
+    const CoreLaunchStorage& storage, void* stream) {
+    if (has_mode(tiling.mode_flags, CoreMode::kPipeline))
+        return invalid("pipeline dispatch requires a communication stream");
+    return launch_internal_dispatch_impl(
+        arguments, tiling, storage, stream, nullptr);
+}
+
+CoreRuntimeStatus launch_internal_dispatch_pipeline(
+    const DispatchArguments& arguments, const CoreTiling& tiling,
+    const CoreLaunchStorage& storage, void* producer_stream,
+    void* communication_stream) {
+    if (!has_mode(tiling.mode_flags, CoreMode::kPipeline) ||
+        producer_stream == nullptr || communication_stream == nullptr ||
+        producer_stream == communication_stream ||
+        arguments.pipeline_chunk_slots == 0)
+        return invalid("invalid pipeline dispatch streams or chunk size");
+    return launch_internal_dispatch_impl(
+        arguments, tiling, storage, producer_stream, communication_stream);
 }
 
 CoreRuntimeStatus launch_internal_dispatch_epilogue(

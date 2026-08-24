@@ -48,7 +48,7 @@ struct CoreTilingInput {
 };
 
 inline constexpr std::uint32_t kAscendMaxDataBlocks = 72;
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 20;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 21;
 inline constexpr std::uint64_t kDirectDeviceIndexLimit = 0x7fffffffULL;
 
 struct CoreTiling {
@@ -212,6 +212,10 @@ inline bool build_workspace_layout(
     const bool parallel_combine =
         input.operation == OperationKind::kCombine &&
         !has_mode(input.mode_flags, CoreMode::kHybrid);
+    const bool pipeline_dispatch = parallel_dispatch &&
+        has_mode(input.mode_flags, CoreMode::kPipeline);
+    layout.dispatch_pipeline_bytes = pipeline_dispatch ?
+        sizeof(DispatchPipelineState) : 0;
     const std::uint64_t local_experts = parallel_dispatch ?
         input.num_experts /
             static_cast<std::uint64_t>(input.topology.world_size) : 0;
@@ -417,6 +421,17 @@ inline bool build_workspace_layout(
                 scratch_cursor, layout.dispatch_expert_tile_count_bytes,
                 &scratch_cursor))
             return false;
+        if (pipeline_dispatch) {
+            if (!checked_align(
+                    scratch_cursor, alignof(DispatchPipelineState),
+                    &scratch_cursor))
+                return false;
+            layout.dispatch_pipeline_offset = scratch_cursor;
+            if (!checked_add(
+                    scratch_cursor, layout.dispatch_pipeline_bytes,
+                    &scratch_cursor))
+                return false;
+        }
     }
     if (parallel_combine) {
         if (!checked_align(
@@ -521,7 +536,11 @@ inline bool build_workspace_layout(
           !checked_add(
               layout.scratch_offset,
               layout.dispatch_expert_tile_count_offset,
-              &layout.dispatch_expert_tile_count_offset))) ||
+              &layout.dispatch_expert_tile_count_offset) ||
+          (layout.dispatch_pipeline_bytes != 0 &&
+           !checked_add(
+               layout.scratch_offset, layout.dispatch_pipeline_offset,
+               &layout.dispatch_pipeline_offset)))) ||
         (parallel_combine &&
          (!checked_add(
               layout.scratch_offset, layout.combine_record_slots_offset,

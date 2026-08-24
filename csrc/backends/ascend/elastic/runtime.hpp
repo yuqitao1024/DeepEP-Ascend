@@ -67,6 +67,11 @@ CoreRuntimeStatus launch_internal_dispatch(
     const DispatchArguments& arguments, const CoreTiling& tiling,
     const CoreLaunchStorage& storage, void* stream);
 
+CoreRuntimeStatus launch_internal_dispatch_pipeline(
+    const DispatchArguments& arguments, const CoreTiling& tiling,
+    const CoreLaunchStorage& storage, void* producer_stream,
+    void* communication_stream);
+
 CoreRuntimeStatus launch_internal_dispatch_epilogue(
     const DispatchArguments& arguments, const CoreTiling& tiling,
     const CoreLaunchStorage& storage, void* stream);

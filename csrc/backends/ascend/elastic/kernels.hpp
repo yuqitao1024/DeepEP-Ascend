@@ -8,6 +8,50 @@ namespace deep_ep::ascend::elastic {
 
 struct HybridRouteRecord;
 
+struct DispatchChunkPlan {
+    std::uint64_t shard_capacity = 0;
+    std::uint64_t chunk_slots = 0;
+    std::uint32_t chunk_count = 0;
+};
+
+inline constexpr bool build_dispatch_chunk_plan(
+    std::uint64_t shard_capacity, std::uint64_t chunk_slots,
+    DispatchChunkPlan* output) noexcept {
+    if (output == nullptr || shard_capacity == 0 || chunk_slots == 0)
+        return false;
+    const auto quotient = shard_capacity / chunk_slots;
+    const auto remainder = shard_capacity % chunk_slots;
+    if (quotient > UINT32_MAX ||
+        (quotient == UINT32_MAX && remainder != 0))
+        return false;
+    *output = {shard_capacity, chunk_slots,
+               static_cast<std::uint32_t>(quotient + (remainder != 0))};
+    return output->chunk_count != 0;
+}
+
+inline constexpr std::uint32_t dispatch_pipeline_slot(
+    std::uint32_t chunk_index) noexcept {
+    return chunk_index % kDispatchPipelineSlotCount;
+}
+
+inline constexpr bool dispatch_chunk_peer_range(
+    const DispatchChunkPlan& plan, std::uint32_t chunk_index,
+    std::uint64_t peer_count, std::uint64_t* chunk_begin,
+    std::uint64_t* chunk_count) noexcept {
+    if (chunk_begin == nullptr || chunk_count == nullptr ||
+        plan.chunk_slots == 0 || chunk_index >= plan.chunk_count ||
+        peer_count > plan.shard_capacity)
+        return false;
+    const auto begin = static_cast<std::uint64_t>(chunk_index) *
+        plan.chunk_slots;
+    const auto end = plan.chunk_slots > plan.shard_capacity - begin ?
+        plan.shard_capacity : begin + plan.chunk_slots;
+    *chunk_begin = begin;
+    *chunk_count = peer_count <= begin ? 0 :
+        (peer_count < end ? peer_count : end) - begin;
+    return true;
+}
+
 enum class DirectDispatchStage : std::uint8_t {
     kFull,
     kProducerControl,
@@ -321,6 +365,11 @@ struct DispatchArguments {
     std::uint64_t num_output_tokens = 0;
     std::uint64_t generation = 0;
     std::uint64_t timeout_cycles = 0;
+    std::uint64_t pipeline_chunk_begin = 0;
+    std::uint64_t pipeline_chunk_end = 0;
+    std::uint32_t pipeline_chunk_index = 0;
+    std::uint32_t pipeline_final_chunk = 1;
+    std::uint64_t pipeline_chunk_slots = 0;
 };
 
 struct CombineArguments {
@@ -354,6 +403,10 @@ extern "C" int deep_ep_ascend_launch_barrier(
 extern "C" int deep_ep_ascend_launch_dispatch(
     deep_ep::ascend::elastic::DispatchArguments arguments,
     deep_ep::ascend::elastic::CoreTiling tiling, void* stream);
+extern "C" int deep_ep_ascend_launch_dispatch_pipeline(
+    deep_ep::ascend::elastic::DispatchArguments arguments,
+    deep_ep::ascend::elastic::CoreTiling tiling, void* producer_stream,
+    void* communication_stream);
 extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
     deep_ep::ascend::elastic::DispatchArguments arguments,
     deep_ep::ascend::elastic::CoreTiling tiling, void* stream);

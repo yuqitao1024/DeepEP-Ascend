@@ -147,6 +147,48 @@ int main() {
         !transport_stage_profile_service_cycles_valid(10, 20, 10))
         return 7;
 
+    auto accumulated_service = accumulate_transport_service_interval(
+        0, 0, 0, 0, 4, 100, 160);
+    if (!accumulated_service.valid ||
+        accumulated_service.command_count != 4 ||
+        accumulated_service.service_start_cycles != 100 ||
+        accumulated_service.service_end_cycles != 160)
+        return 44;
+    accumulated_service = accumulate_transport_service_interval(
+        accumulated_service.command_count,
+        accumulated_service.service_start_cycles,
+        accumulated_service.service_end_cycles, 0, 3, 170, 220);
+    if (!accumulated_service.valid ||
+        accumulated_service.command_count != 7 ||
+        accumulated_service.service_start_cycles != 100 ||
+        accumulated_service.service_end_cycles != 220)
+        return 45;
+    accumulated_service = accumulate_transport_service_interval(
+        accumulated_service.command_count,
+        accumulated_service.service_start_cycles,
+        accumulated_service.service_end_cycles, 2, 5, 230, 250);
+    if (!accumulated_service.valid ||
+        accumulated_service.command_count != 10 ||
+        accumulated_service.service_start_cycles != 100 ||
+        accumulated_service.service_end_cycles != 250 ||
+        accumulate_transport_service_interval(
+            accumulated_service.command_count,
+            accumulated_service.service_start_cycles,
+            accumulated_service.service_end_cycles, 5, 4, 260, 270).valid)
+        return 46;
+    const auto first_stage_start = record_transport_stage_start(0, 100);
+    const auto first_stage_end = record_transport_stage_end(
+        first_stage_start, 0, 160);
+    const auto accumulated_stage_start = record_transport_stage_start(
+        first_stage_start, 170);
+    const auto accumulated_stage_end = record_transport_stage_end(
+        accumulated_stage_start, first_stage_end, 220);
+    if (accumulated_stage_start != 100 || accumulated_stage_end != 220 ||
+        record_transport_stage_start(accumulated_stage_start, 0) != 100 ||
+        record_transport_stage_end(
+            accumulated_stage_start, accumulated_stage_end, 99) != 220)
+        return 47;
+
     const auto first_queue = command::aicore_merge_queue_depth_snapshots(
         TransportQueueDepthSnapshot{}, TransportQueueDepthSnapshot{3, 2});
     const auto aggregated_queue = command::aicore_merge_queue_depth_snapshots(

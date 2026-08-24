@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 
 namespace deep_ep::ascend::transport {
@@ -55,6 +56,62 @@ struct TransportQueueDepthSnapshot {
     std::uint32_t sq_depth = 0;
     std::uint32_t cq_depth = 0;
 };
+
+#if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && \
+    DEEP_EP_ASCEND_AICORE_URMA_SERVICE
+#define DEEP_EP_ASCEND_PROFILE_INLINE __aicore__ inline
+#else
+#define DEEP_EP_ASCEND_PROFILE_INLINE inline constexpr
+#endif
+
+struct TransportServiceIntervalAccumulation {
+    bool valid = false;
+    std::uint32_t command_count = 0;
+    std::uint64_t service_start_cycles = 0;
+    std::uint64_t service_end_cycles = 0;
+};
+
+DEEP_EP_ASCEND_PROFILE_INLINE TransportServiceIntervalAccumulation
+accumulate_transport_service_interval(
+    std::uint32_t existing_command_count,
+    std::uint64_t existing_service_start_cycles,
+    std::uint64_t existing_service_end_cycles,
+    std::uint32_t command_begin, std::uint32_t command_end,
+    std::uint64_t service_start_cycles,
+    std::uint64_t service_end_cycles) noexcept {
+    if (command_begin > command_end ||
+        service_start_cycles == 0 ||
+        service_end_cycles < service_start_cycles)
+        return {};
+    const auto command_delta = command_end - command_begin;
+    if (existing_command_count >
+        std::numeric_limits<std::uint32_t>::max() - command_delta)
+        return {};
+    const auto accumulated_start = existing_service_start_cycles == 0 ||
+            service_start_cycles < existing_service_start_cycles ?
+        service_start_cycles : existing_service_start_cycles;
+    const auto accumulated_end = service_end_cycles >
+            existing_service_end_cycles ?
+        service_end_cycles : existing_service_end_cycles;
+    return {true, static_cast<std::uint32_t>(
+                      existing_command_count + command_delta),
+            accumulated_start, accumulated_end};
+}
+
+DEEP_EP_ASCEND_PROFILE_INLINE std::uint64_t record_transport_stage_start(
+    std::uint64_t existing_start, std::uint64_t observed_start) noexcept {
+    return existing_start == 0 && observed_start != 0 ?
+        observed_start : existing_start;
+}
+
+DEEP_EP_ASCEND_PROFILE_INLINE std::uint64_t record_transport_stage_end(
+    std::uint64_t start, std::uint64_t existing_end,
+    std::uint64_t observed_end) noexcept {
+    return start != 0 && observed_end >= start && observed_end > existing_end ?
+        observed_end : existing_end;
+}
+
+#undef DEEP_EP_ASCEND_PROFILE_INLINE
 
 inline constexpr std::size_t kTransportStageProfileHeaderBytes =
     offsetof(TransportStageProfile, stages);

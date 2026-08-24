@@ -550,6 +550,9 @@ extern "C" int deep_ep_ascend_launch_barrier(
 extern "C" int deep_ep_ascend_launch_dispatch(
     deep_ep::ascend::elastic::DispatchArguments,
     deep_ep::ascend::elastic::CoreTiling, void*) { return 0; }
+extern "C" int deep_ep_ascend_launch_dispatch_pipeline(
+    deep_ep::ascend::elastic::DispatchArguments,
+    deep_ep::ascend::elastic::CoreTiling, void*, void*) { return 0; }
 extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
     deep_ep::ascend::elastic::DispatchArguments,
     deep_ep::ascend::elastic::CoreTiling, void*) { return 0; }

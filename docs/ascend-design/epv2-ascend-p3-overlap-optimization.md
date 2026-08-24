@@ -10,8 +10,10 @@ request-driven pipeline. The work is deliberately ordered:
 2. P3.1 gives `DeviceRequest`, `flush_async()`, and `wait()` a real single-
    channel lifecycle.
 3. P3.2 uses two request and workspace slots to overlap adjacent chunks.
-4. P3.3 is considered only when P3.0 proves that one SQ/CQ or one service
-   drain is saturated. P3.4 and P3.5 remain outside this implementation.
+4. P3.3 is considered only when the post-P3.2 SQ/CQ telemetry proves that one
+   channel or one service drain is saturated.
+5. P3.4 removes at most one measured resource or synchronization cost. P3.5
+   remains outside this implementation.
 
 The first production target is the direct scale-up path on one Ascend 950
 server. Hybrid and physical scale-out use the same fixed ABI, but they are not
@@ -616,3 +618,109 @@ flush completes the exact request target and preserves the request generation
 and terminal status. Host contract probes cover empty and pending misuse,
 range and ABI failures, queue reset, stale service generation, diagnostic
 propagation, short completion, timeout, and idempotent terminal waits.
+
+## 12. P3.2 Hardware Qualification
+
+P3.2 is retained as an opt-in direct-dispatch pipeline for the single-host
+Ascend 950 scale-up path. The setting
+`DEEP_EP_ASCEND_DISPATCH_PIPELINE_CHUNK_SLOTS=2048` divides an 8192-slot shard
+into four chunks and alternates two request/workspace slots. It applies only
+to synchronous, uncached, CPU-split dispatch and expanded dispatch. Cached
+dispatch, combine, hybrid routing, physical scale-out, and async/event modes
+continue to use their existing paths.
+
+The immutable candidate archive is
+`/home/pyptouser/yuqitao/deepep-archives/deepep-p32-1fae4521.tar.gz`, SHA-256
+`1fae4521c5c8bebf19711fa4bf4e83a08c1cf5efce26a93804ccb1f7018622ef`.
+It is based on P3.1 commit `d029ce73413bf09e238335d8c2bb482245061f8e`.
+The production extension and SIMT/AICore runner built from that archive have
+SHA-256 values `c9dfa5c7ec440cddc3bbe924340d04844250c12fc907890534b7fab8b6334b59`
+and `4318e227d056610e12e1915ff55fa0e4a28096fdea19d3082d20e0895e0fdfca`.
+
+### 12.1 Build and correctness gates
+
+| TaskQueue task | Scope | Result |
+| --- | --- | --- |
+| `task_20260825_024612_124368928903` | Production extension, SIMT/AICore runner, facade, 13 lifecycle cases, control and pipeline mini-cases | exit 0 |
+| `task_20260825_030215_137855619344` | Two-rank full 144-case matrix with two chunks | 144 cases and 720 operations passed, exit 0 |
+
+The 144-case report is
+`/home/pyptouser/yuqitao/deepep-results/p32-1fae4521-full144-r2/benchmark.json`,
+SHA-256 `f753a34d0046125f622324a9d6c904bb6ac2670b8c8065a773b3128c08335d13`.
+The first matrix submission, `task_20260825_025823_132996312277`, failed
+before importing DeepEP because its submission wrapper expanded the CANN
+library variables too early and could not load `libhccl.so`. The corrected
+task kept the variables quoted until the TaskQueue shell and required no code
+change.
+
+### 12.2 EP8 chunk sweep
+
+All runs used the representative FP8 case, the same workload manifest, 72
+data blocks, 30 warmups, and 30 measured iterations. The first task swept
+control, 4096, and 2048 slots; the next two tasks reversed or repeated the
+control/2048 order to expose process and device warm-state sensitivity.
+
+| TaskQueue task | Run order | Result directory | Result |
+| --- | --- | --- | --- |
+| `task_20260825_030415_140906913651` | control, 4096, 2048 | `/home/pyptouser/yuqitao/deepep-results/p32-1fae4521-ep8-sweep` | exit 0 |
+| `task_20260825_030828_14772647950` | 2048, control | `/home/pyptouser/yuqitao/deepep-results/p32-1fae4521-ep8-reverse` | exit 0 |
+| `task_20260825_031141_15008704710` | control, 2048 | `/home/pyptouser/yuqitao/deepep-results/p32-1fae4521-ep8-confirm` | exit 0 |
+
+The 4096-slot result regressed dispatch mean from 37.242 ms to 39.972 ms and
+is rejected. The 2048-slot setting has one cold run with little benefit, but
+the run-level median across all three orders improves both targeted
+operations and their tails:
+
+| Operation | Control median mean | 2048 median mean | Delta | Control median p95 | 2048 median p95 | Delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| dispatch | 38.017 ms | 30.871 ms | -18.80% | 39.599 ms | 34.686 ms | -12.41% |
+| expanded dispatch | 39.126 ms | 33.390 ms | -14.66% | 40.885 ms | 37.516 ms | -8.24% |
+
+The three 2048-slot dispatch means are 28.144, 37.976, and 30.871 ms. The
+expanded-dispatch means are 30.834, 39.760, and 33.390 ms. The cold result is
+retained rather than excluded: the optimization has warm-state sensitivity,
+so the table reports the median of complete runs instead of only its best
+sample. Untargeted operations also moved with device state, but by smaller
+median amounts: cached dispatch -8.72%, combine -3.48%, and reduced combine
+-1.19%. This is why the evidence is reported as a three-order qualification,
+not as a claim that every observed delta comes from chunk overlap.
+
+The control/4096/2048 JSON SHA-256 values are respectively
+`e8526653273a8c23ca469056e53fd6d44dd1e01cd5643dd98122cc825102ecdc`,
+`955a68e39c5d9ad6514ba18cb3a8c9432a03c4f386b11381639e2cc6fdd0e935`,
+and `df2d4f530b2ef8e28053b1b5e161d1abff78ccd1778739959ddbf3b08dd483c7`.
+The reverse-run 2048/control hashes are
+`921e519d651c785263fbefecb87c3525b14fd7fcd85a38c787f7071e7cda66ad`
+and `fe1626cf94abfa0f44d343827ef72a79ae265b3ff69856d61dc14017d6bff3ce`.
+The final confirmation control/2048 hashes are
+`3f124d24b7b1c6aa8dc8dd6f7827b98efacb68942e63a4c46ce06f6cba5d3871`
+and `ea66787952503e5bbbfd63b9cd1bcb24edf9791275132df65c92c280f5028838`.
+
+### 12.3 Measured cross-chunk overlap
+
+Task `task_20260825_031544_153457425045` profiled the retained 2048-slot
+setting on the full EP8 workload. Its report is
+`/home/pyptouser/yuqitao/deepep-results/p32-1fae4521-ep8-profile/benchmark.json`,
+SHA-256 `abeeff416aa015f7dc483a9f2ebf1675c192baa281151848fd3028095925eb2a`.
+
+Within one chunk, producer record completes before producer release starts.
+Therefore the intersection of the aggregate record and release intervals can
+only come from a later chunk being recorded while an earlier chunk is being
+released. Every rank has a positive intersection: dispatch ranges from
+3,804,069 to 3,912,264 cycles, and expanded dispatch ranges from 3,807,660 to
+3,859,121 cycles. This is direct cross-chunk overlap evidence, not the
+optimistic ceiling computed from independent phase maxima.
+
+## 13. P3.3 Queue And Channel Decision
+
+P3.3 is closed with no production change. Chunking increases the profiled
+dispatch command count from 30 to 31, but every rank still ends at SQ/CQ depth
+0/0 and the maximum observed SQ/CQ high-water marks remain 4/4. The EP8
+command capacity is 36, so only about 11% of the queue is occupied at the
+high-water point. Dispatch and expanded dispatch both show this result.
+
+Adding another channel or a second service drain would therefore target no
+observed saturation, while introducing another ordering, error-propagation,
+and resource-contention surface. P3.3 remains deferred until repeated
+telemetry approaches queue capacity or service submission becomes the
+measured critical bottleneck.

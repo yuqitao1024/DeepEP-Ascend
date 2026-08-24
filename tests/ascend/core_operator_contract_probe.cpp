@@ -6,6 +6,7 @@
 
 #include "csrc/backends/ascend/elastic/combine_parallel.hpp"
 #include "csrc/backends/ascend/elastic/dispatch_parallel.hpp"
+#include "csrc/backends/ascend/elastic/dispatch_pipeline_config.hpp"
 #include "csrc/backends/ascend/elastic/layout.hpp"
 #include "csrc/backends/ascend/elastic/kernels.hpp"
 #include "csrc/backends/ascend/elastic/tiling.hpp"
@@ -21,6 +22,8 @@ static_assert(std::is_standard_layout_v<SymmetricWindowLayout>);
 static_assert(std::is_trivially_copyable_v<SymmetricWindowLayout>);
 static_assert(std::is_standard_layout_v<CoreTiling>);
 static_assert(std::is_trivially_copyable_v<CoreTiling>);
+static_assert(std::is_standard_layout_v<DispatchPipelineState>);
+static_assert(std::is_trivially_copyable_v<DispatchPipelineState>);
 
 namespace {
 
@@ -203,8 +206,94 @@ bool topk_grouping_reference_contract() {
 }  // namespace
 
 int main() {
+    DispatchPipelineConfig pipeline_config{};
+    if (select_dispatch_pipeline_config(
+            "2048", false, true, false, false, 8, 8192,
+            &pipeline_config) != DispatchPipelineConfigStatus::kEnabled ||
+        !pipeline_config.enabled || pipeline_config.chunk_slots != 2048 ||
+        pipeline_config.chunk_count != 4)
+        return 91;
+    if (select_dispatch_pipeline_config(
+            nullptr, false, true, false, false, 8, 8192,
+            &pipeline_config) != DispatchPipelineConfigStatus::kDisabled ||
+        pipeline_config.enabled)
+        return 92;
+    for (const auto invalid_value : {"", "0", "-1", "2048x"}) {
+        if (select_dispatch_pipeline_config(
+                invalid_value, false, true, false, false, 8, 8192,
+                &pipeline_config) != DispatchPipelineConfigStatus::kInvalid)
+            return 93;
+    }
+    const DispatchPipelineConfigStatus disabled_cases[] = {
+        select_dispatch_pipeline_config(
+            "2048", true, true, false, false, 8, 8192,
+            &pipeline_config),
+        select_dispatch_pipeline_config(
+            "2048", false, false, false, false, 8, 8192,
+            &pipeline_config),
+        select_dispatch_pipeline_config(
+            "2048", false, true, true, false, 8, 8192,
+            &pipeline_config),
+        select_dispatch_pipeline_config(
+            "2048", false, true, false, true, 8, 8192,
+            &pipeline_config),
+        select_dispatch_pipeline_config(
+            "2048", false, true, false, false, 1, 8192,
+            &pipeline_config),
+        select_dispatch_pipeline_config(
+            "8192", false, true, false, false, 8, 8192,
+            &pipeline_config),
+        select_dispatch_pipeline_config(
+            "512", false, true, false, false, 8, 8192,
+            &pipeline_config),
+    };
+    for (const auto status : disabled_cases) {
+        if (status != DispatchPipelineConfigStatus::kDisabled)
+            return 94;
+    }
     if (!topk_grouping_reference_contract())
         return 52;
+    DispatchChunkPlan chunk_plan{};
+    if (!build_dispatch_chunk_plan(8192, 2048, &chunk_plan) ||
+        chunk_plan.chunk_count != 4 ||
+        chunk_plan.chunk_slots != 2048)
+        return 86;
+    const std::uint32_t expected_pipeline_slots[] = {0, 1, 0, 1};
+    const std::uint64_t expected_peer_counts[] = {2048, 2048, 904, 0};
+    for (std::uint32_t chunk = 0; chunk < chunk_plan.chunk_count; ++chunk) {
+        std::uint64_t begin = 0;
+        std::uint64_t count = 0;
+        if (dispatch_pipeline_slot(chunk) != expected_pipeline_slots[chunk] ||
+            !dispatch_chunk_peer_range(
+                chunk_plan, chunk, 5000, &begin, &count) ||
+            begin != static_cast<std::uint64_t>(chunk) * 2048 ||
+            count != expected_peer_counts[chunk])
+            return 87;
+        if (!dispatch_chunk_peer_range(
+                chunk_plan, chunk, 0, &begin, &count) || count != 0)
+            return 88;
+    }
+    if (build_dispatch_chunk_plan(8192, 0, &chunk_plan) ||
+        dispatch_chunk_peer_range(chunk_plan, 4, 5000, nullptr, nullptr))
+        return 89;
+    auto pipeline_input = valid_input();
+    pipeline_input.mode_flags = mode_bit(CoreMode::kPipeline);
+    pipeline_input.data_num_blocks = 72;
+    CoreTiling pipeline_tiling{};
+    if (!build_core_tiling(pipeline_input, &pipeline_tiling).ok() ||
+        pipeline_tiling.workspace_layout.dispatch_pipeline_bytes !=
+            sizeof(DispatchPipelineState) ||
+        pipeline_tiling.workspace_layout.dispatch_pipeline_offset %
+                alignof(DispatchPipelineState) != 0 ||
+        pipeline_tiling.workspace_layout.dispatch_pipeline_offset +
+                pipeline_tiling.workspace_layout.dispatch_pipeline_bytes >
+            pipeline_tiling.workspace_layout.scratch_offset +
+                pipeline_tiling.workspace_layout.scratch_bytes)
+        return 90;
+    DispatchPipelineState pipeline_state{};
+    if (&pipeline_state.slots[0].request ==
+        &pipeline_state.slots[1].request)
+        return 91;
     if (const int boundary_error = direct_device_index_boundary_contract();
         boundary_error != 0)
         return boundary_error;

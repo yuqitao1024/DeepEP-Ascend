@@ -250,6 +250,11 @@ extern "C" int deep_ep_ascend_launch_dispatch(
     arguments.destination_slots[1] = 0;
     return 0;
 }
+extern "C" int deep_ep_ascend_launch_dispatch_pipeline(
+    elastic::DispatchArguments arguments, elastic::CoreTiling tiling,
+    void* producer_stream, void*) {
+    return deep_ep_ascend_launch_dispatch(arguments, tiling, producer_stream);
+}
 extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
     elastic::DispatchArguments arguments, elastic::CoreTiling tiling, void*) {
     auto* control = reinterpret_cast<elastic::SymmetricControlHeader*>(

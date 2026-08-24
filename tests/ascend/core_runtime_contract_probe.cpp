@@ -34,6 +34,7 @@ namespace {
 enum LaunchId : int {
     kBarrierLaunch = 1,
     kDispatchLaunch,
+    kDispatchPipelineLaunch,
     kDispatchEpilogueLaunch,
     kCombineLaunch,
     kCombineEpilogueLaunch,
@@ -416,6 +417,14 @@ extern "C" int deep_ep_ascend_launch_dispatch(
     return record_launch(kDispatchLaunch);
 }
 
+extern "C" int deep_ep_ascend_launch_dispatch_pipeline(
+    DispatchArguments arguments, CoreTiling tiling, void*, void*) {
+    dispatch_generation = arguments.generation;
+    dispatch_timeout_cycles = arguments.timeout_cycles;
+    dispatch_world_rank = tiling.transport_context.topology.world_rank;
+    return record_launch(kDispatchPipelineLaunch);
+}
+
 extern "C" int deep_ep_ascend_launch_dispatch_epilogue(
     DispatchArguments, CoreTiling, void*) {
     return record_launch(kDispatchEpilogueLaunch);
@@ -442,7 +451,7 @@ extern "C" int deep_ep_ascend_launch_combine_epilogue(
 }
 
 int main() {
-    static_assert(kCoreTilingAbiVersion == 20);
+    static_assert(kCoreTilingAbiVersion == 21);
     auto hybrid_tiling = valid_two_dimensional_tiling(
         OperationKind::kDispatch, 0,
         transport::TransportTopologyKind::kLogicalSimulation,
@@ -778,6 +787,30 @@ int main() {
     async_cpu_sync_dispatch.mode_flags |= mode_bit(CoreMode::kAsyncEvent);
     if (!validate_internal_launch(async_cpu_sync_dispatch, storage).ok())
         return 87;
+    auto unsupported_full_pipeline_dispatch = valid_tiling(
+        OperationKind::kDispatch, ElementKind::kBFloat16, 0, 2,
+        mode_bit(CoreMode::kPipeline));
+    export_transport(&unsupported_full_pipeline_dispatch);
+    if (validate_internal_launch(
+            unsupported_full_pipeline_dispatch,
+            required_core_launch_storage(unsupported_full_pipeline_dispatch))
+            .code != CoreRuntimeStatusCode::kUnsupportedMode)
+        return 88;
+    auto pipeline_dispatch = valid_tiling(
+        OperationKind::kDispatch, ElementKind::kBFloat16, 0, 2,
+        mode_bit(CoreMode::kCpuSync) | mode_bit(CoreMode::kPipeline));
+    export_transport(&pipeline_dispatch);
+    if (!validate_internal_launch(
+            pipeline_dispatch,
+            required_core_launch_storage(pipeline_dispatch)).ok())
+        return 121;
+    auto cached_pipeline_dispatch = pipeline_dispatch;
+    cached_pipeline_dispatch.mode_flags |= mode_bit(CoreMode::kCached);
+    if (validate_internal_launch(
+            cached_pipeline_dispatch,
+            required_core_launch_storage(cached_pipeline_dispatch)).code !=
+        CoreRuntimeStatusCode::kUnsupportedMode)
+        return 89;
     unsupported = dispatch_tiling;
     unsupported.mode_flags |= mode_bit(CoreMode::kCpuSync) |
                               mode_bit(CoreMode::kHybrid) |
@@ -897,6 +930,7 @@ int main() {
     dispatch.source_metadata = integers;
     dispatch.generation = 11;
     dispatch.timeout_cycles = 101;
+    dispatch.pipeline_chunk_slots = 4;
 
     reset_launches();
     if (!launch_internal_dispatch(
@@ -910,6 +944,14 @@ int main() {
              reinterpret_cast<void*>(0x6161)).ok() ||
         !trace_is(kDispatchLaunch))
         return 88;
+    reset_launches();
+    if (!launch_internal_dispatch_pipeline(
+             dispatch, pipeline_dispatch,
+             required_core_launch_storage(pipeline_dispatch),
+             reinterpret_cast<void*>(0x6161),
+             reinterpret_cast<void*>(0x6262)).ok() ||
+        !trace_is(kDispatchPipelineLaunch))
+        return 120;
     reset_launches();
     if (!launch_internal_dispatch_epilogue(
              dispatch, async_cpu_sync_dispatch, storage,

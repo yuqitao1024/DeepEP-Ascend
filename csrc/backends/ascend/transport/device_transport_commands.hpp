@@ -584,6 +584,16 @@ DEEP_EP_ASCEND_SIMT_CALLEE void flush_async(
             channel);
         return;
     }
+    auto* state = detail::service_state(queue);
+    if (state == nullptr) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidQueue;
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidQueue,
+            TransportCommandOpcode::kFlush, team, peer_rank, world_peer,
+            channel);
+        return;
+    }
 
     const auto command_begin = simt::load_observed(&queue->count);
     const auto queue_generation = simt::load_observed(&queue->generation);
@@ -591,6 +601,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE void flush_async(
     flush_command.opcode = TransportCommandOpcode::kFlush;
     flush_command.scope = scope;
     flush_command.channel = channel;
+    simt::store_published(
+        &state->consumed_generation, std::uint64_t{0});
     if (!detail::append(queue, flush_command)) {
         request->state = DeviceRequestState::kFailed;
         request->terminal_error = DeviceTransportError::kCommandOverflow;
