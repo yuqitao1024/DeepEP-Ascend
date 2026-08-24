@@ -112,6 +112,9 @@ public:
 
     TransportCapabilities capabilities() const noexcept override {
         auto capabilities = kValidatedCapabilities;
+        if (config_.stage_profile_enabled)
+            capabilities |= capability_bit(
+                TransportCapability::kStageProfile);
 #if DEEP_EP_ASCEND_TESTING
         if (config_.topology_kind == TransportTopologyKind::kPhysical2D)
             capabilities |= capability_bit(

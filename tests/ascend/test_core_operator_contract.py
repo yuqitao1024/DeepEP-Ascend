@@ -1129,8 +1129,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                     self.assertIn(argument, call.group(1), function_name)
             operation = source_name.removesuffix(".asc")
             launch_boundary = (
-                f"launch_direct_{operation}_stage"
-                if f"launch_direct_{operation}_stage" in source
+                f"launch_{operation}_kernel"
+                if f"launch_{operation}_kernel" in source
                 else f"deep_ep_ascend_launch_{operation}")
             self.assertRegex(
                 source,

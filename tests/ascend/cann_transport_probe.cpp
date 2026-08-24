@@ -292,6 +292,9 @@ void check_rank_sized_command_queue() {
             1, transport::CooperationScope::kParticipant).ok());
         transport::DeviceTransportContext context{};
         CHECK(created.transport->export_device_context(&context).ok());
+        CHECK(!transport::has_capability(
+            context.capabilities,
+            transport::TransportCapability::kStageProfile));
         CHECK(fake.allocation_count == 5);
         CHECK(fake.allocation_bytes[0] ==
               static_cast<std::uint64_t>(fixture.command_capacity) *
@@ -435,7 +438,10 @@ void check_success_and_reverse_cleanup() {
     auto created = transport::make_cann_transport(config, fake.api());
     CHECK(created.status.ok());
     CHECK(created.transport != nullptr);
-    CHECK(created.transport->capabilities() == kValidatedCapabilities);
+    CHECK(created.transport->capabilities() ==
+          (kValidatedCapabilities |
+           transport::capability_bit(
+               transport::TransportCapability::kStageProfile)));
 
     alignas(64) std::uint8_t window[4096]{};
     CHECK(created.transport->register_symmetric_window(window, sizeof(window)).ok());
@@ -449,7 +455,13 @@ void check_success_and_reverse_cleanup() {
     CHECK(context.peer_address_table == 0x300000);
     CHECK(context.channel_table == 0x200000);
     CHECK(context.backend_context != 0);
-    CHECK(context.capabilities == kValidatedCapabilities);
+    CHECK(context.capabilities ==
+          (kValidatedCapabilities |
+           transport::capability_bit(
+               transport::TransportCapability::kStageProfile)));
+    CHECK(transport::has_capability(
+        context.capabilities,
+        transport::TransportCapability::kStageProfile));
     CHECK(!transport::has_capability(
         context.capabilities, transport::TransportCapability::kDirectPeerPointer));
     CHECK(!transport::has_capability(

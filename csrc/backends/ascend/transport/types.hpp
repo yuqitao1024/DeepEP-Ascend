@@ -58,6 +58,7 @@ enum class TransportCapability : std::uint8_t {
     kDeviceBarrier,
     kScaleUpTeam,
     kScaleOutTeam,
+    kStageProfile,
 };
 
 using TransportCapabilities = std::uint64_t;
@@ -86,6 +87,7 @@ inline const char* capability_name(TransportCapability capability) {
         case TransportCapability::kDeviceBarrier: return "device_barrier";
         case TransportCapability::kScaleUpTeam: return "scale_up_team";
         case TransportCapability::kScaleOutTeam: return "scale_out_team";
+        case TransportCapability::kStageProfile: return "stage_profile";
     }
     return "unknown";
 }
