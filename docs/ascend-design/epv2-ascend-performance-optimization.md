@@ -530,6 +530,9 @@ lifecycle. The exact candidate was commit
 TaskQueue task `task_20260824_163111_52195411081` built that archive; task
 `task_20260824_163521_5505779125` passed the complete two-rank SIMT/AICore and
 production correctness qualification on devices 0,1; task
+`task_20260824_163705_56259211433` stopped before benchmark because the supplied
+baseline staging path was absent; task `task_20260824_163919_5752582788`
+reconstructed and built the immutable baseline archive; task
 `task_20260824_164240_58668910244` completed the disabled-profile EP8 control;
 and task `task_20260824_164801_6088375783` completed the enabled EP8 profile.
 
@@ -561,6 +564,34 @@ and -0.229% respectively for the five rows above. Each is inside observed
 candidate run-to-run variation, so the profiling instrumentation remains.
 The baseline predates schema v3, making that comparison a disabled-overhead
 control rather than a cross-schema formal comparison.
+
+The complete per-run ABBA evidence, exact TaskQueue command blocks, and
+environment context are committed in
+`epv2-ascend-p3-overlap-optimization.md`, section 10.1.1 and section 10.2;
+they are not delegated to a temporary report. The durable raw artifacts are:
+
+| Artifact | Result path | SHA-256 |
+| --- | --- | --- |
+| Baseline A | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/baseline-a.json` | `32c479d81b8933ec8c8cb4f89e0bac3c874a83401e8fc4ee98ce5d1592e1a27b` |
+| Candidate A | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/candidate-a.json` | `8156ac39e610212b410297984bb214ac2c8e093700f24bdf2ab73c3703be52ba` |
+| Candidate B | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/candidate-b.json` | `99422d1ea6cd9721e6305aa88787860d3c77fdd275319eb5be6ebbcc57100a1e` |
+| Baseline B | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/baseline-b.json` | `fb9240ef9e8f51f186a8b5b3fa10af095b011fa739ff4ce5cf8e023b776f7463` |
+| Enabled profile | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-profile/benchmark.json` | `e5b79ad753624523c3433481656096721c3b1f37ac08c5c6e591009a221b6a80` |
+| Two-rank correctness | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-r2/production-correctness.json` | `2c08868fa799ba306d9244bc1302518ec70b0c10e4e6f053175daff29ad1686a` |
+
+The corresponding durable provenance files are `p3-c28dda33-ep8-ab/provenance.txt`,
+`p3-c28dda33-ep8-profile/provenance.txt`, and `p3-c28dda33-r2/provenance.txt`
+under `/home/pyptouser/yuqitao/deepep-results`. For each operation,
+`control_mean = (baseline_A + baseline_B) / 2`,
+`candidate_mean = (candidate_A + candidate_B) / 2`, and
+`delta_percent = (candidate_mean / control_mean - 1) * 100`. Pair variation is
+exactly `(max(A, B) / min(A, B) - 1) * 100`.
+
+Phase aggregation is component-wise across ranks: the benchmark takes the
+maximum of each phase independently. A reported phase vector can therefore
+combine producer, network, and consumer components from different ranks. The
+overlap ceiling is a directional optimistic bound under that component-wise
+worst-rank diagnostic, not a measured speedup for a single observed rank.
 
 Every operation/rank emitted 30 commands with seven payload puts; completed
 SQ/CQ depths were 0/0 and SQ/CQ high-water marks were only 2/2. P3.1 may

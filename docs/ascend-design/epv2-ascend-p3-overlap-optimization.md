@@ -229,6 +229,8 @@ All NPU work ran serially through TaskQueue with CANN 9.2,
 | --- | --- | --- |
 | `task_20260824_163111_52195411081` | Archive extraction and production/SIMT/AICore builds | exit 0 |
 | `task_20260824_163521_5505779125` | Two-rank SIMT/AICore and production correctness on devices 0,1 | exit 0 |
+| `task_20260824_163705_56259211433` | First disabled AB attempt; baseline staging path absent before benchmark | exit 1 |
+| `task_20260824_163919_5752582788` | Immutable baseline reconstruction and build | exit 0 |
 | `task_20260824_164240_58668910244` | EP8 disabled-profile ABBA control | exit 0 |
 | `task_20260824_164801_6088375783` | EP8 enabled-profile representative case | exit 0 |
 
@@ -255,6 +257,116 @@ The disabled ABBA result directory is
 SHA-256 values are recorded in the task report under
 `/tmp/deepep-ascend-plans/p3-overlap-sdd/task-4-report.md`.
 
+### 10.1.1 Exact archive, environment, and build commands
+
+The local candidate archive command below was re-run against the immutable
+commit and reproduced the recorded candidate archive SHA-256. The remote copy
+used for build and benchmark was
+`/home/pyptouser/yuqitao/deepep-archives/deepep-p3-f73da24-c28dda33.tar.gz`;
+the staging command verifies it before extraction.
+
+```bash
+git archive --format=tar f73da24b954be6575eee6be877e5f3845dc1f48c | gzip -n > /tmp/deepep-p3-f73da24.tar.gz
+sha256sum /tmp/deepep-p3-f73da24.tar.gz
+# c28dda33c8019e4d40805728a1e1fb7bebdba9f27fa1a8f8ef1dc695a86d3286
+```
+
+Every remote task loaded this exact context before its build or benchmark:
+
+```bash
+source /usr/local/Ascend/cann-9.2.0/set_env.sh
+export HCOMM_ROOT=/home/pyptouser/yuqitao/Ascend/hcomm-deepep-current/cann
+export PATH="$HCOMM_ROOT/bin:/home/pyptouser/yuqitao/tools/cmake-3.28.4/bin${PATH:+:$PATH}"
+export LD_LIBRARY_PATH="$HCOMM_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBRARY_PATH="$HCOMM_ROOT/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}"
+export CPLUS_INCLUDE_PATH="$HCOMM_ROOT/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+export CPATH="$HCOMM_ROOT/include${CPATH:+:$CPATH}"
+export CMAKE_INCLUDE_PATH="$HCOMM_ROOT/include${CMAKE_INCLUDE_PATH:+:$CMAKE_INCLUDE_PATH}"
+export CMAKE_LIBRARY_PATH="$HCOMM_ROOT/lib64${CMAKE_LIBRARY_PATH:+:$CMAKE_LIBRARY_PATH}"
+export PYTHONPATH="$HCOMM_ROOT/python/site-packages${PYTHONPATH:+:$PYTHONPATH}"
+source /home/pyptouser/yuqitao/venvs/deepep-ascend-py310/bin/activate
+```
+
+Task `task_20260824_163111_52195411081` staged and built the candidate as
+follows. Its durable provenance is
+`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-build/provenance.txt`; the
+runner path is
+`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-build/simt_urma_runtime/deep_ep_ascend_urma_runner.so`.
+
+```bash
+archive=/home/pyptouser/yuqitao/deepep-archives/deepep-p3-f73da24-c28dda33.tar.gz
+archive_sha256=c28dda33c8019e4d40805728a1e1fb7bebdba9f27fa1a8f8ef1dc695a86d3286
+source_dir=/home/pyptouser/yuqitao/deepep-staging/p3-c28dda33c8019e4d
+result_dir=/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-build
+runner_dir="$result_dir/simt_urma_runtime"
+test "$(sha256sum "$archive" | awk '{print $1}')" = "$archive_sha256"
+test ! -e "$source_dir"
+mkdir -p "$source_dir" "$result_dir"
+tar -xzf "$archive" -C "$source_dir"
+cd "$source_dir"
+DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace
+cmake -S tests/ascend/simt_urma -B "$runner_dir" -DDEEP_EP_ASCEND_STAGED_URMA=ON -DDEEP_EP_BUILD_URMA_RUNTIME=ON
+cmake --build "$runner_dir" --target deep_ep_ascend_urma_runner --parallel 2
+test -s "$runner_dir/deep_ep_ascend_urma_runner.so"
+```
+
+The original supplied baseline staging directory was absent before the first
+AB attempt; this was staging loss, not a P3 benchmark failure. Task
+`task_20260824_163919_5752582788` reconstructed and built the immutable
+baseline, whose durable build provenance is
+`/home/pyptouser/yuqitao/deepep-results/p3-5fc0940a-baseline-build/provenance.txt`.
+
+```bash
+archive=/home/pyptouser/yuqitao/deepep-archives/deepep-main-2bd268f-5fc0940a.tar.gz
+archive_sha256=5fc0940a373391424243188400e876ffbd0bf56840c1fe4769384b4707b6e983
+source_dir=/home/pyptouser/yuqitao/deepep-staging/baseline-5fc0940a37339142
+result_dir=/home/pyptouser/yuqitao/deepep-results/p3-5fc0940a-baseline-build
+test "$(sha256sum "$archive" | awk '{print $1}')" = "$archive_sha256"
+test ! -e "$source_dir"
+mkdir -p "$source_dir" "$result_dir"
+tar -xzf "$archive" -C "$source_dir"
+cd "$source_dir"
+DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace
+```
+
+Task `task_20260824_163521_5505779125` used the candidate staging and runner
+above, unset profiling, and ran these two-rank qualification commands. Its
+durable result directory is `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-r2`
+with `simt-aicore.log`, `production-correctness.log`,
+`production-correctness.json`, and `provenance.txt`.
+
+```bash
+unset DEEP_EP_ASCEND_PROFILE_STAGES
+cd /home/pyptouser/yuqitao/deepep-staging/p3-c28dda33c8019e4d
+python -m torch.distributed.run --standalone --nproc-per-node=2 tests/ascend/simt_urma/run_two_rank_probe.py --runner /home/pyptouser/yuqitao/deepep-results/p3-c28dda33-build/simt_urma_runtime/deep_ep_ascend_urma_runner.so --cases put,put-value64,faa64,signal,signal-set,flush,payload-signal-order,barrier-repeat,queue-wrap,phase-boundary,teardown | tee /home/pyptouser/yuqitao/deepep-results/p3-c28dda33-r2/simt-aicore.log
+python -m torch.distributed.run --standalone --nproc-per-node=2 tests/ascend/benchmark/bench_ep.py --cases ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0 --num-tokens 16 --hidden 128 --num-topk 2 --num-experts 4 --num-sms 72 --warmups 1 --iterations 1 --output /home/pyptouser/yuqitao/deepep-results/p3-c28dda33-r2/production-correctness.json | tee /home/pyptouser/yuqitao/deepep-results/p3-c28dda33-r2/production-correctness.log
+```
+
+Task `task_20260824_164240_58668910244` ran the disabled ABBA control after
+the common environment and `unset DEEP_EP_ASCEND_PROFILE_STAGES`.
+
+```bash
+baseline_source=/home/pyptouser/yuqitao/deepep-staging/baseline-5fc0940a37339142
+candidate_source=/home/pyptouser/yuqitao/deepep-staging/p3-c28dda33c8019e4d
+manifest=/home/pyptouser/yuqitao/deepep-results/ascend950-representative-60e3d08/workload.json
+result_dir=/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab
+case_id=ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0
+cd "$baseline_source" && python -m torch.distributed.run --standalone --nproc-per-node=8 tests/ascend/benchmark/bench_ep.py --cases "$case_id" --workload-manifest "$manifest" --num-sms 72 --warmups 30 --iterations 30 --output "$result_dir/baseline-a.json"
+cd "$candidate_source" && python -m torch.distributed.run --standalone --nproc-per-node=8 tests/ascend/benchmark/bench_ep.py --cases "$case_id" --workload-manifest "$manifest" --num-sms 72 --warmups 30 --iterations 30 --output "$result_dir/candidate-a.json"
+cd "$candidate_source" && python -m torch.distributed.run --standalone --nproc-per-node=8 tests/ascend/benchmark/bench_ep.py --cases "$case_id" --workload-manifest "$manifest" --num-sms 72 --warmups 30 --iterations 30 --output "$result_dir/candidate-b.json"
+cd "$baseline_source" && python -m torch.distributed.run --standalone --nproc-per-node=8 tests/ascend/benchmark/bench_ep.py --cases "$case_id" --workload-manifest "$manifest" --num-sms 72 --warmups 30 --iterations 30 --output "$result_dir/baseline-b.json"
+```
+
+Task `task_20260824_164801_6088375783` ran the enabled candidate profile from
+`/home/pyptouser/yuqitao/deepep-staging/p3-c28dda33c8019e4d`. Its durable
+provenance is
+`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-profile/provenance.txt`.
+
+```bash
+cd /home/pyptouser/yuqitao/deepep-staging/p3-c28dda33c8019e4d
+python -m torch.distributed.run --standalone --nproc-per-node=8 tests/ascend/benchmark/bench_ep.py --cases ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0 --workload-manifest /home/pyptouser/yuqitao/deepep-results/ascend950-representative-60e3d08/workload.json --num-sms 72 --warmups 30 --iterations 30 --profile-stages --output /home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-profile/benchmark.json
+```
+
 ### 10.2 Disabled-profile control
 
 The control order was baseline A, candidate A, candidate B, baseline B, using
@@ -277,6 +389,40 @@ Each candidate disabled-profile mean is within its observed candidate
 run-to-run variation. P3.0 profiling is retained; no arbitrary overhead
 threshold was used.
 
+The full per-run values are durable evidence, not a temporary-report-only
+artifact:
+
+| JSON artifact | Durable result path | SHA-256 | Operation | Mean ms | p50 ms | p95 ms | Logical GB/s |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| baseline A | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/baseline-a.json` | `32c479d81b8933ec8c8cb4f89e0bac3c874a83401e8fc4ee98ce5d1592e1a27b` | dispatch | 37.976 | 37.827 | 39.421 | 205.027 |
+| baseline A | same | same | expanded_dispatch | 38.278 | 38.286 | 40.109 | 241.691 |
+| baseline A | same | same | cached_dispatch | 84.948 | 84.789 | 86.869 | 91.657 |
+| baseline A | same | same | combine | 141.360 | 141.327 | 143.417 | 77.117 |
+| baseline A | same | same | reduced_combine | 168.260 | 168.056 | 169.846 | 64.788 |
+| candidate A | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/candidate-a.json` | `8156ac39e610212b410297984bb214ac2c8e093700f24bdf2ab73c3703be52ba` | dispatch | 38.132 | 38.024 | 39.533 | 204.189 |
+| candidate A | same | same | expanded_dispatch | 38.586 | 38.591 | 39.839 | 239.760 |
+| candidate A | same | same | cached_dispatch | 83.842 | 83.907 | 85.566 | 92.866 |
+| candidate A | same | same | combine | 139.572 | 139.542 | 141.190 | 78.104 |
+| candidate A | same | same | reduced_combine | 167.409 | 167.508 | 169.042 | 65.117 |
+| candidate B | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/candidate-b.json` | `99422d1ea6cd9721e6305aa88787860d3c77fdd275319eb5be6ebbcc57100a1e` | dispatch | 37.199 | 37.142 | 38.694 | 209.308 |
+| candidate B | same | same | expanded_dispatch | 38.269 | 38.217 | 39.549 | 241.746 |
+| candidate B | same | same | cached_dispatch | 85.523 | 85.467 | 86.986 | 91.040 |
+| candidate B | same | same | combine | 140.950 | 140.992 | 142.591 | 77.341 |
+| candidate B | same | same | reduced_combine | 168.193 | 168.328 | 169.200 | 64.814 |
+| baseline B | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/baseline-b.json` | `fb9240ef9e8f51f186a8b5b3fa10af095b011fa739ff4ce5cf8e023b776f7463` | dispatch | 37.478 | 37.385 | 39.395 | 207.749 |
+| baseline B | same | same | expanded_dispatch | 38.252 | 38.348 | 39.312 | 241.855 |
+| baseline B | same | same | cached_dispatch | 83.448 | 83.593 | 85.546 | 93.305 |
+| baseline B | same | same | combine | 140.397 | 140.285 | 143.501 | 77.646 |
+| baseline B | same | same | reduced_combine | 168.113 | 167.963 | 169.837 | 64.844 |
+
+The durable ABBA provenance file is
+`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/provenance.txt`.
+For each operation, `control_mean = (baseline_A + baseline_B) / 2`,
+`candidate_mean = (candidate_A + candidate_B) / 2`, and
+`delta_percent = (candidate_mean / control_mean - 1) * 100`. The corresponding
+pair variation is exactly `(max(A, B) / min(A, B) - 1) * 100`; this is the
+formula used for both control and candidate variation columns above.
+
 ### 10.3 Enabled EP8 latency and pipeline evidence
 
 The following device-event figures are max-rank operation values. Logical
@@ -296,6 +442,14 @@ Ascend 950PR/950DT `GetSystemCycle()` is 1 GHz. Thus one cycle is 0.001 us,
 `time_us = cycles / 1000`, and `time_ms = cycles / 1000000`. The phase tables
 below show cycles with the converted milliseconds; the detailed task report
 also retains microseconds for every value.
+
+The benchmark takes the maximum of each phase independently across ranks.
+Consequently, a reported phase vector is a component-wise worst-rank
+diagnostic: its producer, network, and consumer components can come from
+different ranks and do not describe one observed rank's end-to-end trace. The
+resulting overlap ceilings are directional optimistic bounds under that
+aggregation, before fill/drain, launch, and resource-contention costs; they are
+not measured per-rank speedups.
 
 | Operation | Producer | Publication | Service submit | CQ wait | Consumer wait | Consumer compute | Epilogue |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
