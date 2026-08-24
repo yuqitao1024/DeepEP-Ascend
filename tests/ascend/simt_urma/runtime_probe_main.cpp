@@ -465,8 +465,7 @@ public:
             state.source =
                 (static_cast<std::uint64_t>(rank + 1) << 32U) | generation;
             state.generation = generation;
-            if (!probe::reset_synchronize_and_launch(
-                    finalize_profile_pressure,
+            if (!probe::reset_and_launch(
                     [&] {
                         return check_acl(
                             aclrtMemcpy(
@@ -474,18 +473,6 @@ public:
                                 sizeof(state), ACL_MEMCPY_HOST_TO_DEVICE),
                             "initialize runtime state", error,
                             error_capacity);
-                    },
-                    [&] {
-                        const auto status = transport_->host_barrier();
-                        if (status.ok())
-                            return true;
-                        write_error(
-                            error, error_capacity,
-                            "final profile host barrier failed: operation=%s "
-                            "backend=%d %s",
-                            status.operation.c_str(), status.backend_code,
-                            status.message.c_str());
-                        return false;
                     },
                     [&] {
                         const int launch_status =

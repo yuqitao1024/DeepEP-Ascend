@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <type_traits>
 
+#include "csrc/backends/ascend/transport/device_transport.hpp"
 #include "csrc/backends/ascend/transport/transport_commands.hpp"
 #include "csrc/backends/ascend/transport/types.hpp"
 
@@ -43,15 +44,34 @@ constexpr bool runtime_case_records_transport_profile(
     return runtime_case != RuntimeCase::kPhaseBoundary;
 }
 
-template <typename Reset, typename Synchronize, typename Launch>
-bool reset_synchronize_and_launch(
-    bool synchronize_ranks, Reset&& reset, Synchronize&& synchronize,
-    Launch&& launch) {
+template <typename Reset, typename Launch>
+bool reset_and_launch(Reset&& reset, Launch&& launch) {
     if (!reset())
         return false;
-    if (synchronize_ranks && !synchronize())
-        return false;
     return launch();
+}
+
+template <typename Transport>
+DEEP_EP_ASCEND_SIMT_CALLEE void enqueue_profile_mixed_final_commands(
+    Transport& transport, int peer, DeviceAddress destination,
+    DeviceAddress source, std::uint64_t source_value,
+    DeviceAddress atomic_value, const TeamPeer& signal_route,
+    std::uint64_t generation, std::uint64_t barrier_timeout) {
+    transport.device_barrier(
+        kWorldTeamMask, kNullDeviceAddress, barrier_timeout);
+    transport.put(
+        TransportTeam::kWorld, peer, destination, source,
+        sizeof(std::uint64_t), CooperationScope::kParticipant,
+        MemorySegment::kDevice, kDefaultOptions, RemoteAction::none());
+    transport.put_value(
+        TransportTeam::kWorld, peer, destination, source_value,
+        sizeof(std::uint64_t), kDefaultOptions);
+    transport.remote_add_release(
+        TransportTeam::kWorld, peer, atomic_value, 1);
+    transport.signal(
+        signal_route.team, signal_route.peer,
+        RemoteAction::signal_set(0, generation));
+    transport.flush(CooperationScope::kParticipant);
 }
 
 struct alignas(64) RuntimeState {

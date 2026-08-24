@@ -216,7 +216,7 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
             "            1, false, stream);",
             runtime)
 
-    def test_profile_final_launch_synchronizes_after_reset(self):
+    def test_profile_final_launch_uses_leading_device_barrier(self):
         with tempfile.TemporaryDirectory() as directory:
             executable = pathlib.Path(directory) / "runtime_launch_sequence"
             compile_probe = subprocess.run(
