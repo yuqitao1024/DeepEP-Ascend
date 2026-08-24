@@ -1,10 +1,10 @@
 #include <cstdlib>
+#include <cstdint>
 #include <vector>
 
 #include "tests/ascend/simt_urma/runtime_probe.hpp"
 
 namespace probe = deep_ep::ascend::transport::runtime_probe;
-namespace transport = deep_ep::ascend::transport;
 
 #define CHECK(condition)           \
     do {                           \
@@ -12,93 +12,62 @@ namespace transport = deep_ep::ascend::transport;
             std::abort();          \
     } while (false)
 
-namespace {
-
-class RecordingTransport {
-public:
-    void device_barrier(
-        std::uint32_t, transport::DeviceAddress, std::uint64_t) {
-        commands.push_back(transport::TransportCommandOpcode::kBarrier);
-    }
-
-    void put(
-        transport::TransportTeam, int, transport::DeviceAddress,
-        transport::DeviceAddress, std::size_t,
-        transport::CooperationScope, transport::MemorySegment,
-        transport::DeviceOptions, const transport::RemoteAction&) {
-        commands.push_back(transport::TransportCommandOpcode::kPut);
-    }
-
-    void put_value(
-        transport::TransportTeam, int, transport::DeviceAddress,
-        std::uint64_t, std::uint32_t, transport::DeviceOptions) {
-        commands.push_back(transport::TransportCommandOpcode::kPutValue64);
-    }
-
-    void remote_add_release(
-        transport::TransportTeam, int, transport::DeviceAddress,
-        std::int64_t) {
-        commands.push_back(transport::TransportCommandOpcode::kRemoteAdd64);
-    }
-
-    void signal(
-        transport::TransportTeam, int, const transport::RemoteAction&) {
-        commands.push_back(transport::TransportCommandOpcode::kSignal);
-    }
-
-    void flush(transport::CooperationScope) {
-        commands.push_back(transport::TransportCommandOpcode::kFlush);
-    }
-
-    std::vector<transport::TransportCommandOpcode> commands;
-};
-
-}  // namespace
-
 int main() {
+    void* const expected_stream = reinterpret_cast<void*>(
+        std::uintptr_t{0x1234});
+    void* synchronized_stream = nullptr;
+    void* launched_stream = nullptr;
     std::vector<int> events;
     auto reset = [&] {
         events.push_back(1);
         return true;
     };
-    auto launch = [&] {
+    auto synchronize = [&](void* stream) {
         events.push_back(2);
+        synchronized_stream = stream;
+        return true;
+    };
+    auto launch = [&](void* stream) {
+        events.push_back(3);
+        launched_stream = stream;
         return true;
     };
 
-    CHECK(probe::reset_and_launch(reset, launch));
-    CHECK(events == std::vector<int>({1, 2}));
+    CHECK(probe::reset_synchronize_and_launch(
+        true, expected_stream, reset, synchronize, launch));
+    CHECK(events == std::vector<int>({1, 2, 3}));
+    CHECK(synchronized_stream == expected_stream);
+    CHECK(launched_stream == expected_stream);
 
     events.clear();
-    auto failed_launch = [&] {
+    synchronized_stream = nullptr;
+    launched_stream = nullptr;
+    CHECK(probe::reset_synchronize_and_launch(
+        false, expected_stream, reset, synchronize, launch));
+    CHECK(events == std::vector<int>({1, 3}));
+    CHECK(synchronized_stream == nullptr);
+    CHECK(launched_stream == expected_stream);
+
+    events.clear();
+    launched_stream = nullptr;
+    auto failed_synchronize = [&](void* stream) {
         events.push_back(2);
+        synchronized_stream = stream;
         return false;
     };
-    CHECK(!probe::reset_and_launch(reset, failed_launch));
+    CHECK(!probe::reset_synchronize_and_launch(
+        true, expected_stream, reset, failed_synchronize, launch));
     CHECK(events == std::vector<int>({1, 2}));
+    CHECK(synchronized_stream == expected_stream);
+    CHECK(launched_stream == nullptr);
 
     events.clear();
     auto failed_reset = [&] {
         events.push_back(1);
         return false;
     };
-    CHECK(!probe::reset_and_launch(failed_reset, launch));
+    CHECK(!probe::reset_synchronize_and_launch(
+        true, expected_stream, failed_reset, synchronize, launch));
     CHECK(events == std::vector<int>({1}));
-
-    RecordingTransport transport;
-    const transport::TeamPeer signal_route{
-        transport::TransportTeam::kWorld, 1, 1};
-    probe::enqueue_profile_mixed_final_commands(
-        transport, 1, 0x1000, 0x2000, 0x1234, 0x3000,
-        signal_route, 9, 1000);
-    CHECK(transport.commands ==
-          std::vector<transport::TransportCommandOpcode>({
-              transport::TransportCommandOpcode::kBarrier,
-              transport::TransportCommandOpcode::kPut,
-              transport::TransportCommandOpcode::kPutValue64,
-              transport::TransportCommandOpcode::kRemoteAdd64,
-              transport::TransportCommandOpcode::kSignal,
-              transport::TransportCommandOpcode::kFlush,
-          }));
     return 0;
 }

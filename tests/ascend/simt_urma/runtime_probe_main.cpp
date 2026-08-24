@@ -9,6 +9,7 @@
 #include <string>
 
 #include "acl/acl.h"
+#include "hccl/hccl_comm.h"
 
 #include "csrc/backends/ascend/transport/cann_compat.hpp"
 #include "csrc/backends/ascend/transport/cann_transport.hpp"
@@ -465,7 +466,8 @@ public:
             state.source =
                 (static_cast<std::uint64_t>(rank + 1) << 32U) | generation;
             state.generation = generation;
-            if (!probe::reset_and_launch(
+            if (!probe::reset_synchronize_and_launch(
+                    finalize_profile_pressure, stream_,
                     [&] {
                         return check_acl(
                             aclrtMemcpy(
@@ -474,12 +476,27 @@ public:
                             "initialize runtime state", error,
                             error_capacity);
                     },
-                    [&] {
+                    [&](aclrtStream stream) {
+                        const auto status = HcclBarrier(
+                            reinterpret_cast<HcclComm>(
+                                static_cast<std::uintptr_t>(
+                                    communicator_handle_)),
+                            stream);
+                        if (status == HCCL_SUCCESS)
+                            return true;
+                        write_error(
+                            error, error_capacity,
+                            "final profile stream barrier failed with HCCL "
+                            "status %d",
+                            static_cast<int>(status));
+                        return false;
+                    },
+                    [&](aclrtStream stream) {
                         const int launch_status =
                             deep_ep_ascend_urma_launch_runtime_probe(
                                 device_state, context_, runtime_case, peer,
                                 generation, operations,
-                                finalize_profile_pressure, stream_);
+                                finalize_profile_pressure, stream);
                         if (launch_status == 0)
                             return true;
                         write_error(

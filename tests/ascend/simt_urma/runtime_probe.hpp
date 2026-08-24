@@ -44,11 +44,15 @@ constexpr bool runtime_case_records_transport_profile(
     return runtime_case != RuntimeCase::kPhaseBoundary;
 }
 
-template <typename Reset, typename Launch>
-bool reset_and_launch(Reset&& reset, Launch&& launch) {
+template <typename Stream, typename Reset, typename Synchronize, typename Launch>
+bool reset_synchronize_and_launch(
+    bool synchronize_ranks, Stream stream, Reset&& reset,
+    Synchronize&& synchronize, Launch&& launch) {
     if (!reset())
         return false;
-    return launch();
+    if (synchronize_ranks && !synchronize(stream))
+        return false;
+    return launch(stream);
 }
 
 template <typename Transport>
@@ -57,8 +61,6 @@ DEEP_EP_ASCEND_SIMT_CALLEE void enqueue_profile_mixed_final_commands(
     DeviceAddress source, std::uint64_t source_value,
     DeviceAddress atomic_value, const TeamPeer& signal_route,
     std::uint64_t generation, std::uint64_t barrier_timeout) {
-    transport.device_barrier(
-        kWorldTeamMask, kNullDeviceAddress, barrier_timeout);
     transport.put(
         TransportTeam::kWorld, peer, destination, source,
         sizeof(std::uint64_t), CooperationScope::kParticipant,
@@ -71,6 +73,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE void enqueue_profile_mixed_final_commands(
     transport.signal(
         signal_route.team, signal_route.peer,
         RemoteAction::signal_set(0, generation));
+    transport.device_barrier(
+        kWorldTeamMask, kNullDeviceAddress, barrier_timeout);
     transport.flush(CooperationScope::kParticipant);
 }
 

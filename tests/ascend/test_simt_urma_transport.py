@@ -216,7 +216,7 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
             "            1, false, stream);",
             runtime)
 
-    def test_profile_final_launch_uses_leading_device_barrier(self):
+    def test_profile_final_launch_stream_orders_rank_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             executable = pathlib.Path(directory) / "runtime_launch_sequence"
             compile_probe = subprocess.run(
@@ -225,6 +225,25 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
                     "-I", str(ROOT),
                     str(ROOT / "tests/ascend/"
                         "runtime_probe_launch_sequence_probe.cpp"),
+                    "-o", str(executable),
+                ],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(
+                compile_probe.returncode, 0, compile_probe.stderr)
+
+            run_probe = subprocess.run(
+                [str(executable)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_probe.returncode, 0, run_probe.stderr)
+
+    def test_profile_final_launch_preserves_six_command_sequence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = pathlib.Path(directory) / "runtime_command_sequence"
+            compile_probe = subprocess.run(
+                [
+                    "c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                    "-I", str(ROOT),
+                    str(ROOT / "tests/ascend/"
+                        "runtime_probe_command_sequence_probe.cpp"),
                     "-o", str(executable),
                 ],
                 capture_output=True, text=True, check=False)
