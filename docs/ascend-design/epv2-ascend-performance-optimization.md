@@ -520,3 +520,52 @@ The optimization program is complete only when:
   protocol, and logical-byte formulas on H800 and Ascend; and
 - the final design records residual bottlenecks and the measured reason for any
   retained single-block or single-thread stage.
+
+## P3.0 Overlap Qualification Evidence
+
+P3.0 measured the existing direct single-host protocol before changing its
+lifecycle. The exact candidate was commit
+`f73da24b954be6575eee6be877e5f3845dc1f48c`, fresh archive SHA-256
+`c28dda33c8019e4d40805728a1e1fb7bebdba9f27fa1a8f8ef1dc695a86d3286`.
+TaskQueue task `task_20260824_163111_52195411081` built that archive; task
+`task_20260824_163521_5505779125` passed the complete two-rank SIMT/AICore and
+production correctness qualification on devices 0,1; task
+`task_20260824_164240_58668910244` completed the disabled-profile EP8 control;
+and task `task_20260824_164801_6088375783` completed the enabled EP8 profile.
+
+Both EP8 runs used the unchanged representative manifest SHA-256
+`98d9dc5ff7b8f31afbc9589b037fd658d99b85b739b8572de1751b9e979eb623`
+(fingerprint `d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`),
+the FP8 8192-token/top-k-8/hidden-7168/256-expert case, 72 blocks, 30 warmups,
+and 30 iterations. The enabled schema-v3 result is
+`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-profile/benchmark.json`
+(SHA-256 `e5b79ad753624523c3433481656096721c3b1f37ac08c5c6e591009a221b6a80`).
+
+| Operation | Mean ms | p50 ms | p95 ms | Logical GB/s | Producer ms | Network ms | Consumer ms | Overlap ceiling |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dispatch | 38.178 | 38.076 | 40.124 | 203.939 | 4.472 | 6.433 | 8.777 | 2.242x |
+| expanded_dispatch | 38.736 | 38.545 | 40.472 | 238.832 | 4.479 | 7.825 | 10.297 | 2.195x |
+| cached_dispatch | 85.021 | 84.915 | 86.774 | 91.579 | 51.030 | 10.513 | 8.806 | 1.379x |
+| combine | 140.305 | 140.461 | 141.480 | 77.697 | 47.211 | 61.404 | 18.001 | 2.062x |
+| reduced_combine | 167.866 | 167.933 | 170.405 | 64.940 | 73.551 | 60.539 | 18.002 | 2.068x |
+
+`GetSystemCycle()` timing uses the Ascend 950PR/950DT 1 GHz conversion cited
+in `/root/aiagent/asc-devkit/docs/zh/api/SIMD-API/basic_api/tool_interface/system_resources_and_variables/GetSystemCycle_ISASI.md`:
+cycles divided by 1,000 are microseconds and cycles divided by 1,000,000 are
+milliseconds. The detailed P3 design records every raw named-stage span and
+all phase values in both cycles and elapsed time.
+
+The disabled-profile ABBA control (baseline A, candidate A, candidate B,
+baseline B) found candidate mean deltas of -0.164%, +0.425%, +0.576%, -0.438%,
+and -0.229% respectively for the five rows above. Each is inside observed
+candidate run-to-run variation, so the profiling instrumentation remains.
+The baseline predates schema v3, making that comparison a disabled-overhead
+control rather than a cross-schema formal comparison.
+
+Every operation/rank emitted 30 commands with seven payload puts; completed
+SQ/CQ depths were 0/0 and SQ/CQ high-water marks were only 2/2. P3.1 may
+proceed after review, and P3.2 may start with dispatch and expanded dispatch,
+whose ceilings are about 2.2x. Cached dispatch is producer-dominated and is
+not the first chunking target. P3.3 is deferred: the measurement contains no
+queue-saturation evidence for another channel or service drain. Hybrid and
+physical scale-out remain unqualified.
