@@ -1019,6 +1019,20 @@ class ElasticBuffer:
                 "DeepEP Ascend backend: barrier requires sequential=True")
         self.runtime.barrier(use_comm_stream, with_cpu_sync, sequential)
 
+    def reset_stage_profile(self) -> None:
+        """Reset the optional Ascend transport stage profile buffer."""
+        if is_cuda():
+            raise RuntimeError(
+                "DeepEP stage profiling is available only on Ascend")
+        self.runtime.reset_stage_profile()
+
+    def get_stage_profile(self) -> dict:
+        """Read the generation-qualified Ascend transport stage profile."""
+        if is_cuda():
+            raise RuntimeError(
+                "DeepEP stage profiling is available only on Ascend")
+        return self.runtime.get_stage_profile()
+
     @staticmethod
     def _unpack_handle(handle: Optional[EPHandle] = None) \
         -> Tuple[Optional[int], Optional[int], Optional[list],

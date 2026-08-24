@@ -1,6 +1,7 @@
 import ast
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from collections import Counter
@@ -16,7 +17,12 @@ from tests.ascend.benchmark.report import (
 )
 from tests.ascend.benchmark.compare import compare_reports
 from tests.ascend.benchmark.bench_ep import build_parser, _selected_case_ids
-from tests.ascend.benchmark.runtime import AscendRuntime, PreparedCase
+from tests.ascend.benchmark.runtime import (
+    AscendRuntime,
+    PreparedCase,
+    _aggregate_stage_profiles,
+    _configure_stage_profile_environment,
+)
 from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
 from tests.ascend.benchmark.timing import NpuEventTimer
 from tests.ascend.benchmark import workloads
@@ -428,17 +434,22 @@ def test_default_report_contains_all_current_cases(tmp_path):
     write_report_atomic(output, report)
     payload = json.loads(output.read_text())
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["execution_protocol"] == {
         "allow_multiple_reduction": 1,
+        "stage_profile": 0,
     }
-    assert payload["git_commit"] == subprocess.run(
+    git_result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=ROOT,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
-    ).stdout.strip()
+    )
+    expected_git_commit = (
+        git_result.stdout.strip() if git_result.returncode == 0 else "unknown"
+    )
+    assert payload["git_commit"] == expected_git_commit
     assert len(payload["cases"]) == 144
     assert payload["case_summary"] == {
         "total": 144,
@@ -489,7 +500,7 @@ def test_comparison_rejects_incompatible_report_identity():
 
 
 @pytest.mark.parametrize("allow_multiple_reduction", (0, 1))
-def test_report_schema_v2_serializes_exact_execution_protocol(
+def test_report_schema_v3_serializes_exact_execution_protocol(
     allow_multiple_reduction,
 ):
     report = BenchmarkReport.empty_for_cases(
@@ -503,9 +514,10 @@ def test_report_schema_v2_serializes_exact_execution_protocol(
 
     payload = report.to_dict()
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["execution_protocol"] == {
         "allow_multiple_reduction": allow_multiple_reduction,
+        "stage_profile": 0,
     }
 
 
@@ -523,6 +535,24 @@ def test_report_comparison_rejects_execution_protocol_mismatch():
             ("cuda", 1),
             ("ascend", 0),
         )
+    ]
+
+    with pytest.raises(ValueError, match="execution_protocol"):
+        validate_comparable(*reports)
+
+
+def test_report_comparison_rejects_stage_profile_mismatch():
+    reports = [
+        BenchmarkReport.empty_for_cases(
+            platform=platform,
+            cases=(),
+            classify=classify_ascend_case,
+            workload_fingerprint="a" * 64,
+            world_size=2,
+            allow_multiple_reduction=1,
+            stage_profile=stage_profile,
+        )
+        for platform, stage_profile in (("cuda", 0), ("ascend", 1))
     ]
 
     with pytest.raises(ValueError, match="execution_protocol"):
@@ -581,6 +611,24 @@ def test_benchmark_parser_preserves_production_size_defaults():
     assert args.iterations == 30
     assert args.allow_multiple_reduction == 1
     assert args.num_sms == 72
+    assert args.profile_stages is False
+
+
+def test_benchmark_parser_enables_stage_profile_explicitly():
+    args = build_parser().parse_args(["--profile-stages"])
+
+    assert args.profile_stages is True
+
+
+def test_stage_profile_environment_is_enabled_only_on_request(monkeypatch):
+    name = "DEEP_EP_ASCEND_PROFILE_STAGES"
+    monkeypatch.setenv(name, "1")
+
+    _configure_stage_profile_environment(False)
+    assert name not in os.environ
+
+    _configure_stage_profile_environment(True)
+    assert os.environ[name] == "1"
 
 
 def test_benchmark_parser_accepts_one_and_72_data_blocks():
@@ -793,7 +841,8 @@ def test_timed_handle_operations_prepare_current_handles_outside_measurement():
     }
     runtime = AscendRuntime.__new__(AscendRuntime)
     runtime.buffer = Buffer()
-    runtime.args = SimpleNamespace(warmups=0, iterations=1)
+    runtime.args = SimpleNamespace(
+        warmups=0, iterations=1, profile_stages=False)
     runtime._prepare_case = lambda _case: prepared
     runtime.synchronized_step = lambda operation, _label: operation()
     runtime.timer = SimpleNamespace(
@@ -807,6 +856,146 @@ def test_timed_handle_operations_prepare_current_handles_outside_measurement():
         "dispatch", "expanded_dispatch", "cached_dispatch", "combine",
         "reduced_combine",
     ]
+
+
+def test_stage_profile_capture_runs_outside_event_timing():
+    events = []
+    inside_timing = {"value": False}
+
+    class Buffer:
+        def barrier(self, **_kwargs):
+            events.append("barrier")
+
+        def reset_stage_profile(self):
+            assert not inside_timing["value"]
+            events.append("reset")
+
+        def get_stage_profile(self):
+            assert not inside_timing["value"]
+            events.append("read")
+            return {
+                "available": True,
+                "operation": "dispatch",
+                "generation": 7,
+                "completion_generation": 7,
+                "stages": [],
+                "phase_cycles": {},
+            }
+
+    def launch():
+        events.append(
+            "timed-launch" if inside_timing["value"] else "profile-launch")
+
+    def measure(operation):
+        inside_timing["value"] = True
+        try:
+            operation()
+        finally:
+            inside_timing["value"] = False
+        return SimpleNamespace(device_seconds=1.0, wall_seconds=1.0)
+
+    operation_ids = (
+        "dispatch", "expanded_dispatch", "cached_dispatch", "combine",
+        "reduced_combine",
+    )
+    prepared = PreparedCase(
+        case=SimpleNamespace(case_id="profiled"),
+        x=None,
+        topk_idx=None,
+        topk_weights=None,
+        bias=None,
+        launches={operation_id: launch for operation_id in operation_ids},
+        prepare_launches={},
+        traffic={operation_id: {} for operation_id in operation_ids},
+    )
+    runtime = AscendRuntime.__new__(AscendRuntime)
+    runtime.buffer = Buffer()
+    runtime.args = SimpleNamespace(
+        warmups=0, iterations=1, profile_stages=True)
+    runtime._prepare_case = lambda _case: prepared
+    runtime.synchronized_step = lambda operation, _label: operation()
+    runtime.timer = SimpleNamespace(measure=measure)
+    runtime.torch = SimpleNamespace(
+        npu=SimpleNamespace(synchronize=lambda: events.append("synchronize")))
+
+    records = runtime.run_case(prepared.case)
+
+    assert all(record["stage_profile"]["available"] for record in records)
+    assert events.count("timed-launch") == len(operation_ids)
+    assert events.count("profile-launch") == len(operation_ids)
+    assert events.count("reset") == len(operation_ids)
+    assert events.count("read") == len(operation_ids)
+    assert events.count("synchronize") == len(operation_ids)
+
+
+def _literal_stage_profile(rank, *, generation=9, operation="dispatch"):
+    starts = (100 + rank * 10, 90 + rank * 10)
+    ends = (130 + rank * 10, 150 + rank * 10)
+    return {
+        "available": True,
+        "abi_version": 1,
+        "operation": operation,
+        "generation": generation,
+        "completion_generation": generation,
+        "stages": [{
+            "id": 1,
+            "name": "producer_control",
+            "block_count": 2,
+            "blocks": [
+                {"block": block, "start": start, "end": end}
+                for block, (start, end) in enumerate(zip(starts, ends))
+            ],
+        }],
+        "phase_cycles": {
+            "producer": 60 + rank * 10,
+            "publication": 20,
+            "service_submit": 30,
+            "cq_wait": 10,
+            "consumer_wait": 40,
+            "consumer_compute": 50,
+            "epilogue": 10,
+        },
+    }
+
+
+def test_stage_profile_rank_aggregation_derives_literal_block_span():
+    aggregated = _aggregate_stage_profiles(
+        "dispatch", [_literal_stage_profile(0), _literal_stage_profile(1)])
+
+    assert aggregated["operation"] == "dispatch"
+    assert aggregated["generation"] == 9
+    assert aggregated["stage_spans_cycles"] == {"producer_control": 60}
+    assert aggregated["phase_cycles"]["producer"] == 70
+    assert aggregated["optimistic_speedup_ceiling"] == pytest.approx(2.3)
+
+
+@pytest.mark.parametrize(
+    ("generation", "operation", "match"),
+    ((10, "dispatch", "generation"), (9, "combine", "operation")),
+)
+def test_stage_profile_rank_aggregation_rejects_mismatched_identity(
+    generation, operation, match,
+):
+    profiles = [
+        _literal_stage_profile(0),
+        _literal_stage_profile(
+            1, generation=generation, operation=operation),
+    ]
+
+    with pytest.raises(ValueError, match=match):
+        _aggregate_stage_profiles("dispatch", profiles)
+
+
+def test_stage_profile_rank_aggregation_reports_unavailable_reason_first():
+    profiles = [
+        {"available": False, "reason": "stale_generation"},
+        _literal_stage_profile(1),
+    ]
+
+    with pytest.raises(
+            ValueError,
+            match="stage profile unavailable on rank 0: stale_generation"):
+        _aggregate_stage_profiles("dispatch", profiles)
 
 
 def test_fp8_empty_input_case_requests_exact_column_major_output():
@@ -834,12 +1023,15 @@ def _report_fixture(
     logical_bytes=200_000,
 ):
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "formula_version": 1,
         "platform": platform,
         "world_size": 2,
         "workload_fingerprint": fingerprint,
-        "execution_protocol": {"allow_multiple_reduction": 1},
+        "execution_protocol": {
+            "allow_multiple_reduction": 1,
+            "stage_profile": 0,
+        },
         "timing_protocol": {
             "timer": f"{platform}_event",
             "warmups": 30,

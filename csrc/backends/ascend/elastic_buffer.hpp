@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdlib>
 #include <atomic>
 #include <condition_variable>
@@ -38,11 +39,15 @@
 
 namespace deep_ep::ascend {
 
+inline bool environment_is(const char* name, const char* expected) {
+    const char* value = std::getenv(name);
+    return value != nullptr && std::strcmp(value, expected) == 0;
+}
+
 #if DEEP_EP_ASCEND_TESTING
 inline bool testing_environment_is(
     const char* name, const char* expected) {
-    const char* value = std::getenv(name);
-    return value != nullptr && std::strcmp(value, expected) == 0;
+    return environment_is(name, expected);
 }
 
 inline void inject_testing_completion_mismatch(std::uint64_t* output) {
@@ -953,6 +958,8 @@ public:
         transport::TransportConfig config{
             rank_idx, num_ranks, comm_handle, cpu_comm.empty(), num_buffer_bytes,
             num_cpu_buffer_bytes, allow_hybrid_mode, sl_idx, 1};
+        config.stage_profile_enabled =
+            environment_is("DEEP_EP_ASCEND_PROFILE_STAGES", "1");
         const auto topology_status =
             transport::configure_transport_topology_from_environment(&config);
         if (!topology_status.ok())
@@ -1068,6 +1075,207 @@ public:
             return 0;
         return completion_resources_->dispatch_handle_generation(
             descriptor_tensor);
+    }
+
+    void reset_stage_profile() {
+        std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+        TORCH_CHECK(resources_ != nullptr,
+                    "DeepEP Ascend backend: runtime is destroyed");
+        const auto status = host_transport()->reset_stage_profile();
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+    }
+
+    pybind11::dict get_stage_profile() const {
+        std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+        pybind11::dict result;
+        if (resources_ == nullptr || async_state_ == nullptr) {
+            result["available"] = false;
+            result["reason"] = "runtime_destroyed";
+            return result;
+        }
+
+        transport::TransportStageProfile profile{};
+        const auto status = host_transport()->read_stage_profile(&profile);
+        if (status.code ==
+                transport::TransportStatusCode::kUnsupportedCapability) {
+            result["available"] = false;
+            result["reason"] = "disabled";
+            return result;
+        }
+        if (!status.ok())
+            raise_transport_status(status, rank_idx_);
+
+        const auto unavailable = [&result](const char* reason) {
+            result["available"] = false;
+            result["reason"] = reason;
+        };
+        if (profile.abi_version !=
+                transport::kTransportStageProfileAbiVersion ||
+            profile.struct_size != sizeof(transport::TransportStageProfile)) {
+            unavailable("abi_mismatch");
+            return result;
+        }
+        if (profile.operation !=
+                transport::TransportProfileOperation::kDispatch &&
+            profile.operation !=
+                transport::TransportProfileOperation::kCombine) {
+            unavailable("operation_unavailable");
+            return result;
+        }
+        const auto expected_generation =
+            async_state_->coordinator().last_generation();
+        if (profile.generation == 0 ||
+            profile.generation != expected_generation) {
+            unavailable("stale_generation");
+            return result;
+        }
+        if (profile.completion_generation != profile.generation) {
+            unavailable("partial_generation");
+            return result;
+        }
+        if (profile.valid_stage_mask == 0) {
+            unavailable("no_stages");
+            return result;
+        }
+
+        const bool dispatch = profile.operation ==
+            transport::TransportProfileOperation::kDispatch;
+        constexpr const char* dispatch_stage_names[] = {
+            "full", "producer_control", "producer_group",
+            "producer_prefix", "producer_record", "producer_release",
+            "epilogue_acquire", "epilogue_validate",
+            "epilogue_validate_reduce", "epilogue_expert_count",
+            "epilogue_expert_prefix", "epilogue_metadata",
+            "epilogue_copy", "epilogue_complete",
+        };
+        constexpr const char* combine_stage_names[] = {
+            "full", "producer_control", "producer_plan",
+            "producer_plan_prefix", "producer_record", "producer_release",
+            "epilogue_acquire", "epilogue_validate",
+            "epilogue_validate_reduce", "epilogue_reduce",
+            "epilogue_weights", "epilogue_complete",
+        };
+        const auto stage_name = [
+            dispatch, &dispatch_stage_names,
+            &combine_stage_names](std::uint32_t stage) {
+            if (dispatch &&
+                stage < sizeof(dispatch_stage_names) /
+                            sizeof(dispatch_stage_names[0]))
+                return dispatch_stage_names[stage];
+            if (!dispatch &&
+                stage < sizeof(combine_stage_names) /
+                            sizeof(combine_stage_names[0]))
+                return combine_stage_names[stage];
+            return "unknown";
+        };
+
+        std::uint64_t stage_spans[transport::kTransportProfileStageCount]{};
+        pybind11::list stages;
+        for (std::uint32_t stage = 0;
+             stage < transport::kTransportProfileStageCount; ++stage) {
+            if ((profile.valid_stage_mask & (std::uint64_t{1} << stage)) == 0)
+                continue;
+            const auto& record = profile.stages[stage];
+            if (record.block_count == 0 ||
+                record.block_count > transport::kTransportProfileMaxBlocks) {
+                unavailable("invalid_block_count");
+                result["stage"] = stage;
+                result["block"] = 0;
+                result["start"] = record.blocks[0].start;
+                result["end"] = record.blocks[0].end;
+                return result;
+            }
+            std::uint64_t first = std::numeric_limits<std::uint64_t>::max();
+            std::uint64_t last = 0;
+            pybind11::list blocks;
+            for (std::uint32_t block = 0; block < record.block_count; ++block) {
+                const auto& cycles = record.blocks[block];
+                if (cycles.start == 0 || cycles.end < cycles.start) {
+                    unavailable("partial_stage");
+                    result["stage"] = stage;
+                    result["block"] = block;
+                    result["start"] = cycles.start;
+                    result["end"] = cycles.end;
+                    return result;
+                }
+                first = std::min(first, cycles.start);
+                last = std::max(last, cycles.end);
+                pybind11::dict block_record;
+                block_record["block"] = block;
+                block_record["start"] = cycles.start;
+                block_record["end"] = cycles.end;
+                blocks.append(block_record);
+            }
+            stage_spans[stage] = last - first;
+            pybind11::dict stage_record;
+            stage_record["id"] = stage;
+            stage_record["name"] = stage_name(stage);
+            stage_record["block_count"] = record.block_count;
+            stage_record["start"] = first;
+            stage_record["end"] = last;
+            stage_record["span_cycles"] = stage_spans[stage];
+            stage_record["blocks"] = blocks;
+            stages.append(stage_record);
+        }
+
+        const auto sum_stages = [&stage_spans](
+            std::uint32_t first, std::uint32_t last) {
+            std::uint64_t total = 0;
+            for (auto stage = first; stage <= last; ++stage)
+                total += stage_spans[stage];
+            return total;
+        };
+        if (profile.service_end_cycles < profile.service_start_cycles ||
+            (profile.service_start_cycles == 0 &&
+             profile.service_end_cycles != 0)) {
+            unavailable("invalid_service_cycles");
+            return result;
+        }
+        const auto service_cycles =
+            profile.service_end_cycles - profile.service_start_cycles;
+        const auto wait_cycles = std::min(
+            profile.wait_cycles, service_cycles);
+        const auto release_cycles = stage_spans[5];
+
+        pybind11::dict phase_cycles;
+        phase_cycles["producer"] = sum_stages(1, 4);
+        phase_cycles["publication"] =
+            release_cycles > service_cycles ?
+                release_cycles - service_cycles : 0;
+        phase_cycles["service_submit"] = service_cycles - wait_cycles;
+        phase_cycles["cq_wait"] = wait_cycles;
+        phase_cycles["consumer_wait"] = sum_stages(6, 8);
+        phase_cycles["consumer_compute"] =
+            dispatch ? sum_stages(9, 12) : sum_stages(9, 10);
+        phase_cycles["epilogue"] =
+            stage_spans[dispatch ? 13 : 11];
+
+        pybind11::dict command_metrics;
+        command_metrics["command_count"] = profile.command_count;
+        command_metrics["put_command_count"] = profile.put_command_count;
+        command_metrics["payload_bytes"] = profile.command_bytes;
+        command_metrics["sq_depth"] = profile.sq_depth;
+        command_metrics["cq_depth"] = profile.cq_depth;
+        command_metrics["sq_high_watermark"] = profile.sq_high_watermark;
+        command_metrics["cq_high_watermark"] = profile.cq_high_watermark;
+
+        pybind11::dict service;
+        service["start"] = profile.service_start_cycles;
+        service["end"] = profile.service_end_cycles;
+        service["cycles"] = service_cycles;
+        service["wait_cycles"] = wait_cycles;
+
+        result["available"] = true;
+        result["abi_version"] = profile.abi_version;
+        result["operation"] = dispatch ? "dispatch" : "combine";
+        result["generation"] = profile.generation;
+        result["completion_generation"] = profile.completion_generation;
+        result["stages"] = stages;
+        result["command_metrics"] = command_metrics;
+        result["service"] = service;
+        result["phase_cycles"] = phase_cycles;
+        return result;
     }
 
     c10::Stream get_comm_stream() const {

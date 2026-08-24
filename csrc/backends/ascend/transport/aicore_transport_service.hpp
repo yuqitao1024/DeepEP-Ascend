@@ -1117,6 +1117,10 @@ __aicore__ inline void record_stage_end(
         return;
     profile->stages[stage].blocks[block].end =
         static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+    aicore::system_fence();
+    aicore::flush_cacheline(&profile->stages[stage].blocks[block]);
+    if (block == 0)
+        aicore::flush_cacheline(&profile->stages[stage]);
     if (block == 0 && complete_operation)
         complete_profile(context, generation);
 }

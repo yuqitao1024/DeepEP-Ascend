@@ -75,6 +75,120 @@ def _total_logical_bytes(traffic: dict[str, int]) -> int:
     return sum(traffic.values())
 
 
+def _configure_stage_profile_environment(enabled: bool) -> None:
+    name = "DEEP_EP_ASCEND_PROFILE_STAGES"
+    if enabled:
+        os.environ[name] = "1"
+    else:
+        os.environ.pop(name, None)
+
+
+def _aggregate_stage_profiles(
+    operation_id: str,
+    rank_profiles: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not rank_profiles:
+        raise ValueError("stage profile requires at least one rank")
+    expected_operation = (
+        "dispatch" if operation_id in {
+            "dispatch", "expanded_dispatch", "cached_dispatch"
+        } else "combine"
+    )
+    for rank, profile in enumerate(rank_profiles):
+        if profile.get("available") is not True:
+            reason = profile.get("reason", "unknown")
+            details = {
+                key: profile[key]
+                for key in ("stage", "block", "start", "end")
+                if key in profile
+            }
+            suffix = f": {details!r}" if details else ""
+            raise ValueError(
+                f"stage profile unavailable on rank {rank}: {reason}"
+                f"{suffix}")
+    generations = {profile.get("generation") for profile in rank_profiles}
+    operations = {profile.get("operation") for profile in rank_profiles}
+    if len(generations) != 1:
+        raise ValueError(
+            f"stage profile generation mismatch for {operation_id}: "
+            f"{sorted(generations, key=repr)!r}")
+    if operations != {expected_operation}:
+        raise ValueError(
+            f"stage profile operation mismatch for {operation_id}: "
+            f"expected {expected_operation!r}, got "
+            f"{sorted(operations, key=repr)!r}")
+
+    generation = next(iter(generations))
+    phase_names = (
+        "producer", "publication", "service_submit", "cq_wait",
+        "consumer_wait", "consumer_compute", "epilogue",
+    )
+    per_rank = []
+    stage_spans: dict[str, int] = {}
+    phase_cycles = {name: 0 for name in phase_names}
+    for rank, profile in enumerate(rank_profiles):
+        if profile.get("completion_generation") != generation:
+            raise ValueError("stage profile completion generation mismatch")
+        rank_stages = []
+        for stage in profile.get("stages", ()):
+            blocks = stage.get("blocks", ())
+            if len(blocks) != stage.get("block_count"):
+                raise ValueError("stage profile block count mismatch")
+            starts = [block.get("start", 0) for block in blocks]
+            ends = [block.get("end", 0) for block in blocks]
+            if (
+                not starts
+                or any(type(value) is not int or value <= 0 for value in starts)
+                or any(type(value) is not int for value in ends)
+                or any(end < start for start, end in zip(starts, ends))
+            ):
+                raise ValueError("stage profile block cycles")
+            span = max(ends) - min(starts)
+            stage_name = stage.get("name")
+            if not isinstance(stage_name, str) or not stage_name:
+                raise ValueError("stage profile stage name")
+            stage_spans[stage_name] = max(
+                stage_spans.get(stage_name, 0), span)
+            rank_stages.append(dict(stage, span_cycles=span))
+
+        rank_phases = profile.get("phase_cycles")
+        if not isinstance(rank_phases, dict) or set(rank_phases) != set(
+            phase_names
+        ):
+            raise ValueError("stage profile phase cycles")
+        for name in phase_names:
+            value = rank_phases[name]
+            if type(value) is not int or value < 0:
+                raise ValueError(f"stage profile phase cycles.{name}")
+            phase_cycles[name] = max(phase_cycles[name], value)
+        per_rank.append(dict(profile, rank=rank, stages=rank_stages))
+
+    producer = phase_cycles["producer"]
+    network = sum(
+        phase_cycles[name]
+        for name in ("publication", "service_submit", "cq_wait")
+    )
+    consumer = sum(
+        phase_cycles[name]
+        for name in ("consumer_wait", "consumer_compute", "epilogue")
+    )
+    total = producer + network + consumer
+    ceiling = total / max(producer, network, consumer) if total else 1.0
+    return {
+        "operation": expected_operation,
+        "generation": generation,
+        "stage_spans_cycles": stage_spans,
+        "phase_cycles": phase_cycles,
+        "pipeline_cycles": {
+            "producer": producer,
+            "network": network,
+            "consumer": consumer,
+        },
+        "optimistic_speedup_ceiling": ceiling,
+        "per_rank": per_rank,
+    }
+
+
 def _aggregate_rank_operations(
     rank_operations: list[list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
@@ -119,6 +233,12 @@ def _aggregate_rank_operations(
                 for rank, record in enumerate(rank_records)
             ],
         })
+        profiles = [record.get("stage_profile") for record in rank_records]
+        if any(profile is not None for profile in profiles):
+            if any(profile is None for profile in profiles):
+                raise ValueError("stage profile missing from one or more ranks")
+            operations[-1]["stage_profile"] = _aggregate_stage_profiles(
+                operation_id, profiles)
     return operations
 
 
@@ -746,12 +866,25 @@ class AscendRuntime:
                 sample = self.timer.measure(operation)
                 device_samples.append(sample.device_seconds)
                 wall_samples.append(sample.wall_seconds)
-            records.append({
+            record = {
                 "operation_id": operation_id,
                 "device_samples": device_samples,
                 "wall_samples": wall_samples,
                 "logical_bytes": prepared.traffic[operation_id],
-            })
+            }
+            if getattr(self.args, "profile_stages", False):
+                def capture_profile():
+                    self.buffer.barrier(with_cpu_sync=True, sequential=True)
+                    self.buffer.reset_stage_profile()
+                    operation()
+                    self.torch.npu.synchronize()
+                    return self.buffer.get_stage_profile()
+
+                record["stage_profile"] = self.synchronized_step(
+                    capture_profile,
+                    f"{case.case_id}: {operation_id}: stage profile",
+                )
+            records.append(record)
         return records
 
 
@@ -838,6 +971,7 @@ def run_benchmark(args: Any, selected_case_ids: tuple[str, ...]) -> int:
             workload_fingerprint=manifest.fingerprint,
             world_size=world_size,
             allow_multiple_reduction=args.allow_multiple_reduction,
+            stage_profile=int(args.profile_stages),
         )
         report.workload = asdict(manifest.spec)
         report.timing_protocol = {
@@ -857,6 +991,7 @@ def run_benchmark(args: Any, selected_case_ids: tuple[str, ...]) -> int:
             torch, dist, deep_ep, group, device, args, manifest,
             num_sms=args.num_sms, num_qps=0,
         )
+        _configure_stage_profile_environment(args.profile_stages)
         runtime.synchronized_step(
             runtime.construct_buffer, "buffer construction"
         )

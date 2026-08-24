@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterable
 from tests.utils.ep_benchmark_manifest import EPModeCase
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 FORMULA_VERSION = 1
 
 
@@ -21,7 +21,9 @@ def validate_execution_protocol(
 ) -> None:
     if (
         not isinstance(protocol, dict)
-        or protocol.keys() != {"allow_multiple_reduction"}
+        or protocol.keys() != {
+            "allow_multiple_reduction", "stage_profile"
+        }
     ):
         raise ValueError("execution_protocol")
     allow_multiple_reduction = protocol["allow_multiple_reduction"]
@@ -35,6 +37,9 @@ def validate_execution_protocol(
         )
     ):
         raise ValueError("execution_protocol.allow_multiple_reduction")
+    stage_profile = protocol["stage_profile"]
+    if type(stage_profile) is not int or stage_profile not in (0, 1):
+        raise ValueError("execution_protocol.stage_profile")
 
 
 def _current_git_commit() -> str:
@@ -78,9 +83,11 @@ class BenchmarkReport:
         workload_fingerprint: str,
         world_size: int,
         allow_multiple_reduction: int,
+        stage_profile: int = 0,
     ) -> "BenchmarkReport":
         execution_protocol = {
             "allow_multiple_reduction": allow_multiple_reduction,
+            "stage_profile": stage_profile,
         }
         validate_execution_protocol(execution_protocol)
         records = []

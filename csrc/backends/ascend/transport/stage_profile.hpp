@@ -17,7 +17,7 @@ enum class TransportProfileOperation : std::uint32_t {
     kBarrier,
 };
 
-struct TransportStageBlockCycles {
+struct alignas(64) TransportStageBlockCycles {
     std::uint64_t start = 0;
     std::uint64_t end = 0;
 };
@@ -50,7 +50,7 @@ struct alignas(64) TransportStageProfile {
     TransportStageCycles stages[kTransportProfileStageCount]{};
 };
 
-static_assert(sizeof(TransportStageBlockCycles) == 16);
+static_assert(sizeof(TransportStageBlockCycles) == 64);
 static_assert(alignof(TransportStageProfile) == 64);
 static_assert(sizeof(TransportStageProfile) % 64 == 0);
 static_assert(std::is_trivially_copyable_v<TransportStageBlockCycles>);

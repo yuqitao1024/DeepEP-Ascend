@@ -31,7 +31,20 @@ inline std::string python_error;
 inline void PyErr_SetString(PyObject*, const char* message) { python_error = message; }
 
 namespace pybind11 {
-class object {};
+class object {
+public:
+    template <typename Value>
+    object& operator=(Value&&) { return *this; }
+};
+class dict {
+public:
+    object operator[](const char*) { return {}; }
+};
+class list {
+public:
+    template <typename Value>
+    void append(Value&&) {}
+};
 class error_already_set : public std::exception {};
 class gil_scoped_release {};
 
@@ -310,7 +323,8 @@ int main() {
     if (module.class_methods["ElasticBuffer"] != std::set<std::string>{
             "destroy", "get_comm_stream", "get_physical_domain_size",
             "get_logical_domain_size", "barrier", "dispatch", "combine",
-            "get_dispatch_handle_generation"})
+            "get_dispatch_handle_generation", "reset_stage_profile",
+            "get_stage_profile"})
         return 19;
 
     Buffer::cpu_comm_t cpu_comm;
@@ -575,7 +589,8 @@ int main() {
     if (module.class_methods["ElasticBuffer"] != std::set<std::string>{
             "destroy", "get_comm_stream", "get_physical_domain_size",
             "get_logical_domain_size", "barrier", "dispatch", "combine",
-            "is_destroyed", "get_dispatch_handle_generation"})
+            "is_destroyed", "get_dispatch_handle_generation",
+            "reset_stage_profile", "get_stage_profile"})
         return 3;
 
     deep_ep::ascend::transport::CannHostApi host_api{};
@@ -716,6 +731,18 @@ class AscendStubSourceTest(unittest.TestCase):
                 f"elastic::BufferOperationKind::{operation_kind}", source)
         self.assertIn("async_state_->coordinator().reserve(kind)", source)
         self.assertIn("async_state_->destroy()", source)
+
+    def test_stage_profile_rejects_reversed_service_cycles(self):
+        source = HEADER.read_text()
+        begin = source.index("pybind11::dict get_stage_profile() const")
+        end = source.index("\n    c10::Stream get_comm_stream() const", begin)
+        profile = source[begin:end]
+
+        self.assertIn(
+            "profile.service_end_cycles < profile.service_start_cycles",
+            profile,
+        )
+        self.assertIn('unavailable("invalid_service_cycles")', profile)
 
     def test_contract_defines_exact_public_allowlists(self):
         spec = importlib.util.spec_from_file_location("api_contract", API_CONTRACT)

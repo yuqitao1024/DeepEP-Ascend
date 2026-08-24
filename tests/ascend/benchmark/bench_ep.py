@@ -56,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-sms", type=_data_blocks, default=72)
     parser.add_argument("--cases")
     parser.add_argument("--skip-check", action="store_true")
+    parser.add_argument("--profile-stages", action="store_true")
     return parser
 
 

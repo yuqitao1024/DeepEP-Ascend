@@ -52,7 +52,7 @@ The profile and artifact contracts are strict:
 - workload.json must be transferred byte-for-byte to the second host
 - benchmark.json files are comparison inputs; Markdown files are outputs only
 - Ascend launch requires all 144 inventory rows to be supported
-- benchmark reports use schema version 2 and all profiles require multiple
+- benchmark reports use schema version 3 and all profiles require multiple
   reduction enabled
 
 The current Ascend inventory satisfies the strict 144/144/0 launch gate. The
@@ -190,11 +190,11 @@ machine-readable comparison input. `benchmark.md`, the comparison Markdown,
 and `run.log` are outputs and must never be used as comparison inputs.
 Comparison output must be a separate path and cannot alias either JSON input.
 
-Schema-v2 reports record the backend's actual reduction setting in this exact
-top-level object:
+Schema-v3 reports record the reduction setting and whether Ascend stage
+profiling was enabled in this exact top-level object:
 
 ```json
-{"execution_protocol": {"allow_multiple_reduction": 1}}
+{"execution_protocol": {"allow_multiple_reduction": 1, "stage_profile": 0}}
 ```
 
 The field is execution identity and is intentionally outside both the workload
@@ -202,6 +202,14 @@ fingerprint and `timing_protocol`. The fixed smoke, representative, and
 canonical automation profiles reject value `0`, missing or additional protocol
 fields, and all schema-v1 reports; there is no pre-merge migration path for
 older automation artifacts.
+
+For an Ascend-only stage capture, add `--profile-stages` to `bench_ep.py`.
+The benchmark keeps all event samples unchanged, then resets the profile and
+runs one extra synchronized launch per operation outside the timed interval.
+Each operation receives raw per-block cycles, stage spans, non-overlapping
+phase accounting, transport command counters, and an optimistic pipeline
+ceiling. Such a report records `stage_profile: 1` and is intentionally not
+comparable with a normal latency report.
 
 ## Suite classification
 

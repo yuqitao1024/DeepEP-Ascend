@@ -18,7 +18,10 @@ CUDA_ONLY_BUFFER_METHODS = {
     "create_agrs_session", "destroy_agrs_session", "agrs_set_config",
     "agrs_get_inplace_tensor", "all_gather",
 }
-ASCEND_ONLY_BUFFER_METHODS = {"is_destroyed"}
+ASCEND_ONLY_BUFFER_METHODS = {
+    "is_destroyed", "get_dispatch_handle_generation",
+    "reset_stage_profile", "get_stage_profile",
+}
 
 ASCEND_MODULE_NAMES = COMMON_MODULE_NAMES
 CUDA_MODULE_NAMES = COMMON_MODULE_NAMES | CUDA_ONLY_MODULE_NAMES

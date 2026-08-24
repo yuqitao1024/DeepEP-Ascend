@@ -44,6 +44,8 @@ static_assert(offsetof(transport::DeviceTransportDiagnostic, peer) == 16);
 static_assert(offsetof(transport::DeviceTransportDiagnostic, world_peer) == 48);
 static_assert(offsetof(transport::DeviceTransportDiagnostic, team) == 52);
 static_assert(sizeof(transport::StagedTransportContext) == 128);
+static_assert(alignof(transport::TransportStageBlockCycles) == 64);
+static_assert(sizeof(transport::TransportStageBlockCycles) == 64);
 constexpr transport::TransportTopology kBarrierTopology{
     transport::kTransportTopologyAbiVersion,
     sizeof(transport::TransportTopology),

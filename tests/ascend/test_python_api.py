@@ -384,6 +384,18 @@ def _install_fake_extension(platform, events):
                 return 0
             return self.last_dispatch_generation
 
+        def reset_stage_profile(self):
+            events.append("runtime.reset_stage_profile")
+
+        def get_stage_profile(self):
+            events.append("runtime.get_stage_profile")
+            return {
+                "available": True,
+                "operation": "dispatch",
+                "generation": 3,
+                "completion_generation": 3,
+            }
+
         def get_logical_domain_size(self):
             events.append("runtime.get_logical_domain_size")
             if (platform == "ascend" and
@@ -757,6 +769,23 @@ def _scenario_ascend_topology_preflight():
     assert (buffer.scaleout_rank_idx, buffer.scaleup_rank_idx) == (1, 1)
     assert (buffer.num_rdma_ranks, buffer.num_nvlink_ranks) == (1, 4)
     assert len(extension.runtime_args) == 1
+    buffer.destroy()
+
+
+def _scenario_ascend_stage_profile_surface():
+    deep_ep, _, events = _load_package("ascend", True)
+    group = _FakeGroup(events, rank=0, size=2)
+    buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+        explicitly_destroy=True)
+
+    buffer.reset_stage_profile()
+    profile = buffer.get_stage_profile()
+
+    assert profile["available"] is True
+    assert profile["generation"] == 3
+    assert events.count("runtime.reset_stage_profile") == 1
+    assert events.count("runtime.get_stage_profile") == 1
     buffer.destroy()
 
 
@@ -2580,6 +2609,7 @@ SCENARIOS = {
     "ascend_destroy_state_publication":
         _scenario_ascend_destroy_state_publication,
     "ascend_topology_preflight": _scenario_ascend_topology_preflight,
+    "ascend_stage_profile_surface": _scenario_ascend_stage_profile_surface,
     "ascend_topology_preflight_mismatch":
         _scenario_ascend_topology_preflight_mismatch,
     "ascend_topology_preflight_local_parse_failure":
@@ -2679,6 +2709,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_explicit_logical_topology_is_aggregated_before_construction(self):
         self.run_scenario("ascend_topology_preflight")
+
+    def test_stage_profile_surface_delegates_to_ascend_runtime(self):
+        self.run_scenario("ascend_stage_profile_surface")
 
     def test_asymmetric_logical_topology_fails_before_construction(self):
         self.run_scenario("ascend_topology_preflight_mismatch")
