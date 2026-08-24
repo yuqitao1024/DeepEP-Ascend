@@ -9,6 +9,18 @@
 
 namespace deep_ep::ascend::transport::runtime_probe {
 
+inline constexpr std::uint32_t kMaxQueueWrapBatchOperations = 64;
+
+constexpr std::uint32_t queue_wrap_batch_operations(
+    std::uint32_t command_capacity) noexcept {
+    constexpr std::uint32_t kBarrierCommandCount = 2;
+    if (command_capacity <= kBarrierCommandCount)
+        return 0;
+    const auto available = command_capacity - kBarrierCommandCount;
+    return available < kMaxQueueWrapBatchOperations ?
+        available : kMaxQueueWrapBatchOperations;
+}
+
 enum class RuntimeCase : std::uint32_t {
     kPut,
     kPutValue64,
@@ -21,6 +33,11 @@ enum class RuntimeCase : std::uint32_t {
     kQueueWrap,
     kPhaseBoundary,
 };
+
+constexpr bool runtime_case_records_transport_profile(
+    RuntimeCase runtime_case) noexcept {
+    return runtime_case != RuntimeCase::kPhaseBoundary;
+}
 
 struct alignas(64) RuntimeState {
     std::uint64_t source = 0;

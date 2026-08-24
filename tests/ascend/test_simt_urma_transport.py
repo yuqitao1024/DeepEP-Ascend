@@ -271,6 +271,24 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
                 [str(executable)], capture_output=True, text=True, check=False)
             self.assertEqual(run_probe.returncode, 0, run_probe.stderr)
 
+    def test_queue_wrap_batch_respects_command_capacity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = pathlib.Path(directory) / "queue_wrap_batch_probe"
+            compile_probe = subprocess.run(
+                [
+                    "c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                    "-I", str(ROOT),
+                    str(ROOT / "tests/ascend/queue_wrap_batch_probe.cpp"),
+                    "-o", str(executable),
+                ],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(
+                compile_probe.returncode, 0, compile_probe.stderr)
+
+            run_probe = subprocess.run(
+                [str(executable)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_probe.returncode, 0, run_probe.stderr)
+
     def test_urma_wqe_publication_uses_mte3(self):
         service = (
             TRANSPORT / "aicore_transport_service.hpp").read_text()

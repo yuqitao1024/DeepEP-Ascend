@@ -20,7 +20,6 @@ namespace probe = deep_ep::ascend::transport::runtime_probe;
 namespace {
 
 constexpr std::uint64_t kWindowBytes = 64 * 1024;
-constexpr std::uint32_t kBatchOperations = 64;
 
 void write_error(char* output, std::size_t capacity, const char* format, ...) {
     if (output == nullptr || capacity == 0)
@@ -265,6 +264,27 @@ std::uint32_t inspect_sq_depth(
     return sq.depth;
 }
 
+std::uint32_t inspect_command_capacity(
+    const transport::DeviceTransportContext& context, char* error,
+    std::size_t error_capacity) {
+    transport::StagedTransportContext staged{};
+    if (context.backend_context == 0 ||
+        !copy_from_device(
+            &staged, reinterpret_cast<const void*>(context.backend_context),
+            sizeof(staged), "copy staged context", error, error_capacity) ||
+        staged.command_queue == 0) {
+        if (error != nullptr && error[0] == '\0')
+            write_error(error, error_capacity, "invalid command queue");
+        return 0;
+    }
+    transport::TransportCommandQueue queue{};
+    if (!copy_from_device(
+            &queue, reinterpret_cast<const void*>(staged.command_queue),
+            sizeof(queue), "copy command queue", error, error_capacity))
+        return 0;
+    return queue.capacity;
+}
+
 class RuntimeResources {
 public:
     ~RuntimeResources() {
@@ -346,10 +366,20 @@ public:
                 context_, peer, error, error_capacity);
             if (depth == 0)
                 return false;
+            const auto command_capacity = inspect_command_capacity(
+                context_, error, error_capacity);
+            operations = probe::queue_wrap_batch_operations(command_capacity);
+            if (operations == 0) {
+                if (error != nullptr && error[0] == '\0')
+                    write_error(
+                        error, error_capacity,
+                        "command queue capacity %u cannot hold queue-wrap "
+                        "barriers and payload", command_capacity);
+                return false;
+            }
             launch_count = (static_cast<std::uint64_t>(depth) +
-                            kBatchOperations - 1) /
-                           kBatchOperations + 1;
-            operations = kBatchOperations;
+                            operations - 1) /
+                           operations + 1;
         }
 
         auto* device_state = static_cast<probe::RuntimeState*>(window_);
@@ -409,32 +439,35 @@ public:
                     static_cast<unsigned long long>(state.observed));
                 return false;
             }
-            transport::TransportStageProfile profile{};
-            const auto profile_status =
-                transport_->read_stage_profile(&profile);
-            if (!profile_status.ok() ||
-                profile.abi_version !=
-                    transport::kTransportStageProfileAbiVersion ||
-                profile.struct_size !=
-                    sizeof(transport::TransportStageProfile) ||
-                profile.generation != generation ||
-                profile.completion_generation != generation ||
-                profile.command_count == 0 ||
-                profile.service_start_cycles == 0 ||
-                profile.service_end_cycles < profile.service_start_cycles) {
-                write_error(
-                    error, error_capacity,
-                    "profile failure: generation=%llu completion=%llu "
-                    "commands=%u service=%llu..%llu",
-                    static_cast<unsigned long long>(profile.generation),
-                    static_cast<unsigned long long>(
-                        profile.completion_generation),
-                    profile.command_count,
-                    static_cast<unsigned long long>(
-                        profile.service_start_cycles),
-                    static_cast<unsigned long long>(
-                        profile.service_end_cycles));
-                return false;
+            if (probe::runtime_case_records_transport_profile(runtime_case)) {
+                transport::TransportStageProfile profile{};
+                const auto profile_status =
+                    transport_->read_stage_profile(&profile);
+                if (!profile_status.ok() ||
+                    profile.abi_version !=
+                        transport::kTransportStageProfileAbiVersion ||
+                    profile.struct_size !=
+                        sizeof(transport::TransportStageProfile) ||
+                    profile.generation != generation ||
+                    profile.completion_generation != generation ||
+                    profile.command_count == 0 ||
+                    profile.service_start_cycles == 0 ||
+                    profile.service_end_cycles <
+                        profile.service_start_cycles) {
+                    write_error(
+                        error, error_capacity,
+                        "profile failure: generation=%llu completion=%llu "
+                        "commands=%u service=%llu..%llu",
+                        static_cast<unsigned long long>(profile.generation),
+                        static_cast<unsigned long long>(
+                            profile.completion_generation),
+                        profile.command_count,
+                        static_cast<unsigned long long>(
+                            profile.service_start_cycles),
+                        static_cast<unsigned long long>(
+                            profile.service_end_cycles));
+                    return false;
+                }
             }
         }
         return true;
