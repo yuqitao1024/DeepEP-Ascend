@@ -225,6 +225,161 @@ def _valid_component_rank(rank):
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
+    def test_direct_device_hot_path_uses_32_bit_control_indices(self):
+        """Keeps shape iteration narrow while addresses and offsets stay wide."""
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        grid_begin = kernels.index("struct DirectDataGridStride")
+        grid_end = kernels.index(
+            "DEEP_EP_ASCEND_KERNEL_CALLEE WorldRoute", grid_begin)
+        grid = kernels[grid_begin:grid_end]
+        self.assertIn("std::uint32_t first", grid)
+        self.assertIn("std::uint32_t stride", grid)
+        self.assertNotIn("std::uint64_t first", grid)
+        self.assertNotIn("std::uint64_t stride", grid)
+
+        tiling = (ELASTIC / "tiling.hpp").read_text()
+        self.assertIn("kDirectDeviceIndexLimit", tiling)
+        self.assertIn("shape exceeds 32-bit device index range", tiling)
+        self.assertIn("dispatch output exceeds 32-bit device index range", tiling)
+
+        dispatch = (ELASTIC / "dispatch.asc").read_text()
+        for function_name, markers in {
+                "direct_dispatch_producer_group_vf": (
+                    "const std::uint32_t num_tokens_u32",
+                    "for (std::uint32_t tile = grid.first",
+                    "for (std::uint32_t local_token = 0",
+                ),
+                "direct_dispatch_producer_vector_payload_impl": (
+                    "const std::uint32_t num_tokens_u32",
+                    "const std::uint32_t block_index",
+                    "for (std::uint32_t subgroup = 0",
+                    "for (std::uint32_t tile =",
+                ),
+                "direct_dispatch_producer_record_vf": (
+                    "const std::uint32_t num_tokens_u32",
+                    "for (std::uint32_t tile = grid.first",
+                    "for (std::uint32_t logical = grid.first",
+                ),
+        }.items():
+            begin = dispatch.index(f"inline void {function_name}")
+            end = dispatch.index("\n}\n", begin)
+            function = dispatch[begin:end]
+            for marker in markers:
+                self.assertIn(marker, function)
+
+    def test_direct_epilogues_keep_shape_iteration_32_bit(self):
+        dispatch = (ELASTIC / "dispatch.asc").read_text()
+        for function_name, markers in {
+                "direct_dispatch_producer_plan_vf": (
+                    "const std::uint32_t num_tokens_u32",
+                    "const std::uint32_t words_per_rank_u32",
+                    "for (std::uint32_t token = 0",
+                    "for (std::uint32_t lane = 0",
+                ),
+                "direct_dispatch_epilogue_validate_records_vf": (
+                    "const std::uint32_t tile_count_u32",
+                    "for (std::uint32_t tile = work.first",
+                    "for (std::uint32_t logical_record = tile_begin",
+                    "for (std::uint32_t lane = 0",
+                ),
+                "direct_dispatch_epilogue_count_experts_vf": (
+                    "const std::uint32_t local_experts",
+                    "for (std::uint32_t tile = work.first",
+                    "for (std::uint32_t logical_record = tile_begin",
+                ),
+                "direct_dispatch_epilogue_metadata_vf": (
+                    "const std::uint32_t logical_count",
+                    "for (std::uint32_t tile = work.first",
+                    "for (std::uint32_t lane = 0",
+                ),
+                "direct_dispatch_epilogue_assign_destinations_vf": (
+                    "const std::uint32_t tile_count_u32",
+                    "for (std::uint32_t tile = work.first",
+                    "for (std::uint32_t lane = 0",
+                ),
+                "direct_dispatch_epilogue_vector_payload_impl": (
+                    "const std::uint32_t logical_count",
+                    "const std::uint32_t block_index",
+                    "for (std::uint32_t logical = block_index",
+                ),
+                "direct_dispatch_epilogue_copy_outputs_vf": (
+                    "const std::uint32_t logical_count",
+                    "for (std::uint32_t logical = grid.first",
+                    "for (std::uint32_t compact_lane = 0",
+                ),
+        }.items():
+            begin = dispatch.index(f"inline void {function_name}")
+            end = dispatch.index("\n}\n", begin)
+            function = dispatch[begin:end]
+            for marker in markers:
+                self.assertIn(marker, function)
+
+        combine = (ELASTIC / "combine.asc").read_text()
+        for function_name, markers in {
+                "direct_combine_producer_plan_prefix_vf": (
+                    "const std::uint32_t rank_count_u32",
+                    "const std::uint32_t tile_count_u32",
+                    "for (std::uint32_t rank = 0",
+                    "for (std::uint32_t tile = 0",
+                ),
+                "direct_combine_epilogue_clear_index_vf": (
+                    "const std::uint32_t slot_count",
+                    "for (std::uint32_t index = threadIdx.x",
+                    "for (std::uint32_t tile = threadIdx.x",
+                ),
+                "direct_combine_epilogue_validate_vf": (
+                    "const std::uint32_t tile_count_u32",
+                    "for (std::uint32_t tile = work.first",
+                    "for (std::uint32_t logical = tile_begin",
+                ),
+                "direct_combine_epilogue_reduce_errors_vf": (
+                    "const std::uint32_t tile_count_u32",
+                    "const std::uint32_t slot_count",
+                    "for (std::uint32_t tile = 0",
+                    "for (std::uint32_t receive_slot = 0",
+                ),
+        }.items():
+            begin = combine.index(f"inline void {function_name}")
+            end = combine.index("\n}\n", begin)
+            function = combine[begin:end]
+            for marker in markers:
+                self.assertIn(marker, function)
+
+        combine = (ELASTIC / "combine.asc").read_text()
+        for function_name, markers in {
+                "direct_combine_producer_plan_vf": (
+                    "const std::uint32_t num_source_rows_u32",
+                    "for (std::uint32_t tile = work.first",
+                    "for (std::uint32_t row = begin; row < end; ++row)",
+                ),
+                "direct_combine_producer_record_vf": (
+                    "const std::uint32_t num_source_rows_u32",
+                    "for (std::uint32_t row = grid.first",
+                    "for (std::uint32_t hidden = 0",
+                ),
+                "direct_combine_epilogue_vector_reduce_impl": (
+                    "const std::uint32_t num_tokens_u32",
+                    "const std::uint32_t hidden_elements_u32",
+                    "for (std::uint32_t token = block_index",
+                    "for (std::uint32_t hidden = 0",
+                ),
+                "direct_combine_epilogue_reduce_vf": (
+                    "const std::uint32_t num_tokens_u32",
+                    "const std::uint32_t hidden_elements_u32",
+                    "for (std::uint32_t token = work.first",
+                    "for (std::uint32_t hidden = work.lane",
+                ),
+                "direct_combine_epilogue_weights_vf": (
+                    "const std::uint32_t output_count",
+                    "for (std::uint32_t logical = grid.first",
+                ),
+        }.items():
+            begin = combine.index(f"inline void {function_name}")
+            end = combine.index("\n}\n", begin)
+            function = combine[begin:end]
+            for marker in markers:
+                self.assertIn(marker, function)
+
     def test_direct_dispatch_launcher_consumes_stage_pipeline(self):
         """Catches accepting 72 blocks without launching split data stages."""
         source = (ELASTIC / "dispatch.asc").read_text()
@@ -290,7 +445,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         for marker in (
                 "direct_block_distributed_grid_stride(",
                 "kDispatchReceiveRecordsPerTile",
-                "tile_counts[tile * local_experts + local_expert]"):
+                "static_cast<std::uint64_t>(tile) * local_experts +"):
             self.assertIn(marker, count)
         self.assertNotIn(
             "for (std::uint64_t local_expert = threadIdx.x", count)
@@ -392,9 +547,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "block_index * subgroups_per_block + subgroup", producer)
         self.assertIn(
             "block_count * subgroups_per_block", producer)
-        self.assertIn("tile < dispatch_group_tile_count", producer)
+        self.assertIn("tile < tile_count_u32", producer)
         self.assertIn(
-            "tile * kDispatchGroupingTokensPerTile", producer)
+            "tile * static_cast<std::uint32_t>(\n"
+            "                    kDispatchGroupingTokensPerTile)", producer)
         self.assertNotIn("logical_count = num_tokens * world_size", producer)
         self.assertNotIn("input_queue", producer)
         for ready, release in (
@@ -684,7 +840,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "slots[logical_index] = resolved_slot"):
             self.assertIn(marker, reduce)
         self.assertNotIn("CombineContributorEntry", reduce)
-        self.assertIn("if (num_topk > kTopkSubgroupWidth)", reduce)
+        self.assertIn("if (num_topk_u32 > kTopkSubgroupWidth)", reduce)
         self.assertIn("direct_data_grid_stride(", reduce)
         self.assertIn("for (int contributor_rank = 0;", reduce)
         self.assertIn("slots[token_base + lane] = owner_slot", reduce)

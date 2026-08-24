@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <type_traits>
@@ -41,6 +42,70 @@ CoreTilingInput valid_input() {
     input.topology.scale_up_rank = 0;
     input.topology.scale_out_rank = 0;
     return input;
+}
+
+bool has_tiling_error(
+    const TilingStatus& status, const char* expected_message) {
+    return status.code == TilingStatusCode::kInvalidArgument &&
+        status.message != nullptr &&
+        std::strcmp(status.message, expected_message) == 0;
+}
+
+int direct_device_index_boundary_contract() {
+    constexpr std::uint64_t kLimit = 0x7fffffffULL;
+    constexpr const char* kShapeError =
+        "shape exceeds 32-bit device index range";
+    constexpr const char* kCapacityError =
+        "dispatch output exceeds 32-bit device index range";
+    CoreTiling tiling{};
+
+    auto input = valid_input();
+    input.num_experts = 1;
+    input.num_topk = 1;
+    input.expert_alignment = 1;
+    input.num_max_tokens_per_rank = kLimit;
+    auto status = build_core_tiling(input, &tiling);
+    if (!status.ok() || tiling.dispatch_output_capacity != kLimit)
+        return 79;
+
+    input = valid_input();
+    input.hidden = kLimit + 1;
+    if (!has_tiling_error(build_core_tiling(input, &tiling), kShapeError))
+        return 80;
+
+    input = valid_input();
+    input.num_experts = kLimit + 1;
+    if (!has_tiling_error(build_core_tiling(input, &tiling), kShapeError))
+        return 81;
+
+    input = valid_input();
+    input.num_max_tokens_per_rank = kLimit + 1;
+    if (!has_tiling_error(build_core_tiling(input, &tiling), kShapeError))
+        return 82;
+
+    input = valid_input();
+    input.num_tokens = kLimit + 1;
+    input.num_max_tokens_per_rank = kLimit + 1;
+    if (!has_tiling_error(build_core_tiling(input, &tiling), kShapeError))
+        return 83;
+
+    input = valid_input();
+    input.num_experts = kLimit + 1;
+    input.num_topk = kLimit + 1;
+    input.expert_alignment = 1;
+    if (!has_tiling_error(build_core_tiling(input, &tiling), kShapeError))
+        return 84;
+
+    input = valid_input();
+    input.num_experts = 4;
+    input.expert_alignment = 1;
+    input.num_max_tokens_per_rank = 536870912ULL;
+    input.topology.world_size = 2;
+    input.topology.scale_up_size = 2;
+    if (!has_tiling_error(build_core_tiling(input, &tiling), kCapacityError))
+        return 85;
+
+    return 0;
 }
 
 bool aligned(std::uint64_t value) {
@@ -140,6 +205,9 @@ bool topk_grouping_reference_contract() {
 int main() {
     if (!topk_grouping_reference_contract())
         return 52;
+    if (const int boundary_error = direct_device_index_boundary_contract();
+        boundary_error != 0)
+        return boundary_error;
     std::uint64_t combine_slot = 0;
     if (!combine_record_slot_index(0, 0, 4, 6, &combine_slot) ||
         combine_slot != 0 ||

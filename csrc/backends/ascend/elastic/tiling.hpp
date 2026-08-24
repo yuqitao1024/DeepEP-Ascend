@@ -47,6 +47,7 @@ struct CoreTilingInput {
 
 inline constexpr std::uint32_t kAscendMaxDataBlocks = 72;
 inline constexpr std::uint32_t kCoreTilingAbiVersion = 20;
+inline constexpr std::uint64_t kDirectDeviceIndexLimit = 0x7fffffffULL;
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -646,6 +647,17 @@ inline TilingStatus build_core_tiling(
             input, tiling.dispatch_output_capacity,
             &tiling.workspace_layout))
         return TilingStatus::overflow("layout size overflow");
+    if (requires_token_shape &&
+        (input.num_tokens > kDirectDeviceIndexLimit ||
+         input.hidden > kDirectDeviceIndexLimit ||
+         input.num_experts > kDirectDeviceIndexLimit ||
+         input.num_topk > kDirectDeviceIndexLimit ||
+         input.num_max_tokens_per_rank > kDirectDeviceIndexLimit))
+        return TilingStatus::invalid(
+            "shape exceeds 32-bit device index range");
+    if (tiling.dispatch_output_capacity > kDirectDeviceIndexLimit)
+        return TilingStatus::invalid(
+            "dispatch output exceeds 32-bit device index range");
     if (has_mode(input.mode_flags, CoreMode::kHybrid) &&
         !checked_multiply(
             input.num_max_tokens_per_rank,

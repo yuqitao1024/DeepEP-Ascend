@@ -169,13 +169,13 @@ struct ReleaseBoundary {
 #endif
 
 struct DirectDataGridStride {
-    std::uint64_t first = 0;
-    std::uint64_t stride = 0;
+    std::uint32_t first = 0;
+    std::uint32_t stride = 0;
 };
 
 struct DirectSubgroupGridStride {
-    std::uint64_t first = 0;
-    std::uint64_t stride = 0;
+    std::uint32_t first = 0;
+    std::uint32_t stride = 0;
     std::uint32_t lane = 0;
 };
 
@@ -183,8 +183,8 @@ DEEP_EP_ASCEND_KERNEL_CALLEE DirectDataGridStride direct_data_grid_stride(
     std::uint32_t block_index, std::uint32_t thread_index,
     std::uint32_t num_blocks, std::uint32_t num_threads) noexcept {
     return {
-        static_cast<std::uint64_t>(block_index) * num_threads + thread_index,
-        static_cast<std::uint64_t>(num_blocks) * num_threads,
+        block_index * num_threads + thread_index,
+        num_blocks * num_threads,
     };
 }
 
@@ -193,8 +193,8 @@ direct_block_distributed_grid_stride(
     std::uint32_t block_index, std::uint32_t thread_index,
     std::uint32_t num_blocks, std::uint32_t num_threads) noexcept {
     return {
-        static_cast<std::uint64_t>(thread_index) * num_blocks + block_index,
-        static_cast<std::uint64_t>(num_blocks) * num_threads,
+        thread_index * num_blocks + block_index,
+        num_blocks * num_threads,
     };
 }
 
@@ -208,9 +208,8 @@ direct_subgroup_grid_stride(
     const std::uint32_t subgroup_in_block =
         thread_index / subgroup_width;
     return {
-        static_cast<std::uint64_t>(block_index) * subgroups_per_block +
-            subgroup_in_block,
-        static_cast<std::uint64_t>(num_blocks) * subgroups_per_block,
+        block_index * subgroups_per_block + subgroup_in_block,
+        num_blocks * subgroups_per_block,
         thread_index % subgroup_width,
     };
 }
