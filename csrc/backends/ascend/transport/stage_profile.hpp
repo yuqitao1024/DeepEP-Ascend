@@ -79,11 +79,6 @@ inline constexpr TransportStageProfileMaskStatus stage_profile_mask_status(
         kTransportDispatchPipelineStageMask : operation ==
             TransportProfileOperation::kCombine ?
         kTransportCombinePipelineStageMask : 0;
-    const std::uint64_t required_mask = operation ==
-            TransportProfileOperation::kDispatch ?
-        (std::uint64_t{1} << 1U) | (std::uint64_t{1} << 13U) : operation ==
-            TransportProfileOperation::kCombine ?
-        (std::uint64_t{1} << 1U) | (std::uint64_t{1} << 11U) : 0;
     if (pipeline_mask == 0)
         return TransportStageProfileMaskStatus::kInvalidOperation;
     if (stage_mask == 0)
@@ -96,7 +91,7 @@ inline constexpr TransportStageProfileMaskStatus stage_profile_mask_status(
         return TransportStageProfileMaskStatus::kValid;
     if ((stage_mask & kTransportStageProfileFullMask) != 0)
         return TransportStageProfileMaskStatus::kPartialMask;
-    return (stage_mask & required_mask) == required_mask ?
+    return stage_mask == pipeline_mask ?
         TransportStageProfileMaskStatus::kValid :
         TransportStageProfileMaskStatus::kPartialMask;
 }

@@ -1086,7 +1086,18 @@ __aicore__ inline void complete_profile(
         return;
     profile->completion_generation = generation;
     aicore::system_fence();
-    aicore::flush_cacheline(profile);
+    aicore::flush_stage_profile_header(profile);
+}
+
+__aicore__ inline std::uint64_t stage_profile_completed_mask(
+    TransportProfileOperation operation, std::uint32_t stage) {
+    if (stage == 0)
+        return kTransportStageProfileFullMask;
+    if (operation == TransportProfileOperation::kDispatch && stage == 13)
+        return kTransportDispatchPipelineStageMask;
+    if (operation == TransportProfileOperation::kCombine && stage == 11)
+        return kTransportCombinePipelineStageMask;
+    return 0;
 }
 
 __aicore__ inline void record_stage_start(
@@ -1101,14 +1112,13 @@ __aicore__ inline void record_stage_start(
     profile->generation = generation;
     profile->stages[stage].blocks[block].start =
         static_cast<std::uint64_t>(AscendC::GetSystemCycle());
-    if (block == 0) {
+    if (block == 0)
         profile->stages[stage].block_count = block_count;
-        profile->valid_stage_mask |= std::uint64_t{1} << stage;
-    }
 }
 
 __aicore__ inline void record_stage_end(
-    const DeviceTransportContext& context, std::uint64_t generation,
+    const DeviceTransportContext& context, TransportProfileOperation operation,
+    std::uint64_t generation,
     std::uint32_t stage, std::uint32_t block, bool complete_operation) {
     auto* profile = detail::profile_buffer(context);
     if (profile == nullptr || profile->generation != generation ||
@@ -1121,8 +1131,10 @@ __aicore__ inline void record_stage_end(
     aicore::flush_cacheline(&profile->stages[stage].blocks[block]);
     if (block == 0)
         aicore::flush_cacheline(&profile->stages[stage]);
-    if (block == 0 && complete_operation)
+    if (block == 0 && complete_operation) {
+        profile->valid_stage_mask = stage_profile_completed_mask(operation, stage);
         complete_profile(context, generation);
+    }
 }
 
 __aicore__ inline void reset(

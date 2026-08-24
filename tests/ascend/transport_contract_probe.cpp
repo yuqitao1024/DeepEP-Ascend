@@ -124,10 +124,10 @@ int main() {
         return 6;
     if (stage_profile_mask_status(
             TransportProfileOperation::kDispatch, observed_dispatch_mask) !=
-            TransportStageProfileMaskStatus::kValid ||
+            TransportStageProfileMaskStatus::kPartialMask ||
         stage_profile_mask_status(
             TransportProfileOperation::kCombine, observed_combine_mask) !=
-            TransportStageProfileMaskStatus::kValid ||
+            TransportStageProfileMaskStatus::kPartialMask ||
         stage_profile_mask_status(
             TransportProfileOperation::kDispatch,
             std::uint64_t{1} << 13U) !=
