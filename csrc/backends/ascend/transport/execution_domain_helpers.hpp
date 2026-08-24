@@ -1,5 +1,6 @@
 #pragma once
 
+#include "stage_profile.hpp"
 #include "sync_layout.hpp"
 #include "transport_commands.hpp"
 
@@ -33,6 +34,17 @@ aicore_profile_payload_bytes(
         default:
             return 0;
     }
+}
+
+DEEP_EP_ASCEND_AICORE_EXECUTION_INLINE TransportQueueDepthSnapshot
+aicore_merge_queue_depth_snapshots(
+    TransportQueueDepthSnapshot aggregate,
+    TransportQueueDepthSnapshot observed) {
+    if (observed.sq_depth > aggregate.sq_depth)
+        aggregate.sq_depth = observed.sq_depth;
+    if (observed.cq_depth > aggregate.cq_depth)
+        aggregate.cq_depth = observed.cq_depth;
+    return aggregate;
 }
 
 DEEP_EP_ASCEND_SIMT_EXECUTION_INLINE bool simt_barrier_team_enabled(

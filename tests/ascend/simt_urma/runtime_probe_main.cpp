@@ -58,6 +58,7 @@ bool parse_case(const char* name, probe::RuntimeCase* runtime_case) {
         {"payload-signal-order", probe::RuntimeCase::kPayloadSignalOrder},
         {"barrier-repeat", probe::RuntimeCase::kBarrierRepeat},
         {"queue-wrap", probe::RuntimeCase::kQueueWrap},
+        {"profile-mixed", probe::RuntimeCase::kProfileMixed},
         {"phase-boundary", probe::RuntimeCase::kPhaseBoundary},
     };
     for (const auto& entry : entries) {
@@ -264,6 +265,52 @@ std::uint32_t inspect_sq_depth(
     return sq.depth;
 }
 
+std::uint32_t inspect_cq_depth(
+    const transport::DeviceTransportContext& context, std::uint32_t peer,
+    char* error, std::size_t error_capacity) {
+    transport::cann_abi::Team team{};
+    if (!copy_from_device(
+            &team, reinterpret_cast<const void*>(context.channel_table),
+            sizeof(team), "copy team", error, error_capacity))
+        return 0;
+    if (peer >= team.member_count || team.channel_counts == 0 ||
+        team.channels == 0) {
+        write_error(error, error_capacity, "invalid team channel table");
+        return 0;
+    }
+    std::uint32_t counts[64]{};
+    if (team.member_count > 64 ||
+        !copy_from_device(
+            counts, reinterpret_cast<const void*>(team.channel_counts),
+            team.member_count * sizeof(std::uint32_t), "copy channel counts",
+            error, error_capacity))
+        return 0;
+    if (counts[peer] == 0) {
+        write_error(error, error_capacity, "peer has no channel");
+        return 0;
+    }
+    std::uint32_t channel_index = 0;
+    for (std::uint32_t member = 0; member < peer; ++member)
+        channel_index += counts[member];
+    transport::cann_abi::Channel channel{};
+    const auto channel_address = team.channels +
+        static_cast<std::uint64_t>(channel_index) * sizeof(channel);
+    if (!copy_from_device(
+            &channel, reinterpret_cast<const void*>(channel_address),
+            sizeof(channel), "copy channel", error, error_capacity) ||
+        channel.cq_contexts == 0 || channel.cq_count == 0) {
+        if (error != nullptr && error[0] == '\0')
+            write_error(error, error_capacity, "invalid CQ table");
+        return 0;
+    }
+    transport::cann_abi::CqContext cq{};
+    if (!copy_from_device(
+            &cq, reinterpret_cast<const void*>(channel.cq_contexts),
+            sizeof(cq), "copy CQ context", error, error_capacity))
+        return 0;
+    return cq.depth;
+}
+
 std::uint32_t inspect_command_capacity(
     const transport::DeviceTransportContext& context, char* error,
     std::size_t error_capacity) {
@@ -361,12 +408,15 @@ public:
         const std::uint32_t peer = (rank + 1) % world_size;
         std::uint64_t launch_count = std::max<std::uint64_t>(iterations, 1);
         std::uint32_t operations = 1;
+        std::uint32_t command_capacity = 0;
+        std::uint32_t pressure_depth = 0;
+        std::uint64_t pressure_remaining = 0;
         if (runtime_case == probe::RuntimeCase::kQueueWrap) {
             const auto depth = inspect_sq_depth(
                 context_, peer, error, error_capacity);
             if (depth == 0)
                 return false;
-            const auto command_capacity = inspect_command_capacity(
+            command_capacity = inspect_command_capacity(
                 context_, error, error_capacity);
             operations = probe::queue_wrap_batch_operations(command_capacity);
             if (operations == 0) {
@@ -380,11 +430,37 @@ public:
             launch_count = (static_cast<std::uint64_t>(depth) +
                             operations - 1) /
                            operations + 1;
+        } else if (runtime_case == probe::RuntimeCase::kProfileMixed) {
+            pressure_depth = inspect_cq_depth(
+                context_, peer, error, error_capacity);
+            command_capacity = inspect_command_capacity(
+                context_, error, error_capacity);
+            if (pressure_depth <= 1 ||
+                command_capacity < probe::kMixedProfileCommandCount) {
+                if (error != nullptr && error[0] == '\0')
+                    write_error(
+                        error, error_capacity,
+                        "cannot force queue pressure: cq_depth=%u "
+                        "command_capacity=%u",
+                        pressure_depth, command_capacity);
+                return false;
+            }
+            pressure_remaining = pressure_depth - 1;
+            launch_count = (pressure_remaining + command_capacity - 1) /
+                command_capacity + 1;
         }
 
         auto* device_state = static_cast<probe::RuntimeState*>(window_);
         for (std::uint64_t launch = 0; launch < launch_count; ++launch) {
             const std::uint64_t generation = launch + 1;
+            const bool finalize_profile_pressure =
+                runtime_case == probe::RuntimeCase::kProfileMixed &&
+                pressure_remaining == 0;
+            if (runtime_case == probe::RuntimeCase::kProfileMixed) {
+                operations = finalize_profile_pressure ? 1 :
+                    static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                        pressure_remaining, command_capacity));
+            }
             probe::RuntimeState state;
             state.source =
                 (static_cast<std::uint64_t>(rank + 1) << 32U) | generation;
@@ -397,7 +473,7 @@ public:
                 return false;
             const int launch_status = deep_ep_ascend_urma_launch_runtime_probe(
                 device_state, context_, runtime_case, peer, generation,
-                operations, stream_);
+                operations, finalize_profile_pressure, stream_);
             if (launch_status != 0) {
                 write_error(
                     error, error_capacity, "kernel launch failed with %d",
@@ -468,7 +544,37 @@ public:
                             profile.service_end_cycles));
                     return false;
                 }
+                if (finalize_profile_pressure &&
+                    (profile.command_count !=
+                         probe::kMixedProfileCommandCount ||
+                     profile.put_command_count !=
+                         probe::kMixedProfilePutCommandCount ||
+                     profile.command_bytes !=
+                         probe::kMixedProfilePayloadBytes ||
+                     profile.sq_depth != 0 || profile.cq_depth != 0 ||
+                     profile.sq_high_watermark != pressure_depth - 1 ||
+                     profile.cq_high_watermark != pressure_depth - 1 ||
+                     profile.wait_cycles == 0 ||
+                     transport::transport_stage_profile_command_metrics_status(
+                         profile, true) !=
+                         transport::TransportStageProfileCommandMetricsStatus::
+                             kValid)) {
+                    write_error(
+                        error, error_capacity,
+                        "mixed profile failure: commands=%u puts=%u bytes=%llu "
+                        "depth=%u/%u hwm=%u/%u expected_hwm=%u wait=%llu",
+                        profile.command_count, profile.put_command_count,
+                        static_cast<unsigned long long>(profile.command_bytes),
+                        profile.sq_depth, profile.cq_depth,
+                        profile.sq_high_watermark,
+                        profile.cq_high_watermark, pressure_depth - 1,
+                        static_cast<unsigned long long>(profile.wait_cycles));
+                    return false;
+                }
             }
+            if (runtime_case == probe::RuntimeCase::kProfileMixed &&
+                !finalize_profile_pressure)
+                pressure_remaining -= operations;
         }
         return true;
     }
@@ -620,7 +726,7 @@ extern "C" int deep_ep_ascend_urma_run_local_phase_boundary(
     if (success) {
         const int launch_status = deep_ep_ascend_urma_launch_runtime_probe(
             device_state, context, probe::RuntimeCase::kPhaseBoundary, 0, 1,
-            1, stream);
+            1, false, stream);
         if (launch_status != 0) {
             write_error(
                 error, error_capacity, "local smoke launch failed with %d",

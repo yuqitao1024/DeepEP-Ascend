@@ -5,6 +5,7 @@
 #include <type_traits>
 
 #include "csrc/backends/ascend/transport/device_transport.hpp"
+#include "csrc/backends/ascend/transport/execution_domain_helpers.hpp"
 #include "csrc/backends/ascend/transport/stage_profile.hpp"
 #include "csrc/backends/ascend/transport/stub_transport.hpp"
 
@@ -145,6 +146,119 @@ int main() {
         transport_stage_profile_service_cycles_valid(10, 20, 11) ||
         !transport_stage_profile_service_cycles_valid(10, 20, 10))
         return 7;
+
+    const auto first_queue = command::aicore_merge_queue_depth_snapshots(
+        TransportQueueDepthSnapshot{}, TransportQueueDepthSnapshot{3, 2});
+    const auto aggregated_queue = command::aicore_merge_queue_depth_snapshots(
+        first_queue, TransportQueueDepthSnapshot{1, 4});
+    if (aggregated_queue.sq_depth != 3 || aggregated_queue.cq_depth != 4)
+        return 32;
+
+    TransportStageProfile valid_metrics{};
+    valid_metrics.command_count = 6;
+    valid_metrics.put_command_count = 1;
+    valid_metrics.command_bytes = 24;
+    valid_metrics.sq_high_watermark = 7;
+    valid_metrics.cq_high_watermark = 7;
+    if (transport_stage_profile_command_metrics_status(
+            valid_metrics, true) !=
+            TransportStageProfileCommandMetricsStatus::kValid)
+        return 33;
+
+    const auto expect_metric_status = [](
+        TransportStageProfile candidate,
+        TransportStageProfileCommandMetricsStatus expected,
+        const char* expected_reason) {
+        const auto observed = transport_stage_profile_command_metrics_status(
+            candidate, true);
+        const auto* reason = transport_stage_profile_command_metrics_reason(
+            observed);
+        return observed == expected && reason != nullptr &&
+            std::string(reason) == expected_reason;
+    };
+    auto invalid_metrics = valid_metrics;
+    invalid_metrics.put_command_count = 7;
+    if (!expect_metric_status(
+            invalid_metrics,
+            TransportStageProfileCommandMetricsStatus::
+                kPutCommandCountExceedsCommandCount,
+            "put_command_count_exceeds_command_count"))
+        return 34;
+    invalid_metrics = valid_metrics;
+    invalid_metrics.sq_depth = 8;
+    if (!expect_metric_status(
+            invalid_metrics,
+            TransportStageProfileCommandMetricsStatus::
+                kSqDepthExceedsHighWatermark,
+            "sq_depth_exceeds_high_watermark"))
+        return 35;
+    invalid_metrics = valid_metrics;
+    invalid_metrics.cq_depth = 8;
+    if (!expect_metric_status(
+            invalid_metrics,
+            TransportStageProfileCommandMetricsStatus::
+                kCqDepthExceedsHighWatermark,
+            "cq_depth_exceeds_high_watermark"))
+        return 36;
+    invalid_metrics = valid_metrics;
+    invalid_metrics.sq_depth = 1;
+    invalid_metrics.cq_depth = 0;
+    if (!expect_metric_status(
+            invalid_metrics,
+            TransportStageProfileCommandMetricsStatus::kQueueDepthMismatch,
+            "queue_depth_mismatch"))
+        return 37;
+    invalid_metrics = valid_metrics;
+    invalid_metrics.cq_high_watermark = 0;
+    if (!expect_metric_status(
+            invalid_metrics,
+            TransportStageProfileCommandMetricsStatus::
+                kQueueHighWatermarkMismatch,
+            "queue_high_watermark_mismatch"))
+        return 38;
+    invalid_metrics = TransportStageProfile{};
+    invalid_metrics.sq_high_watermark = 1;
+    invalid_metrics.cq_high_watermark = 1;
+    if (!expect_metric_status(
+            invalid_metrics,
+            TransportStageProfileCommandMetricsStatus::
+                kQueueActivityWithoutCommands,
+            "queue_activity_without_commands"))
+        return 39;
+    invalid_metrics = valid_metrics;
+    invalid_metrics.sq_depth = 1;
+    invalid_metrics.cq_depth = 1;
+    if (!expect_metric_status(
+            invalid_metrics,
+            TransportStageProfileCommandMetricsStatus::
+                kCompletedServiceHasOutstandingRequests,
+            "completed_service_has_outstanding_requests"))
+        return 40;
+    invalid_metrics = valid_metrics;
+    invalid_metrics.sq_high_watermark = 0;
+    invalid_metrics.cq_high_watermark = 0;
+    if (!expect_metric_status(
+            invalid_metrics,
+            TransportStageProfileCommandMetricsStatus::
+                kPayloadWithoutQueueActivity,
+            "payload_without_queue_activity"))
+        return 41;
+    invalid_metrics = valid_metrics;
+    invalid_metrics.put_command_count = 1;
+    invalid_metrics.command_bytes = 0;
+    if (!expect_metric_status(
+            invalid_metrics,
+            TransportStageProfileCommandMetricsStatus::
+                kPutCommandsWithoutPayload,
+            "put_commands_without_payload"))
+        return 42;
+    invalid_metrics = valid_metrics;
+    invalid_metrics.sq_depth = 1;
+    invalid_metrics.cq_depth = 1;
+    if (transport_stage_profile_command_metrics_status(
+            invalid_metrics, false) !=
+            TransportStageProfileCommandMetricsStatus::kValid)
+        return 43;
 
     std::array<std::uint64_t, kTransportProfileStageCount> stage_spans{};
     stage_spans[0] = 140;

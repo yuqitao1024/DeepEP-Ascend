@@ -1134,6 +1134,16 @@ public:
             unavailable("partial_generation");
             return result;
         }
+        const auto command_metrics_status =
+            transport::transport_stage_profile_command_metrics_status(
+                profile, true);
+        if (command_metrics_status !=
+                transport::TransportStageProfileCommandMetricsStatus::kValid) {
+            unavailable(
+                transport::transport_stage_profile_command_metrics_reason(
+                    command_metrics_status));
+            return result;
+        }
         const auto mask_status = transport::stage_profile_mask_status(
             profile.operation, profile.valid_stage_mask);
         if (mask_status != transport::TransportStageProfileMaskStatus::kValid) {

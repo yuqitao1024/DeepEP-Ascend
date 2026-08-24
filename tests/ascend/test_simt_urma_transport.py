@@ -178,7 +178,7 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
         expected_cases = {
             "put", "put-value64", "faa64", "signal", "signal-set", "flush",
             "payload-signal-order", "barrier-repeat", "queue-wrap",
-            "phase-boundary", "teardown",
+            "profile-mixed", "phase-boundary", "teardown",
         }
         self.assertEqual(set(contract["cases"]), expected_cases)
         self.assertEqual(
@@ -190,10 +190,31 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
         self.assertGreaterEqual(
             contract["cases"]["payload-signal-order"]["iterations"], 1000)
         self.assertTrue(contract["cases"]["queue-wrap"]["requires_sq_wrap"])
+        self.assertEqual(
+            contract["cases"]["profile-mixed"]["command_metrics"], {
+                "command_count": 6,
+                "put_command_count": 1,
+                "payload_bytes": 24,
+            })
+        self.assertEqual(
+            contract["cases"]["profile-mixed"]["queue_invariants"], {
+                "forced_capacity_drain": True,
+                "final_sq_depth": 0,
+                "final_cq_depth": 0,
+                "equal_nonzero_high_watermarks": True,
+                "positive_wait_cycles": True,
+            })
         for name in expected_cases - {"teardown"}:
             self.assertEqual(
                 contract["cases"][name]["phases"],
                 ["producer", "service", "consumer"])
+
+    def test_local_phase_boundary_launch_disables_profile_pressure(self):
+        runtime = (SIMT_URMA / "runtime_probe_main.cpp").read_text()
+        self.assertIn(
+            "probe::RuntimeCase::kPhaseBoundary, 0, 1,\n"
+            "            1, false, stream);",
+            runtime)
 
     def test_cann_host_transport_lifecycle(self):
         with tempfile.TemporaryDirectory() as directory:

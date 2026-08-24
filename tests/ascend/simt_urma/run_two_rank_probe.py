@@ -27,6 +27,21 @@ def runtime_contract():
         },
         "barrier-repeat": {**phased, "iterations": 50},
         "queue-wrap": {**phased, "requires_sq_wrap": True},
+        "profile-mixed": {
+            **phased,
+            "command_metrics": {
+                "command_count": 6,
+                "put_command_count": 1,
+                "payload_bytes": 24,
+            },
+            "queue_invariants": {
+                "forced_capacity_drain": True,
+                "final_sq_depth": 0,
+                "final_cq_depth": 0,
+                "equal_nonzero_high_watermarks": True,
+                "positive_wait_cycles": True,
+            },
+        },
         "phase-boundary": dict(phased),
         "teardown": {"phases": ["host"]},
     }

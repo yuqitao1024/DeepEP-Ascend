@@ -10,6 +10,9 @@
 namespace deep_ep::ascend::transport::runtime_probe {
 
 inline constexpr std::uint32_t kMaxQueueWrapBatchOperations = 64;
+inline constexpr std::uint32_t kMixedProfileCommandCount = 6;
+inline constexpr std::uint32_t kMixedProfilePutCommandCount = 1;
+inline constexpr std::uint64_t kMixedProfilePayloadBytes = 24;
 
 constexpr std::uint32_t queue_wrap_batch_operations(
     std::uint32_t command_capacity) noexcept {
@@ -31,6 +34,7 @@ enum class RuntimeCase : std::uint32_t {
     kPayloadSignalOrder,
     kBarrierRepeat,
     kQueueWrap,
+    kProfileMixed,
     kPhaseBoundary,
 };
 
@@ -61,7 +65,8 @@ extern "C" int deep_ep_ascend_urma_launch_runtime_probe(
     deep_ep::ascend::transport::DeviceTransportContext context,
     deep_ep::ascend::transport::runtime_probe::RuntimeCase runtime_case,
     std::uint32_t peer, std::uint64_t generation,
-    std::uint32_t operation_count, void* stream);
+    std::uint32_t operation_count, bool finalize_profile_pressure,
+    void* stream);
 
 extern "C" int deep_ep_ascend_urma_run_case(
     std::int64_t communicator_handle, std::uint32_t rank,

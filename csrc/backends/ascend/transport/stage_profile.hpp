@@ -51,6 +51,11 @@ struct alignas(64) TransportStageProfile {
     TransportStageCycles stages[kTransportProfileStageCount]{};
 };
 
+struct TransportQueueDepthSnapshot {
+    std::uint32_t sq_depth = 0;
+    std::uint32_t cq_depth = 0;
+};
+
 inline constexpr std::size_t kTransportStageProfileHeaderBytes =
     offsetof(TransportStageProfile, stages);
 inline constexpr std::size_t kTransportStageProfileHeaderCacheLineCount =
@@ -102,6 +107,91 @@ inline constexpr bool transport_stage_profile_service_cycles_valid(
     return service_start_cycles != 0 && service_end_cycles != 0 &&
         service_end_cycles >= service_start_cycles &&
         wait_cycles <= service_end_cycles - service_start_cycles;
+}
+
+enum class TransportStageProfileCommandMetricsStatus : std::uint32_t {
+    kValid,
+    kPutCommandCountExceedsCommandCount,
+    kSqDepthExceedsHighWatermark,
+    kCqDepthExceedsHighWatermark,
+    kQueueDepthMismatch,
+    kQueueHighWatermarkMismatch,
+    kQueueActivityWithoutCommands,
+    kPutCommandsWithoutPayload,
+    kPayloadWithoutQueueActivity,
+    kCompletedServiceHasOutstandingRequests,
+};
+
+inline constexpr TransportStageProfileCommandMetricsStatus
+transport_stage_profile_command_metrics_status(
+    const TransportStageProfile& profile, bool service_completed) noexcept {
+    if (profile.put_command_count > profile.command_count)
+        return TransportStageProfileCommandMetricsStatus::
+            kPutCommandCountExceedsCommandCount;
+    if (profile.sq_depth > profile.sq_high_watermark)
+        return TransportStageProfileCommandMetricsStatus::
+            kSqDepthExceedsHighWatermark;
+    if (profile.cq_depth > profile.cq_high_watermark)
+        return TransportStageProfileCommandMetricsStatus::
+            kCqDepthExceedsHighWatermark;
+    if (profile.sq_depth != profile.cq_depth)
+        return TransportStageProfileCommandMetricsStatus::kQueueDepthMismatch;
+    if (profile.sq_high_watermark != profile.cq_high_watermark)
+        return TransportStageProfileCommandMetricsStatus::
+            kQueueHighWatermarkMismatch;
+    if (profile.command_count == 0 &&
+        (profile.put_command_count != 0 || profile.command_bytes != 0 ||
+         profile.sq_depth != 0 || profile.cq_depth != 0 ||
+         profile.sq_high_watermark != 0 ||
+         profile.cq_high_watermark != 0 || profile.wait_cycles != 0))
+        return TransportStageProfileCommandMetricsStatus::
+            kQueueActivityWithoutCommands;
+    if (profile.put_command_count != 0 && profile.command_bytes == 0)
+        return TransportStageProfileCommandMetricsStatus::
+            kPutCommandsWithoutPayload;
+    if (profile.command_bytes != 0 && profile.sq_high_watermark == 0)
+        return TransportStageProfileCommandMetricsStatus::
+            kPayloadWithoutQueueActivity;
+    if (service_completed &&
+        (profile.sq_depth != 0 || profile.cq_depth != 0))
+        return TransportStageProfileCommandMetricsStatus::
+            kCompletedServiceHasOutstandingRequests;
+    return TransportStageProfileCommandMetricsStatus::kValid;
+}
+
+inline constexpr const char* transport_stage_profile_command_metrics_reason(
+    TransportStageProfileCommandMetricsStatus status) noexcept {
+    switch (status) {
+        case TransportStageProfileCommandMetricsStatus::kValid:
+            return nullptr;
+        case TransportStageProfileCommandMetricsStatus::
+                kPutCommandCountExceedsCommandCount:
+            return "put_command_count_exceeds_command_count";
+        case TransportStageProfileCommandMetricsStatus::
+                kSqDepthExceedsHighWatermark:
+            return "sq_depth_exceeds_high_watermark";
+        case TransportStageProfileCommandMetricsStatus::
+                kCqDepthExceedsHighWatermark:
+            return "cq_depth_exceeds_high_watermark";
+        case TransportStageProfileCommandMetricsStatus::kQueueDepthMismatch:
+            return "queue_depth_mismatch";
+        case TransportStageProfileCommandMetricsStatus::
+                kQueueHighWatermarkMismatch:
+            return "queue_high_watermark_mismatch";
+        case TransportStageProfileCommandMetricsStatus::
+                kQueueActivityWithoutCommands:
+            return "queue_activity_without_commands";
+        case TransportStageProfileCommandMetricsStatus::
+                kPutCommandsWithoutPayload:
+            return "put_commands_without_payload";
+        case TransportStageProfileCommandMetricsStatus::
+                kPayloadWithoutQueueActivity:
+            return "payload_without_queue_activity";
+        case TransportStageProfileCommandMetricsStatus::
+                kCompletedServiceHasOutstandingRequests:
+            return "completed_service_has_outstanding_requests";
+    }
+    return "invalid_command_metrics";
 }
 
 struct TransportStageProfilePhaseCycles {
@@ -163,5 +253,6 @@ static_assert(kTransportStageProfileHeaderCacheLineCount == 2);
 static_assert(std::is_trivially_copyable_v<TransportStageBlockCycles>);
 static_assert(std::is_trivially_copyable_v<TransportStageCycles>);
 static_assert(std::is_trivially_copyable_v<TransportStageProfile>);
+static_assert(std::is_trivially_copyable_v<TransportQueueDepthSnapshot>);
 
 }  // namespace deep_ep::ascend::transport
