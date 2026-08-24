@@ -465,21 +465,42 @@ public:
             state.source =
                 (static_cast<std::uint64_t>(rank + 1) << 32U) | generation;
             state.generation = generation;
-            if (!check_acl(
-                    aclrtMemcpy(
-                        device_state, sizeof(state), &state, sizeof(state),
-                        ACL_MEMCPY_HOST_TO_DEVICE),
-                    "initialize runtime state", error, error_capacity))
+            if (!probe::reset_synchronize_and_launch(
+                    finalize_profile_pressure,
+                    [&] {
+                        return check_acl(
+                            aclrtMemcpy(
+                                device_state, sizeof(state), &state,
+                                sizeof(state), ACL_MEMCPY_HOST_TO_DEVICE),
+                            "initialize runtime state", error,
+                            error_capacity);
+                    },
+                    [&] {
+                        const auto status = transport_->host_barrier();
+                        if (status.ok())
+                            return true;
+                        write_error(
+                            error, error_capacity,
+                            "final profile host barrier failed: operation=%s "
+                            "backend=%d %s",
+                            status.operation.c_str(), status.backend_code,
+                            status.message.c_str());
+                        return false;
+                    },
+                    [&] {
+                        const int launch_status =
+                            deep_ep_ascend_urma_launch_runtime_probe(
+                                device_state, context_, runtime_case, peer,
+                                generation, operations,
+                                finalize_profile_pressure, stream_);
+                        if (launch_status == 0)
+                            return true;
+                        write_error(
+                            error, error_capacity,
+                            "kernel launch failed with %d", launch_status);
+                        return false;
+                    }))
                 return false;
-            const int launch_status = deep_ep_ascend_urma_launch_runtime_probe(
-                device_state, context_, runtime_case, peer, generation,
-                operations, finalize_profile_pressure, stream_);
-            if (launch_status != 0) {
-                write_error(
-                    error, error_capacity, "kernel launch failed with %d",
-                    launch_status);
-                return false;
-            }
             if (!check_acl(
                     aclrtSynchronizeStream(stream_), "synchronize stream",
                     error, error_capacity) ||

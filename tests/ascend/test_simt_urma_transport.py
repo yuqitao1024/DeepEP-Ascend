@@ -216,6 +216,25 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
             "            1, false, stream);",
             runtime)
 
+    def test_profile_final_launch_synchronizes_after_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = pathlib.Path(directory) / "runtime_launch_sequence"
+            compile_probe = subprocess.run(
+                [
+                    "c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                    "-I", str(ROOT),
+                    str(ROOT / "tests/ascend/"
+                        "runtime_probe_launch_sequence_probe.cpp"),
+                    "-o", str(executable),
+                ],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(
+                compile_probe.returncode, 0, compile_probe.stderr)
+
+            run_probe = subprocess.run(
+                [str(executable)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_probe.returncode, 0, run_probe.stderr)
+
     def test_cann_host_transport_lifecycle(self):
         with tempfile.TemporaryDirectory() as directory:
             executable = pathlib.Path(directory) / "cann_transport_probe"

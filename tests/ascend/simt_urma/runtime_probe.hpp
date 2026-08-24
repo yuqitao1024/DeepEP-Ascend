@@ -43,6 +43,17 @@ constexpr bool runtime_case_records_transport_profile(
     return runtime_case != RuntimeCase::kPhaseBoundary;
 }
 
+template <typename Reset, typename Synchronize, typename Launch>
+bool reset_synchronize_and_launch(
+    bool synchronize_ranks, Reset&& reset, Synchronize&& synchronize,
+    Launch&& launch) {
+    if (!reset())
+        return false;
+    if (synchronize_ranks && !synchronize())
+        return false;
+    return launch();
+}
+
 struct alignas(64) RuntimeState {
     std::uint64_t source = 0;
     std::uint64_t destination = 0;
