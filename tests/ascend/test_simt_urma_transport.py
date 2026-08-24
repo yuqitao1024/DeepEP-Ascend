@@ -297,6 +297,17 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
         self.assertIn("observed = signal_scratch.GetValue(0)", service)
         self.assertNotIn("if (*signal >= generation)", service)
 
+    def test_stage_recording_does_not_reset_from_one_kernel_block(self):
+        service = (
+            TRANSPORT / "aicore_transport_service.hpp").read_text()
+        begin = service.index("__aicore__ inline void record_stage_start(")
+        end = service.index("\n}\n", begin)
+        record_stage_start = service[begin:end]
+
+        self.assertNotIn("begin_profile(", record_stage_start)
+        self.assertIn("profile->generation = generation", record_stage_start)
+        self.assertIn("profile->operation = operation", record_stage_start)
+
     def test_cann_92_device_abi_matches_package_layouts(self):
         ascend_home = os.environ.get("ASCEND_HOME_PATH")
         if not ascend_home:

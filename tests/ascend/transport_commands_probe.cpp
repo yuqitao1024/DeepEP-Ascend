@@ -44,7 +44,6 @@ static_assert(offsetof(transport::DeviceTransportDiagnostic, peer) == 16);
 static_assert(offsetof(transport::DeviceTransportDiagnostic, world_peer) == 48);
 static_assert(offsetof(transport::DeviceTransportDiagnostic, team) == 52);
 static_assert(sizeof(transport::StagedTransportContext) == 128);
-
 constexpr transport::TransportTopology kBarrierTopology{
     transport::kTransportTopologyAbiVersion,
     sizeof(transport::TransportTopology),
@@ -353,6 +352,24 @@ void check_signal_address_layout_diagnostics() {
           Failure::kInvalidSourceMember);
 }
 
+void check_profile_payload_bytes() {
+    const auto put = transport::command::make_put(
+        transport::TransportTeam::kWorld, 1, 1, 0, 0x1000, 0x2000, 4096,
+        transport::CooperationScope::kParticipant,
+        transport::MemorySegment::kDevice, transport::kDefaultOptions);
+    const auto value = transport::command::make_put_value64(
+        transport::TransportTeam::kWorld, 1, 1, 0, 0x1000, 7,
+        transport::kDefaultOptions);
+    const auto flush = transport::command::make_flush(
+        0, transport::CooperationScope::kParticipant);
+    CHECK(transport::command::profile_payload_bytes(
+              put.opcode, put.bytes) == 4096);
+    CHECK(transport::command::profile_payload_bytes(
+              value.opcode, value.bytes) == 8);
+    CHECK(transport::command::profile_payload_bytes(
+              flush.opcode, flush.bytes) == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -363,5 +380,6 @@ int main() {
     check_service_entry_contract();
     check_barrier_poll_timeout();
     check_signal_address_layout_diagnostics();
+    check_profile_payload_bytes();
     return failures == 0 ? 0 : 1;
 }

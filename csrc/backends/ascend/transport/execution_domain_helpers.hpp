@@ -21,6 +21,20 @@ namespace deep_ep::ascend::transport::command {
 
 // Keep these wrappers leaf-only: Bisheng cannot link device-domain calls to
 // ordinary inline constexpr host helpers.
+DEEP_EP_ASCEND_AICORE_EXECUTION_INLINE std::uint64_t
+aicore_profile_payload_bytes(
+    TransportCommandOpcode opcode, std::uint64_t bytes) {
+    switch (opcode) {
+        case TransportCommandOpcode::kPut:
+            return bytes;
+        case TransportCommandOpcode::kPutValue64:
+        case TransportCommandOpcode::kRemoteAdd64:
+            return sizeof(std::uint64_t);
+        default:
+            return 0;
+    }
+}
+
 DEEP_EP_ASCEND_SIMT_EXECUTION_INLINE bool simt_barrier_team_enabled(
     const TransportTopology& topology, std::uint32_t team_mask,
     TransportTeam team) {

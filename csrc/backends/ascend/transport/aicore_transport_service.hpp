@@ -5,6 +5,7 @@
 
 #include "cann_compat.hpp"
 #include "execution_domain_helpers.hpp"
+#include "stage_profile.hpp"
 #include "sync_layout.hpp"
 #include "transport_commands.hpp"
 #include "urma_wqe.hpp"
@@ -321,6 +322,36 @@ __aicore__ inline __gm__ StagedTransportContext* staged_context(
     const DeviceTransportContext& context) {
     return reinterpret_cast<__gm__ StagedTransportContext*>(
         context.backend_context);
+}
+
+__aicore__ inline __gm__ TransportStageProfile* profile_buffer(
+    const DeviceTransportContext& context) {
+    auto* staged = staged_context(context);
+    if (staged == nullptr)
+        return nullptr;
+    aicore::flush_cacheline(staged);
+    if (staged->abi_version != kTransportCommandAbiVersion ||
+        staged->struct_size != sizeof(StagedTransportContext) ||
+        staged->cann_compatibility != kStagedTransportCannCompatibility ||
+        staged->stage_profile == 0 ||
+        staged->stage_profile_bytes != sizeof(TransportStageProfile))
+        return nullptr;
+    return reinterpret_cast<__gm__ TransportStageProfile*>(
+        staged->stage_profile);
+}
+
+__aicore__ inline void update_queue_profile(
+    __gm__ TransportStageProfile* profile, std::uint32_t submitted,
+    std::uint32_t completed) {
+    if (profile == nullptr)
+        return;
+    const auto depth = submitted - completed;
+    profile->sq_depth = depth;
+    profile->cq_depth = depth;
+    if (depth > profile->sq_high_watermark)
+        profile->sq_high_watermark = depth;
+    if (depth > profile->cq_high_watermark)
+        profile->cq_high_watermark = depth;
 }
 
 __aicore__ inline __gm__ TransportCommandQueue* command_queue(
@@ -669,7 +700,8 @@ __aicore__ inline bool post_request(
     __gm__ TransportCommandQueue* queue, ResolvedPeer peer,
     Request request, std::uint32_t command_index,
     TransportCommandOpcode opcode, std::uint64_t retry_limit,
-    const AscendC::LocalTensor<std::uint32_t>& wqe_scratch) {
+    const AscendC::LocalTensor<std::uint32_t>& wqe_scratch,
+    __gm__ TransportStageProfile* profile = nullptr) {
     constexpr std::uint32_t blocks = sizeof(Request) / 64;
     if (peer.channel == nullptr || peer.sq == nullptr || peer.cq == nullptr ||
         peer.sq->entry_bytes != 64 || peer.sq->depth == 0 ||
@@ -687,6 +719,7 @@ __aicore__ inline bool post_request(
     auto request_count = urma::sq_request_count(head_value);
     const auto completed = aicore::load_device(
         reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->tail));
+    update_queue_profile(profile, request_count, completed);
     if (request_count - completed + 1 >= peer.cq->depth) {
         if (!drain_channel(
                 queue, peer, command_index, opcode, retry_limit,
@@ -707,6 +740,7 @@ __aicore__ inline bool post_request(
         wqe_scratch);
     position += blocks;
     ++request_count;
+    update_queue_profile(profile, request_count, completed);
     aicore::store_device(
         reinterpret_cast<__gm__ std::uint64_t*>(peer.sq->head),
         urma::pack_sq_head(position, request_count));
@@ -1018,6 +1052,75 @@ __aicore__ inline bool execute_barrier(
 
 }  // namespace detail
 
+__aicore__ inline void begin_profile(
+    const DeviceTransportContext& context, TransportProfileOperation operation,
+    std::uint64_t generation) {
+    auto* profile = detail::profile_buffer(context);
+    if (profile == nullptr)
+        return;
+    profile->abi_version = kTransportStageProfileAbiVersion;
+    profile->struct_size = sizeof(TransportStageProfile);
+    profile->operation = operation;
+    profile->flags = 0;
+    profile->generation = generation;
+    profile->completion_generation = 0;
+    profile->valid_stage_mask = 0;
+    profile->command_count = 0;
+    profile->put_command_count = 0;
+    profile->sq_depth = 0;
+    profile->cq_depth = 0;
+    profile->sq_high_watermark = 0;
+    profile->cq_high_watermark = 0;
+    profile->command_bytes = 0;
+    profile->service_start_cycles = 0;
+    profile->service_end_cycles = 0;
+    profile->wait_cycles = 0;
+    aicore::system_fence();
+    aicore::flush_cacheline(profile);
+}
+
+__aicore__ inline void complete_profile(
+    const DeviceTransportContext& context, std::uint64_t generation) {
+    auto* profile = detail::profile_buffer(context);
+    if (profile == nullptr || profile->generation != generation)
+        return;
+    profile->completion_generation = generation;
+    aicore::system_fence();
+    aicore::flush_cacheline(profile);
+}
+
+__aicore__ inline void record_stage_start(
+    const DeviceTransportContext& context,
+    TransportProfileOperation operation, std::uint64_t generation,
+    std::uint32_t stage, std::uint32_t block, std::uint32_t block_count) {
+    auto* profile = detail::profile_buffer(context);
+    if (profile == nullptr || stage >= kTransportProfileStageCount ||
+        block >= kTransportProfileMaxBlocks)
+        return;
+    profile->operation = operation;
+    profile->generation = generation;
+    profile->stages[stage].blocks[block].start =
+        static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+    if (block == 0) {
+        profile->stages[stage].block_count = block_count;
+        profile->valid_stage_mask |= std::uint64_t{1} << stage;
+    }
+}
+
+__aicore__ inline void record_stage_end(
+    const DeviceTransportContext& context, std::uint64_t generation,
+    std::uint32_t stage, std::uint32_t block, bool complete_operation) {
+    auto* profile = detail::profile_buffer(context);
+    if (profile == nullptr || profile->generation != generation ||
+        stage >= kTransportProfileStageCount ||
+        block >= kTransportProfileMaxBlocks)
+        return;
+    profile->stages[stage].blocks[block].end =
+        static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+    if (block == 0 && complete_operation)
+        complete_profile(context, generation);
+}
+
 __aicore__ inline void reset(
     const DeviceTransportContext& context, std::uint64_t generation) {
     auto* staged = detail::staged_context(context);
@@ -1076,10 +1179,23 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
     auto* commands = reinterpret_cast<__gm__ TransportCommand*>(
         queue->commands);
     const std::uint32_t count = queue->count;
+    auto* profile = detail::profile_buffer(context);
+    if (profile != nullptr) {
+        profile->command_count = count;
+        profile->service_start_cycles = static_cast<std::uint64_t>(
+            AscendC::GetSystemCycle());
+    }
 
     for (std::uint32_t index = 0; index < count; ++index) {
         auto* current = commands + index;
         aicore::flush_cacheline(current);
+        if (profile != nullptr) {
+            profile->command_bytes +=
+                command::aicore_profile_payload_bytes(
+                    current->opcode, current->bytes);
+            if (current->opcode == TransportCommandOpcode::kPut)
+                ++profile->put_command_count;
+        }
         bool success = true;
         const auto command_error = detail::validate_command(context, current);
         if (command_error != DeviceTransportError::kNone) {
@@ -1109,9 +1225,14 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
         if (!success) {
             // Validation is complete before any transport submission.
         } else if (current->opcode == TransportCommandOpcode::kFlush) {
+            const auto wait_start = static_cast<std::uint64_t>(
+                AscendC::GetSystemCycle());
             success = detail::drain_all(
                 context, queue, index, current->opcode, retry_limit,
                 wqe_scratch);
+            if (profile != nullptr)
+                profile->wait_cycles += static_cast<std::uint64_t>(
+                    AscendC::GetSystemCycle()) - wait_start;
             if (!success)
                 detail::record_error(
                     queue, DeviceTransportError::kInvalidQueue, index,
@@ -1178,7 +1299,7 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                         local->token_id);
                     success = detail::post_request(
                         queue, peer, request, index, current->opcode,
-                        retry_limit, wqe_scratch);
+                        retry_limit, wqe_scratch, profile);
                 }
             } else if (current->opcode ==
                        TransportCommandOpcode::kPutValue64) {
@@ -1201,7 +1322,7 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
                         remote_address, current->value);
                     success = detail::post_request(
                         queue, peer, request, index, current->opcode,
-                        retry_limit, wqe_scratch);
+                        retry_limit, wqe_scratch, profile);
                 }
             } else if (current->opcode ==
                        TransportCommandOpcode::kRemoteAdd64) {
@@ -1228,6 +1349,13 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
     }
     state->active = 0;
     state->consumed_generation = queue->generation;
+    if (profile != nullptr) {
+        profile->service_end_cycles = static_cast<std::uint64_t>(
+            AscendC::GetSystemCycle());
+        profile->sq_depth = 0;
+        profile->cq_depth = 0;
+        aicore::flush_cacheline(profile);
+    }
     aicore::system_fence();
     aicore::flush_cacheline(state);
 }

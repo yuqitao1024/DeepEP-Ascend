@@ -130,6 +130,19 @@ static_assert(std::is_trivially_copyable_v<StagedTransportContext>);
 
 namespace command {
 
+inline constexpr std::uint64_t profile_payload_bytes(
+    TransportCommandOpcode opcode, std::uint64_t bytes) noexcept {
+    switch (opcode) {
+        case TransportCommandOpcode::kPut:
+            return bytes;
+        case TransportCommandOpcode::kPutValue64:
+        case TransportCommandOpcode::kRemoteAdd64:
+            return sizeof(std::uint64_t);
+        default:
+            return 0;
+    }
+}
+
 inline constexpr bool valid_staged_context_header(
     std::uint32_t abi_version, std::uint32_t struct_size,
     std::uint32_t cann_compatibility, std::uintptr_t command_queue) {

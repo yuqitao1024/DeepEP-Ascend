@@ -117,6 +117,8 @@ static_assert(__builtin_has_attribute(
 static_assert(__builtin_has_attribute(
     command::aicore_barrier_peer_in_team, noinline));
 static_assert(__builtin_has_attribute(
+    command::aicore_profile_payload_bytes, noinline));
+static_assert(__builtin_has_attribute(
     sync_layout::aicore_barrier_offset, noinline));
 
 __aicore__ bool aicore_execution_helpers_probe() {
@@ -129,6 +131,12 @@ __aicore__ bool aicore_execution_helpers_probe() {
     const auto cookie = command::aicore_registration_cookie(
         kQueue, kCommands, kService, kDiagnostic, kCapacity);
     return mixed != 0 &&
+           command::aicore_profile_payload_bytes(
+               transport::TransportCommandOpcode::kPut, 4096) == 4096 &&
+           command::aicore_profile_payload_bytes(
+               transport::TransportCommandOpcode::kPutValue64, 0) == 8 &&
+           command::aicore_profile_payload_bytes(
+               transport::TransportCommandOpcode::kFlush, 0) == 0 &&
            command::aicore_valid_staged_context_header(
                transport::kTransportCommandAbiVersion,
                sizeof(transport::StagedTransportContext),

@@ -296,6 +296,7 @@ public:
         config.communicator_handle = communicator_handle;
         config.device_buffer_bytes = kWindowBytes;
         config.requested_channels = 1;
+        config.stage_profile_enabled = true;
         auto topology_status =
             transport::configure_transport_topology_from_environment(&config);
         if (!topology_status.ok()) {
@@ -406,6 +407,33 @@ public:
                     static_cast<unsigned long long>(
                         state.diagnostic.reserved),
                     static_cast<unsigned long long>(state.observed));
+                return false;
+            }
+            transport::TransportStageProfile profile{};
+            const auto profile_status =
+                transport_->read_stage_profile(&profile);
+            if (!profile_status.ok() ||
+                profile.abi_version !=
+                    transport::kTransportStageProfileAbiVersion ||
+                profile.struct_size !=
+                    sizeof(transport::TransportStageProfile) ||
+                profile.generation != generation ||
+                profile.completion_generation != generation ||
+                profile.command_count == 0 ||
+                profile.service_start_cycles == 0 ||
+                profile.service_end_cycles < profile.service_start_cycles) {
+                write_error(
+                    error, error_capacity,
+                    "profile failure: generation=%llu completion=%llu "
+                    "commands=%u service=%llu..%llu",
+                    static_cast<unsigned long long>(profile.generation),
+                    static_cast<unsigned long long>(
+                        profile.completion_generation),
+                    profile.command_count,
+                    static_cast<unsigned long long>(
+                        profile.service_start_cycles),
+                    static_cast<unsigned long long>(
+                        profile.service_end_cycles));
                 return false;
             }
         }
