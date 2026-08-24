@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="在单机 Ascend 950 x 8 上编译 DeepEP Ascend 扩展并运行 representative 单 case">
+  <title>Ascend 950 x 8 representative case 运行教程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main class="page">
+  <header class="cover">
+    <p class="eyebrow">DeepEP 实机课 · Ascend 950 x 8</p>
+    <h1>编译 Ascend 包，跑完同一个 representative case</h1>
+    <p class="lead">这次在八张 Ascend 950 上运行与 H800 相同的 workload。命令加载 CANN 9.2.0 和固定 HCOMM，编译 Ascend extension，启动 8 个 HCCL rank，再输出五个操作的耗时和逻辑带宽。</p>
+    <div class="meta">
+      <span>单机 8 卡</span>
+      <span>72 AI Vector blocks</span>
+      <span>FP8 dispatch</span>
+      <span>BF16 combine</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>1. 对齐 H800 的测试合同</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>项目</th><th>Ascend 950 representative</th></tr></thead>
+      <tbody>
+        <tr><td>World size</td><td>8 ranks，对应本机 NPU 0 到 NPU 7</td></tr>
+        <tr><td>Case</td><td><code>ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0</code></td></tr>
+        <tr><td>Workload</td><td>每 rank 最多 8192 tokens，hidden 7168，top-k 8，256 experts，seed 0</td></tr>
+        <tr><td>精度</td><td>FP8 dispatch，BF16 combine</td></tr>
+        <tr><td>资源</td><td>72 个 AI Vector data blocks，CUDA QP 参数在 Ascend 侧固定为 0</td></tr>
+        <tr><td>计时</td><td>NPU event；30 次 warmup，30 次 measurement；跨 rank 取最大 latency</td></tr>
+        <tr><td>输出</td><td>与 H800 相同的五个 operation IDs</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="band warning"><strong>推荐做法：</strong>把 H800 结果目录中的 <code>workload.json</code> 传到 Ascend 机器，并在运行前设置 <code>DEEPEP_H800_MANIFEST</code>。wrapper 会逐字段验证它，不一致时直接退出。</div>
+
+    <figure class="explainer" id="fig-ascend-run-path">
+      <p class="figure-title">Ascend 950 的直接运行路径</p>
+      <div class="flow">
+        <div><strong>1. CANN 9.2.0</strong>runtime、compiler、HCCL</div>
+        <div><strong>2. 固定 HCOMM</strong>headers 与 libhcomm 同源</div>
+        <div><strong>3. Torch-NPU</strong>识别八张 Ascend 950</div>
+        <div><strong>4. Ascend extension</strong>CMake 强制编译</div>
+        <div><strong>5. HCCL EP8</strong>8 个 local ranks</div>
+        <div><strong>6. 报告</strong>五项 latency 和 GB/s</div>
+      </div>
+      <figcaption>所有环境变量、编译和运行都在同一个 shell 中完成，避免 build 时的 headers 与 runtime 的 shared library 来自不同 HCOMM 包。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>2. 运行前提</h2>
+    <ul>
+      <li>当前 shell 运行在有八张 Ascend 950 的机器上，NPU 0 到 NPU 7 都空闲且可访问。</li>
+      <li>系统 CANN 路径是 <code>/usr/local/Ascend/cann-9.2.0</code>。</li>
+      <li>验证过的 HCOMM 路径是 <code>/home/pyptouser/yuqitao/Ascend/hcomm-deepep-current/cann</code>。</li>
+      <li>Python 环境是 <code>/home/pyptouser/yuqitao/venvs/deepep-ascend-py310</code>，其中包含 PyTorch 2.10、Torch-NPU 2.10 和 pybind11。</li>
+      <li>命令从 DeepEP-Ascend 仓库根目录执行。</li>
+    </ul>
+    <p>如果你的机器使用不同的安装目录，只改复制块开头的 <code>DEEPEP_CANN_ENV</code>、<code>HCOMM_ROOT</code>、<code>DEEPEP_CMAKE_ROOT</code> 和 <code>DEEPEP_PYTHON_ENV</code>。不要只替换一半 HCOMM 路径。</p>
+
+    <h3>2.1 可选：先放好 H800 manifest</h3>
+    <p>H800 和 Ascend 不在同一台机器时，先传输文件：</p>
+    <pre class="shell"><code>scp /path/to/h800-result/workload.json \
+  ascend-host:/path/to/ascend950-workload.json</code></pre>
+    <p>进入 Ascend 机器后设置：</p>
+    <pre class="shell"><code>export DEEPEP_H800_MANIFEST=/path/to/ascend950-workload.json</code></pre>
+    <p>如果不设置，下面的 wrapper 会生成 representative profile 的确定性 manifest。它的 workload 字段相同，但正式比较前仍应核对两边 fingerprint。</p>
+  </section>
+
+  <section>
+    <h2>3. 可整体复制的编译和运行命令</h2>
+    <p>先进入仓库根目录，再整体执行。结果写到仓库同级的 <code>deepep-results/</code>，每次运行使用新的时间戳目录。</p>
+
+    <pre class="shell" id="copy-run-ascend"><code>set -eo pipefail
+
+# ---------- 安装位置 ----------
+DEEPEP_ROOT="$(pwd -P)"
+DEEPEP_CANN_ENV=/usr/local/Ascend/cann-9.2.0/set_env.sh
+HCOMM_ROOT=/home/pyptouser/yuqitao/Ascend/hcomm-deepep-current/cann
+DEEPEP_CMAKE_ROOT=/home/pyptouser/yuqitao/tools/cmake-3.28.4
+DEEPEP_PYTHON_ENV=/home/pyptouser/yuqitao/venvs/deepep-ascend-py310
+
+test -f "${DEEPEP_ROOT}/tests/benchmark/run_ep.py" || {
+  echo "ERROR: 请在 DeepEP-Ascend 仓库根目录执行" >&amp;2
+  exit 1
+}
+test -f "${DEEPEP_CANN_ENV}" || {
+  echo "ERROR: CANN 环境脚本不存在: ${DEEPEP_CANN_ENV}" >&amp;2
+  exit 1
+}
+test -d "${HCOMM_ROOT}/include" || {
+  echo "ERROR: HCOMM include 不存在: ${HCOMM_ROOT}/include" >&amp;2
+  exit 1
+}
+test -d "${HCOMM_ROOT}/lib64" || {
+  echo "ERROR: HCOMM lib64 不存在: ${HCOMM_ROOT}/lib64" >&amp;2
+  exit 1
+}
+test -f "${DEEPEP_PYTHON_ENV}/bin/activate" || {
+  echo "ERROR: Python 环境不存在: ${DEEPEP_PYTHON_ENV}" >&amp;2
+  exit 1
+}
+
+cd "${DEEPEP_ROOT}"
+source "${DEEPEP_CANN_ENV}"
+
+export HCOMM_ROOT
+export PATH="${HCOMM_ROOT}/bin:${DEEPEP_CMAKE_ROOT}/bin${PATH:+:${PATH}}"
+export LD_LIBRARY_PATH="${HCOMM_ROOT}/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export LIBRARY_PATH="${HCOMM_ROOT}/lib64${LIBRARY_PATH:+:${LIBRARY_PATH}}"
+export CPLUS_INCLUDE_PATH="${HCOMM_ROOT}/include${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}}"
+export CPATH="${HCOMM_ROOT}/include${CPATH:+:${CPATH}}"
+export CMAKE_INCLUDE_PATH="${HCOMM_ROOT}/include${CMAKE_INCLUDE_PATH:+:${CMAKE_INCLUDE_PATH}}"
+export CMAKE_LIBRARY_PATH="${HCOMM_ROOT}/lib64${CMAKE_LIBRARY_PATH:+:${CMAKE_LIBRARY_PATH}}"
+export PYTHONPATH="${HCOMM_ROOT}/python/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
+
+source "${DEEPEP_PYTHON_ENV}/bin/activate"
+export DEEP_EP_PLATFORM=ascend
+
+test -n "${ASCEND_HOME_PATH:-}" || {
+  echo "ERROR: CANN set_env.sh 没有设置 ASCEND_HOME_PATH" >&amp;2
+  exit 1
+}
+command -v python >/dev/null
+command -v cmake >/dev/null
+
+# ---------- CANN、Torch-NPU 和八张 Ascend 950 预检 ----------
+python - &lt;&lt;'PY'
+import torch
+import torch_npu
+
+del torch_npu
+if not torch.npu.is_available():
+    raise SystemExit('ERROR: 当前 Torch-NPU 不能访问 NPU')
+count = torch.npu.device_count()
+if count != 8:
+    raise SystemExit(f'ERROR: 必须恰好看到 8 张 NPU，当前是 {count}')
+names = [torch.npu.get_device_name(i) for i in range(count)]
+bad = [f'{i}:{name}' for i, name in enumerate(names) if 'ASCEND950' not in name.upper()]
+if bad:
+    raise SystemExit('ERROR: 检测到非 Ascend 950 设备: ' + ', '.join(bad))
+print('PyTorch:', torch.__version__)
+print('NPUs:', names)
+PY
+
+python -c 'import pybind11; print("pybind11:", pybind11.__version__)'
+cmake --version
+
+# ---------- 强制编译当前仓库的 Ascend extension ----------
+DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace --force
+
+python - &lt;&lt;'PY'
+import torch
+import torch_npu
+import deep_ep
+from deep_ep import _C
+
+del torch_npu
+platform = _C.get_platform()
+if platform != 'ascend':
+    raise SystemExit(f'ERROR: extension 平台是 {platform!r}，不是 ascend')
+print('DeepEP:', deep_ep.__version__)
+print('DeepEP platform:', platform)
+print('Device 0:', torch.npu.get_device_name(0))
+PY
+
+# ---------- 选择 manifest 和结果目录 ----------
+DEEPEP_RESULT_ROOT="$(dirname "${DEEPEP_ROOT}")/deepep-results"
+DEEPEP_RESULT_DIR="${DEEPEP_RESULT_ROOT}/ascend950-representative-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "${DEEPEP_RESULT_DIR}"
+
+DEEPEP_RUN_ARGS=(
+  --backend ascend
+  --profile representative
+  --output-dir "${DEEPEP_RESULT_DIR}"
+)
+
+if test -n "${DEEPEP_H800_MANIFEST:-}"; then
+  test -s "${DEEPEP_H800_MANIFEST}" || {
+    echo "ERROR: H800 manifest 不存在或为空: ${DEEPEP_H800_MANIFEST}" >&amp;2
+    exit 1
+  }
+  DEEPEP_RUN_ARGS+=(--workload-manifest "${DEEPEP_H800_MANIFEST}")
+  echo "Reuse H800 manifest: ${DEEPEP_H800_MANIFEST}"
+else
+  echo "H800 manifest 未指定，将生成固定 representative manifest"
+fi
+
+echo "Git commit: $(git rev-parse HEAD)"
+echo "Result dir: ${DEEPEP_RESULT_DIR}"
+
+# run_ep.py 内部使用 torch.distributed.run --standalone --nproc-per-node=8。
+python tests/benchmark/run_ep.py "${DEEPEP_RUN_ARGS[@]}"
+
+# ---------- 验收并打印五项结果 ----------
+test -s "${DEEPEP_RESULT_DIR}/workload.json"
+test -s "${DEEPEP_RESULT_DIR}/benchmark.json"
+test -s "${DEEPEP_RESULT_DIR}/benchmark.md"
+test -s "${DEEPEP_RESULT_DIR}/run.log"
+
+python - "${DEEPEP_RESULT_DIR}/benchmark.json" &lt;&lt;'PY'
+import json
+import sys
+
+report = json.load(open(sys.argv[1], encoding='utf-8'))
+expected = {'total': 1, 'pending': 0, 'passed': 1, 'failed': 0}
+if report['case_summary'] != expected:
+    raise SystemExit(f"ERROR: case 未通过: {report['case_summary']}")
+if report['failures']:
+    raise SystemExit(f"ERROR: benchmark failures: {report['failures']}")
+if report['world_size'] != 8:
+    raise SystemExit(f"ERROR: world_size 不是 8: {report['world_size']}")
+if report['device']['num_sms'] != 72:
+    raise SystemExit(f"ERROR: num_sms 不是 72: {report['device']['num_sms']}")
+
+operations = report['cases'][0]['operations']
+if len(operations) != 5:
+    raise SystemExit(f'ERROR: operation 数量不是 5: {len(operations)}')
+
+print('\nAscend 950 representative result')
+print(f"device: {report['device']['name']}")
+print(f"fingerprint: {report['workload_fingerprint']}")
+print(f"{'operation':&lt;22} {'mean_us':&gt;12} {'p50_us':&gt;12} {'p95_us':&gt;12} {'GB/s':&gt;12}")
+for op in operations:
+    timing = op['device_seconds']
+    print(
+        f"{op['operation_id']:&lt;22} "
+        f"{timing['mean'] * 1e6:&gt;12.3f} "
+        f"{timing['p50'] * 1e6:&gt;12.3f} "
+        f"{timing['p95'] * 1e6:&gt;12.3f} "
+        f"{op['logical_gbps']:&gt;12.3f}"
+    )
+PY
+
+sha256sum \
+  "${DEEPEP_RESULT_DIR}/workload.json" \
+  "${DEEPEP_RESULT_DIR}/benchmark.json"
+
+echo
+echo "SUCCESS: ${DEEPEP_RESULT_DIR}"
+echo "可读报告: ${DEEPEP_RESULT_DIR}/benchmark.md"</code></pre>
+  </section>
+
+  <section>
+    <h2>4. 为什么要把环境和运行放在同一个 shell</h2>
+    <p>CANN 的 <code>set_env.sh</code> 先提供系统 runtime、compiler 和 HCCL。随后复制块把 <code>hcomm-deepep-current</code> 的 include、lib64 和 Python package 放到搜索路径前面。编译器看到的 HCOMM 结构体布局必须与运行时加载的 <code>libhcomm.so</code> 一致。</p>
+    <p>如果在一个 shell 编译，换到另一个没有 HCOMM export 的 shell 运行，程序可能加载系统中的另一份 shared library。最好的结果是 import 或 ABI 检查报错；更差的情况是通信阶段才超时。</p>
+
+    <figure class="explainer" id="fig-ascend-environment">
+      <p class="figure-title">环境覆盖顺序</p>
+      <div class="stack-diagram">
+        <div class="stack-layer"><strong>System CANN 9.2.0</strong><span><code>set_env.sh</code> 提供 ACL、HCCL、compiler 与系统工具。</span></div>
+        <div class="stack-layer focus"><strong>hcomm-deepep-current</strong><span>固定的 headers、<code>libhcomm.so</code> 和 Python site-packages，放在搜索路径前部。</span></div>
+        <div class="stack-layer"><strong>Python 3.10 env</strong><span>PyTorch 2.10、Torch-NPU 2.10、pybind11 和 DeepEP 当前源码。</span></div>
+        <div class="stack-layer"><strong>8-rank process</strong><span><code>LOCAL_RANK=0..7</code>，每个进程调用 <code>torch.npu.set_device(local_rank)</code>。</span></div>
+      </div>
+      <figcaption>不要把 weekly HCOMM 的 include 与 current HCOMM 的 lib64 混用。教程只使用一个 <code>HCOMM_ROOT</code>。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>5. wrapper 实际启动了什么</h2>
+    <p>复制块调用的入口很短：</p>
+    <pre class="shell"><code>python tests/benchmark/run_ep.py \
+  --backend ascend \
+  --profile representative \
+  --workload-manifest /path/to/h800/workload.json \
+  --output-dir /path/to/new/result-dir</code></pre>
+    <p>wrapper 会先检查 144 个 Ascend case 都是 supported，然后展开为：</p>
+    <pre class="shell"><code>python -m torch.distributed.run \
+  --standalone \
+  --nproc-per-node=8 \
+  tests/ascend/benchmark/bench_ep.py \
+  --num-sms 72 \
+  --num-tokens 8192 \
+  --hidden 7168 \
+  --num-topk 8 \
+  --num-experts 256 \
+  --warmups 30 \
+  --iterations 30 \
+  --cases ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0 \
+  ...</code></pre>
+    <p>不要直接复制展开后的长命令作为日常入口。统一 wrapper 还负责 workload 校验、报告 schema、临时文件和失败日志。</p>
+  </section>
+
+  <section>
+    <h2>6. 结果文件和 H800 相同</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>文件</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td><code>workload.json</code></td><td>Ascend 实际使用的 workload。与 H800 文件做 SHA-256 或内容比较。</td></tr>
+        <tr><td><code>benchmark.json</code></td><td>机器可读报告，包含 30 个 device/wall samples、mean/p50/p95、logical bytes 和 GB/s。</td></tr>
+        <tr><td><code>benchmark.md</code></td><td>可直接阅读的五行性能表。</td></tr>
+        <tr><td><code>run.log</code></td><td>实际展开命令、8-rank 输出、错误和退出状态。</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>6.1 生成 H800 与 Ascend 对比表</h3>
+    <p>两边都成功后，在任一普通 Python 环境运行：</p>
+    <pre class="shell"><code>python3 tests/benchmark/compare_ep.py \
+  --cuda /path/to/h800/benchmark.json \
+  --ascend /path/to/ascend950/benchmark.json \
+  --output /path/to/representative-comparison.md</code></pre>
+    <p>比较器会检查 profile、world size、workload fingerprint、case ID、operation ID、logical bytes 和计时协议。任何一项不同都不会生成比值。</p>
+  </section>
+
+  <section>
+    <h2>7. 常见失败</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>报错或现象</th><th>原因</th><th>处理</th></tr></thead>
+      <tbody>
+        <tr><td><code>ASCEND_HOME_PATH</code> 为空</td><td>CANN 环境没有加载，或加载了错误的脚本。</td><td>确认 <code>DEEPEP_CANN_ENV</code> 指向 CANN 9.2.0 的 <code>set_env.sh</code>。</td></tr>
+        <tr><td><code>import torch_npu</code> 失败</td><td>Python 环境未激活，或 PyTorch/Torch-NPU 版本不匹配。</td><td>重新加载指定 venv，核对两个包都为团队验证版本。</td></tr>
+        <tr><td>只能看到部分 NPU</td><td>当前 shell 的设备可见范围受限，或设备没有分配给当前进程。</td><td>先恢复八张设备可见性。不要把 world size 改小后继续当作八卡结果。</td></tr>
+        <tr><td><code>extension 平台不是 ascend</code></td><td>源码树里仍是 CUDA extension，或 build 没有强制执行。</td><td>保留 <code>DEEP_EP_PLATFORM=ascend</code> 和 <code>--force</code>，检查编译日志的 Platform 行。</td></tr>
+        <tr><td>HCOMM ABI、symbol 或 protocol 错误</td><td>HCOMM headers 和 shared library 来自不同目录。</td><td>只保留一个 <code>HCOMM_ROOT</code>，确认所有 include/lib/Python 路径都由它派生。</td></tr>
+        <tr><td>HCCL 初始化超时</td><td>某个 rank 没启动、设备绑定错误、旧进程仍占资源或通信环境异常。</td><td>检查 <code>run.log</code> 中第一个失败 rank，确认没有遗留 8-rank 进程，再重跑新结果目录。</td></tr>
+        <tr><td><code>workload manifest does not match</code></td><td>传入的文件不是当前 representative profile，或文件被改过。</td><td>使用 H800 教程生成的原始 <code>workload.json</code>，不要手工编辑。</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>8. 跑完后的自检</h2>
+    <details class="quiz"><summary>问题 1：为什么优先复用 H800 的 <code>workload.json</code>？</summary><div class="answer">它把 shape、seed 和路由 workload 固定为同一份输入合同。比较器还会检查 fingerprint，避免只看参数文字相同却实际输入不同。</div></details>
+    <details class="quiz"><summary>问题 2：Ascend 的 <code>num_qps=0</code> 是否表示没有通信资源？</summary><div class="answer">不是。QP 是 CUDA 侧调参字段。Ascend 侧由 HCOMM 管理 team、window、channel 和底层通信队列，报告中的 CUDA QP 字段固定为 0。</div></details>
+    <details class="quiz"><summary>问题 3：为什么不能把两卡结果与八卡 H800 直接算比值？</summary><div class="answer">world size 会改变每 rank 的目标集合、logical bytes 和通信拓扑。比较器要求 world size、fingerprint、case 和 operation 全部一致。</div></details>
+  </section>
+
+  <section>
+    <h2>9. 源码和主资料</h2>
+    <ul>
+      <li><a href="../../../tests/benchmark/run_ep.py"><code>tests/benchmark/run_ep.py</code></a>：Ascend 8-rank representative 的统一入口。</li>
+      <li><a href="../../../tests/benchmark/profiles.py"><code>tests/benchmark/profiles.py</code></a>：固定 workload、case 和 30+30 计时。</li>
+      <li><a href="../../../tests/ascend/benchmark/bench_ep.py"><code>tests/ascend/benchmark/bench_ep.py</code></a>：Ascend 参数、case inventory 和 72-block 限制。</li>
+      <li><a href="../../../tests/ascend/benchmark/runtime.py"><code>tests/ascend/benchmark/runtime.py</code></a>：HCCL 初始化、LOCAL_RANK 绑定和 benchmark 执行。</li>
+      <li><a href="../../../tests/ascend/benchmark/README.md"><code>tests/ascend/benchmark/README.md</code></a>：验证过的 CANN/HCOMM 环境和报告要求。</li>
+      <li><a href="../reference/ascend-hcomm-simt-communication-overlap.html">Ascend HCOMM 与 SIMT 通信专题</a>：为什么 Ascend extension 依赖固定 HCOMM ABI。</li>
+    </ul>
+    <p>如果运行失败，保留结果目录中的 <code>run.log</code>，并记录 commit、CANN/HCOMM 路径、Python 包版本和首个失败 rank。不要只保留最后一行异常。</p>
+  </section>
+
+  <footer>
+    <p>配套教程：<a href="0002-run-h800-representative.html">H800 x 8 representative case</a>。两边完成后再运行仓库的离线比较器。</p>
+  </footer>
+</main>
+</body>
+</html>

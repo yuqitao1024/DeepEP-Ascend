@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="在单机 H800 x 8 上编译 DeepEP CUDA 扩展并运行 representative 单 case">
+  <title>H800 x 8 representative case 运行教程</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main class="page">
+  <header class="cover">
+    <p class="eyebrow">DeepEP 实机课 · H800 x 8</p>
+    <h1>编译 CUDA 包，跑完一个 representative case</h1>
+    <p class="lead">目标很具体：在一台八卡 H800 服务器上编译当前仓库的 CUDA extension，运行 <code>ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0</code>，拿到五个操作的耗时和逻辑带宽。</p>
+    <div class="meta">
+      <span>单机 8 卡</span>
+      <span>FP8 dispatch</span>
+      <span>BF16 combine</span>
+      <span>30 warmups + 30 measurements</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>1. 这次到底测什么</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>项目</th><th>固定值</th></tr></thead>
+      <tbody>
+        <tr><td>设备</td><td>单机 NVIDIA H800 x 8，rank 0 到 rank 7</td></tr>
+        <tr><td>Case</td><td><code>ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0</code></td></tr>
+        <tr><td>Workload</td><td>每 rank 最多 8192 tokens，hidden 7168，top-k 8，256 experts，seed 0</td></tr>
+        <tr><td>精度</td><td>FP8 dispatch，BF16 combine</td></tr>
+        <tr><td>计时</td><td>CUDA event；每个操作 30 次 warmup，30 次 measurement；跨 rank 取最大 latency</td></tr>
+        <tr><td>输出</td><td><code>dispatch</code>、<code>expanded_dispatch</code>、<code>cached_dispatch</code>、<code>combine</code>、<code>reduced_combine</code></td></tr>
+      </tbody>
+    </table></div>
+    <div class="band warning"><strong>口径说明：</strong>这是 144 cases 中的一项，用来做跨平台 representative precheck。它可以与当前 Ascend 代表 case 逐项比较，但不能代替 144-case 正式验收。</div>
+
+    <figure class="explainer" id="fig-h800-run-path">
+      <p class="figure-title">一次完整运行会经过六个检查点</p>
+      <div class="flow">
+        <div><strong>1. H800 拓扑</strong>八张卡和 NVLink</div>
+        <div><strong>2. CUDA/PyTorch</strong>版本与架构</div>
+        <div><strong>3. 依赖</strong>NCCL + NVSHMEM + fmt</div>
+        <div><strong>4. CUDA extension</strong>SM90 编译和 import</div>
+        <div><strong>5. EP8 benchmark</strong>一个 case，五个操作</div>
+        <div><strong>6. 报告</strong>JSON、Markdown、manifest、log</div>
+      </div>
+      <figcaption>脚本在任何检查点失败都会退出。不要跳过失败继续测，否则结果很难复现。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>2. 运行前提</h2>
+    <p>下面的复制块从仓库根目录运行。服务器需要满足这些条件：</p>
+    <ul>
+      <li>八张 GPU 的设备名包含 <code>H800</code>，并且当前用户有权访问 GPU 0 到 GPU 7。</li>
+      <li>系统有 CUDA toolkit，<code>nvcc</code> 版本不低于 12.3。</li>
+      <li>当前 Python 环境已经安装 CUDA 版 PyTorch 2.10 或更高版本。PyTorch wheel 必须按服务器镜像和驱动安装，这一步不适合由通用脚本猜测。</li>
+      <li>机器能访问 PyPI 和 GitHub；如果是离线环境，需要提前准备 NCCL、NVSHMEM wheel 和 <code>third-party/fmt</code> 子模块。</li>
+      <li>至少有一个空闲 TCP 端口。教程固定使用 <code>8361</code>。</li>
+    </ul>
+    <p>如果仓库还没传到 H800 机器，先 clone，并切到团队指定的 commit。不要在不同 commit 上比较 H800 和 Ascend。</p>
+    <pre class="shell"><code>git clone --recurse-submodules &lt;DeepEP-Ascend 仓库地址&gt;
+cd DeepEP-Ascend
+git rev-parse HEAD</code></pre>
+  </section>
+
+  <section>
+    <h2>3. 可整体复制的编译和运行命令</h2>
+    <p>先 <code>cd</code> 到 DeepEP-Ascend 仓库根目录，然后整体执行下面这段。它不会清理已有文件，结果写到仓库同级的 <code>deepep-results/</code>。每次运行都会创建带时间戳的新目录。</p>
+
+    <pre class="shell" id="copy-run"><code>set -euo pipefail
+
+# ---------- 固定本次运行位置和设备 ----------
+DEEPEP_ROOT="$(pwd -P)"
+test -f "${DEEPEP_ROOT}/tests/benchmark/run_ep.py" || {
+  echo "ERROR: 请在 DeepEP-Ascend 仓库根目录执行" >&amp;2
+  exit 1
+}
+cd "${DEEPEP_ROOT}"
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export TORCH_CUDA_ARCH_LIST=9.0
+export DEEP_EP_PLATFORM=cuda
+export WORLD_SIZE=1
+export RANK=0
+export MASTER_ADDR=127.0.0.1
+export MASTER_PORT=8361
+export EP_DISABLE_GIN=0
+export EP_SUPPRESS_NCCL_CHECK=0
+
+command -v python3 >/dev/null
+command -v nvidia-smi >/dev/null
+test -x "${CUDA_HOME}/bin/nvcc" || {
+  echo "ERROR: ${CUDA_HOME}/bin/nvcc 不存在，请设置正确的 CUDA_HOME" >&amp;2
+  exit 1
+}
+
+# ---------- Python、CUDA 和八张 H800 预检 ----------
+python3 -m pip install --upgrade setuptools wheel ninja packaging
+
+DEEPEP_CUDA_MAJOR="$(python3 - &lt;&lt;'PY'
+import torch
+from packaging.version import Version
+
+if Version(torch.__version__.split('+')[0]) &lt; Version('2.10.0'):
+    raise SystemExit(f'ERROR: PyTorch 必须 &gt;= 2.10，当前是 {torch.__version__}')
+if not torch.cuda.is_available():
+    raise SystemExit('ERROR: 当前 PyTorch 不能使用 CUDA')
+if torch.version.cuda is None:
+    raise SystemExit('ERROR: 当前不是 CUDA 版 PyTorch')
+print(torch.version.cuda.split('.')[0])
+PY
+)"
+
+case "${DEEPEP_CUDA_MAJOR}" in
+  12|13) ;;
+  *)
+    echo "ERROR: 只支持 CUDA 12 或 13，当前 PyTorch CUDA major=${DEEPEP_CUDA_MAJOR}" >&amp;2
+    exit 1
+    ;;
+esac
+
+python3 - &lt;&lt;'PY'
+import os
+import re
+import subprocess
+import torch
+from packaging.version import Version
+
+count = torch.cuda.device_count()
+names = [torch.cuda.get_device_name(i) for i in range(count)]
+if count != 8:
+    raise SystemExit(f'ERROR: CUDA_VISIBLE_DEVICES 中必须恰好有 8 张卡，当前是 {count}')
+bad = [f'{i}:{name}' for i, name in enumerate(names) if 'H800' not in name.upper()]
+if bad:
+    raise SystemExit('ERROR: 检测到非 H800 设备: ' + ', '.join(bad))
+
+nvcc = os.path.join(os.environ['CUDA_HOME'], 'bin', 'nvcc')
+nvcc_output = subprocess.check_output([nvcc, '--version'], text=True)
+match = re.search(r'release\s+([0-9]+\.[0-9]+)', nvcc_output)
+if match is None:
+    raise SystemExit('ERROR: 无法解析 nvcc 版本')
+nvcc_version = Version(match.group(1))
+if nvcc_version &lt; Version('12.3'):
+    raise SystemExit(f'ERROR: CUDA toolkit 必须 &gt;= 12.3，当前是 {nvcc_version}')
+if str(nvcc_version.major) != torch.version.cuda.split('.')[0]:
+    raise SystemExit(
+        f'ERROR: nvcc major={nvcc_version.major} 与 PyTorch CUDA='
+        f'{torch.version.cuda} 不一致'
+    )
+print('PyTorch:', torch.__version__)
+print('PyTorch CUDA:', torch.version.cuda)
+print('CUDA toolkit:', nvcc_version)
+print('GPUs:', names)
+subprocess.run(['nvidia-smi', 'topo', '-m'], check=True)
+PY
+
+"${CUDA_HOME}/bin/nvcc" --version
+
+# ---------- 编译依赖 ----------
+# 版本固定后，H800 与 Ascend 的报告才容易复现和追踪。
+python3 -m pip install \
+  "nvidia-nccl-cu${DEEPEP_CUDA_MAJOR}==2.30.4" --no-deps
+python3 -m pip install \
+  "nvidia-nvshmem-cu${DEEPEP_CUDA_MAJOR}==3.3.20" --no-deps
+
+# CUDA extension 会引用 fmt 子模块。只初始化这个子模块。
+git submodule update --init third-party/fmt
+
+# ---------- 编译当前仓库的 CUDA extension ----------
+DEEP_EP_PLATFORM=cuda TORCH_CUDA_ARCH_LIST=9.0 \
+  python3 setup.py build_ext --inplace --force
+
+# import 会执行 NCCL 二进制一致性检查，也会初始化 JIT。
+python3 - &lt;&lt;'PY'
+import torch
+import deep_ep
+from deep_ep import _C
+
+platform = _C.get_platform()
+if platform != 'cuda':
+    raise SystemExit(f'ERROR: 编译出的 extension 平台是 {platform!r}，不是 cuda')
+print('DeepEP:', deep_ep.__version__)
+print('DeepEP platform:', platform)
+print('Device 0:', torch.cuda.get_device_name(0))
+PY
+
+# ---------- 运行 H800 x 8 representative case ----------
+DEEPEP_RESULT_ROOT="$(dirname "${DEEPEP_ROOT}")/deepep-results"
+DEEPEP_RESULT_DIR="${DEEPEP_RESULT_ROOT}/h800-representative-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "${DEEPEP_RESULT_DIR}"
+
+echo "Git commit: $(git rev-parse HEAD)"
+echo "Result dir: ${DEEPEP_RESULT_DIR}"
+
+python3 tests/benchmark/run_ep.py \
+  --backend cuda \
+  --profile representative \
+  --output-dir "${DEEPEP_RESULT_DIR}"
+
+# ---------- 验收并打印五项结果 ----------
+test -s "${DEEPEP_RESULT_DIR}/workload.json"
+test -s "${DEEPEP_RESULT_DIR}/benchmark.json"
+test -s "${DEEPEP_RESULT_DIR}/benchmark.md"
+test -s "${DEEPEP_RESULT_DIR}/run.log"
+
+python3 - "${DEEPEP_RESULT_DIR}/benchmark.json" &lt;&lt;'PY'
+import json
+import sys
+
+report = json.load(open(sys.argv[1], encoding='utf-8'))
+if report['case_summary'] != {'total': 1, 'pending': 0, 'passed': 1, 'failed': 0}:
+    raise SystemExit(f"ERROR: case 未通过: {report['case_summary']}")
+if report['failures']:
+    raise SystemExit(f"ERROR: benchmark failures: {report['failures']}")
+
+print('\nH800 representative result')
+print(f"device: {report['device']['name']}")
+print(f"fingerprint: {report['workload_fingerprint']}")
+print(f"{'operation':&lt;22} {'mean_us':&gt;12} {'p50_us':&gt;12} {'p95_us':&gt;12} {'GB/s':&gt;12}")
+for op in report['cases'][0]['operations']:
+    timing = op['device_seconds']
+    print(
+        f"{op['operation_id']:&lt;22} "
+        f"{timing['mean'] * 1e6:&gt;12.3f} "
+        f"{timing['p50'] * 1e6:&gt;12.3f} "
+        f"{timing['p95'] * 1e6:&gt;12.3f} "
+        f"{op['logical_gbps']:&gt;12.3f}"
+    )
+PY
+
+sha256sum \
+  "${DEEPEP_RESULT_DIR}/workload.json" \
+  "${DEEPEP_RESULT_DIR}/benchmark.json"
+
+echo
+echo "SUCCESS: ${DEEPEP_RESULT_DIR}"
+echo "可读报告: ${DEEPEP_RESULT_DIR}/benchmark.md"</code></pre>
+
+    <div class="band danger"><strong>不要设置 <code>EP_SUPPRESS_NCCL_CHECK=1</code>。</strong>DeepEP 会检查 PyTorch 实际加载的 NCCL 与编译链接的 NCCL 是否为同一个二进制。绕过检查可能让程序能启动，却把不一致的通信栈带进性能数据。</div>
+  </section>
+
+  <section>
+    <h2>4. 命令做了哪些事</h2>
+    <h3>4.1 根据 PyTorch CUDA 版本选择 wheel</h3>
+    <p><code>torch.version.cuda</code> 是 PyTorch wheel 的 CUDA family。复制块从中取 major，并安装同 family 的 NCCL 2.30.4 和 NVSHMEM 3.3.20。例如 PyTorch 报 CUDA 12.x 时，安装包名是 <code>nvidia-nccl-cu12</code> 和 <code>nvidia-nvshmem-cu12</code>。</p>
+    <p>当前 CUDA extension 即使只跑 EPv2，也会在构建阶段链接 legacy NVSHMEM 源码和静态 device library。因此不能因为 representative case 使用 NCCL Gin 就省掉 NVSHMEM 安装。</p>
+
+    <h3>4.2 强制编译 SM90 CUDA extension</h3>
+    <p>H800 是 Hopper 架构，编译目标是 <code>TORCH_CUDA_ARCH_LIST=9.0</code>。<code>--inplace --force</code> 会在当前源码树重新生成 <code>deep_ep/_C*.so</code>，避免误用之前留下的 Ascend extension。编译完成后的 import 必须打印：</p>
+    <pre><code>DeepEP platform: cuda
+Device 0: NVIDIA H800 ...</code></pre>
+
+    <h3>4.3 benchmark wrapper 固定测试合同</h3>
+    <p>不要直接手写 8192、7168、top-k 8 等参数调用 <code>tests/elastic/test_ep.py</code>。统一入口 <code>tests/benchmark/run_ep.py</code> 会选择固定 case，生成 workload fingerprint，验证设备名包含 H800，并检查五条 operation record 都存在。</p>
+  </section>
+
+  <section>
+    <h2>5. 成功后会得到什么</h2>
+    <figure class="explainer" id="fig-h800-artifacts">
+      <p class="figure-title">结果目录里的四个文件各有用途</p>
+      <div class="stack-diagram">
+        <div class="stack-layer"><strong><code>workload.json</code></strong><span>固定 workload 和 fingerprint。以后跑 Ascend 时应原样复用。</span></div>
+        <div class="stack-layer focus"><strong><code>benchmark.json</code></strong><span>机器可读原始报告。包含 commit、设备、样本、统计值、逻辑字节和五项带宽。</span></div>
+        <div class="stack-layer"><strong><code>benchmark.md</code></strong><span>人可读的五行结果表，适合直接发给同事核对。</span></div>
+        <div class="stack-layer"><strong><code>run.log</code></strong><span>完整命令、标准输出、错误和退出状态。排查 hang 或编译环境时先看这里。</span></div>
+      </div>
+      <figcaption>比较前至少保留 <code>workload.json</code>、<code>benchmark.json</code> 及其 SHA-256。只抄屏幕上的带宽数字会丢失测试口径和来源。</figcaption>
+    </figure>
+
+    <p><code>benchmark.md</code> 的结果区应有五行：</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Operation</th><th>在 MoE 流程中的含义</th></tr></thead>
+      <tbody>
+        <tr><td><code>dispatch</code></td><td>普通 FP8 token dispatch。</td></tr>
+        <tr><td><code>expanded_dispatch</code></td><td>带 expert alignment 展开布局的 dispatch。</td></tr>
+        <tr><td><code>cached_dispatch</code></td><td>复用第一次 dispatch 生成的 handle。</td></tr>
+        <tr><td><code>combine</code></td><td>BF16 expert output 返回 origin rank 并按 token 归并。</td></tr>
+        <tr><td><code>reduced_combine</code></td><td>expanded contributor 的 combine 与 reduction。</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>6. 常见失败怎么处理</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>报错或现象</th><th>原因</th><th>处理</th></tr></thead>
+      <tbody>
+        <tr><td><code>Cannot find package: nccl</code></td><td>NCCL wheel 没装进当前 Python 环境，或 pip/python 不是同一个环境。</td><td>始终用 <code>python3 -m pip</code> 安装，并检查 <code>python3 -m pip show nvidia-nccl-cu12</code> 或 <code>cu13</code>。</td></tr>
+        <tr><td><code>Cannot find package: nvshmem</code></td><td>NVSHMEM wheel 缺失，或使用了另一个 Python。</td><td>安装与 <code>torch.version.cuda</code> major 相同的 <code>nvidia-nvshmem-cuXX==3.3.20</code>。</td></tr>
+        <tr><td><code>Duplicate NCCL runtime</code> / <code>Invalid NCCL versions</code></td><td>PyTorch 加载的 NCCL 与 DeepEP 链接的 NCCL 不一致，常见于系统库、conda 库和 pip wheel 混用。</td><td>清理 <code>LD_LIBRARY_PATH</code> 中多余 NCCL，使用同一 Python 环境重装 PyTorch/NCCL。不要关闭检查。</td></tr>
+        <tr><td><code>fmt/core.h: No such file</code></td><td><code>third-party/fmt</code> 子模块未初始化。</td><td>运行 <code>git submodule update --init third-party/fmt</code>。</td></tr>
+        <tr><td><code>cuda/std/...</code> 或 CCCL header 缺失</td><td><code>CUDA_HOME</code> 指向 runtime-only 目录，或 toolkit 不完整。</td><td>指向包含 <code>bin/nvcc</code> 和 <code>include/cccl</code> 的 CUDA toolkit。</td></tr>
+        <tr><td>初始化卡住或 <code>Address already in use</code></td><td><code>MASTER_PORT=8361</code> 被其他任务占用。</td><td>八个进程都结束后换一个空闲端口，例如 <code>export MASTER_PORT=18361</code>，再整体重跑。</td></tr>
+        <tr><td>设备名校验失败</td><td>可见设备不是八张 H800，或 MIG/容器映射改变了设备名和数量。</td><td>先修正容器 GPU 映射和 <code>CUDA_VISIBLE_DEVICES</code>。不要修改报告校验器伪装设备。</td></tr>
+        <tr><td>结果目录已存在 benchmark 文件</td><td>wrapper 拒绝覆盖历史报告。</td><td>使用新的时间戳目录。复制块默认已经这样处理。</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>6.1 性能数据不稳定时先记录这些信息</h3>
+    <pre class="shell"><code>git rev-parse HEAD
+nvidia-smi --query-gpu=index,name,pstate,temperature.gpu,power.draw,clocks.sm,clocks.mem --format=csv
+nvidia-smi topo -m
+python3 -c 'import torch; print(torch.__version__, torch.version.cuda)'
+python3 -m pip show nvidia-nccl-cu12 nvidia-nccl-cu13 nvidia-nvshmem-cu12 nvidia-nvshmem-cu13</code></pre>
+    <p>同机有其他 GPU 任务、GPU 处于不同功耗或时钟状态、NVLink 拓扑异常，都会让 30 次样本的 p95 漂移。保留这些输出比单纯多跑几次更有用。</p>
+  </section>
+
+  <section>
+    <h2>7. 跑完后的自检</h2>
+    <details class="quiz"><summary>问题 1：为什么不直接运行 <code>python tests/elastic/test_ep.py</code>？</summary><div class="answer">统一 wrapper 会固定 representative profile、生成 workload fingerprint、验证 H800 设备和报告 schema，并以原子方式发布最终 JSON/Markdown。直接调用底层脚本更容易漏参数。</div></details>
+    <details class="quiz"><summary>问题 2：为什么单机 H800 测试仍要安装 NVSHMEM？</summary><div class="answer">当前 CUDA extension 的构建仍包含 legacy NVSHMEM 源码和 device static library。代表 case 运行时走 NCCL Gin，不等于构建时可以缺少 NVSHMEM。</div></details>
+    <details class="quiz"><summary>问题 3：哪份文件应传给 Ascend 侧锁定相同 workload？</summary><div class="answer"><code>workload.json</code>。Ascend wrapper 使用 <code>--workload-manifest</code> 读取它，并验证内容与 representative profile 完全一致。</div></details>
+  </section>
+
+  <section>
+    <h2>8. 源码和主资料</h2>
+    <ul>
+      <li><a href="../../../tests/benchmark/profiles.py"><code>tests/benchmark/profiles.py</code></a>：representative 的固定 shape、case、warmup 和 iteration。</li>
+      <li><a href="../../../tests/benchmark/run_ep.py"><code>tests/benchmark/run_ep.py</code></a>：统一运行入口、输出目录和报告发布。</li>
+      <li><a href="../../../tests/elastic/test_ep.py"><code>tests/elastic/test_ep.py</code></a>：CUDA EP8 正确性与性能执行路径。</li>
+      <li><a href="../../../tests/benchmark/report_markdown.py"><code>tests/benchmark/report_markdown.py</code></a>：H800 设备校验、报告 schema 和五行 Markdown。</li>
+      <li><a href="../../../docs/nvshmem.md"><code>docs/nvshmem.md</code></a>：NVSHMEM 3.3.9+ 安装要求。</li>
+      <li><a href="https://github.com/deepseek-ai/DeepEP/tree/epv2-release">DeepEP EPv2 upstream</a>：Hopper、CUDA、PyTorch、NCCL 和 NVLink 要求。</li>
+    </ul>
+    <p>如果命令在某一步失败，把失败步骤、完整报错、<code>git rev-parse HEAD</code> 和 <code>run.log</code> 发给我。不要只截最后一行错误。</p>
+  </section>
+
+  <footer>
+    <p>上一课：<a href="0001-read-the-moe-dataflow.html">读懂 MoE token 往返</a>。相关参考：<a href="../reference/deepep-v2-ascend-950-guide.html">DeepEP v2 与 Ascend 950 主讲义</a>。</p>
+  </footer>
+</main>
+</body>
+</html>
