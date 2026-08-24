@@ -1138,6 +1138,33 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 rf"arguments\.timeout_cycles,",
                 operation)
 
+    def test_disabled_stage_profile_does_not_materialize_kernel_block_state(self):
+        """Keeps profile-only block state out of disabled production kernels."""
+        boundaries = {
+            "dispatch.asc": "__global__ __vector__ void dispatch_copy_kernel",
+            "combine.asc": "template <bool ProfileEnabled>\n"
+                           "inline int launch_combine_kernel",
+        }
+        for source_name, boundary in boundaries.items():
+            operation = source_name.removesuffix(".asc")
+            source = (ELASTIC / source_name).read_text()
+            begin = source.index(
+                "template <bool ProfileEnabled>\n"
+                f"__global__ __vector__ void {operation}_kernel")
+            kernel = source[begin:source.index(boundary, begin)]
+
+            self.assertGreaterEqual(
+                kernel.count("if constexpr (ProfileEnabled)"), 2,
+                source_name)
+            self.assertEqual(kernel.count("const auto profile_block"), 2,
+                             source_name)
+            first_guard = kernel.index("if constexpr (ProfileEnabled)")
+            first_block = kernel.index("const auto profile_block")
+            last_guard = kernel.rindex("if constexpr (ProfileEnabled)")
+            last_block = kernel.rindex("const auto profile_block")
+            self.assertLess(first_guard, first_block, source_name)
+            self.assertLess(last_guard, last_block, source_name)
+
     def test_remote_operator_commands_reuse_checked_team_peer(self):
         release = (ELASTIC / "release_protocol.hpp").read_text()
         for source_name, signal_name, barrier_calls in (
