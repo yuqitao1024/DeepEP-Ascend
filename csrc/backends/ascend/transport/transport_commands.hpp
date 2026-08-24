@@ -8,7 +8,7 @@
 
 namespace deep_ep::ascend::transport {
 
-inline constexpr std::uint32_t kTransportCommandAbiVersion = 2;
+inline constexpr std::uint32_t kTransportCommandAbiVersion = 3;
 inline constexpr std::uint32_t kStagedTransportCannCompatibility =
     0x00090200U;
 inline constexpr std::uint32_t kScaleUpTeamMask = 1U;
@@ -112,6 +112,8 @@ struct alignas(64) StagedTransportContext {
     std::uintptr_t window = 0;
     std::uintptr_t fetch_results = 0;
     std::uint64_t fetch_result_bytes = 0;
+    std::uintptr_t stage_profile = 0;
+    std::uint64_t stage_profile_bytes = 0;
     std::uint64_t reserved = 0;
 };
 
@@ -119,7 +121,7 @@ static_assert(sizeof(TransportCommand) == 128);
 static_assert(sizeof(TransportCommandQueue) == 64);
 static_assert(sizeof(TransportServiceState) == 64);
 static_assert(sizeof(DeviceTransportDiagnostic) == 64);
-static_assert(sizeof(StagedTransportContext) == 64);
+static_assert(sizeof(StagedTransportContext) == 128);
 static_assert(std::is_trivially_copyable_v<TransportCommand>);
 static_assert(std::is_trivially_copyable_v<TransportCommandQueue>);
 static_assert(std::is_trivially_copyable_v<TransportServiceState>);

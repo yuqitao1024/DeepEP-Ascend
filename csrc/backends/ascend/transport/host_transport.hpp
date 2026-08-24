@@ -5,6 +5,7 @@
 #include <string>
 
 #include "transport_commands.hpp"
+#include "stage_profile.hpp"
 #include "types.hpp"
 
 namespace deep_ep::ascend::transport {
@@ -38,6 +39,9 @@ public:
         DeviceTransportContext* context) = 0;
     virtual TransportStatus read_diagnostic(
         DeviceTransportDiagnostic* diagnostic) = 0;
+    virtual TransportStatus reset_stage_profile() = 0;
+    virtual TransportStatus read_stage_profile(
+        TransportStageProfile* profile) = 0;
     virtual TransportStatus host_barrier() = 0;
     virtual TransportStatus destroy() = 0;
 };

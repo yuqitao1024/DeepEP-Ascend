@@ -46,6 +46,14 @@ public:
         return unavailable("read_diagnostic");
     }
 
+    TransportStatus reset_stage_profile() override {
+        return unavailable("reset_stage_profile");
+    }
+
+    TransportStatus read_stage_profile(TransportStageProfile*) override {
+        return unavailable("read_stage_profile");
+    }
+
     TransportStatus host_barrier() override {
         return unavailable("host_barrier");
     }

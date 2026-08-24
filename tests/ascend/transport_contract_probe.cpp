@@ -3,6 +3,7 @@
 #include <type_traits>
 
 #include "csrc/backends/ascend/transport/device_transport.hpp"
+#include "csrc/backends/ascend/transport/stage_profile.hpp"
 #include "csrc/backends/ascend/transport/stub_transport.hpp"
 
 using namespace deep_ep::ascend::transport;
@@ -25,6 +26,11 @@ static_assert(std::is_trivially_copyable_v<DeviceRequest>);
 static_assert(alignof(DeviceRequest) == 16);
 static_assert(sizeof(DeviceRequest) == 32);
 static_assert(std::is_trivially_copyable_v<RemoteAction>);
+static_assert(std::is_trivially_copyable_v<TransportStageProfile>);
+static_assert(alignof(TransportStageProfile) == 64);
+static_assert(kTransportProfileStageCount == 16);
+static_assert(kTransportProfileMaxBlocks == 72);
+static_assert(sizeof(TransportStageBlockCycles) == 2 * sizeof(std::uint64_t));
 static_assert(kDefaultOptions == 0);
 static_assert((kAggregateRequests & kDefaultOptions) == 0);
 static_assert(kNoCapabilities == 0);
@@ -71,6 +77,12 @@ int main() {
         context.struct_size != sizeof(DeviceTransportContext))
         return 3;
 
+    TransportStageProfile profile{};
+    if (profile.abi_version != kTransportStageProfileAbiVersion ||
+        profile.struct_size != sizeof(TransportStageProfile) ||
+        profile.operation != TransportProfileOperation::kNone)
+        return 5;
+
     const auto no_action = RemoteAction::none();
     const auto signal_add = RemoteAction::signal_add(128, 7);
     const auto signal_increment = RemoteAction::signal_increment(3);
@@ -115,6 +127,11 @@ int main() {
     if (created.transport->export_device_context(&exported).code !=
         TransportStatusCode::kUnsupportedCapability)
         return 17;
+    if (created.transport->reset_stage_profile().code !=
+            TransportStatusCode::kUnsupportedCapability ||
+        created.transport->read_stage_profile(&profile).code !=
+            TransportStatusCode::kUnsupportedCapability)
+        return 31;
     if (created.transport->host_barrier().code !=
         TransportStatusCode::kUnsupportedCapability)
         return 18;

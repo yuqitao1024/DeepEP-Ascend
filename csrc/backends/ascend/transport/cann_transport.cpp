@@ -77,6 +77,12 @@ public:
             sizeof(DeviceTransportDiagnostic), &diagnostic_,
             "allocate_diagnostic");
         if (!status.ok()) return status;
+        if (config_.stage_profile_enabled) {
+            status = allocate_zero(
+                sizeof(TransportStageProfile), &stage_profile_,
+                "allocate_stage_profile");
+            if (!status.ok()) return status;
+        }
         status = allocate_zero(
             sizeof(StagedTransportContext), &staged_, "allocate_context");
         if (!status.ok()) return status;
@@ -256,6 +262,29 @@ public:
                            : backend_failure("read_diagnostic", result);
     }
 
+    TransportStatus reset_stage_profile() override {
+        if (teardown_started_ || stage_profile_ == nullptr)
+            return TransportStatus::unsupported(
+                "reset_stage_profile", "transport stage profile is disabled");
+        const TransportStageProfile profile{};
+        return copy_to_device(
+            stage_profile_, profile, "reset_stage_profile");
+    }
+
+    TransportStatus read_stage_profile(
+        TransportStageProfile* profile) override {
+        if (profile == nullptr)
+            return TransportStatus::invalid(
+                "read_stage_profile", "profile must not be null");
+        if (teardown_started_ || stage_profile_ == nullptr)
+            return TransportStatus::unsupported(
+                "read_stage_profile", "transport stage profile is disabled");
+        const int result = api_.copy_from_device(
+            api_.user_data, profile, stage_profile_, sizeof(*profile));
+        return result == 0 ? TransportStatus::success()
+                           : backend_failure("read_stage_profile", result);
+    }
+
     TransportStatus host_barrier() override {
         if (api_.host_barrier == nullptr)
             return TransportStatus::unsupported(
@@ -350,6 +379,9 @@ private:
         context.command_queue = pointer_value(queue_);
         context.team = team_;
         context.window = window_;
+        context.stage_profile = pointer_value(stage_profile_);
+        context.stage_profile_bytes = stage_profile_ == nullptr ? 0 :
+            sizeof(TransportStageProfile);
         context.reserved = command::registration_cookie(
             context.command_queue, pointer_value(commands_),
             pointer_value(service_), pointer_value(diagnostic_),
@@ -369,6 +401,7 @@ private:
 
     void release_backend_resources(TransportStatus& first_error) {
         free_resource(staged_, "free_context", first_error);
+        free_resource(stage_profile_, "free_stage_profile", first_error);
         free_resource(diagnostic_, "free_diagnostic", first_error);
         free_resource(service_, "free_service", first_error);
         free_resource(queue_, "free_queue", first_error);
@@ -395,6 +428,7 @@ private:
     void* queue_ = nullptr;
     void* service_ = nullptr;
     void* diagnostic_ = nullptr;
+    void* stage_profile_ = nullptr;
     void* staged_ = nullptr;
 };
 

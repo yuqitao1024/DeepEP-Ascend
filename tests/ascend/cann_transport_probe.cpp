@@ -54,6 +54,9 @@ struct FakeApi {
     std::uint32_t queue_copy_count = 0;
     transport::DeviceTransportDiagnostic diagnostic{};
     std::uint32_t diagnostic_copy_count = 0;
+    transport::TransportStageProfile profile{};
+    std::uint32_t profile_copy_count = 0;
+    void* profile_device_pointer = nullptr;
     std::uint64_t allocation_bytes[8]{};
     std::uint32_t allocation_count = 0;
 
@@ -185,19 +188,37 @@ struct FakeApi {
                 const transport::DeviceTransportDiagnostic*>(source);
             ++fake.diagnostic_copy_count;
         }
+        if (bytes == sizeof(transport::TransportStageProfile)) {
+            fake.profile =
+                *static_cast<const transport::TransportStageProfile*>(source);
+            fake.profile_device_pointer = destination;
+            ++fake.profile_copy_count;
+        }
         return 0;
     }
 
     static int copy_from_device(
-        void* data, void* destination, const void*, std::uint64_t bytes) {
+        void* data, void* destination, const void* source,
+        std::uint64_t bytes) {
         auto& fake = self(data);
         fake.record(Event::kCopyFromDevice);
         if (fake.fail_now()) return 79;
-        CHECK(bytes == sizeof(transport::DeviceTransportDiagnostic));
-        auto* diagnostic =
-            static_cast<transport::DeviceTransportDiagnostic*>(destination);
-        diagnostic->error = transport::DeviceTransportError::kCompletionTimeout;
-        diagnostic->generation = 17;
+        if (bytes == sizeof(transport::DeviceTransportDiagnostic)) {
+            auto* diagnostic =
+                static_cast<transport::DeviceTransportDiagnostic*>(destination);
+            diagnostic->error =
+                transport::DeviceTransportError::kCompletionTimeout;
+            diagnostic->generation = 17;
+        } else {
+            CHECK(bytes == sizeof(transport::TransportStageProfile));
+            CHECK(const_cast<void*>(source) == fake.profile_device_pointer);
+            auto* profile =
+                static_cast<transport::TransportStageProfile*>(destination);
+            *profile = fake.profile;
+            profile->operation = transport::TransportProfileOperation::kCombine;
+            profile->generation = 23;
+            profile->completion_generation = 23;
+        }
         return 0;
     }
 
@@ -277,6 +298,8 @@ void check_rank_sized_command_queue() {
                   sizeof(transport::TransportCommand));
         CHECK(fake.queue_copy_count == 1);
         CHECK(fake.queue.capacity == fixture.command_capacity);
+        CHECK(fake.staged.stage_profile == 0);
+        CHECK(fake.staged.stage_profile_bytes == 0);
         CHECK(created.transport->destroy().ok());
     }
 
@@ -407,7 +430,9 @@ void check_success_and_reverse_cleanup() {
     static_assert(kValidatedCapabilities == 0x775);
 
     FakeApi fake;
-    auto created = transport::make_cann_transport(valid_config(), fake.api());
+    auto config = valid_config();
+    config.stage_profile_enabled = true;
+    auto created = transport::make_cann_transport(config, fake.api());
     CHECK(created.status.ok());
     CHECK(created.transport != nullptr);
     CHECK(created.transport->capabilities() == kValidatedCapabilities);
@@ -447,6 +472,9 @@ void check_success_and_reverse_cleanup() {
     CHECK(fake.staged_copy_count == 1);
     CHECK(fake.staged.fetch_results == 0);
     CHECK(fake.staged.fetch_result_bytes == 0);
+    CHECK(fake.staged.stage_profile != 0);
+    CHECK(fake.staged.stage_profile_bytes ==
+          sizeof(transport::TransportStageProfile));
     CHECK(fake.staged.reserved == transport::command::registration_cookie(
         fake.staged.command_queue, fake.queue.commands,
         fake.queue.service_state, fake.queue.diagnostic,
@@ -455,15 +483,27 @@ void check_success_and_reverse_cleanup() {
     CHECK(fake.diagnostic.abi_version ==
           transport::kTransportCommandAbiVersion);
     CHECK(fake.diagnostic.error == transport::DeviceTransportError::kNone);
-    CHECK(fake.count(Event::kAllocate) == 5);
-    CHECK(fake.count(Event::kZero) == 5);
+    CHECK(fake.count(Event::kAllocate) == 6);
+    CHECK(fake.count(Event::kZero) == 6);
     CHECK(fake.count(Event::kCopy) == 4);
+
+    CHECK(created.transport->reset_stage_profile().ok());
+    CHECK(fake.profile_copy_count == 1);
+    CHECK(fake.profile.abi_version ==
+          transport::kTransportStageProfileAbiVersion);
+    CHECK(fake.profile.operation == transport::TransportProfileOperation::kNone);
+    transport::TransportStageProfile profile{};
+    CHECK(created.transport->read_stage_profile(&profile).ok());
+    CHECK(profile.operation == transport::TransportProfileOperation::kCombine);
+    CHECK(profile.generation == 23);
+    CHECK(profile.completion_generation == 23);
+    CHECK(fake.count(Event::kCopyFromDevice) == 2);
 
     CHECK(created.transport->destroy().ok());
     const auto after_first_destroy = fake.event_count;
     CHECK(created.transport->destroy().ok());
     CHECK(fake.event_count == after_first_destroy);
-    CHECK(fake.count(Event::kFree) == 5);
+    CHECK(fake.count(Event::kFree) == 6);
     CHECK(fake.events[fake.event_count - 2] == Event::kDeregisterWindow);
     CHECK(fake.events[fake.event_count - 1] == Event::kDestroyTeam);
 }

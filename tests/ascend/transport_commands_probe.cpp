@@ -43,7 +43,7 @@ static_assert(sizeof(transport::DeviceTransportDiagnostic) == 64);
 static_assert(offsetof(transport::DeviceTransportDiagnostic, peer) == 16);
 static_assert(offsetof(transport::DeviceTransportDiagnostic, world_peer) == 48);
 static_assert(offsetof(transport::DeviceTransportDiagnostic, team) == 52);
-static_assert(sizeof(transport::StagedTransportContext) == 64);
+static_assert(sizeof(transport::StagedTransportContext) == 128);
 
 constexpr transport::TransportTopology kBarrierTopology{
     transport::kTransportTopologyAbiVersion,
@@ -161,6 +161,8 @@ void check_queue_model() {
     auto queue = transport::command::make_queue(
         commands, 3, &service, &diagnostic);
     transport::StagedTransportContext staged{};
+    CHECK(staged.stage_profile == 0);
+    CHECK(staged.stage_profile_bytes == 0);
     staged.command_queue = reinterpret_cast<std::uintptr_t>(&queue);
     staged.reserved = transport::command::registration_cookie(
         staged.command_queue, queue.commands, queue.service_state,

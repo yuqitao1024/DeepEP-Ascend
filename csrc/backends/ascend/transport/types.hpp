@@ -370,6 +370,7 @@ struct TransportConfig {
     TransportTopologyKind topology_kind =
         TransportTopologyKind::kFlatScaleUp;
     std::uint64_t topology_epoch = 1;
+    bool stage_profile_enabled = false;
 };
 
 inline TransportStatus build_configured_transport_topology(
