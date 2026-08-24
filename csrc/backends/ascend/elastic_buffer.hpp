@@ -660,6 +660,8 @@ class ElasticBuffer {
         transport::capability_bit(transport::TransportCapability::kDevicePutValue) |
         transport::capability_bit(transport::TransportCapability::kRemoteSignal) |
         transport::capability_bit(
+            transport::TransportCapability::kAsyncCompletion) |
+        transport::capability_bit(
             transport::TransportCapability::kSystemMemoryOrdering) |
         transport::capability_bit(transport::TransportCapability::kDeviceBarrier) |
         transport::capability_bit(transport::TransportCapability::kScaleUpTeam);
@@ -709,6 +711,8 @@ class ElasticBuffer {
         transport::capability_bit(transport::TransportCapability::kDevicePut) |
         transport::capability_bit(transport::TransportCapability::kDevicePutValue) |
         transport::capability_bit(transport::TransportCapability::kRemoteSignal) |
+        transport::capability_bit(
+            transport::TransportCapability::kAsyncCompletion) |
         transport::capability_bit(
             transport::TransportCapability::kSystemMemoryOrdering) |
         transport::capability_bit(transport::TransportCapability::kDeviceBarrier) |

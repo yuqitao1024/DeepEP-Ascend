@@ -427,10 +427,12 @@ void check_success_and_reverse_cleanup() {
             transport::TransportCapability::kRemoteAtomicAddRelease) |
         transport::capability_bit(transport::TransportCapability::kRemoteSignal) |
         transport::capability_bit(
+            transport::TransportCapability::kAsyncCompletion) |
+        transport::capability_bit(
             transport::TransportCapability::kSystemMemoryOrdering) |
         transport::capability_bit(transport::TransportCapability::kDeviceBarrier) |
         transport::capability_bit(transport::TransportCapability::kScaleUpTeam);
-    static_assert(kValidatedCapabilities == 0x775);
+    static_assert(kValidatedCapabilities == 0x7f5);
 
     FakeApi fake;
     auto config = valid_config();
@@ -466,7 +468,7 @@ void check_success_and_reverse_cleanup() {
         context.capabilities, transport::TransportCapability::kDirectPeerPointer));
     CHECK(!transport::has_capability(
         context.capabilities, transport::TransportCapability::kDeviceGet));
-    CHECK(!transport::has_capability(
+    CHECK(transport::has_capability(
         context.capabilities, transport::TransportCapability::kAsyncCompletion));
     CHECK(!transport::has_capability(
         context.capabilities, transport::TransportCapability::kScaleOutTeam));

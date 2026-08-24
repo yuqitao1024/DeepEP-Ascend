@@ -11,6 +11,15 @@
 #define DEEP_EP_ASCEND_SIMT_EXECUTION_INLINE inline constexpr
 #endif
 
+#if !defined(DEEP_EP_ASCEND_SIMT_GLOBAL)
+#if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
+#define DEEP_EP_ASCEND_SIMT_GLOBAL __gm__
+#else
+#define DEEP_EP_ASCEND_SIMT_GLOBAL
+#endif
+#define DEEP_EP_ASCEND_HELPERS_OWN_SIMT_GLOBAL 1
+#endif
+
 #if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && \
     DEEP_EP_ASCEND_AICORE_URMA_SERVICE
 #define DEEP_EP_ASCEND_AICORE_EXECUTION_INLINE __aicore__ inline
@@ -57,6 +66,92 @@ DEEP_EP_ASCEND_SIMT_EXECUTION_INLINE bool simt_barrier_team_enabled(
         return topology.scale_up_size > 1 &&
             (team_mask & kScaleUpTeamMask) != 0;
     return false;
+}
+
+DEEP_EP_ASCEND_SIMT_EXECUTION_INLINE bool simt_publish_request(
+    DEEP_EP_ASCEND_SIMT_GLOBAL DeviceRequest* request,
+    std::uint32_t command_begin,
+    std::uint32_t command_end, std::uint64_t queue_generation) {
+    if (request == nullptr)
+        return false;
+    if (request->abi_version != kDeviceRequestAbiVersion) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidAbi;
+        return false;
+    }
+    if (request->state == DeviceRequestState::kPending ||
+        request->state < DeviceRequestState::kEmpty ||
+        request->state > DeviceRequestState::kFailed ||
+        command_end <= command_begin || queue_generation == 0) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidProtocol;
+        return false;
+    }
+    request->command_begin = command_begin;
+    request->command_end = command_end;
+    request->queue_generation = queue_generation;
+    request->consumed_target = command_end;
+    request->terminal_error = DeviceTransportError::kNone;
+    request->state = DeviceRequestState::kPending;
+    return true;
+}
+
+DEEP_EP_ASCEND_SIMT_EXECUTION_INLINE bool simt_observe_request(
+    DEEP_EP_ASCEND_SIMT_GLOBAL DeviceRequest* request,
+    std::uint64_t queue_generation,
+    std::uint64_t consumed_generation, std::uint32_t consumed_count,
+    std::uint64_t diagnostic_generation,
+    std::uint32_t diagnostic_command_index,
+    DeviceTransportError diagnostic_error) {
+    if (request == nullptr)
+        return true;
+    if (request->state == DeviceRequestState::kCompleted ||
+        request->state == DeviceRequestState::kFailed)
+        return true;
+    if (request->abi_version != kDeviceRequestAbiVersion) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidAbi;
+        return true;
+    }
+    if (request->state != DeviceRequestState::kPending ||
+        queue_generation != request->queue_generation ||
+        (consumed_generation != 0 &&
+         consumed_generation != request->queue_generation)) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidProtocol;
+        return true;
+    }
+    if (diagnostic_generation == request->queue_generation &&
+        diagnostic_error != DeviceTransportError::kNone &&
+        diagnostic_command_index >= request->command_begin &&
+        diagnostic_command_index < request->command_end) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = diagnostic_error;
+        return true;
+    }
+    if (consumed_count >= request->consumed_target) {
+        request->state = DeviceRequestState::kCompleted;
+        request->terminal_error = DeviceTransportError::kNone;
+        return true;
+    }
+    if (consumed_generation == request->queue_generation) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kCompletionFailure;
+        return true;
+    }
+    return false;
+}
+
+DEEP_EP_ASCEND_SIMT_EXECUTION_INLINE bool simt_timeout_request(
+    DEEP_EP_ASCEND_SIMT_GLOBAL DeviceRequest* request) {
+    if (request == nullptr)
+        return true;
+    if (request->state == DeviceRequestState::kCompleted ||
+        request->state == DeviceRequestState::kFailed)
+        return true;
+    request->state = DeviceRequestState::kFailed;
+    request->terminal_error = DeviceTransportError::kCompletionTimeout;
+    return true;
 }
 
 DEEP_EP_ASCEND_AICORE_EXECUTION_INLINE bool
@@ -145,6 +240,11 @@ DEEP_EP_ASCEND_AICORE_EXECUTION_INLINE bool aicore_barrier_peer_in_team(
 }
 
 }  // namespace deep_ep::ascend::transport::command
+
+#if defined(DEEP_EP_ASCEND_HELPERS_OWN_SIMT_GLOBAL)
+#undef DEEP_EP_ASCEND_HELPERS_OWN_SIMT_GLOBAL
+#undef DEEP_EP_ASCEND_SIMT_GLOBAL
+#endif
 
 namespace deep_ep::ascend::transport::sync_layout {
 

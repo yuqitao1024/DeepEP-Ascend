@@ -86,12 +86,13 @@ public:
 
     DEEP_EP_ASCEND_SIMT_CALLEE void flush_async(
         TransportTeam team, int peer_rank, CooperationScope scope,
-        DeviceRequest* request) const {
+        DEEP_EP_ASCEND_SIMT_GLOBAL DeviceRequest* request) const {
         device::flush_async(
             context_, channel_, team, peer_rank, scope, request);
     }
 
-    DEEP_EP_ASCEND_SIMT_CALLEE void wait(DeviceRequest* request) const {
+    DEEP_EP_ASCEND_SIMT_CALLEE void wait(
+        DEEP_EP_ASCEND_SIMT_GLOBAL DeviceRequest* request) const {
         device::wait(context_, request);
     }
 

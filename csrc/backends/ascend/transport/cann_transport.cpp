@@ -30,6 +30,7 @@ constexpr TransportCapabilities kValidatedCapabilities =
     capability_bit(TransportCapability::kDevicePutValue) |
     capability_bit(TransportCapability::kRemoteAtomicAddRelease) |
     capability_bit(TransportCapability::kRemoteSignal) |
+    capability_bit(TransportCapability::kAsyncCompletion) |
     capability_bit(TransportCapability::kSystemMemoryOrdering) |
     capability_bit(TransportCapability::kDeviceBarrier) |
     capability_bit(TransportCapability::kScaleUpTeam);

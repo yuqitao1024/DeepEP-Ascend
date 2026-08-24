@@ -44,6 +44,8 @@ static_assert(offsetof(transport::DeviceTransportDiagnostic, peer) == 16);
 static_assert(offsetof(transport::DeviceTransportDiagnostic, world_peer) == 48);
 static_assert(offsetof(transport::DeviceTransportDiagnostic, team) == 52);
 static_assert(sizeof(transport::StagedTransportContext) == 128);
+static_assert(sizeof(transport::DeviceRequest) == 32);
+static_assert(alignof(transport::DeviceRequest) == 16);
 static_assert(alignof(transport::TransportStageBlockCycles) == 64);
 static_assert(sizeof(transport::TransportStageBlockCycles) == 64);
 constexpr transport::TransportTopology kBarrierTopology{
@@ -64,6 +66,144 @@ static_assert(transport::command::barrier_team_enabled(
     transport::TransportTeam::kScaleOut));
 static_assert(transport::command::barrier_peer_in_team(
     kBarrierTopology, transport::TransportTeam::kScaleOut, 3));
+
+void check_device_request_default_state() {
+    const transport::DeviceRequest request{};
+    CHECK(request.abi_version == transport::kDeviceRequestAbiVersion);
+    CHECK(request.state == transport::DeviceRequestState::kEmpty);
+    CHECK(request.command_begin == 0);
+    CHECK(request.command_end == 0);
+    CHECK(request.queue_generation == 0);
+    CHECK(request.consumed_target == 0);
+    CHECK(request.terminal_error == transport::DeviceTransportError::kNone);
+}
+
+void check_device_request_publish_state() {
+    transport::DeviceRequest request{};
+    CHECK(transport::command::publish_request(request, 3, 4, 17));
+    CHECK(request.state == transport::DeviceRequestState::kPending);
+    CHECK(request.command_begin == 3);
+    CHECK(request.command_end == 4);
+    CHECK(request.queue_generation == 17);
+    CHECK(request.consumed_target == 4);
+    CHECK(request.terminal_error == transport::DeviceTransportError::kNone);
+}
+
+void check_device_request_publish_rejections() {
+    transport::DeviceRequest invalid_abi{};
+    ++invalid_abi.abi_version;
+    CHECK(!transport::command::publish_request(invalid_abi, 0, 1, 9));
+    CHECK(invalid_abi.state == transport::DeviceRequestState::kFailed);
+    CHECK(invalid_abi.terminal_error ==
+          transport::DeviceTransportError::kInvalidAbi);
+
+    transport::DeviceRequest invalid_range{};
+    CHECK(!transport::command::publish_request(invalid_range, 4, 4, 9));
+    CHECK(invalid_range.state == transport::DeviceRequestState::kFailed);
+    CHECK(invalid_range.terminal_error ==
+          transport::DeviceTransportError::kInvalidProtocol);
+
+    transport::DeviceRequest invalid_generation{};
+    CHECK(!transport::command::publish_request(
+        invalid_generation, 4, 5, 0));
+    CHECK(invalid_generation.state == transport::DeviceRequestState::kFailed);
+    CHECK(invalid_generation.terminal_error ==
+          transport::DeviceTransportError::kInvalidProtocol);
+
+    transport::DeviceRequest pending{};
+    CHECK(transport::command::publish_request(pending, 3, 4, 17));
+    CHECK(!transport::command::publish_request(pending, 4, 5, 17));
+    CHECK(pending.state == transport::DeviceRequestState::kFailed);
+    CHECK(pending.command_begin == 3);
+    CHECK(pending.command_end == 4);
+    CHECK(pending.queue_generation == 17);
+    CHECK(pending.consumed_target == 4);
+    CHECK(pending.terminal_error ==
+          transport::DeviceTransportError::kInvalidProtocol);
+}
+
+void check_device_request_completion_is_targeted_and_idempotent() {
+    transport::DeviceRequest request{};
+    CHECK(transport::command::publish_request(request, 3, 4, 17));
+    CHECK(!transport::command::observe_request(
+        request, 17, 0, 3, 17, 3,
+        transport::DeviceTransportError::kNone));
+    CHECK(request.state == transport::DeviceRequestState::kPending);
+
+    CHECK(transport::command::observe_request(
+        request, 17, 0, 4, 17, 4,
+        transport::DeviceTransportError::kNone));
+    CHECK(request.state == transport::DeviceRequestState::kCompleted);
+    CHECK(request.terminal_error == transport::DeviceTransportError::kNone);
+
+    CHECK(transport::command::observe_request(
+        request, 99, 99, 0, 99, 0,
+        transport::DeviceTransportError::kCompletionFailure));
+    CHECK(request.state == transport::DeviceRequestState::kCompleted);
+    CHECK(request.terminal_error == transport::DeviceTransportError::kNone);
+}
+
+void check_device_request_observation_failures() {
+    transport::DeviceRequest empty{};
+    CHECK(transport::command::observe_request(
+        empty, 17, 0, 0, 17, 0,
+        transport::DeviceTransportError::kNone));
+    CHECK(empty.state == transport::DeviceRequestState::kFailed);
+    CHECK(empty.terminal_error ==
+          transport::DeviceTransportError::kInvalidProtocol);
+
+    transport::DeviceRequest reset{};
+    CHECK(transport::command::publish_request(reset, 3, 4, 17));
+    CHECK(transport::command::observe_request(
+        reset, 18, 0, 0, 18, 0,
+        transport::DeviceTransportError::kNone));
+    CHECK(reset.state == transport::DeviceRequestState::kFailed);
+    CHECK(reset.terminal_error ==
+          transport::DeviceTransportError::kInvalidProtocol);
+
+    transport::DeviceRequest stale_service{};
+    CHECK(transport::command::publish_request(stale_service, 3, 4, 17));
+    CHECK(transport::command::observe_request(
+        stale_service, 17, 16, 3, 16, 3,
+        transport::DeviceTransportError::kNone));
+    CHECK(stale_service.state == transport::DeviceRequestState::kFailed);
+    CHECK(stale_service.terminal_error ==
+          transport::DeviceTransportError::kInvalidProtocol);
+
+    transport::DeviceRequest service_error{};
+    CHECK(transport::command::publish_request(service_error, 3, 4, 17));
+    CHECK(transport::command::observe_request(
+        service_error, 17, 0, 3, 17, 3,
+        transport::DeviceTransportError::kInvalidAddress));
+    CHECK(service_error.state == transport::DeviceRequestState::kFailed);
+    CHECK(service_error.terminal_error ==
+          transport::DeviceTransportError::kInvalidAddress);
+
+    transport::DeviceRequest short_completion{};
+    CHECK(transport::command::publish_request(short_completion, 3, 4, 17));
+    CHECK(transport::command::observe_request(
+        short_completion, 17, 17, 3, 17, 3,
+        transport::DeviceTransportError::kNone));
+    CHECK(short_completion.state == transport::DeviceRequestState::kFailed);
+    CHECK(short_completion.terminal_error ==
+          transport::DeviceTransportError::kCompletionFailure);
+}
+
+void check_device_request_timeout_is_terminal() {
+    transport::DeviceRequest request{};
+    CHECK(transport::command::publish_request(request, 3, 4, 17));
+    CHECK(transport::command::timeout_request(request));
+    CHECK(request.state == transport::DeviceRequestState::kFailed);
+    CHECK(request.terminal_error ==
+          transport::DeviceTransportError::kCompletionTimeout);
+
+    CHECK(transport::command::observe_request(
+        request, 99, 99, 0, 99, 0,
+        transport::DeviceTransportError::kCompletionFailure));
+    CHECK(request.state == transport::DeviceRequestState::kFailed);
+    CHECK(request.terminal_error ==
+          transport::DeviceTransportError::kCompletionTimeout);
+}
 
 void check_team_peer_translation() {
     transport::TransportTopology topology{};
@@ -375,6 +515,12 @@ void check_profile_payload_bytes() {
 }  // namespace
 
 int main() {
+    check_device_request_default_state();
+    check_device_request_publish_state();
+    check_device_request_publish_rejections();
+    check_device_request_completion_is_targeted_and_idempotent();
+    check_device_request_observation_failures();
+    check_device_request_timeout_is_terminal();
     check_team_peer_translation();
     check_factories();
     check_queue_model();

@@ -16,6 +16,8 @@ inline constexpr transport::TransportCapabilities
         transport::capability_bit(
             transport::TransportCapability::kRemoteSignal) |
         transport::capability_bit(
+            transport::TransportCapability::kAsyncCompletion) |
+        transport::capability_bit(
             transport::TransportCapability::kSystemMemoryOrdering) |
         transport::capability_bit(
             transport::TransportCapability::kDeviceBarrier) |

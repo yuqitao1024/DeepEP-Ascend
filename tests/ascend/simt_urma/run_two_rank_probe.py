@@ -22,6 +22,7 @@ def runtime_contract():
         "signal": dict(phased),
         "signal-set": dict(phased),
         "flush": dict(phased),
+        "async-lifecycle": dict(phased),
         "payload-signal-order": {
             **phased, "iterations": ORDERING_ITERATIONS,
         },

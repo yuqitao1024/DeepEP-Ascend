@@ -177,7 +177,7 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
 
         expected_cases = {
             "put", "put-value64", "faa64", "signal", "signal-set", "flush",
-            "payload-signal-order", "barrier-repeat", "queue-wrap",
+            "async-lifecycle", "payload-signal-order", "barrier-repeat", "queue-wrap",
             "profile-mixed", "phase-boundary", "teardown",
         }
         self.assertEqual(set(contract["cases"]), expected_cases)

@@ -215,31 +215,37 @@ transport protocol and does not qualify hybrid or physical scale-out.
 
 ### 10.1 Reproducible inputs and execution
 
-The candidate was commit
-`f73da24b954be6575eee6be877e5f3845dc1f48c`, archived from a clean tree as
-`deepep-p3-f73da24-c28dda33.tar.gz` with SHA-256
-`c28dda33c8019e4d40805728a1e1fb7bebdba9f27fa1a8f8ef1dc695a86d3286`.
+The final candidate was commit
+`17dd7ed9f23a9f5fdadfd3137a356d0ca9319e3f`, archived from a clean tree as
+`deepep-p3-final-17dd7ed-88d09052.tar.gz` with SHA-256
+`88d090525eb580d1c8e39bd08f7894af0252e4258344851ead779c2e0b1c93c0`.
 The remote staging directory was
-`/home/pyptouser/yuqitao/deepep-staging/p3-c28dda33c8019e4d`.
+`/home/pyptouser/yuqitao/deepep-staging/p3-final-88d090525eb580d1`.
+This final archive includes the corrected command accounting, all drain-wait
+paths, observed SQ/CQ depths and high-water marks, strict host validation, and
+the stream-ordered final profiling boundary. Results from the earlier
+`f73da24` archive are superseded because its queue and wait telemetry was
+incomplete.
 
 All NPU work ran serially through TaskQueue with CANN 9.2,
 `hcomm-deepep-current`, and the qualified Python 3.10 virtual environment:
 
 | TaskQueue task | Scope | Terminal result |
 | --- | --- | --- |
-| `task_20260824_163111_52195411081` | Archive extraction and production/SIMT/AICore builds | exit 0 |
-| `task_20260824_163521_5505779125` | Two-rank SIMT/AICore and production correctness on devices 0,1 | exit 0 |
-| `task_20260824_163705_56259211433` | First disabled AB attempt; baseline staging path absent before benchmark | exit 1 |
+| `task_20260824_221053_12428769443` | Final archive extraction and production/SIMT/AICore builds | exit 0 |
+| `task_20260824_224053_156495113079` | Focused two-rank `profile-mixed` and teardown retry on devices 6,7 | exit 0 |
+| `task_20260824_224207_157664916330` | Full two-rank 12-case suite and production correctness on devices 6,7 | exit 0 |
 | `task_20260824_163919_5752582788` | Immutable baseline reconstruction and build | exit 0 |
-| `task_20260824_164240_58668910244` | EP8 disabled-profile ABBA control | exit 0 |
-| `task_20260824_164801_6088375783` | EP8 enabled-profile representative case | exit 0 |
+| `task_20260824_224637_16141996053` | Final EP8 disabled-profile ABBA control | exit 0 |
+| `task_20260824_225210_166672421792` | Final EP8 enabled-profile representative case | exit 0 |
 
 The two-rank transport suite passed `put`, `put-value64`, `faa64`, `signal`,
 `signal-set`, `flush`, `payload-signal-order`, `barrier-repeat`, `queue-wrap`,
-`phase-boundary`, and `teardown`, all with `diagnostics=kNone`. The production
-benchmark passed all five operations. Its result is
-`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-r2/production-correctness.json`
-(SHA-256 `2c08868fa799ba306d9244bc1302518ec70b0c10e4e6f053175daff29ad1686a`).
+`profile-mixed`, `phase-boundary`, and `teardown`, all with
+`diagnostics=kNone`. The production benchmark passed all five operations. Its
+result is
+`/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-full-r1/production-correctness.json`
+(SHA-256 `a1fcbf822889aab86098cf734fe47df56a55d822cc77e2de9e750b1f439ffdb1`).
 
 The EP8 command used `torch.distributed.run --standalone --nproc-per-node=8`
 with `bench_ep.py --cases ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0
@@ -250,25 +256,24 @@ with `bench_ep.py --cases ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0
 fingerprint `d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`).
 
 The enabled schema-v3 result is
-`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-profile/benchmark.json`
-(SHA-256 `e5b79ad753624523c3433481656096721c3b1f37ac08c5c6e591009a221b6a80`).
+`/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-profile/benchmark.json`
+(SHA-256 `b6f456c9527428b5425807621a86f368b5c6714a4047af2f1d948567ce3451c7`).
 The disabled ABBA result directory is
-`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab`; its four JSON
-SHA-256 values are recorded in the task report under
-`/tmp/deepep-ascend-plans/p3-overlap-sdd/task-4-report.md`.
+`/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-abba`; its four
+JSON SHA-256 values are recorded below.
 
 ### 10.1.1 Exact archive, environment, and build commands
 
 The local candidate archive command below was re-run against the immutable
 commit and reproduced the recorded candidate archive SHA-256. The remote copy
 used for build and benchmark was
-`/home/pyptouser/yuqitao/deepep-archives/deepep-p3-f73da24-c28dda33.tar.gz`;
+`/home/pyptouser/yuqitao/deepep-archives/deepep-p3-final-17dd7ed-88d09052.tar.gz`;
 the staging command verifies it before extraction.
 
 ```bash
-git archive --format=tar f73da24b954be6575eee6be877e5f3845dc1f48c | gzip -n > /tmp/deepep-p3-f73da24.tar.gz
-sha256sum /tmp/deepep-p3-f73da24.tar.gz
-# c28dda33c8019e4d40805728a1e1fb7bebdba9f27fa1a8f8ef1dc695a86d3286
+git archive --format=tar 17dd7ed9f23a9f5fdadfd3137a356d0ca9319e3f | gzip -n > /tmp/deepep-p3-final-17dd7ed.tar.gz
+sha256sum /tmp/deepep-p3-final-17dd7ed.tar.gz
+# 88d090525eb580d1c8e39bd08f7894af0252e4258344851ead779c2e0b1c93c0
 ```
 
 Every remote task loaded this exact context before its build or benchmark:
@@ -287,17 +292,17 @@ export PYTHONPATH="$HCOMM_ROOT/python/site-packages${PYTHONPATH:+:$PYTHONPATH}"
 source /home/pyptouser/yuqitao/venvs/deepep-ascend-py310/bin/activate
 ```
 
-Task `task_20260824_163111_52195411081` staged and built the candidate as
+Task `task_20260824_221053_12428769443` staged and built the candidate as
 follows. Its durable provenance is
-`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-build/provenance.txt`; the
+`/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-build/provenance.txt`; the
 runner path is
-`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-build/simt_urma_runtime/deep_ep_ascend_urma_runner.so`.
+`/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-build/simt_urma_runtime/deep_ep_ascend_urma_runner.so`.
 
 ```bash
-archive=/home/pyptouser/yuqitao/deepep-archives/deepep-p3-f73da24-c28dda33.tar.gz
-archive_sha256=c28dda33c8019e4d40805728a1e1fb7bebdba9f27fa1a8f8ef1dc695a86d3286
-source_dir=/home/pyptouser/yuqitao/deepep-staging/p3-c28dda33c8019e4d
-result_dir=/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-build
+archive=/home/pyptouser/yuqitao/deepep-archives/deepep-p3-final-17dd7ed-88d09052.tar.gz
+archive_sha256=88d090525eb580d1c8e39bd08f7894af0252e4258344851ead779c2e0b1c93c0
+source_dir=/home/pyptouser/yuqitao/deepep-staging/p3-final-88d090525eb580d1
+result_dir=/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-build
 runner_dir="$result_dir/simt_urma_runtime"
 test "$(sha256sum "$archive" | awk '{print $1}')" = "$archive_sha256"
 test ! -e "$source_dir"
@@ -329,27 +334,28 @@ cd "$source_dir"
 DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace
 ```
 
-Task `task_20260824_163521_5505779125` used the candidate staging and runner
-above, unset profiling, and ran these two-rank qualification commands. Its
-durable result directory is `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-r2`
-with `simt-aicore.log`, `production-correctness.log`,
+Task `task_20260824_224207_157664916330` used the final candidate staging and
+runner above, unset profiling, and ran the full two-rank qualification. Its
+durable result directory is
+`/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-full-r1` with
+`simt-aicore.log`, `production-correctness.log`,
 `production-correctness.json`, and `provenance.txt`.
 
 ```bash
 unset DEEP_EP_ASCEND_PROFILE_STAGES
-cd /home/pyptouser/yuqitao/deepep-staging/p3-c28dda33c8019e4d
-python -m torch.distributed.run --standalone --nproc-per-node=2 tests/ascend/simt_urma/run_two_rank_probe.py --runner /home/pyptouser/yuqitao/deepep-results/p3-c28dda33-build/simt_urma_runtime/deep_ep_ascend_urma_runner.so --cases put,put-value64,faa64,signal,signal-set,flush,payload-signal-order,barrier-repeat,queue-wrap,phase-boundary,teardown | tee /home/pyptouser/yuqitao/deepep-results/p3-c28dda33-r2/simt-aicore.log
-python -m torch.distributed.run --standalone --nproc-per-node=2 tests/ascend/benchmark/bench_ep.py --cases ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0 --num-tokens 16 --hidden 128 --num-topk 2 --num-experts 4 --num-sms 72 --warmups 1 --iterations 1 --output /home/pyptouser/yuqitao/deepep-results/p3-c28dda33-r2/production-correctness.json | tee /home/pyptouser/yuqitao/deepep-results/p3-c28dda33-r2/production-correctness.log
+cd /home/pyptouser/yuqitao/deepep-staging/p3-final-88d090525eb580d1
+python -m torch.distributed.run --standalone --nproc-per-node=2 tests/ascend/simt_urma/run_two_rank_probe.py --runner /home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-build/simt_urma_runtime/deep_ep_ascend_urma_runner.so --cases put,put-value64,faa64,signal,signal-set,flush,payload-signal-order,barrier-repeat,queue-wrap,profile-mixed,phase-boundary,teardown | tee /home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-full-r1/simt-aicore.log
+python -m torch.distributed.run --standalone --nproc-per-node=2 tests/ascend/benchmark/bench_ep.py --cases ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0 --num-tokens 16 --hidden 128 --num-topk 2 --num-experts 4 --num-sms 72 --warmups 1 --iterations 1 --output /home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-full-r1/production-correctness.json | tee /home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-full-r1/production-correctness.log
 ```
 
-Task `task_20260824_164240_58668910244` ran the disabled ABBA control after
+Task `task_20260824_224637_16141996053` ran the disabled ABBA control after
 the common environment and `unset DEEP_EP_ASCEND_PROFILE_STAGES`.
 
 ```bash
 baseline_source=/home/pyptouser/yuqitao/deepep-staging/baseline-5fc0940a37339142
-candidate_source=/home/pyptouser/yuqitao/deepep-staging/p3-c28dda33c8019e4d
+candidate_source=/home/pyptouser/yuqitao/deepep-staging/p3-final-88d090525eb580d1
 manifest=/home/pyptouser/yuqitao/deepep-results/ascend950-representative-60e3d08/workload.json
-result_dir=/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab
+result_dir=/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-abba
 case_id=ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0
 cd "$baseline_source" && python -m torch.distributed.run --standalone --nproc-per-node=8 tests/ascend/benchmark/bench_ep.py --cases "$case_id" --workload-manifest "$manifest" --num-sms 72 --warmups 30 --iterations 30 --output "$result_dir/baseline-a.json"
 cd "$candidate_source" && python -m torch.distributed.run --standalone --nproc-per-node=8 tests/ascend/benchmark/bench_ep.py --cases "$case_id" --workload-manifest "$manifest" --num-sms 72 --warmups 30 --iterations 30 --output "$result_dir/candidate-a.json"
@@ -357,14 +363,14 @@ cd "$candidate_source" && python -m torch.distributed.run --standalone --nproc-p
 cd "$baseline_source" && python -m torch.distributed.run --standalone --nproc-per-node=8 tests/ascend/benchmark/bench_ep.py --cases "$case_id" --workload-manifest "$manifest" --num-sms 72 --warmups 30 --iterations 30 --output "$result_dir/baseline-b.json"
 ```
 
-Task `task_20260824_164801_6088375783` ran the enabled candidate profile from
-`/home/pyptouser/yuqitao/deepep-staging/p3-c28dda33c8019e4d`. Its durable
+Task `task_20260824_225210_166672421792` ran the enabled candidate profile from
+`/home/pyptouser/yuqitao/deepep-staging/p3-final-88d090525eb580d1`. Its durable
 provenance is
-`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-profile/provenance.txt`.
+`/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-profile/provenance.txt`.
 
 ```bash
-cd /home/pyptouser/yuqitao/deepep-staging/p3-c28dda33c8019e4d
-python -m torch.distributed.run --standalone --nproc-per-node=8 tests/ascend/benchmark/bench_ep.py --cases ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0 --workload-manifest /home/pyptouser/yuqitao/deepep-results/ascend950-representative-60e3d08/workload.json --num-sms 72 --warmups 30 --iterations 30 --profile-stages --output /home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-profile/benchmark.json
+cd /home/pyptouser/yuqitao/deepep-staging/p3-final-88d090525eb580d1
+python -m torch.distributed.run --standalone --nproc-per-node=8 tests/ascend/benchmark/bench_ep.py --cases ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0 --workload-manifest /home/pyptouser/yuqitao/deepep-results/ascend950-representative-60e3d08/workload.json --num-sms 72 --warmups 30 --iterations 30 --profile-stages --output /home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-profile/benchmark.json
 ```
 
 ### 10.2 Disabled-profile control
@@ -379,44 +385,47 @@ this is a disabled-overhead control, not a formal cross-schema comparator.
 
 | Operation | Control mean ms | Candidate mean ms | Delta | Control pair variation | Candidate pair variation |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| dispatch | 37.727 | 37.665 | -0.164% | 1.328% | 2.507% |
-| expanded_dispatch | 38.265 | 38.428 | +0.425% | 0.068% | 0.828% |
-| cached_dispatch | 84.198 | 84.683 | +0.576% | 1.798% | 2.005% |
-| combine | 140.878 | 140.261 | -0.438% | 0.686% | 0.987% |
-| reduced_combine | 168.187 | 167.801 | -0.229% | 0.087% | 0.468% |
+| dispatch | 36.878 | 37.510 | +1.715% | 0.529% | 1.555% |
+| expanded_dispatch | 39.049 | 38.497 | -1.414% | 0.299% | 4.179% |
+| cached_dispatch | 84.303 | 84.635 | +0.393% | 1.310% | 0.008% |
+| combine | 140.121 | 140.191 | +0.051% | 0.526% | 0.466% |
+| reduced_combine | 167.462 | 169.555 | +1.250% | 0.668% | 0.515% |
 
-Each candidate disabled-profile mean is within its observed candidate
-run-to-run variation. P3.0 profiling is retained; no arbitrary overhead
-threshold was used.
+Dispatch and reduced combine move by 1.715% and 1.250%; those changes remain
+within the observed candidate pair variation or the combined control/candidate
+run-to-run spread. Expanded dispatch varies by 4.179% between candidate runs,
+which is larger than its -1.414% pair-mean delta. Cached dispatch and combine
+are effectively flat. P3.0 profiling is therefore retained without applying
+an arbitrary overhead threshold.
 
 The full per-run values are durable evidence, not a temporary-report-only
 artifact:
 
 | JSON artifact | Durable result path | SHA-256 | Operation | Mean ms | p50 ms | p95 ms | Logical GB/s |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| baseline A | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/baseline-a.json` | `32c479d81b8933ec8c8cb4f89e0bac3c874a83401e8fc4ee98ce5d1592e1a27b` | dispatch | 37.976 | 37.827 | 39.421 | 205.027 |
-| baseline A | same | same | expanded_dispatch | 38.278 | 38.286 | 40.109 | 241.691 |
-| baseline A | same | same | cached_dispatch | 84.948 | 84.789 | 86.869 | 91.657 |
-| baseline A | same | same | combine | 141.360 | 141.327 | 143.417 | 77.117 |
-| baseline A | same | same | reduced_combine | 168.260 | 168.056 | 169.846 | 64.788 |
-| candidate A | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/candidate-a.json` | `8156ac39e610212b410297984bb214ac2c8e093700f24bdf2ab73c3703be52ba` | dispatch | 38.132 | 38.024 | 39.533 | 204.189 |
-| candidate A | same | same | expanded_dispatch | 38.586 | 38.591 | 39.839 | 239.760 |
-| candidate A | same | same | cached_dispatch | 83.842 | 83.907 | 85.566 | 92.866 |
-| candidate A | same | same | combine | 139.572 | 139.542 | 141.190 | 78.104 |
-| candidate A | same | same | reduced_combine | 167.409 | 167.508 | 169.042 | 65.117 |
-| candidate B | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/candidate-b.json` | `99422d1ea6cd9721e6305aa88787860d3c77fdd275319eb5be6ebbcc57100a1e` | dispatch | 37.199 | 37.142 | 38.694 | 209.308 |
-| candidate B | same | same | expanded_dispatch | 38.269 | 38.217 | 39.549 | 241.746 |
-| candidate B | same | same | cached_dispatch | 85.523 | 85.467 | 86.986 | 91.040 |
-| candidate B | same | same | combine | 140.950 | 140.992 | 142.591 | 77.341 |
-| candidate B | same | same | reduced_combine | 168.193 | 168.328 | 169.200 | 64.814 |
-| baseline B | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/baseline-b.json` | `fb9240ef9e8f51f186a8b5b3fa10af095b011fa739ff4ce5cf8e023b776f7463` | dispatch | 37.478 | 37.385 | 39.395 | 207.749 |
-| baseline B | same | same | expanded_dispatch | 38.252 | 38.348 | 39.312 | 241.855 |
-| baseline B | same | same | cached_dispatch | 83.448 | 83.593 | 85.546 | 93.305 |
-| baseline B | same | same | combine | 140.397 | 140.285 | 143.501 | 77.646 |
-| baseline B | same | same | reduced_combine | 168.113 | 167.963 | 169.837 | 64.844 |
+| baseline A | `/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-abba/baseline-a.json` | `a560798f7f6ed7146b16295ef4a29e30741976b6ecc37c1469a6d43aa8a842e1` | dispatch | 36.780 | 36.854 | 39.333 | 211.691 |
+| baseline A | same | same | expanded_dispatch | 39.107 | 39.095 | 41.882 | 236.566 |
+| baseline A | same | same | cached_dispatch | 84.852 | 85.178 | 86.383 | 91.761 |
+| baseline A | same | same | combine | 140.488 | 140.537 | 141.992 | 77.595 |
+| baseline A | same | same | reduced_combine | 168.019 | 168.180 | 169.461 | 64.881 |
+| candidate A | `/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-abba/candidate-a.json` | `125c1ee890bd36eafa369d72e9686aebe3698b0b7cb8941a84848d378d74a3e7` | dispatch | 37.799 | 37.906 | 40.523 | 205.984 |
+| candidate A | same | same | expanded_dispatch | 39.285 | 39.285 | 41.508 | 235.498 |
+| candidate A | same | same | cached_dispatch | 84.638 | 84.755 | 86.417 | 91.993 |
+| candidate A | same | same | combine | 140.517 | 140.633 | 142.002 | 77.579 |
+| candidate A | same | same | reduced_combine | 169.991 | 169.858 | 172.444 | 64.128 |
+| candidate B | `/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-abba/candidate-b.json` | `92b1f947b0b853d80b4acecf7b773d53c2c01fb3306002270c3eb8e1fca06b4c` | dispatch | 37.221 | 37.159 | 38.873 | 209.186 |
+| candidate B | same | same | expanded_dispatch | 37.709 | 37.323 | 39.812 | 245.338 |
+| candidate B | same | same | cached_dispatch | 84.631 | 84.594 | 86.076 | 92.000 |
+| candidate B | same | same | combine | 139.866 | 139.952 | 141.389 | 77.940 |
+| candidate B | same | same | reduced_combine | 169.120 | 168.976 | 170.933 | 64.459 |
+| baseline B | `/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-abba/baseline-b.json` | `1f07b19f85b5fd4aa822d1052f26ddec4b6855e7c8088c8360e7799d7a0e573c` | dispatch | 36.975 | 36.839 | 38.777 | 210.577 |
+| baseline B | same | same | expanded_dispatch | 38.991 | 38.785 | 40.540 | 237.274 |
+| baseline B | same | same | cached_dispatch | 83.755 | 83.872 | 85.316 | 92.963 |
+| baseline B | same | same | combine | 139.753 | 139.960 | 142.142 | 78.003 |
+| baseline B | same | same | reduced_combine | 166.904 | 166.830 | 169.279 | 65.314 |
 
 The durable ABBA provenance file is
-`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/provenance.txt`.
+`/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-abba/provenance.txt`.
 For each operation, `control_mean = (baseline_A + baseline_B) / 2`,
 `candidate_mean = (candidate_A + candidate_B) / 2`, and
 `delta_percent = (candidate_mean / control_mean - 1) * 100`. The corresponding
@@ -430,11 +439,11 @@ bandwidth uses the unchanged benchmark formulas.
 
 | Operation | Mean ms | p50 ms | p95 ms | Logical GB/s | Producer cycles/ms | Network cycles/ms | Consumer cycles/ms | Ceiling |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| dispatch | 38.178 | 38.076 | 40.124 | 203.939 | 4,472,437 / 4.472 | 6,432,550 / 6.433 | 8,776,951 / 8.777 | 2.242x |
-| expanded_dispatch | 38.736 | 38.545 | 40.472 | 238.832 | 4,479,470 / 4.479 | 7,825,052 / 7.825 | 10,296,814 / 10.297 | 2.195x |
-| cached_dispatch | 85.021 | 84.915 | 86.774 | 91.579 | 51,029,833 / 51.030 | 10,513,472 / 10.513 | 8,805,904 / 8.806 | 1.379x |
-| combine | 140.305 | 140.461 | 141.480 | 77.697 | 47,210,962 / 47.211 | 61,404,108 / 61.404 | 18,000,774 / 18.001 | 2.062x |
-| reduced_combine | 167.866 | 167.933 | 170.405 | 64.940 | 73,551,009 / 73.551 | 60,538,982 / 60.539 | 18,001,954 / 18.002 | 2.068x |
+| dispatch | 36.176 | 36.171 | 38.413 | 215.231 | 4,469,515 / 4.470 | 6,747,839 / 6.748 | 8,786,682 / 8.787 | 2.277x |
+| expanded_dispatch | 38.347 | 38.304 | 40.340 | 241.257 | 4,483,951 / 4.484 | 6,642,344 / 6.642 | 10,299,972 / 10.300 | 2.080x |
+| cached_dispatch | 85.689 | 85.699 | 87.071 | 90.865 | 50,759,224 / 50.759 | 10,934,981 / 10.935 | 8,813,497 / 8.813 | 1.389x |
+| combine | 141.098 | 140.983 | 143.446 | 77.260 | 47,146,601 / 47.147 | 60,301,742 / 60.302 | 18,423,982 / 18.424 | 2.087x |
+| reduced_combine | 168.954 | 168.657 | 171.146 | 64.522 | 74,430,398 / 74.430 | 62,895,605 / 62.896 | 18,419,423 / 18.419 | 2.092x |
 
 The source of cycle conversion is the checked-in Ascend DevKit reference
 `/root/aiagent/asc-devkit/docs/zh/api/SIMD-API/basic_api/tool_interface/system_resources_and_variables/GetSystemCycle_ISASI.md`:
@@ -453,35 +462,157 @@ not measured per-rank speedups.
 
 | Operation | Producer | Publication | Service submit | CQ wait | Consumer wait | Consumer compute | Epilogue |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| dispatch | 4,472,437 / 4.472 ms | 162,862 / 0.163 ms | 5,395,936 / 5.396 ms | 873,752 / 0.874 ms | 607,816 / 0.608 ms | 8,165,797 / 8.166 ms | 3,338 / 0.003 ms |
-| expanded_dispatch | 4,479,470 / 4.479 ms | 162,620 / 0.163 ms | 6,851,373 / 6.851 ms | 811,059 / 0.811 ms | 607,699 / 0.608 ms | 9,685,972 / 9.686 ms | 3,143 / 0.003 ms |
-| cached_dispatch | 51,029,833 / 51.030 ms | 163,211 / 0.163 ms | 9,477,790 / 9.478 ms | 872,471 / 0.872 ms | 658,724 / 0.659 ms | 8,144,130 / 8.144 ms | 3,050 / 0.003 ms |
-| combine | 47,210,962 / 47.211 ms | 51,433,595 / 51.434 ms | 8,441,917 / 8.442 ms | 1,528,596 / 1.529 ms | 10,363,481 / 10.363 ms | 7,635,281 / 7.635 ms | 2,012 / 0.002 ms |
-| reduced_combine | 73,551,009 / 73.551 ms | 51,671,572 / 51.672 ms | 7,258,696 / 7.259 ms | 1,608,714 / 1.609 ms | 10,359,249 / 10.359 ms | 7,640,691 / 7.641 ms | 2,014 / 0.002 ms |
+| dispatch | 4,469,515 / 4.470 ms | 163,049 / 0.163 ms | 5,734,015 / 5.734 ms | 850,775 / 0.851 ms | 604,662 / 0.605 ms | 8,178,839 / 8.179 ms | 3,181 / 0.003 ms |
+| expanded_dispatch | 4,483,951 / 4.484 ms | 162,256 / 0.162 ms | 5,687,829 / 5.688 ms | 792,259 / 0.792 ms | 604,651 / 0.605 ms | 9,692,163 / 9.692 ms | 3,158 / 0.003 ms |
+| cached_dispatch | 50,759,224 / 50.759 ms | 162,739 / 0.163 ms | 9,967,340 / 9.967 ms | 804,902 / 0.805 ms | 656,486 / 0.656 ms | 8,154,135 / 8.154 ms | 2,876 / 0.003 ms |
+| combine | 47,146,601 / 47.147 ms | 51,360,567 / 51.361 ms | 7,383,877 / 7.384 ms | 1,557,298 / 1.557 ms | 10,782,474 / 10.782 ms | 7,639,255 / 7.639 ms | 2,253 / 0.002 ms |
+| reduced_combine | 74,430,398 / 74.430 ms | 51,625,863 / 51.626 ms | 9,713,533 / 9.714 ms | 1,556,209 / 1.556 ms | 10,782,991 / 10.783 ms | 7,633,962 / 7.634 ms | 2,470 / 0.002 ms |
 
 Raw named-stage spans are retained below as `cycles / us / ms`:
 
 | Operation | Raw stage spans |
 | --- | --- |
-| dispatch | `producer_control` 7,081 / 7.081 / 0.007; `producer_group` 28,693 / 28.693 / 0.029; `producer_prefix` 569,641 / 569.641 / 0.570; `producer_record` 3,871,441 / 3871.441 / 3.871; `producer_release` 6,341,637 / 6341.637 / 6.342; `epilogue_acquire` 52,152 / 52.152 / 0.052; `epilogue_validate` 503,655 / 503.655 / 0.504; `epilogue_validate_reduce` 52,361 / 52.361 / 0.052; `epilogue_expert_count` 339,414 / 339.414 / 0.339; `epilogue_expert_prefix` 2,773,827 / 2773.827 / 2.774; `epilogue_metadata` 204,786 / 204.786 / 0.205; `epilogue_copy` 4,855,414 / 4855.414 / 4.855; `epilogue_complete` 3,338 / 3.338 / 0.003 |
-| expanded_dispatch | `producer_control` 7,703 / 7.703 / 0.008; `producer_group` 28,711 / 28.711 / 0.029; `producer_prefix` 567,933 / 567.933 / 0.568; `producer_record` 3,879,221 / 3879.221 / 3.879; `producer_release` 7,824,497 / 7824.497 / 7.824; `epilogue_acquire` 52,450 / 52.450 / 0.052; `epilogue_validate` 503,650 / 503.650 / 0.504; `epilogue_validate_reduce` 51,848 / 51.848 / 0.052; `epilogue_expert_count` 338,973 / 338.973 / 0.339; `epilogue_expert_prefix` 2,774,644 / 2774.644 / 2.775; `epilogue_metadata` 528,254 / 528.254 / 0.528; `epilogue_copy` 6,051,809 / 6051.809 / 6.052; `epilogue_complete` 3,143 / 3.143 / 0.003 |
-| cached_dispatch | `producer_control` 47,160,172 / 47160.172 / 47.160; `producer_group` 28,113 / 28.113 / 0.028; `producer_prefix` 580 / 0.580 / 0.001; `producer_record` 3,858,685 / 3858.685 / 3.859; `producer_release` 10,417,428 / 10417.428 / 10.417; `epilogue_acquire` 52,702 / 52.702 / 0.053; `epilogue_validate` 556,060 / 556.060 / 0.556; `epilogue_validate_reduce` 52,172 / 52.172 / 0.052; `epilogue_expert_count` 338,933 / 338.933 / 0.339; `epilogue_expert_prefix` 2,792,368 / 2792.368 / 2.792; `epilogue_metadata` 167,907 / 167.907 / 0.168; `epilogue_copy` 4,851,407 / 4851.407 / 4.851; `epilogue_complete` 3,050 / 3.050 / 0.003 |
-| combine | `producer_control` 9,052 / 9.052 / 0.009; `producer_plan` 976,268 / 976.268 / 0.976; `producer_plan_prefix` 773,675 / 773.675 / 0.774; `producer_record` 45,458,283 / 45458.283 / 45.458; `producer_release` 60,124,965 / 60124.965 / 60.125; `epilogue_acquire` 55,971 / 55.971 / 0.056; `epilogue_validate` 553,488 / 553.488 / 0.553; `epilogue_validate_reduce` 9,754,147 / 9754.147 / 9.754; `epilogue_reduce` 7,612,421 / 7612.421 / 7.612; `epilogue_weights` 24,902 / 24.902 / 0.025; `epilogue_complete` 2,012 / 2.012 / 0.002 |
-| reduced_combine | `producer_control` 8,924 / 8.924 / 0.009; `producer_plan` 1,020,054 / 1020.054 / 1.020; `producer_plan_prefix` 773,671 / 773.671 / 0.774; `producer_record` 71,748,449 / 71748.449 / 71.748; `producer_release` 60,163,662 / 60163.662 / 60.164; `epilogue_acquire` 56,137 / 56.137 / 0.056; `epilogue_validate` 550,957 / 550.957 / 0.551; `epilogue_validate_reduce` 9,753,681 / 9753.681 / 9.754; `epilogue_reduce` 7,617,315 / 7617.315 / 7.617; `epilogue_weights` 25,521 / 25.521 / 0.026; `epilogue_complete` 2,014 / 2.014 / 0.002 |
+| dispatch | `producer_control` 6,964 / 6.964 / 0.007; `producer_group` 28,638 / 28.638 / 0.029; `producer_prefix` 575,271 / 575.271 / 0.575; `producer_record` 3,860,050 / 3860.050 / 3.860; `producer_release` 6,693,293 / 6693.293 / 6.693; `epilogue_acquire` 51,989 / 51.989 / 0.052; `epilogue_validate` 500,026 / 500.026 / 0.500; `epilogue_validate_reduce` 53,080 / 53.080 / 0.053; `epilogue_expert_count` 339,379 / 339.379 / 0.339; `epilogue_expert_prefix` 2,787,867 / 2787.867 / 2.788; `epilogue_metadata` 205,314 / 205.314 / 0.205; `epilogue_copy` 4,857,048 / 4857.048 / 4.857; `epilogue_complete` 3,181 / 3.181 / 0.003 |
+| expanded_dispatch | `producer_control` 7,128 / 7.128 / 0.007; `producer_group` 28,185 / 28.185 / 0.028; `producer_prefix` 574,537 / 574.537 / 0.575; `producer_record` 3,875,302 / 3875.302 / 3.875; `producer_release` 6,606,836 / 6606.836 / 6.607; `epilogue_acquire` 51,767 / 51.767 / 0.052; `epilogue_validate` 500,857 / 500.857 / 0.501; `epilogue_validate_reduce` 53,015 / 53.015 / 0.053; `epilogue_expert_count` 340,163 / 340.163 / 0.340; `epilogue_expert_prefix` 2,787,268 / 2787.268 / 2.787; `epilogue_metadata` 527,412 / 527.412 / 0.527; `epilogue_copy` 6,047,142 / 6047.142 / 6.047; `epilogue_complete` 3,158 / 3.158 / 0.003 |
+| cached_dispatch | `producer_control` 46,869,182 / 46869.182 / 46.869; `producer_group` 28,588 / 28.588 / 0.029; `producer_prefix` 687 / 0.687 / 0.001; `producer_record` 3,884,856 / 3884.856 / 3.885; `producer_release` 10,909,994 / 10909.994 / 10.910; `epilogue_acquire` 52,219 / 52.219 / 0.052; `epilogue_validate` 552,806 / 552.806 / 0.553; `epilogue_validate_reduce` 52,582 / 52.582 / 0.053; `epilogue_expert_count` 340,222 / 340.222 / 0.340; `epilogue_expert_prefix` 2,807,387 / 2807.387 / 2.807; `epilogue_metadata` 168,398 / 168.398 / 0.168; `epilogue_copy` 4,849,467 / 4849.467 / 4.849; `epilogue_complete` 2,876 / 2.876 / 0.003 |
+| combine | `producer_control` 8,350 / 8.350 / 0.008; `producer_plan` 1,029,890 / 1029.890 / 1.030; `producer_plan_prefix` 776,143 / 776.143 / 0.776; `producer_record` 45,335,537 / 45335.537 / 45.336; `producer_release` 59,179,762 / 59179.762 / 59.180; `epilogue_acquire` 56,154 / 56.154 / 0.056; `epilogue_validate` 554,399 / 554.399 / 0.554; `epilogue_validate_reduce` 10,171,921 / 10171.921 / 10.172; `epilogue_reduce` 7,616,493 / 7616.493 / 7.616; `epilogue_weights` 24,562 / 24.562 / 0.025; `epilogue_complete` 2,253 / 2.253 / 0.002 |
+| reduced_combine | `producer_control` 8,287 / 8.287 / 0.008; `producer_plan` 1,037,270 / 1037.270 / 1.037; `producer_plan_prefix` 775,225 / 775.225 / 0.775; `producer_record` 72,613,467 / 72613.467 / 72.613; `producer_release` 61,235,614 / 61235.614 / 61.236; `epilogue_acquire` 55,997 / 55.997 / 0.056; `epilogue_validate` 551,992 / 551.992 / 0.552; `epilogue_validate_reduce` 10,175,042 / 10175.042 / 10.175; `epilogue_reduce` 7,611,430 / 7611.430 / 7.611; `epilogue_weights` 24,996 / 24.996 / 0.025; `epilogue_complete` 2,470 / 2.470 / 0.002 |
+
+Command and queue evidence:
+
+| Operation | Commands | Puts | Payload bytes per rank | Final SQ/CQ | SQ/CQ HWM | Wait cycles per rank |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| dispatch | 30 | 7 | 285,118,320-287,399,024 | 0/0 | 4/4 | 762,883-850,775 |
+| expanded_dispatch | 30 | 7 | 285,118,320-287,399,024 | 0/0 | 4/4 | 756,751-792,259 |
+| cached_dispatch | 30 | 7 | 285,118,320-287,399,024 | 0/0 | 4/4 | 757,966-804,902 |
+| combine | 30 | 7 | 543,110,512-548,352,112 | 0/0 | 4/4 | 1,479,098-1,557,298 |
+| reduced_combine | 30 | 7 | 543,110,512-548,352,112 | 0/0 | 4/4 | 1,469,585-1,556,209 |
 
 Each operation and rank emitted 30 commands with seven payload puts. The
-observed SQ/CQ depths were 0/0 at completion and their high-water marks were
-2/2. Dispatch payload bytes ranged from 285,118,320 to 287,399,024 per rank;
-combine payload bytes ranged from 543,110,512 to 548,352,112 per rank.
+observed SQ/CQ depths were 0/0 at completion and their corrected high-water
+marks were 4/4. Dispatch payload bytes ranged from 285,118,320 to 287,399,024
+per rank; combine payload bytes ranged from 543,110,512 to 548,352,112 per
+rank. The measured wait-cycle ranges were 762,883-850,775 for dispatch,
+756,751-792,259 for expanded dispatch, 757,966-804,902 for cached dispatch,
+1,479,098-1,557,298 for combine, and 1,469,585-1,556,209 for reduced combine.
 
 ### 10.4 Decision
 
 - P3.1 may proceed after review as the bounded single-channel request
   lifecycle described above; it was not implemented in P3.0.
 - P3.2 may proceed after P3.1 review, first for dispatch and expanded dispatch:
-  their 2.242x and 2.195x ceilings leave material producer/network/consumer
-  overlap opportunity. Cached dispatch is producer-dominated (1.379x ceiling)
+  their 2.277x and 2.080x ceilings leave material producer/network/consumer
+  overlap opportunity. Cached dispatch is producer-dominated (1.389x ceiling)
   and is not the initial chunking target.
 - P3.3 is rejected/deferred. With final SQ/CQ depths 0/0 and high-water marks
-  only 2/2, this qualification shows no queue saturation evidence for another
-  channel or an additional service drain.
+  only 4/4 against the EP8 command capacity of 36, this qualification shows no
+  queue saturation evidence for another channel or an additional service
+  drain.
+
+### 10.5 Disabled-template residual cleanup
+
+Commit `5970e2261ffbb8358bec50a1d20436f48e961203` moves the disabled
+`profile_block` lifetime and all profile calls inside caller-level
+`if constexpr (ProfileEnabled)` branches. The immutable archive is
+`/tmp/deepep-p3-profile-lifetime-5970e22.tar.gz`, SHA-256
+`25f4fe0757fc6698ed84901ef1b0bfb58842acfc24e3e7c953979ee931b3c94f`.
+The remote source is
+`/home/pyptouser/yuqitao/deepep-staging/p3-profile-lifetime-25f4fe07`.
+Generated code confirms that this is a real disabled-path reduction: the
+disabled dispatch kernel shrank from `0x37c90` bytes at `ccc624e` to
+`0x37aa0` bytes at `5970e22`, a 496-byte reduction.
+
+TaskQueue task `task_20260825_001526_24835973056` built the archive;
+`task_20260825_002211_25969545668` passed all 12 two-rank SIMT/AICore cases
+with `diagnostics=kNone` and the production five-operation mini-case.
+Task `task_20260825_002436_26393331534` then exposed a benchmark-method issue:
+its ABBA process switched from baseline back to candidate, and candidate B
+cached dispatch started with eight samples between roughly 181 and 303 ms
+before returning to 70.6-78.8 ms. That mixed-binary result is retained as
+diagnostic evidence but is not used for acceptance.
+
+The final control used separate candidate-only and baseline-only processes:
+
+| Task | Binary | Result directory | Terminal result |
+| --- | --- | --- | --- |
+| `task_20260825_003333_31844097674` | `5970e22` candidate, two consecutive runs | `/home/pyptouser/yuqitao/deepep-results/p3-profile-lifetime-25f4fe07-ep8-isolated` | exit 0 |
+| `task_20260825_004855_37587428376` | `5fc0940a` baseline, two consecutive runs | `/home/pyptouser/yuqitao/deepep-results/p3-baseline-5fc0940a-ep8-isolated` | exit 0 |
+
+| Run | Operation | Mean ms | p50 ms | p95 ms | Logical GB/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| candidate A | dispatch | 38.385 | 38.247 | 40.151 | 202.842 |
+| candidate A | expanded dispatch | 39.375 | 39.378 | 40.664 | 234.958 |
+| candidate A | cached dispatch | 85.093 | 85.085 | 86.945 | 91.501 |
+| candidate A | combine | 139.757 | 139.815 | 141.879 | 78.001 |
+| candidate A | reduced combine | 167.624 | 167.880 | 169.334 | 65.034 |
+| candidate B | dispatch | 31.311 | 31.113 | 32.327 | 248.672 |
+| candidate B | expanded dispatch | 36.419 | 36.750 | 38.506 | 254.031 |
+| candidate B | cached dispatch | 78.204 | 77.531 | 81.432 | 99.562 |
+| candidate B | combine | 136.447 | 136.854 | 139.560 | 79.893 |
+| candidate B | reduced combine | 166.589 | 166.480 | 168.602 | 65.438 |
+| baseline A | dispatch | 36.828 | 36.443 | 39.712 | 211.420 |
+| baseline A | expanded dispatch | 37.776 | 37.507 | 39.937 | 244.905 |
+| baseline A | cached dispatch | 84.087 | 84.008 | 86.331 | 92.595 |
+| baseline A | combine | 139.734 | 139.757 | 142.073 | 78.014 |
+| baseline A | reduced combine | 166.802 | 166.763 | 168.495 | 65.354 |
+| baseline B | dispatch | 37.576 | 37.462 | 39.747 | 207.211 |
+| baseline B | expanded dispatch | 39.781 | 39.610 | 41.888 | 232.561 |
+| baseline B | cached dispatch | 82.852 | 83.133 | 84.737 | 93.976 |
+| baseline B | combine | 141.303 | 141.444 | 143.029 | 77.148 |
+| baseline B | reduced combine | 168.525 | 168.381 | 170.861 | 64.686 |
+
+The isolated candidate pair is itself warm-state sensitive, especially for
+dispatch, so the lower candidate pair mean is not claimed as a stable
+speedup. The acceptance statement is narrower: no operation shows a stable
+regression against both isolated baseline runs, and the disabled kernel no
+longer contains the measured residual profile code. P3.0 is therefore closed.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| candidate A JSON | `b49ba5bb821628c278bd4e47ae5e671525a7bdbd60e75222470a092c1d067af7` |
+| candidate B JSON | `f65258a72a4964170cdcf4101ee1e47990e62c6aba16b9fc75b4f159d027a5be` |
+| baseline A JSON | `8d31e317e05f041ed10bb463228302ebe2035ebc8ea342d7b39ce0f583224562` |
+| baseline B JSON | `50f52618b3e15542e9714f32a6e57e753d11b4b97b64c234268aa42544ec6969` |
+
+## 11. P3.1 Hardware Qualification
+
+P3.1 is accepted for the direct, single-host Ascend 950 scale-up path. It
+adds the bounded request lifecycle described in section 6 and advertises
+`kAsyncCompletion`. This is a correctness and ABI qualification; it does not
+claim an isolated latency improvement.
+
+The immutable input was captured from the P3.1 working tree based on commit
+`5970e2261ffbb8358bec50a1d20436f48e961203` as
+`/home/pyptouser/yuqitao/deepep-archives/deepep-p31-final-6edc5b69.tar.gz`.
+Its SHA-256 is
+`6edc5b69621750fb3227237f87599c67d2294da04250868577ea7e5828f6aecf`.
+TaskQueue task `task_20260825_015319_90796624703` used CANN 9.2, the pinned
+`hcomm-deepep-current` package, and the qualified Python 3.10 environment on
+devices 0,1. It completed with exit 0 after performing all of the following:
+
+- built the production extension with `kAsyncCompletion` advertised;
+- built the SIMT/AICore runtime runner and the standalone facade probe;
+- passed all 13 two-rank lifecycle cases with `diagnostics=kNone`, including
+  `async-lifecycle`;
+- passed the five-operation production mini-case.
+
+The durable result directory is
+`/home/pyptouser/yuqitao/deepep-results/p31-final-6edc5b69`. The exact
+artifacts are:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| production extension | `f63bfcbbe52f48be89cdeb055c4efccd2fb6a9fa2c9f9479ac73a96f5c209ede` |
+| SIMT/AICore runner | `269286e1138ac6beb21eda93ffefda6a47e00014a14dbef088983bb61eb5b7d1` |
+| production correctness JSON | `433d7a4e06c753cb97e8777a171dfd6936277048236cfda35bee303d5199fcd9` |
+| SIMT/AICore validation log | `6ff02fe70d90789e7eceaacac6684cb0d43304ced7e8bfc18ac9c86201ecd8e1` |
+| facade build log | `8fc183e703a7f716d36c4e6658f17d45fd3b64f9eab4753e9a452135eadacd6a` |
+
+The device suite passed `put`, `put-value64`, `faa64`, `signal`,
+`signal-set`, `flush`, `async-lifecycle`, `payload-signal-order`,
+`barrier-repeat`, `queue-wrap`, `profile-mixed`, `phase-boundary`, and
+`teardown`. The lifecycle case verifies that an asynchronously published
+flush completes the exact request target and preserves the request generation
+and terminal status. Host contract probes cover empty and pending misuse,
+range and ABI failures, queue reset, stale service generation, diagnostic
+propagation, short completion, timeout, and idempotent terminal waits.

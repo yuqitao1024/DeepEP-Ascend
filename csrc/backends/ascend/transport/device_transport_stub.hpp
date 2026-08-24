@@ -74,10 +74,10 @@ DEEP_EP_ASCEND_SIMT_CALLEE void flush(
 
 DEEP_EP_ASCEND_SIMT_CALLEE void flush_async(
     const DeviceTransportContext&, DeviceChannel, TransportTeam, int,
-    CooperationScope, DeviceRequest*) {}
+    CooperationScope, DEEP_EP_ASCEND_SIMT_GLOBAL DeviceRequest*) {}
 
 DEEP_EP_ASCEND_SIMT_CALLEE void wait(
-    const DeviceTransportContext&, DeviceRequest*) {}
+    const DeviceTransportContext&, DEEP_EP_ASCEND_SIMT_GLOBAL DeviceRequest*) {}
 
 DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t load_acquire(
     DeviceAddress) {

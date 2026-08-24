@@ -525,32 +525,33 @@ The optimization program is complete only when:
 
 P3.0 measured the existing direct single-host protocol before changing its
 lifecycle. The exact candidate was commit
-`f73da24b954be6575eee6be877e5f3845dc1f48c`, fresh archive SHA-256
-`c28dda33c8019e4d40805728a1e1fb7bebdba9f27fa1a8f8ef1dc695a86d3286`.
-TaskQueue task `task_20260824_163111_52195411081` built that archive; task
-`task_20260824_163521_5505779125` passed the complete two-rank SIMT/AICore and
-production correctness qualification on devices 0,1; task
-`task_20260824_163705_56259211433` stopped before benchmark because the supplied
-baseline staging path was absent; task `task_20260824_163919_5752582788`
-reconstructed and built the immutable baseline archive; task
-`task_20260824_164240_58668910244` completed the disabled-profile EP8 control;
-and task `task_20260824_164801_6088375783` completed the enabled EP8 profile.
+`17dd7ed9f23a9f5fdadfd3137a356d0ca9319e3f`, fresh archive SHA-256
+`88d090525eb580d1c8e39bd08f7894af0252e4258344851ead779c2e0b1c93c0`.
+TaskQueue task `task_20260824_221053_12428769443` built that archive; task
+`task_20260824_224207_157664916330` passed the complete two-rank SIMT/AICore
+and production correctness qualification on devices 6,7; task
+`task_20260824_163919_5752582788` had previously reconstructed and built the
+immutable baseline archive; task `task_20260824_224637_16141996053` completed
+the final disabled-profile EP8 control; and task
+`task_20260824_225210_166672421792` completed the final enabled EP8 profile.
+The earlier `f73da24` profile is superseded because its request coverage,
+drain waits, and queue-depth telemetry were incomplete.
 
 Both EP8 runs used the unchanged representative manifest SHA-256
 `98d9dc5ff7b8f31afbc9589b037fd658d99b85b739b8572de1751b9e979eb623`
 (fingerprint `d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`),
 the FP8 8192-token/top-k-8/hidden-7168/256-expert case, 72 blocks, 30 warmups,
 and 30 iterations. The enabled schema-v3 result is
-`/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-profile/benchmark.json`
-(SHA-256 `e5b79ad753624523c3433481656096721c3b1f37ac08c5c6e591009a221b6a80`).
+`/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-profile/benchmark.json`
+(SHA-256 `b6f456c9527428b5425807621a86f368b5c6714a4047af2f1d948567ce3451c7`).
 
 | Operation | Mean ms | p50 ms | p95 ms | Logical GB/s | Producer ms | Network ms | Consumer ms | Overlap ceiling |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| dispatch | 38.178 | 38.076 | 40.124 | 203.939 | 4.472 | 6.433 | 8.777 | 2.242x |
-| expanded_dispatch | 38.736 | 38.545 | 40.472 | 238.832 | 4.479 | 7.825 | 10.297 | 2.195x |
-| cached_dispatch | 85.021 | 84.915 | 86.774 | 91.579 | 51.030 | 10.513 | 8.806 | 1.379x |
-| combine | 140.305 | 140.461 | 141.480 | 77.697 | 47.211 | 61.404 | 18.001 | 2.062x |
-| reduced_combine | 167.866 | 167.933 | 170.405 | 64.940 | 73.551 | 60.539 | 18.002 | 2.068x |
+| dispatch | 36.176 | 36.171 | 38.413 | 215.231 | 4.470 | 6.748 | 8.787 | 2.277x |
+| expanded_dispatch | 38.347 | 38.304 | 40.340 | 241.257 | 4.484 | 6.642 | 10.300 | 2.080x |
+| cached_dispatch | 85.689 | 85.699 | 87.071 | 90.865 | 50.759 | 10.935 | 8.813 | 1.389x |
+| combine | 141.098 | 140.983 | 143.446 | 77.260 | 47.147 | 60.302 | 18.424 | 2.087x |
+| reduced_combine | 168.954 | 168.657 | 171.146 | 64.522 | 74.430 | 62.896 | 18.419 | 2.092x |
 
 `GetSystemCycle()` timing uses the Ascend 950PR/950DT 1 GHz conversion cited
 in `/root/aiagent/asc-devkit/docs/zh/api/SIMD-API/basic_api/tool_interface/system_resources_and_variables/GetSystemCycle_ISASI.md`:
@@ -559,9 +560,10 @@ milliseconds. The detailed P3 design records every raw named-stage span and
 all phase values in both cycles and elapsed time.
 
 The disabled-profile ABBA control (baseline A, candidate A, candidate B,
-baseline B) found candidate mean deltas of -0.164%, +0.425%, +0.576%, -0.438%,
-and -0.229% respectively for the five rows above. Each is inside observed
-candidate run-to-run variation, so the profiling instrumentation remains.
+baseline B) found candidate mean deltas of +1.715%, -1.414%, +0.393%, +0.051%,
+and +1.250% respectively for the five rows above. These shifts remain within
+the observed control/candidate run-to-run spread; expanded dispatch alone has
+4.179% candidate pair variation. The profiling instrumentation remains.
 The baseline predates schema v3, making that comparison a disabled-overhead
 control rather than a cross-schema formal comparison.
 
@@ -572,16 +574,18 @@ they are not delegated to a temporary report. The durable raw artifacts are:
 
 | Artifact | Result path | SHA-256 |
 | --- | --- | --- |
-| Baseline A | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/baseline-a.json` | `32c479d81b8933ec8c8cb4f89e0bac3c874a83401e8fc4ee98ce5d1592e1a27b` |
-| Candidate A | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/candidate-a.json` | `8156ac39e610212b410297984bb214ac2c8e093700f24bdf2ab73c3703be52ba` |
-| Candidate B | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/candidate-b.json` | `99422d1ea6cd9721e6305aa88787860d3c77fdd275319eb5be6ebbcc57100a1e` |
-| Baseline B | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-ab/baseline-b.json` | `fb9240ef9e8f51f186a8b5b3fa10af095b011fa739ff4ce5cf8e023b776f7463` |
-| Enabled profile | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-ep8-profile/benchmark.json` | `e5b79ad753624523c3433481656096721c3b1f37ac08c5c6e591009a221b6a80` |
-| Two-rank correctness | `/home/pyptouser/yuqitao/deepep-results/p3-c28dda33-r2/production-correctness.json` | `2c08868fa799ba306d9244bc1302518ec70b0c10e4e6f053175daff29ad1686a` |
+| Baseline A | `/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-abba/baseline-a.json` | `a560798f7f6ed7146b16295ef4a29e30741976b6ecc37c1469a6d43aa8a842e1` |
+| Candidate A | `/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-abba/candidate-a.json` | `125c1ee890bd36eafa369d72e9686aebe3698b0b7cb8941a84848d378d74a3e7` |
+| Candidate B | `/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-abba/candidate-b.json` | `92b1f947b0b853d80b4acecf7b773d53c2c01fb3306002270c3eb8e1fca06b4c` |
+| Baseline B | `/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-abba/baseline-b.json` | `1f07b19f85b5fd4aa822d1052f26ddec4b6855e7c8088c8360e7799d7a0e573c` |
+| Enabled profile | `/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-ep8-profile/benchmark.json` | `b6f456c9527428b5425807621a86f368b5c6714a4047af2f1d948567ce3451c7` |
+| Two-rank correctness | `/home/pyptouser/yuqitao/deepep-results/p3-final-88d09052-full-r1/production-correctness.json` | `a1fcbf822889aab86098cf734fe47df56a55d822cc77e2de9e750b1f439ffdb1` |
 
-The corresponding durable provenance files are `p3-c28dda33-ep8-ab/provenance.txt`,
-`p3-c28dda33-ep8-profile/provenance.txt`, and `p3-c28dda33-r2/provenance.txt`
-under `/home/pyptouser/yuqitao/deepep-results`. For each operation,
+The corresponding durable provenance files are
+`p3-final-88d09052-ep8-abba/provenance.txt`,
+`p3-final-88d09052-ep8-profile/provenance.txt`, and
+`p3-final-88d09052-full-r1/provenance.txt` under
+`/home/pyptouser/yuqitao/deepep-results`. For each operation,
 `control_mean = (baseline_A + baseline_B) / 2`,
 `candidate_mean = (candidate_A + candidate_B) / 2`, and
 `delta_percent = (candidate_mean / control_mean - 1) * 100`. Pair variation is
@@ -594,9 +598,48 @@ overlap ceiling is a directional optimistic bound under that component-wise
 worst-rank diagnostic, not a measured speedup for a single observed rank.
 
 Every operation/rank emitted 30 commands with seven payload puts; completed
-SQ/CQ depths were 0/0 and SQ/CQ high-water marks were only 2/2. P3.1 may
+SQ/CQ depths were 0/0 and corrected SQ/CQ high-water marks were 4/4, compared
+with the EP8 command capacity of 36. P3.1 may
 proceed after review, and P3.2 may start with dispatch and expanded dispatch,
-whose ceilings are about 2.2x. Cached dispatch is producer-dominated and is
+whose ceilings are 2.277x and 2.080x. Cached dispatch is producer-dominated and is
 not the first chunking target. P3.3 is deferred: the measurement contains no
 queue-saturation evidence for another channel or service drain. Hybrid and
 physical scale-out remain unqualified.
+
+The final P3.0 disabled-path cleanup is commit
+`5970e2261ffbb8358bec50a1d20436f48e961203`. Caller-level compile-time guards
+remove another 496 bytes from the disabled dispatch kernel (`0x37c90` to
+`0x37aa0`). Its two-rank build and correctness tasks are
+`task_20260825_001526_24835973056` and
+`task_20260825_002211_25969545668`.
+
+Formal acceptance uses isolated EP8 tasks, not a process that switches loaded
+binaries. Candidate-only task `task_20260825_003333_31844097674` and
+baseline-only task `task_20260825_004855_37587428376` each ran the unchanged
+representative case twice. Across the five operations, neither candidate run
+shows a stable regression against both baseline runs. Candidate A/B dispatch
+means are 38.385/31.311 ms versus baseline A/B 36.828/37.576 ms; cached
+dispatch is 85.093/78.204 ms versus 84.087/82.852 ms; combine is
+139.757/136.447 ms versus 139.734/141.303 ms. The candidate pair has a strong
+warm-state effect, so its lower pair means are not recorded as guaranteed
+speedups. The decision is only that the residual disabled code is gone and no
+stable performance regression remains. Full per-run p50/p95, logical
+bandwidth, paths, and SHA-256 values are in
+`epv2-ascend-p3-overlap-optimization.md`, section 10.5.
+
+P3.1 is now qualified on the same direct single-host path. Its immutable
+working-tree archive is
+`/home/pyptouser/yuqitao/deepep-archives/deepep-p31-final-6edc5b69.tar.gz`
+(SHA-256
+`6edc5b69621750fb3227237f87599c67d2294da04250868577ea7e5828f6aecf`).
+TaskQueue task `task_20260825_015319_90796624703` completed with exit 0 after
+building the capability-enabled extension, the SIMT/AICore runner, and the
+facade probe; passing all 13 two-rank lifecycle cases with
+`diagnostics=kNone`; and passing the production five-operation mini-case.
+The durable result is
+`/home/pyptouser/yuqitao/deepep-results/p31-final-6edc5b69/production-correctness.json`
+(SHA-256
+`433d7a4e06c753cb97e8777a171dfd6936277048236cfda35bee303d5199fcd9`).
+P3.1 is an enabling ABI and lifecycle change, so this gate makes no isolated
+latency claim. P3.2 can now use the two independently owned request/workspace
+slots described in the P3 design.

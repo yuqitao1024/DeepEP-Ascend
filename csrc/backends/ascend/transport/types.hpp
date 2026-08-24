@@ -388,6 +388,28 @@ inline TransportStatus build_configured_transport_topology(
 }
 
 inline constexpr std::uint32_t kDeviceTransportAbiVersion = 2;
+inline constexpr std::uint32_t kDeviceRequestAbiVersion = 1;
+
+enum class DeviceRequestState : std::uint32_t {
+    kEmpty,
+    kPending,
+    kCompleted,
+    kFailed,
+};
+
+enum class DeviceTransportError : std::uint32_t {
+    kNone,
+    kInvalidAbi,
+    kInvalidRank,
+    kInvalidChannel,
+    kInvalidAddress,
+    kInvalidProtocol,
+    kInvalidQueue,
+    kUnsupportedOperation,
+    kCommandOverflow,
+    kCompletionTimeout,
+    kCompletionFailure,
+};
 
 struct DeviceTransportContext {
     std::uint32_t abi_version = kDeviceTransportAbiVersion;
@@ -408,7 +430,13 @@ inline DeviceTransportContext make_device_transport_context() {
 }
 
 struct alignas(16) DeviceRequest {
-    std::array<std::uint64_t, 4> words{};
+    std::uint32_t abi_version = kDeviceRequestAbiVersion;
+    DeviceRequestState state = DeviceRequestState::kEmpty;
+    std::uint32_t command_begin = 0;
+    std::uint32_t command_end = 0;
+    std::uint64_t queue_generation = 0;
+    std::uint32_t consumed_target = 0;
+    DeviceTransportError terminal_error = DeviceTransportError::kNone;
 };
 
 static_assert(std::is_trivially_copyable_v<TransportTopology>);

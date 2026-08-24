@@ -115,6 +115,8 @@ CoreTiling valid_barrier_tiling(int world_rank, int world_size = 2) {
         transport::capability_bit(
             transport::TransportCapability::kRemoteSignal) |
         transport::capability_bit(
+            transport::TransportCapability::kAsyncCompletion) |
+        transport::capability_bit(
             transport::TransportCapability::kSystemMemoryOrdering) |
         transport::capability_bit(
             transport::TransportCapability::kDeviceBarrier) |
@@ -175,6 +177,8 @@ void export_transport(CoreTiling* tiling) {
             transport::TransportCapability::kDevicePutValue) |
         transport::capability_bit(
             transport::TransportCapability::kRemoteSignal) |
+        transport::capability_bit(
+            transport::TransportCapability::kAsyncCompletion) |
         transport::capability_bit(
             transport::TransportCapability::kSystemMemoryOrdering) |
         transport::capability_bit(
@@ -575,6 +579,15 @@ int main() {
     for (const auto operation : {
              OperationKind::kBarrier, OperationKind::kDispatch,
              OperationKind::kCombine}) {
+        auto missing_async = valid_two_dimensional_tiling(operation, 0);
+        missing_async.transport_context.capabilities &=
+            ~transport::capability_bit(
+                transport::TransportCapability::kAsyncCompletion);
+        if (validate_internal_launch(
+                missing_async,
+                required_core_launch_storage(missing_async)).code !=
+            CoreRuntimeStatusCode::kInvalidArgument)
+            return 87;
         for (int rank = 0; rank < 4; ++rank) {
             auto logical = valid_two_dimensional_tiling(operation, rank);
             if (!validate_internal_launch(

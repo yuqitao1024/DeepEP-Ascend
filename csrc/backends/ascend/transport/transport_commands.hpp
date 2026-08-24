@@ -26,20 +26,6 @@ enum class TransportCommandOpcode : std::uint32_t {
     kBarrier,
 };
 
-enum class DeviceTransportError : std::uint32_t {
-    kNone,
-    kInvalidAbi,
-    kInvalidRank,
-    kInvalidChannel,
-    kInvalidAddress,
-    kInvalidProtocol,
-    kInvalidQueue,
-    kUnsupportedOperation,
-    kCommandOverflow,
-    kCompletionTimeout,
-    kCompletionFailure,
-};
-
 struct alignas(64) TransportCommand {
     TransportCommandOpcode opcode = TransportCommandOpcode::kNone;
     TransportTeam team = TransportTeam::kWorld;
@@ -129,6 +115,76 @@ static_assert(std::is_trivially_copyable_v<DeviceTransportDiagnostic>);
 static_assert(std::is_trivially_copyable_v<StagedTransportContext>);
 
 namespace command {
+
+inline bool fail_request(
+    DeviceRequest& request, DeviceTransportError error) {
+    request.state = DeviceRequestState::kFailed;
+    request.terminal_error = error;
+    return false;
+}
+
+inline bool publish_request(
+    DeviceRequest& request, std::uint32_t command_begin,
+    std::uint32_t command_end, std::uint64_t queue_generation) {
+    if (request.abi_version != kDeviceRequestAbiVersion)
+        return fail_request(request, DeviceTransportError::kInvalidAbi);
+    if (request.state == DeviceRequestState::kPending ||
+        request.state < DeviceRequestState::kEmpty ||
+        request.state > DeviceRequestState::kFailed ||
+        command_end <= command_begin || queue_generation == 0)
+        return fail_request(request, DeviceTransportError::kInvalidProtocol);
+    request.command_begin = command_begin;
+    request.command_end = command_end;
+    request.queue_generation = queue_generation;
+    request.consumed_target = command_end;
+    request.terminal_error = DeviceTransportError::kNone;
+    request.state = DeviceRequestState::kPending;
+    return true;
+}
+
+inline bool timeout_request(DeviceRequest& request) {
+    fail_request(request, DeviceTransportError::kCompletionTimeout);
+    return true;
+}
+
+inline bool observe_request(
+    DeviceRequest& request, std::uint64_t queue_generation,
+    std::uint64_t consumed_generation, std::uint32_t consumed_count,
+    std::uint64_t diagnostic_generation,
+    std::uint32_t diagnostic_command_index,
+    DeviceTransportError diagnostic_error) {
+    if (request.state == DeviceRequestState::kCompleted ||
+        request.state == DeviceRequestState::kFailed)
+        return true;
+    if (request.abi_version != kDeviceRequestAbiVersion) {
+        fail_request(request, DeviceTransportError::kInvalidAbi);
+        return true;
+    }
+    if (request.state != DeviceRequestState::kPending ||
+        queue_generation != request.queue_generation ||
+        (consumed_generation != 0 &&
+         consumed_generation != request.queue_generation)) {
+        fail_request(request, DeviceTransportError::kInvalidProtocol);
+        return true;
+    }
+    if (diagnostic_generation == request.queue_generation &&
+        diagnostic_error != DeviceTransportError::kNone &&
+        diagnostic_command_index >= request.command_begin &&
+        diagnostic_command_index < request.command_end) {
+        fail_request(request, diagnostic_error);
+        return true;
+    }
+    if (consumed_count >= request.consumed_target) {
+        request.state = DeviceRequestState::kCompleted;
+        request.terminal_error = DeviceTransportError::kNone;
+        return true;
+    }
+    if (consumed_generation == request.queue_generation) {
+        fail_request(request, DeviceTransportError::kCompletionFailure);
+        return true;
+    }
+    return false;
+}
 
 inline constexpr std::uint64_t profile_payload_bytes(
     TransportCommandOpcode opcode, std::uint64_t bytes) noexcept {

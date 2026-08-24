@@ -2,14 +2,16 @@
 
 #include "cann_compat.hpp"
 #include "device_topology.hpp"
-#include "execution_domain_helpers.hpp"
 #include "simt_intrinsics.hpp"
+#include "execution_domain_helpers.hpp"
 #include "sync_layout.hpp"
 #include "transport_commands.hpp"
 
 namespace deep_ep::ascend::transport::device {
 
 namespace detail {
+
+inline constexpr std::uint64_t kDefaultRequestRetryLimit = 1000000;
 
 DEEP_EP_ASCEND_SIMT_CALLEE int local_rank(
     const DeviceTransportContext& context, TransportTeam team) {
@@ -48,6 +50,14 @@ DEEP_EP_ASCEND_SIMT_CALLEE __gm__ DeviceTransportDiagnostic* diagnostic(
         return nullptr;
     return reinterpret_cast<__gm__ DeviceTransportDiagnostic*>(
         simt::load_observed(&queue->diagnostic));
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE __gm__ TransportServiceState* service_state(
+    __gm__ TransportCommandQueue* queue) {
+    if (queue == nullptr)
+        return nullptr;
+    return reinterpret_cast<__gm__ TransportServiceState*>(
+        simt::load_observed(&queue->service_state));
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE __gm__ std::uint64_t* signal_address(
@@ -522,11 +532,142 @@ DEEP_EP_ASCEND_SIMT_CALLEE void flush(
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE void flush_async(
-    const DeviceTransportContext&, DeviceChannel, TransportTeam, int,
-    CooperationScope, DeviceRequest*) {}
+    const DeviceTransportContext& context, DeviceChannel channel,
+    TransportTeam team, int peer_rank, CooperationScope scope,
+    DEEP_EP_ASCEND_SIMT_GLOBAL DeviceRequest* request) {
+    if (threadIdx.x != 0)
+        return;
+    auto* queue = detail::command_queue(context);
+    if (!detail::validate_queue(
+            queue, TransportCommandOpcode::kFlush, peer_rank, channel))
+        return;
+    if (request == nullptr) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidAddress,
+            TransportCommandOpcode::kFlush, team, peer_rank, -1, channel);
+        return;
+    }
+    if (request->abi_version != kDeviceRequestAbiVersion) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidAbi;
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidAbi,
+            TransportCommandOpcode::kFlush, team, peer_rank, -1, channel);
+        return;
+    }
+    if (request->state == DeviceRequestState::kPending ||
+        request->state < DeviceRequestState::kEmpty ||
+        request->state > DeviceRequestState::kFailed) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidProtocol;
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidProtocol,
+            TransportCommandOpcode::kFlush, team, peer_rank, -1, channel);
+        return;
+    }
+    if (channel != 0) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidChannel;
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidChannel,
+            TransportCommandOpcode::kFlush, team, peer_rank, -1, channel);
+        return;
+    }
+    int world_peer = -1;
+    if (!detail::checked_world_peer(
+            context.topology, team, peer_rank, &world_peer)) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidRank;
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidRank,
+            TransportCommandOpcode::kFlush, team, peer_rank, world_peer,
+            channel);
+        return;
+    }
+
+    const auto command_begin = simt::load_observed(&queue->count);
+    const auto queue_generation = simt::load_observed(&queue->generation);
+    TransportCommand flush_command{};
+    flush_command.opcode = TransportCommandOpcode::kFlush;
+    flush_command.scope = scope;
+    flush_command.channel = channel;
+    if (!detail::append(queue, flush_command)) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kCommandOverflow;
+        return;
+    }
+    command::simt_publish_request(
+        request, command_begin, command_begin + 1, queue_generation);
+}
 
 DEEP_EP_ASCEND_SIMT_CALLEE void wait(
-    const DeviceTransportContext&, DeviceRequest*) {}
+    const DeviceTransportContext& context,
+    DEEP_EP_ASCEND_SIMT_GLOBAL DeviceRequest* request) {
+    if (threadIdx.x != 0 || request == nullptr)
+        return;
+    if (request->state == DeviceRequestState::kCompleted ||
+        request->state == DeviceRequestState::kFailed)
+        return;
+
+    auto* queue = detail::command_queue(context);
+    if (!detail::validate_queue(
+            queue, TransportCommandOpcode::kFlush, 0, 0)) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidQueue;
+        return;
+    }
+    auto* state = detail::service_state(queue);
+    auto* diagnostic = detail::diagnostic(queue);
+    if (state == nullptr || diagnostic == nullptr) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidQueue;
+        return;
+    }
+    if (simt::load_observed(&state->abi_version) !=
+            kTransportCommandAbiVersion ||
+        simt::load_observed(&state->struct_size) !=
+            sizeof(TransportServiceState) ||
+        simt::load_observed(&diagnostic->abi_version) !=
+            kTransportCommandAbiVersion) {
+        request->state = DeviceRequestState::kFailed;
+        request->terminal_error = DeviceTransportError::kInvalidAbi;
+        return;
+    }
+
+    const auto configured_limit =
+        simt::load_observed(&state->default_retry_limit);
+    const auto retry_limit = configured_limit == 0 ?
+        detail::kDefaultRequestRetryLimit : configured_limit;
+    std::uint64_t retry = 0;
+    while (retry < retry_limit) {
+        const auto queue_generation =
+            simt::load_observed(&queue->generation);
+        const auto consumed_generation =
+            simt::load_observed(&state->consumed_generation);
+        const auto consumed_count =
+            simt::load_observed(&state->consumed_count);
+        const auto diagnostic_error = static_cast<DeviceTransportError>(
+            simt::load_observed(
+                reinterpret_cast<__gm__ std::uint32_t*>(
+                    &diagnostic->error)));
+        if (diagnostic_error != DeviceTransportError::kNone)
+            simt::system_fence();
+        const auto diagnostic_generation =
+            simt::load_observed(&diagnostic->generation);
+        const auto diagnostic_command_index =
+            simt::load_observed(&diagnostic->command_index);
+        if (command::simt_observe_request(
+                request, queue_generation, consumed_generation,
+                consumed_count, diagnostic_generation,
+                diagnostic_command_index, diagnostic_error)) {
+            simt::system_fence();
+            return;
+        }
+        ++retry;
+    }
+    command::simt_timeout_request(request);
+    simt::system_fence();
+}
 
 DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t load_acquire(
     DeviceAddress address) {

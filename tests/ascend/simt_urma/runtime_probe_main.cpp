@@ -56,6 +56,7 @@ bool parse_case(const char* name, probe::RuntimeCase* runtime_case) {
         {"signal", probe::RuntimeCase::kSignal},
         {"signal-set", probe::RuntimeCase::kSignalSet},
         {"flush", probe::RuntimeCase::kFlush},
+        {"async-lifecycle", probe::RuntimeCase::kAsyncLifecycle},
         {"payload-signal-order", probe::RuntimeCase::kPayloadSignalOrder},
         {"barrier-repeat", probe::RuntimeCase::kBarrierRepeat},
         {"queue-wrap", probe::RuntimeCase::kQueueWrap},

@@ -32,6 +32,7 @@ enum class RuntimeCase : std::uint32_t {
     kSignal,
     kSignalSet,
     kFlush,
+    kAsyncLifecycle,
     kPayloadSignalOrder,
     kBarrierRepeat,
     kQueueWrap,
@@ -87,6 +88,7 @@ struct alignas(64) RuntimeState {
     std::uint32_t phase_sequence = 0;
     std::uint32_t success = 0;
     std::uint64_t generation = 0;
+    DeviceRequest request{};
     DeviceTransportDiagnostic diagnostic{};
 };
 

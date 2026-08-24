@@ -7,8 +7,10 @@
 
 #if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
 #define DEEP_EP_ASCEND_SIMT_CALLEE __SIMT_DEVICE_FUNCTIONS_DECL__ inline
+#define DEEP_EP_ASCEND_SIMT_GLOBAL __gm__
 #else
 #define DEEP_EP_ASCEND_SIMT_CALLEE inline
+#define DEEP_EP_ASCEND_SIMT_GLOBAL
 #endif
 
 namespace deep_ep::ascend::transport::device {
@@ -53,9 +55,11 @@ DEEP_EP_ASCEND_SIMT_CALLEE void flush(
     const DeviceTransportContext&, DeviceChannel, CooperationScope);
 DEEP_EP_ASCEND_SIMT_CALLEE void flush_async(
     const DeviceTransportContext&, DeviceChannel, TransportTeam,
-    int peer_rank, CooperationScope, DeviceRequest* request);
+    int peer_rank, CooperationScope,
+    DEEP_EP_ASCEND_SIMT_GLOBAL DeviceRequest* request);
 DEEP_EP_ASCEND_SIMT_CALLEE void wait(
-    const DeviceTransportContext&, DeviceRequest* request);
+    const DeviceTransportContext&,
+    DEEP_EP_ASCEND_SIMT_GLOBAL DeviceRequest* request);
 DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t load_acquire(
     DeviceAddress address);
 DEEP_EP_ASCEND_SIMT_CALLEE void store_release(
