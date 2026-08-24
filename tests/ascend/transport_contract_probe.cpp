@@ -1,3 +1,5 @@
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <type_traits>
@@ -32,6 +34,8 @@ static_assert(kTransportProfileStageCount == 16);
 static_assert(kTransportProfileMaxBlocks == 72);
 static_assert(sizeof(TransportStageBlockCycles) == 64);
 static_assert(alignof(TransportStageBlockCycles) == 64);
+static_assert(offsetof(TransportStageProfile, command_bytes) == 64);
+static_assert(kTransportStageProfileHeaderCacheLineCount == 2);
 static_assert(kDefaultOptions == 0);
 static_assert((kAggregateRequests & kDefaultOptions) == 0);
 static_assert(kNoCapabilities == 0);
@@ -83,6 +87,75 @@ int main() {
         profile.struct_size != sizeof(TransportStageProfile) ||
         profile.operation != TransportProfileOperation::kNone)
         return 5;
+
+    constexpr auto full_mask = std::uint64_t{1};
+    constexpr auto dispatch_pipeline_mask =
+        ((std::uint64_t{1} << 14U) - 1U) & ~full_mask;
+    constexpr auto combine_pipeline_mask =
+        ((std::uint64_t{1} << 12U) - 1U) & ~full_mask;
+    constexpr auto observed_dispatch_mask =
+        (std::uint64_t{1} << 1U) | (std::uint64_t{1} << 2U) |
+        (std::uint64_t{1} << 3U) | (std::uint64_t{1} << 5U) |
+        (std::uint64_t{1} << 6U) | (std::uint64_t{1} << 8U) |
+        (std::uint64_t{1} << 9U) | (std::uint64_t{1} << 10U) |
+        (std::uint64_t{1} << 12U) | (std::uint64_t{1} << 13U);
+    constexpr auto observed_combine_mask =
+        (std::uint64_t{1} << 1U) | (std::uint64_t{1} << 2U) |
+        (std::uint64_t{1} << 3U) | (std::uint64_t{1} << 4U) |
+        (std::uint64_t{1} << 5U) | (std::uint64_t{1} << 6U) |
+        (std::uint64_t{1} << 8U) | (std::uint64_t{1} << 11U);
+    if (stage_profile_mask_status(
+            TransportProfileOperation::kDispatch, std::uint64_t{1} << 63U) !=
+            TransportStageProfileMaskStatus::kInvalidMask ||
+        stage_profile_mask_status(
+            TransportProfileOperation::kDispatch,
+            dispatch_pipeline_mask & ~(std::uint64_t{1} << 13U)) !=
+            TransportStageProfileMaskStatus::kPartialMask ||
+        stage_profile_mask_status(
+            TransportProfileOperation::kCombine,
+            combine_pipeline_mask & ~(std::uint64_t{1} << 11U)) !=
+            TransportStageProfileMaskStatus::kPartialMask ||
+        stage_profile_mask_status(
+            TransportProfileOperation::kDispatch, full_mask) !=
+            TransportStageProfileMaskStatus::kValid ||
+        stage_profile_mask_status(
+            TransportProfileOperation::kCombine, combine_pipeline_mask) !=
+            TransportStageProfileMaskStatus::kValid)
+        return 6;
+    if (stage_profile_mask_status(
+            TransportProfileOperation::kDispatch, observed_dispatch_mask) !=
+            TransportStageProfileMaskStatus::kValid ||
+        stage_profile_mask_status(
+            TransportProfileOperation::kCombine, observed_combine_mask) !=
+            TransportStageProfileMaskStatus::kValid ||
+        stage_profile_mask_status(
+            TransportProfileOperation::kDispatch,
+            std::uint64_t{1} << 13U) !=
+            TransportStageProfileMaskStatus::kPartialMask ||
+        stage_profile_mask_status(
+            TransportProfileOperation::kDispatch,
+            full_mask | (std::uint64_t{1} << 1U) |
+                (std::uint64_t{1} << 13U)) !=
+            TransportStageProfileMaskStatus::kPartialMask)
+        return 9;
+
+    if (transport_stage_profile_service_cycles_valid(0, 0, 0) ||
+        transport_stage_profile_service_cycles_valid(11, 0, 0) ||
+        transport_stage_profile_service_cycles_valid(11, 10, 0) ||
+        transport_stage_profile_service_cycles_valid(10, 20, 11) ||
+        !transport_stage_profile_service_cycles_valid(10, 20, 10))
+        return 7;
+
+    std::array<std::uint64_t, kTransportProfileStageCount> stage_spans{};
+    stage_spans[0] = 140;
+    const auto full_phases = derive_stage_profile_phase_cycles(
+        TransportProfileOperation::kDispatch, full_mask, stage_spans.data(),
+        100, 200, 20);
+    if (full_phases.producer != 140 || full_phases.publication != 0 ||
+        full_phases.service_submit != 0 || full_phases.cq_wait != 0 ||
+        full_phases.consumer_wait != 0 ||
+        full_phases.consumer_compute != 0 || full_phases.epilogue != 0)
+        return 8;
 
     const auto no_action = RemoteAction::none();
     const auto signal_add = RemoteAction::signal_add(128, 7);

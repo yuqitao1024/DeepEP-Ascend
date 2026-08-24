@@ -160,7 +160,18 @@ def _aggregate_stage_profiles(
             value = rank_phases[name]
             if type(value) is not int or value < 0:
                 raise ValueError(f"stage profile phase cycles.{name}")
-            phase_cycles[name] = max(phase_cycles[name], value)
+        full_stages = [
+            stage for stage in rank_stages
+            if stage.get("id") == 0
+        ]
+        if full_stages:
+            if (len(rank_stages) != 1 or
+                    full_stages[0].get("name") != "full"):
+                raise ValueError("stage profile full stage mask")
+            rank_phases = {name: 0 for name in phase_names}
+            rank_phases["producer"] = full_stages[0]["span_cycles"]
+        for name in phase_names:
+            phase_cycles[name] = max(phase_cycles[name], rank_phases[name])
         per_rank.append(dict(profile, rank=rank, stages=rank_stages))
 
     producer = phase_cycles["producer"]

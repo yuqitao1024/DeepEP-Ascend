@@ -1134,8 +1134,14 @@ public:
             unavailable("partial_generation");
             return result;
         }
-        if (profile.valid_stage_mask == 0) {
-            unavailable("no_stages");
+        const auto mask_status = transport::stage_profile_mask_status(
+            profile.operation, profile.valid_stage_mask);
+        if (mask_status != transport::TransportStageProfileMaskStatus::kValid) {
+            unavailable(mask_status ==
+                        transport::TransportStageProfileMaskStatus::kNoStages ?
+                    "no_stages" : mask_status ==
+                        transport::TransportStageProfileMaskStatus::kInvalidMask ?
+                    "invalid_stage_mask" : "partial_stage_mask");
             return result;
         }
 
@@ -1219,37 +1225,27 @@ public:
             stages.append(stage_record);
         }
 
-        const auto sum_stages = [&stage_spans](
-            std::uint32_t first, std::uint32_t last) {
-            std::uint64_t total = 0;
-            for (auto stage = first; stage <= last; ++stage)
-                total += stage_spans[stage];
-            return total;
-        };
-        if (profile.service_end_cycles < profile.service_start_cycles ||
-            (profile.service_start_cycles == 0 &&
-             profile.service_end_cycles != 0)) {
+        if (!transport::transport_stage_profile_service_cycles_valid(
+                profile.service_start_cycles, profile.service_end_cycles,
+                profile.wait_cycles)) {
             unavailable("invalid_service_cycles");
             return result;
         }
         const auto service_cycles =
             profile.service_end_cycles - profile.service_start_cycles;
-        const auto wait_cycles = std::min(
-            profile.wait_cycles, service_cycles);
-        const auto release_cycles = stage_spans[5];
+        const auto phases = transport::derive_stage_profile_phase_cycles(
+            profile.operation, profile.valid_stage_mask, stage_spans,
+            profile.service_start_cycles, profile.service_end_cycles,
+            profile.wait_cycles);
 
         pybind11::dict phase_cycles;
-        phase_cycles["producer"] = sum_stages(1, 4);
-        phase_cycles["publication"] =
-            release_cycles > service_cycles ?
-                release_cycles - service_cycles : 0;
-        phase_cycles["service_submit"] = service_cycles - wait_cycles;
-        phase_cycles["cq_wait"] = wait_cycles;
-        phase_cycles["consumer_wait"] = sum_stages(6, 8);
-        phase_cycles["consumer_compute"] =
-            dispatch ? sum_stages(9, 12) : sum_stages(9, 10);
-        phase_cycles["epilogue"] =
-            stage_spans[dispatch ? 13 : 11];
+        phase_cycles["producer"] = phases.producer;
+        phase_cycles["publication"] = phases.publication;
+        phase_cycles["service_submit"] = phases.service_submit;
+        phase_cycles["cq_wait"] = phases.cq_wait;
+        phase_cycles["consumer_wait"] = phases.consumer_wait;
+        phase_cycles["consumer_compute"] = phases.consumer_compute;
+        phase_cycles["epilogue"] = phases.epilogue;
 
         pybind11::dict command_metrics;
         command_metrics["command_count"] = profile.command_count;
@@ -1264,7 +1260,7 @@ public:
         service["start"] = profile.service_start_cycles;
         service["end"] = profile.service_end_cycles;
         service["cycles"] = service_cycles;
-        service["wait_cycles"] = wait_cycles;
+        service["wait_cycles"] = profile.wait_cycles;
 
         result["available"] = true;
         result["abi_version"] = profile.abi_version;

@@ -1076,7 +1076,7 @@ __aicore__ inline void begin_profile(
     profile->service_end_cycles = 0;
     profile->wait_cycles = 0;
     aicore::system_fence();
-    aicore::flush_cacheline(profile);
+    aicore::flush_stage_profile_header(profile);
 }
 
 __aicore__ inline void complete_profile(
@@ -1358,7 +1358,7 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
             AscendC::GetSystemCycle());
         profile->sq_depth = 0;
         profile->cq_depth = 0;
-        aicore::flush_cacheline(profile);
+        aicore::flush_stage_profile_header(profile);
     }
     aicore::system_fence();
     aicore::flush_cacheline(state);

@@ -293,6 +293,12 @@ def _install_fake_extension(platform, events):
     extension.runtime_args = []
     extension.runtime_instances = []
     extension.size_calls = []
+    extension.stage_profile = {
+        "available": True,
+        "operation": "dispatch",
+        "generation": 3,
+        "completion_generation": 3,
+    }
 
     class EventHandle:
         def __init__(self, state=None):
@@ -389,12 +395,7 @@ def _install_fake_extension(platform, events):
 
         def get_stage_profile(self):
             events.append("runtime.get_stage_profile")
-            return {
-                "available": True,
-                "operation": "dispatch",
-                "generation": 3,
-                "completion_generation": 3,
-            }
+            return copy.deepcopy(extension.stage_profile)
 
         def get_logical_domain_size(self):
             events.append("runtime.get_logical_domain_size")
@@ -785,6 +786,29 @@ def _scenario_ascend_stage_profile_surface():
     assert profile["available"] is True
     assert profile["generation"] == 3
     assert events.count("runtime.reset_stage_profile") == 1
+    assert events.count("runtime.get_stage_profile") == 1
+    buffer.destroy()
+
+
+def _scenario_ascend_stage_profile_unavailable_reason():
+    deep_ep, extension, events = _load_package("ascend", True)
+    extension.stage_profile = {
+        "available": False,
+        "reason": "invalid_stage_mask",
+        "stage": 63,
+    }
+    group = _FakeGroup(events, rank=0, size=2)
+    buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+        explicitly_destroy=True)
+
+    profile = buffer.get_stage_profile()
+
+    assert profile == {
+        "available": False,
+        "reason": "invalid_stage_mask",
+        "stage": 63,
+    }
     assert events.count("runtime.get_stage_profile") == 1
     buffer.destroy()
 
@@ -2610,6 +2634,8 @@ SCENARIOS = {
         _scenario_ascend_destroy_state_publication,
     "ascend_topology_preflight": _scenario_ascend_topology_preflight,
     "ascend_stage_profile_surface": _scenario_ascend_stage_profile_surface,
+    "ascend_stage_profile_unavailable_reason":
+        _scenario_ascend_stage_profile_unavailable_reason,
     "ascend_topology_preflight_mismatch":
         _scenario_ascend_topology_preflight_mismatch,
     "ascend_topology_preflight_local_parse_failure":
@@ -2712,6 +2738,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_stage_profile_surface_delegates_to_ascend_runtime(self):
         self.run_scenario("ascend_stage_profile_surface")
+
+    def test_stage_profile_unavailable_reason_is_preserved(self):
+        self.run_scenario("ascend_stage_profile_unavailable_reason")
 
     def test_asymmetric_logical_topology_fails_before_construction(self):
         self.run_scenario("ascend_topology_preflight_mismatch")

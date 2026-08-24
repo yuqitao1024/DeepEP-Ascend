@@ -4,6 +4,8 @@
 
 #include "kernel_operator.h"
 
+#include "stage_profile.hpp"
+
 namespace deep_ep::ascend::transport::aicore {
 
 template <typename T>
@@ -20,6 +22,16 @@ __aicore__ inline void flush_cacheline(__gm__ void* address) {
     dcci(address, cache_line_t::SINGLE_CACHE_LINE,
          dcci_dst_t::CACHELINE_OUT);
     pipe_barrier(PIPE_ALL);
+}
+
+__aicore__ inline void flush_stage_profile_header(
+    __gm__ TransportStageProfile* profile) {
+    auto* bytes = reinterpret_cast<__gm__ std::uint8_t*>(profile);
+    for (std::size_t line = 0;
+         line < kTransportStageProfileHeaderCacheLineCount; ++line) {
+        flush_cacheline(bytes +
+                        line * kTransportStageProfileCacheLineBytes);
+    }
 }
 
 template <AscendC::HardEvent Event>

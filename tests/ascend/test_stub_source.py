@@ -732,18 +732,6 @@ class AscendStubSourceTest(unittest.TestCase):
         self.assertIn("async_state_->coordinator().reserve(kind)", source)
         self.assertIn("async_state_->destroy()", source)
 
-    def test_stage_profile_rejects_reversed_service_cycles(self):
-        source = HEADER.read_text()
-        begin = source.index("pybind11::dict get_stage_profile() const")
-        end = source.index("\n    c10::Stream get_comm_stream() const", begin)
-        profile = source[begin:end]
-
-        self.assertIn(
-            "profile.service_end_cycles < profile.service_start_cycles",
-            profile,
-        )
-        self.assertIn('unavailable("invalid_service_cycles")', profile)
-
     def test_contract_defines_exact_public_allowlists(self):
         spec = importlib.util.spec_from_file_location("api_contract", API_CONTRACT)
         contract = importlib.util.module_from_spec(spec)

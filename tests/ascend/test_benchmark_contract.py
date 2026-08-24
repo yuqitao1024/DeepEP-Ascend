@@ -969,6 +969,36 @@ def test_stage_profile_rank_aggregation_derives_literal_block_span():
     assert aggregated["optimistic_speedup_ceiling"] == pytest.approx(2.3)
 
 
+def test_stage_profile_rank_aggregation_maps_full_only_span_to_a_phase():
+    profile = _literal_stage_profile(0)
+    profile["stages"] = [{
+        "id": 0,
+        "name": "full",
+        "block_count": 1,
+        "blocks": [{"block": 0, "start": 100, "end": 240}],
+    }]
+    profile["phase_cycles"] = {
+        "producer": 0,
+        "publication": 0,
+        "service_submit": 0,
+        "cq_wait": 0,
+        "consumer_wait": 0,
+        "consumer_compute": 0,
+        "epilogue": 0,
+    }
+
+    aggregated = _aggregate_stage_profiles("dispatch", [profile])
+
+    assert aggregated["stage_spans_cycles"] == {"full": 140}
+    assert aggregated["phase_cycles"]["producer"] == 140
+    assert aggregated["pipeline_cycles"] == {
+        "producer": 140,
+        "network": 0,
+        "consumer": 0,
+    }
+    assert aggregated["optimistic_speedup_ceiling"] == pytest.approx(1.0)
+
+
 @pytest.mark.parametrize(
     ("generation", "operation", "match"),
     ((10, "dispatch", "generation"), (9, "combine", "operation")),
