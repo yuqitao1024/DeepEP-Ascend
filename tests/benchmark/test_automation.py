@@ -11,6 +11,7 @@ import sys
 
 import pytest
 
+from tests.ascend.benchmark.report import SCHEMA_VERSION
 from tests.benchmark.profiles import BenchmarkProfile, PROFILES, profile_manifest
 from tests.benchmark.run_ep import (
     ASCEND_READINESS_COMMAND,
@@ -94,7 +95,7 @@ def complete_report(platform, profile_name, device_name):
     if platform == "ascend":
         device.update(num_sms=profile.ascend_num_sms, num_qps=0)
     return {
-        "schema_version": 2,
+        "schema_version": SCHEMA_VERSION,
         "formula_version": 1,
         "generated_at": "2026-08-20T00:00:00+00:00",
         "git_commit": "a" * 40,
@@ -105,6 +106,7 @@ def complete_report(platform, profile_name, device_name):
         "workload_fingerprint": manifest.fingerprint,
         "execution_protocol": {
             "allow_multiple_reduction": profile.allow_multiple_reduction,
+            "stage_profile": 0,
         },
         "timing_protocol": {
             "timer": "cuda_event" if platform == "cuda" else "npu_event",
@@ -365,15 +367,19 @@ def test_identify_profile_rejects_disabled_reduction_with_field_specific_error()
     ("execution_protocol", "field"),
     (
         (
-            {"allow_multiple_reduction": 0},
+            {"allow_multiple_reduction": 0, "stage_profile": 0},
             "execution_protocol.allow_multiple_reduction",
         ),
         (
-            {"allow_multiple_reduction": True},
+            {"allow_multiple_reduction": True, "stage_profile": 0},
             "execution_protocol.allow_multiple_reduction",
         ),
         (
-            {"allow_multiple_reduction": 1, "unexpected": True},
+            {
+                "allow_multiple_reduction": 1,
+                "stage_profile": 0,
+                "unexpected": True,
+            },
             "execution_protocol",
         ),
         (None, "execution_protocol"),
