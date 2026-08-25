@@ -57,6 +57,7 @@
       <li>八张 GPU 的设备名包含 <code>H800</code>，并且当前用户有权访问 GPU 0 到 GPU 7。</li>
       <li>系统有 CUDA toolkit，<code>nvcc</code> 版本不低于 12.3。</li>
       <li>当前 Python 环境已经安装 CUDA 版 PyTorch 2.10 或更高版本。PyTorch wheel 必须按服务器镜像和驱动安装，这一步不适合由通用脚本猜测。</li>
+      <li>NCCL 2.30.4 或更高版本必须在实际运行时提供 Gin。使用跨节点或网络 Gin 时，还需要可用的 RDMA 网卡、驱动和网络插件，并启用 GPUDirect RDMA；只安装 NCCL wheel 不能保证 Gin 可用。</li>
       <li>机器能访问 PyPI 和 GitHub；如果是离线环境，需要提前准备 NCCL、NVSHMEM wheel 和 <code>third-party/fmt</code> 子模块。</li>
       <li>至少有一个空闲 TCP 端口。教程固定使用 <code>8361</code>。</li>
     </ul>
@@ -69,6 +70,7 @@ git rev-parse HEAD</code></pre>
   <section>
     <h2>3. 可整体复制的编译和运行命令</h2>
     <p>先 <code>cd</code> 到 DeepEP-Ascend 仓库根目录，然后整体执行下面这段。它不会清理已有文件，结果写到仓库同级的 <code>deepep-results/</code>。每次运行都会创建带时间戳的新目录。</p>
+    <div class="band warning"><strong>复制提示：</strong>请从浏览器渲染后的页面复制命令，不要从 HTML 源码复制。HTML 源码中的 <code>&amp;lt;&amp;lt;</code> 是转义文本，浏览器显示和复制出来的才是 shell 需要的 <code>&lt;&lt;</code>。<code>python3 - &lt;&lt;'PY'</code> 后直接出现 <code>import os</code> 是正确格式；即使两者之间有一个空行，也不会导致 heredoc 失败。</div>
 
     <pre class="shell" id="copy-run"><code>set -euo pipefail
 
@@ -188,11 +190,16 @@ print('DeepEP platform:', platform)
 print('Device 0:', torch.cuda.get_device_name(0))
 PY
 
-# ---------- 运行 H800 x 8 representative case ----------
+# ---------- 创建结果目录并执行 2-rank Gin 预检 ----------
 DEEPEP_RESULT_ROOT="$(dirname "${DEEPEP_ROOT}")/deepep-results"
 DEEPEP_RESULT_DIR="${DEEPEP_RESULT_ROOT}/h800-representative-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "${DEEPEP_RESULT_DIR}"
 
+python3 tests/benchmark/check_cuda_gin.py \
+  --log-dir "${DEEPEP_RESULT_DIR}/gin-preflight" \
+  --master-port "${MASTER_PORT}"
+
+# ---------- 运行 H800 x 8 representative case ----------
 echo "Git commit: $(git rev-parse HEAD)"
 echo "Result dir: ${DEEPEP_RESULT_DIR}"
 
@@ -254,7 +261,20 @@ echo "可读报告: ${DEEPEP_RESULT_DIR}/benchmark.md"</code></pre>
     <pre><code>DeepEP platform: cuda
 Device 0: NVIDIA H800 ...</code></pre>
 
-    <h3>4.3 benchmark wrapper 固定测试合同</h3>
+    <h3>4.3 先用 2 rank 判断 Gin 能力</h3>
+    <p><code>check_cuda_gin.py</code> 使用小 shape 依次探测 direct Gin、hybrid Gin 和禁用 Gin 的基础路径。只有 direct Gin 成功时才返回 0 并继续正式测试；其他情况会停止，避免自动切换通信模式后仍把结果当作同一口径。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>脚本结论</th><th>含义和下一步</th></tr></thead>
+      <tbody>
+        <tr><td><code>DIRECT_GIN_AVAILABLE</code></td><td>direct Gin 可用，可以继续当前 representative parity 测试。</td></tr>
+        <tr><td><code>HYBRID_GIN_ONLY</code></td><td>direct Gin 不可用而 hybrid Gin 可用，通常表示 multi-plane/multi-rail 网络与当前 direct parity 口径不匹配。检查网络配置，或者为 hybrid 测试建立单独口径。</td></tr>
+        <tr><td><code>GIN_UNAVAILABLE_BASE_RUNTIME_OK</code></td><td>direct 和 hybrid Gin 都不可用，但禁用 Gin 后基础路径成功。重点检查 NCCL network plugin、RDMA 和 GPUDirect RDMA。</td></tr>
+        <tr><td><code>PROBE_FAILED</code></td><td>探针遇到的不是已知 Gin unavailable 错误，例如 OOM 或设备映射错误。直接查看对应日志，不要按网络问题处理。</td></tr>
+      </tbody>
+    </table></div>
+    <p>探针日志保存在结果目录的 <code>gin-preflight/direct.log</code>、<code>hybrid.log</code> 和 <code>fallback.log</code>。脚本按需执行，已经得到结论后不会继续运行无关探针。</p>
+
+    <h3>4.4 benchmark wrapper 固定测试合同</h3>
     <p>不要直接手写 8192、7168、top-k 8 等参数调用 <code>tests/elastic/test_ep.py</code>。统一入口 <code>tests/benchmark/run_ep.py</code> 会选择固定 case，生成 workload fingerprint，验证设备名包含 H800，并检查五条 operation record 都存在。</p>
   </section>
 
@@ -292,6 +312,7 @@ Device 0: NVIDIA H800 ...</code></pre>
         <tr><td><code>Cannot find package: nccl</code></td><td>NCCL wheel 没装进当前 Python 环境，或 pip/python 不是同一个环境。</td><td>始终用 <code>python3 -m pip</code> 安装，并检查 <code>python3 -m pip show nvidia-nccl-cu12</code> 或 <code>cu13</code>。</td></tr>
         <tr><td><code>Cannot find package: nvshmem</code></td><td>NVSHMEM wheel 缺失，或使用了另一个 Python。</td><td>安装与 <code>torch.version.cuda</code> major 相同的 <code>nvidia-nvshmem-cuXX==3.3.20</code>。</td></tr>
         <tr><td><code>Duplicate NCCL runtime</code> / <code>Invalid NCCL versions</code></td><td>PyTorch 加载的 NCCL 与 DeepEP 链接的 NCCL 不一致，常见于系统库、conda 库和 pip wheel 混用。</td><td>清理 <code>LD_LIBRARY_PATH</code> 中多余 NCCL，使用同一 Python 环境重装 PyTorch/NCCL。不要关闭检查。</td></tr>
+        <tr><td><code>NCCL Gin is unavailable</code></td><td>当前 NCCL communicator 没有提供可用的 Gin 类型。版本号满足要求也可能因 NVLink、RDMA、驱动、网络插件或多平面网络配置而不可用。</td><td>查看 <code>gin-preflight/</code> 中的自动判定和日志，再检查 <code>nvidia-smi topo -m</code>、RDMA 设备、GPUDirect RDMA 和 NCCL 实际选择的网络插件。脚本中的 <code>EP_DISABLE_GIN=1</code> 仅用于诊断基础路径，不会用于正式 representative case。</td></tr>
         <tr><td><code>fmt/core.h: No such file</code></td><td><code>third-party/fmt</code> 子模块未初始化。</td><td>运行 <code>git submodule update --init third-party/fmt</code>。</td></tr>
         <tr><td><code>cuda/std/...</code> 或 CCCL header 缺失</td><td><code>CUDA_HOME</code> 指向 runtime-only 目录，或 toolkit 不完整。</td><td>指向包含 <code>bin/nvcc</code> 和 <code>include/cccl</code> 的 CUDA toolkit。</td></tr>
         <tr><td>初始化卡住或 <code>Address already in use</code></td><td><code>MASTER_PORT=8361</code> 被其他任务占用。</td><td>八个进程都结束后换一个空闲端口，例如 <code>export MASTER_PORT=18361</code>，再整体重跑。</td></tr>
@@ -320,6 +341,7 @@ python3 -m pip show nvidia-nccl-cu12 nvidia-nccl-cu13 nvidia-nvshmem-cu12 nvidia
     <h2>8. 源码和主资料</h2>
     <ul>
       <li><a href="../../../tests/benchmark/profiles.py"><code>tests/benchmark/profiles.py</code></a>：representative 的固定 shape、case、warmup 和 iteration。</li>
+      <li><a href="../../../tests/benchmark/check_cuda_gin.py"><code>tests/benchmark/check_cuda_gin.py</code></a>：2-rank direct、hybrid 和 non-Gin 自动预检与结论分类。</li>
       <li><a href="../../../tests/benchmark/run_ep.py"><code>tests/benchmark/run_ep.py</code></a>：统一运行入口、输出目录和报告发布。</li>
       <li><a href="../../../tests/elastic/test_ep.py"><code>tests/elastic/test_ep.py</code></a>：CUDA EP8 正确性与性能执行路径。</li>
       <li><a href="../../../tests/benchmark/report_markdown.py"><code>tests/benchmark/report_markdown.py</code></a>：H800 设备校验、报告 schema 和五行 Markdown。</li>

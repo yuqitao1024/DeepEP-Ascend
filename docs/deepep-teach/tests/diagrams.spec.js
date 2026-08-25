@@ -97,6 +97,34 @@ test('H800 lesson renders executable commands and diagrams without page overflow
     }
 });
 
+test('H800 lesson renders shell-safe heredocs and Gin setup guidance', async ({ page }) => {
+    await page.goto(h800LessonUrl);
+
+    const copyRunText = await page.locator('#copy-run').textContent();
+    expect(copyRunText).toContain("python3 - <<'PY'\nimport os");
+    expect(copyRunText).not.toContain('&lt;');
+    expect(copyRunText).toContain(
+      'python3 tests/benchmark/check_cuda_gin.py');
+    expect(copyRunText).toContain(
+      '--log-dir "${DEEPEP_RESULT_DIR}/gin-preflight"');
+    expect(copyRunText).toContain('--master-port "${MASTER_PORT}"');
+
+    await expect(page.getByText(
+      '请从浏览器渲染后的页面复制命令',
+      { exact: false },
+    )).toBeVisible();
+    await expect(page.getByText('NCCL Gin is unavailable', { exact: true }))
+      .toBeVisible();
+    await expect(page.getByText('GPUDirect RDMA', { exact: false }).first())
+      .toBeVisible();
+    await expect(page.getByText('HYBRID_GIN_ONLY', { exact: true }))
+      .toBeVisible();
+    await expect(page.getByText(
+      'GIN_UNAVAILABLE_BASE_RUNTIME_OK',
+      { exact: true },
+    )).toBeVisible();
+});
+
 test('Ascend lesson renders direct eight-rank commands without page overflow', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(ascendLessonUrl);
