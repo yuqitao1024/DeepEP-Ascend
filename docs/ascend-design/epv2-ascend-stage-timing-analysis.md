@@ -440,7 +440,178 @@ Ascend stage cycle 和 H800 CUDA kernel breakdown 的阶段边界不同，不能
 只使用相同 case、相同逻辑字节公式和相同 warmup/iteration 协议下的端到端
 device Event mean、P50、P95 和 logical GB/s。
 
-## 10. 源码索引
+## 10. 与其他实现的阶段数据怎样对应
+
+已有的其他实现给出了两组数据：
+
+```text
+统计 expert tokens：7 us
+计算 token 偏移 + 拼接 SQE + 搬运 scale：小于 30 us
+```
+
+只有先确认操作语义、输入 shape、统计范围和同步边界一致，这两个数字才能与
+P3.0 数据直接相除。下面先按最接近的语义建立映射。
+
+### 10.1 操作映射
+
+| 其他实现的操作 | 我们最接近的阶段 | 我们的耗时 | 对齐程度 |
+| --- | --- | ---: | --- |
+| 统计最终本地 expert tokens | `epilogue_expert_count` | 339 us | 基本对应 |
+| 发送侧按目标 rank 统计 token records | `producer_group` | 29 us | 不是 expert count |
+| 计算发送 staging slot 偏移 | `producer_prefix` | 575 us | 取决于“偏移”的定义 |
+| 计算最终 expert 输出偏移 | `epilogue_expert_prefix` | 2,788 us | 取决于“偏移”的定义 |
+| 发布逻辑 transport commands | `publication` | 163 us | 比写一条 SQE 的范围更大 |
+| 构造并提交 WQE/SQE | `service_submit` | 5,734 us | 包含完整 service submit 窗口 |
+| 搬运 scale | `producer_record` 的一部分 | 无独立数据 | 同时搬运 hidden 和 metadata |
+| 完整 record packing | `producer_record` | 3,860 us | 明显大于单独搬运 scale |
+
+这里的 `producer_control = 6.964 us` 虽然数值恰好接近对方的 7 us，但它
+只执行状态清零和布局校验，不统计 token，二者不能对应。
+
+### 10.2 “统计 expert tokens”的两种解释
+
+如果其他实现生成的是最终 `num_tokens_per_expert`，应当与我们的
+`epilogue_expert_count` 对比：
+
+\[
+\frac{339\ \mu s}{7\ \mu s} \approx 48.4
+\]
+
+在相同 workload 和同步边界成立的前提下，我们的最终 expert count 大约慢
+48 倍。当前实现是在 payload 到达后扫描有效
+`(source_rank, source_slot, topk_lane)`，再为本地 experts 累计 tile
+histogram。其他实现如果复用了路由阶段已经产生的 expert count，或者在发送
+控制信息时一并传输了 per-expert counts，实际执行的工作量会小得多。
+
+如果对方所谓的“expert tokens”只是发送侧判断一个 token 要去哪些 rank，
+那么更接近我们的 `producer_group = 28.638 us`：
+
+\[
+\frac{28.638\ \mu s}{7\ \mu s} \approx 4.1
+\]
+
+但这只是 destination-rank record count，不能替代最终 expert count。一个
+token 的多个 top-k experts 位于同一个 rank 时，group 只产生一个 record；
+consumer 仍需要把这条 record 分配给该 rank 上的多个 local experts。
+
+### 10.3 “计算 token 偏移”也有两种解释
+
+如果偏移指发送侧 staging slot：
+
+\[
+O_{t,r}=\sum_{j<t}C_{j,r}
+\]
+
+对应 `producer_prefix = 575 us`。它单独就已经是对方整个组合阶段 30 us
+上限的约 19 倍：
+
+\[
+\frac{575\ \mu s}{30\ \mu s} \approx 19.2
+\]
+
+该阶段只有少数 rank-owner threads 活跃，并从 global memory 扫描 tile
+counts，是一个明确的串行控制面优化目标。
+
+如果偏移指最终 expert-major 输出位置：
+
+\[
+O_e=\operatorname{align}\left(\sum_{j<e}N_j\right)
+\]
+
+则对应 `epilogue_expert_prefix = 2,788 us`。这个阶段除了 expert count 的
+prefix，还要处理 tile histogram、alignment、capacity 和 cached metadata
+约束，不能拿 `producer_prefix` 的 575 us 代替。
+
+### 10.4 为什么“小于 30 us”不能直接对比我们的一个 phase
+
+我们当前将对方组合描述中的工作分散在几个范围更大的阶段里：
+
+```text
+producer_prefix       575 us   计算发送 staging slot
+producer_record     3,860 us   hidden + scale + top-k + metadata
+publication           163 us   发布整批逻辑 transport commands
+service_submit      5,734 us   解析、寻址、构造 WQE/SQE、post SQ
+```
+
+如果把最宽泛的相关阶段全部相加，可以得到：
+
+\[
+575 + 3860 + 163 + 5734 = 10{,}332\ \mu s
+\]
+
+这个 10.332 ms 不能与 30 us 直接相除，因为两边包含的工作量明显不同。
+
+第一，`producer_record` 不只是搬 scale。Representative FP8 hidden 每条
+record 有 7,168 B，而 scale factor 是每 128 个 hidden 元素一个 FP32，合计：
+
+\[
+\frac{7168}{128}\times4=224\ \text{B/token}
+\]
+
+Scale 字节数约为 hidden 的 3.1%。`producer_record` 还会搬运完整 hidden、
+top-k indices、weights 和 source metadata。因此 3.860 ms 主要反映 hidden
+staging copy，不能据此判断 scale copy 自身需要几毫秒。
+
+第二，`service_submit` 不是一条 `make_write()` 的耗时。每个 rank 的一次
+representative dispatch 共发布 30 条 transport commands，其中有 7 条
+payload puts；payload 总量约为 285～287 MB。`service_submit` 覆盖整批命令
+的读取、校验、channel 和 address 解析、WQE/SQE 构造及 request post。它既
+不是“单条 SQE 构造耗时”，也不包含已经单列的 CQ wait。
+
+第三，其他实现可能由 DMA/RDMA 直接读取原始 hidden，只统计 descriptor、
+offset 和 scale 的准备时间。我们的路径先把完整 record 写入 staging shard，
+再由 transport service 提交网络写。如果对方的 30 us 不包含 hidden staging、
+payload DMA 和 CQ completion，它测量的是控制面准备时间，而我们的相关
+phase 同时包含了大量数据面工作。
+
+### 10.5 当前能够得出的性能判断
+
+在两边 workload 完全一致的前提下，目前可以作出三条有限结论：
+
+1. 如果 7 us 确实生成最终 per-expert counts，我们的 339 us 存在约 48 倍
+   差距，expert count 算法或 count 复用方式值得优先检查。
+2. 发送侧 `producer_prefix` 单项为 575 us，已经显著超过对方整个组合阶段
+   的 30 us 上限；这一差距不依赖 hidden copy 的统计歧义。
+3. 现有数据不能证明 scale copy 或单条 SQE 构造分别慢了多少，因为这两项
+   尚未从 `producer_record` 和 `service_submit` 中独立计时。
+
+不能用 `10.332 ms / 30 us` 宣称我们的同类操作慢 344 倍。这个比值混合了
+hidden staging、整批命令服务和逻辑发布，只能说明当前 profiling 粒度不足以
+复现对方的 30 us 口径。
+
+### 10.6 下一次严格对比需要补充的打点
+
+为了把差距落实到可分配的优化任务，下一轮 profiling 至少应拆分：
+
+| 子阶段 | 需要记录的内容 |
+| --- | --- |
+| Rank grouping/count | 扫描 top-k、rank 去重和 tile count |
+| Expert count | 扫描 received top-k 和写 tile histogram |
+| Rank prefix | tile-to-rank staging offset |
+| Expert prefix | histogram 汇总、alignment 和 output offset |
+| Hidden staging copy | vector main body 与 scalar tail |
+| Scale copy | scale pack 数、字节数和独立 cycles |
+| Top-k/metadata copy | indices、weights、source metadata |
+| Command publication | command reserve、写 command、publish producer index |
+| WQE/SQE construction | `make_write` 或 inline write 构造时间 |
+| SQ post | SQ slot、doorbell 和 post 时间 |
+| CQ wait | completion polling，继续保持独立 |
+
+报告还必须同时记录每个 rank 的 command 数、payload put 数、payload bytes、
+是否等待 CQ，以及统计的是单条命令、单个 rank 的整批命令还是八卡最大值。
+
+对方数据也需要确认以下条件，才能进入正式横向比较：
+
+- 是否同为 8,192 tokens/rank、hidden 7,168、top-k 8、256 experts 和 EP8；
+- 7 us 和 30 us 是单 rank、八卡最大值，还是单条 WQE/SQE 的时间；
+- token offset 是 rank staging offset 还是 expert output offset；
+- 30 us 是否包含 hidden DMA、doorbell、CQ completion 和跨 rank 同步；
+- 一次操作构造了多少条 WQE/SQE、搬运了多少 payload 和 scale bytes。
+
+这些条件对齐后，才能分别计算 expert count、prefix、scale copy 和 SQE
+construction 的真实倍数，并据此确定优化优先级。
+
+## 11. 源码索引
 
 正式 benchmark 计时与聚合在 `main` 中已经存在：
 
