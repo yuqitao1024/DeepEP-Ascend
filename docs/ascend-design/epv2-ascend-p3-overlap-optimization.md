@@ -724,3 +724,77 @@ observed saturation, while introducing another ordering, error-propagation,
 and resource-contention surface. P3.3 remains deferred until repeated
 telemetry approaches queue capacity or service submission becomes the
 measured critical bottleneck.
+
+## 14. P3.4 Resource And Tail-Synchronization Decision
+
+P3.4 tested one resource/overlap change and rejected it. The experiment
+removed the final host-side synchronization of the communication stream from
+the two-slot dispatch pipeline. The communication stream records the final
+`done` event, the producer stream waits on that event, and the producer stream
+then runs the epilogue. That dependency suggested that synchronizing the
+producer stream might already imply communication completion.
+
+The hypothesis was encoded first as a focused contract probe. The candidate
+then passed `119` focused local tests and `48` subtests. Its immutable archive
+is `/home/pyptouser/yuqitao/deepep-archives/deepep-p34-0202c072.tar.gz`,
+SHA-256
+`0202c072707f81ed0c7d4df3195fdf42e8f70c9460f42323a7acf9fd19a2aae0`.
+It is based on P3.2 commit `c523940988273069d5d28086b646699374458aa4`.
+
+Task `task_20260825_032312_157236922930` built the production extension and
+SIMT/AICore runner, passed all 13 two-rank lifecycle cases, and passed the
+production mini-case. The task exited 0. The extension, runner, lifecycle log,
+and mini-case JSON SHA-256 values are respectively
+`b75d255d373193bd444e0d3fef0a764a51c0416a6778649ce780a03ef04a85c7`,
+`4318e227d056610e12e1915ff55fa0e4a28096fdea19d3082d20e0895e0fdfca`,
+`10ab9950bdfeb1901abb5e593621ae0934d7201117d2685d38389ed2f3fe4f91`,
+and `32305e8f3fb956f8107915769d98a2cb8342811cb108dc9277d2bb7d5050661c`.
+
+Task `task_20260825_033003_161765226496` ran an EP8 ABBA comparison in the
+order P3.2 control A, P3.4 candidate A, P3.4 candidate B, P3.2 control B. All
+four runs used the retained 2048-slot pipeline, the representative FP8
+workload manifest, 72 blocks, 30 warmups, and 30 measured iterations. The
+result directory is
+`/home/pyptouser/yuqitao/deepep-results/p34-0202c072-ep8-abba`.
+
+| Operation | Control pair mean | Candidate pair mean | Delta | Control pair p95 | Candidate pair p95 | Delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| dispatch | 37.655 ms | 39.928 ms | +6.04% | 39.936 ms | 42.250 ms | +5.79% |
+| expanded dispatch | 39.091 ms | 40.301 ms | +3.10% | 41.043 ms | 42.384 ms | +3.27% |
+| cached dispatch | 84.598 ms | 86.020 ms | +1.68% | 86.897 ms | 87.273 ms | +0.43% |
+| combine | 140.910 ms | 140.317 ms | -0.42% | 142.608 ms | 141.887 ms | -0.51% |
+| reduced combine | 167.575 ms | 168.287 ms | +0.42% | 169.056 ms | 169.788 ms | +0.43% |
+
+The dispatch regression is larger than both the control pair variation
+(`3.45%`) and candidate pair variation (`2.79%`). Expanded dispatch also
+regresses, while its candidate pair has a `5.51%` warm-state spread. The
+change therefore fails both target-operation mean and p95 acceptance. Removing
+the explicit communication-stream synchronization did not shorten the
+measured pipeline on this runtime. The experiment does not attribute the
+regression to a lower-level runtime mechanism. The synchronization remains in
+production.
+
+The four JSON SHA-256 values are:
+
+| Run | Artifact | SHA-256 |
+| --- | --- | --- |
+| Control A | `control-a.json` | `fca7ffb483a0fc076ed3d5034921fa2bff79fc30e5894f11e04e11f3947d1c3e` |
+| Candidate A | `candidate-a.json` | `a1d722cd1590b4649cbb561837a5deffe8bf8422b5bc6e6d382e77773a0ce24f` |
+| Candidate B | `candidate-b.json` | `60ead7f55dcdca668f4a28f4f1ba10a92df271240cd217f3cbc351d2fe465aef` |
+| Control B | `control-b.json` | `aab11e32da78afc395cb0e46d679f2bcc826a98379f22604fc240f9fa1654292` |
+
+The candidate code and contract-test changes were reverted from the working
+tree after this decision; the immutable remote archive and result artifacts
+remain as evidence. A second 144-case run is not required for rejected code;
+the retained P3.2 implementation remains covered by the 144-case,
+720-operation gate in section 12.1. P3.4 is complete with no production-code
+change.
+
+## 15. P3 Completion Summary
+
+P3.0 retains low-overhead stage telemetry, P3.1 retains the bounded asynchronous
+request lifecycle, and P3.2 retains opt-in two-slot dispatch chunking. P3.3
+adds no queue or channel because measured occupancy is low. P3.4 retains the
+existing tail synchronization because its removal regresses both targeted
+operations. The only claimed representative-case latency improvement in P3
+is the independently measured P3.2 dispatch and expanded-dispatch result.

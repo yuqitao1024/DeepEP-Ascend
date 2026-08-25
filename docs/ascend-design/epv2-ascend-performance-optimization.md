@@ -1,7 +1,8 @@
 # Ascend EPv2 Performance Optimization
 
-**Status:** P0/P1/P2 implementation, two-rank regression, and EP8
-representative-case acceptance complete; 144-case formal acceptance pending
+**Status:** P0/P1/P2 and P3.0-P3.4 implementation decisions complete;
+representative EP8 qualification and the retained P3.2 two-rank 144-case
+functional gate complete
 
 ## Purpose
 
@@ -643,3 +644,29 @@ The durable result is
 P3.1 is an enabling ABI and lifecycle change, so this gate makes no isolated
 latency claim. P3.2 can now use the two independently owned request/workspace
 slots described in the P3 design.
+
+## P3.2-P3.4 Completion Evidence
+
+P3.2 retains the opt-in two-slot direct-dispatch pipeline at
+`DEEP_EP_ASCEND_DISPATCH_PIPELINE_CHUNK_SLOTS=2048`. Across three EP8 run
+orders, the run-level median dispatch mean improves from 38.017 ms to
+30.871 ms (-18.80%), and expanded dispatch improves from 39.126 ms to
+33.390 ms (-14.66%). Their median p95 values improve by 12.41% and 8.24%.
+Task `task_20260825_030215_137855619344` passed the complete two-rank
+144-case, 720-operation functional matrix. Task
+`task_20260825_031544_153457425045` measured positive cross-chunk overlap on
+every rank.
+
+P3.3 makes no production change. Post-pipeline telemetry ends at SQ/CQ depth
+0/0 and reaches only 4/4 high-water marks against capacity 36. Another channel
+or service drain would add ordering and resource costs without targeting an
+observed saturation point.
+
+P3.4 tested and rejected removal of the final communication-stream
+synchronization. Task `task_20260825_032312_157236922930` passed build,
+13 lifecycle cases, and production correctness. The EP8 ABBA task
+`task_20260825_033003_161765226496` then measured dispatch mean/p95 regressions
+of 6.04%/5.79% and expanded-dispatch regressions of 3.10%/3.27%. The candidate
+was removed, so the retained production state is P3.2. Full artifact hashes,
+per-operation values, and the acceptance reasoning are recorded in
+`epv2-ascend-p3-overlap-optimization.md`, sections 12 through 15.
