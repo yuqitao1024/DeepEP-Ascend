@@ -1,8 +1,10 @@
 import argparse
+from dataclasses import dataclass
 from enum import Enum
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 
@@ -18,10 +20,17 @@ class ProbeStatus(Enum):
 
 
 class Conclusion(Enum):
+    CUOBJDUMP_UNAVAILABLE = "CUOBJDUMP_UNAVAILABLE"
     DIRECT_GIN_AVAILABLE = "DIRECT_GIN_AVAILABLE"
     HYBRID_GIN_ONLY = "HYBRID_GIN_ONLY"
     GIN_UNAVAILABLE_BASE_RUNTIME_OK = "GIN_UNAVAILABLE_BASE_RUNTIME_OK"
     PROBE_FAILED = "PROBE_FAILED"
+
+
+@dataclass(frozen=True)
+class CuobjdumpCheck:
+    path: Path | None
+    error: str | None
 
 
 def _build_probe_command(hybrid_mode):
@@ -30,13 +39,51 @@ def _build_probe_command(hybrid_mode):
         str(REPOSITORY_ROOT / "tests/elastic/test_ep.py"),
         "--num-processes", "2",
         "--num-tokens", "16",
-        "--hidden", "128",
+        "--hidden", "256",
         "--num-topk", "2",
         "--num-experts", "8",
         "--allow-hybrid-mode", "1" if hybrid_mode else "0",
         "--test-first-only",
         "--skip-perf-test",
     )
+
+
+def _find_cuda_home():
+    configured_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if configured_home:
+        return Path(configured_home)
+
+    nvcc = shutil.which("nvcc")
+    if nvcc:
+        return Path(nvcc).parent.parent
+
+    default_home = Path("/usr/local/cuda")
+    return default_home if default_home.exists() else None
+
+
+def _check_cuobjdump():
+    cuda_home = _find_cuda_home()
+    if cuda_home is None:
+        return CuobjdumpCheck(
+            path=None,
+            error=(
+                "CUDA_HOME could not be resolved. Set CUDA_HOME to the CUDA "
+                "toolkit directory that contains bin/cuobjdump."
+            ),
+        )
+
+    cuobjdump = cuda_home / "bin" / "cuobjdump"
+    if not cuobjdump.is_file():
+        return CuobjdumpCheck(
+            path=cuobjdump,
+            error=f"Required CUDA binary is missing: {cuobjdump}",
+        )
+    if not os.access(cuobjdump, os.X_OK):
+        return CuobjdumpCheck(
+            path=cuobjdump,
+            error=f"Required CUDA binary is not executable: {cuobjdump}",
+        )
+    return CuobjdumpCheck(path=cuobjdump, error=None)
 
 
 def _run_probe(mode, command, environment, log_path, timeout_seconds):
@@ -84,11 +131,18 @@ def _probe_status(exit_code, output):
 def run_preflight(
     log_dir,
     command_runner=_run_probe,
+    cuobjdump_checker=_check_cuobjdump,
     timeout_seconds=120,
     master_port=8361,
 ):
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    cuobjdump = cuobjdump_checker()
+    if cuobjdump.error is not None:
+        print(f"Gin preflight prerequisite failed: {cuobjdump.error}", file=sys.stderr)
+        return Conclusion.CUOBJDUMP_UNAVAILABLE
+    print(f"Gin preflight cuobjdump: {cuobjdump.path}")
 
     def probe(mode, hybrid_mode, disable_gin):
         environment = os.environ.copy()
@@ -147,6 +201,14 @@ def main(argv=None):
     )
     print(f"GIN_PREFLIGHT_CONCLUSION={conclusion.value}")
 
+    if conclusion is Conclusion.CUOBJDUMP_UNAVAILABLE:
+        print(
+            "Install the cuobjdump component for the active CUDA toolkit "
+            "(for CUDA 13.0: `apt install cuda-cuobjdump-13-0` or "
+            "`dnf install cuda-cuobjdump-13-0`), then verify CUDA_HOME.",
+            file=sys.stderr,
+        )
+        return 5
     if conclusion is Conclusion.DIRECT_GIN_AVAILABLE:
         print("Direct Gin is available; representative parity can continue.")
         return 0

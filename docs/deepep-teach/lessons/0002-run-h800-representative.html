@@ -70,182 +70,10 @@ git rev-parse HEAD</code></pre>
   <section>
     <h2>3. 可整体复制的编译和运行命令</h2>
     <p>先 <code>cd</code> 到 DeepEP-Ascend 仓库根目录，然后整体执行下面这段。它不会清理已有文件，结果写到仓库同级的 <code>deepep-results/</code>。每次运行都会创建带时间戳的新目录。</p>
-    <div class="band warning"><strong>复制提示：</strong>请从浏览器渲染后的页面复制命令，不要从 HTML 源码复制。HTML 源码中的 <code>&amp;lt;&amp;lt;</code> 是转义文本，浏览器显示和复制出来的才是 shell 需要的 <code>&lt;&lt;</code>。<code>python3 - &lt;&lt;'PY'</code> 后直接出现 <code>import os</code> 是正确格式；即使两者之间有一个空行，也不会导致 heredoc 失败。</div>
+    <div class="band warning"><strong>脚本会修改当前 Python 环境：</strong>它会安装或更新构建依赖、NCCL 和 NVSHMEM，然后强制重编译 CUDA extension。请先激活用于 H800 测试的虚拟环境。</div>
 
-    <pre class="shell" id="copy-run"><code>set -euo pipefail
-
-# ---------- 固定本次运行位置和设备 ----------
-DEEPEP_ROOT="$(pwd -P)"
-test -f "${DEEPEP_ROOT}/tests/benchmark/run_ep.py" || {
-  echo "ERROR: 请在 DeepEP-Ascend 仓库根目录执行" >&amp;2
-  exit 1
-}
-cd "${DEEPEP_ROOT}"
-
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
-export TORCH_CUDA_ARCH_LIST=9.0
-export DEEP_EP_PLATFORM=cuda
-export WORLD_SIZE=1
-export RANK=0
-export MASTER_ADDR=127.0.0.1
-export MASTER_PORT=8361
-export EP_DISABLE_GIN=0
-export EP_SUPPRESS_NCCL_CHECK=0
-
-command -v python3 >/dev/null
-command -v nvidia-smi >/dev/null
-test -x "${CUDA_HOME}/bin/nvcc" || {
-  echo "ERROR: ${CUDA_HOME}/bin/nvcc 不存在，请设置正确的 CUDA_HOME" >&amp;2
-  exit 1
-}
-
-# ---------- Python、CUDA 和八张 H800 预检 ----------
-python3 -m pip install --upgrade setuptools wheel ninja packaging
-
-DEEPEP_CUDA_MAJOR="$(python3 - &lt;&lt;'PY'
-import torch
-from packaging.version import Version
-
-if Version(torch.__version__.split('+')[0]) &lt; Version('2.10.0'):
-    raise SystemExit(f'ERROR: PyTorch 必须 &gt;= 2.10，当前是 {torch.__version__}')
-if not torch.cuda.is_available():
-    raise SystemExit('ERROR: 当前 PyTorch 不能使用 CUDA')
-if torch.version.cuda is None:
-    raise SystemExit('ERROR: 当前不是 CUDA 版 PyTorch')
-print(torch.version.cuda.split('.')[0])
-PY
-)"
-
-case "${DEEPEP_CUDA_MAJOR}" in
-  12|13) ;;
-  *)
-    echo "ERROR: 只支持 CUDA 12 或 13，当前 PyTorch CUDA major=${DEEPEP_CUDA_MAJOR}" >&amp;2
-    exit 1
-    ;;
-esac
-
-python3 - &lt;&lt;'PY'
-import os
-import re
-import subprocess
-import torch
-from packaging.version import Version
-
-count = torch.cuda.device_count()
-names = [torch.cuda.get_device_name(i) for i in range(count)]
-if count != 8:
-    raise SystemExit(f'ERROR: CUDA_VISIBLE_DEVICES 中必须恰好有 8 张卡，当前是 {count}')
-bad = [f'{i}:{name}' for i, name in enumerate(names) if 'H800' not in name.upper()]
-if bad:
-    raise SystemExit('ERROR: 检测到非 H800 设备: ' + ', '.join(bad))
-
-nvcc = os.path.join(os.environ['CUDA_HOME'], 'bin', 'nvcc')
-nvcc_output = subprocess.check_output([nvcc, '--version'], text=True)
-match = re.search(r'release\s+([0-9]+\.[0-9]+)', nvcc_output)
-if match is None:
-    raise SystemExit('ERROR: 无法解析 nvcc 版本')
-nvcc_version = Version(match.group(1))
-if nvcc_version &lt; Version('12.3'):
-    raise SystemExit(f'ERROR: CUDA toolkit 必须 &gt;= 12.3，当前是 {nvcc_version}')
-if str(nvcc_version.major) != torch.version.cuda.split('.')[0]:
-    raise SystemExit(
-        f'ERROR: nvcc major={nvcc_version.major} 与 PyTorch CUDA='
-        f'{torch.version.cuda} 不一致'
-    )
-print('PyTorch:', torch.__version__)
-print('PyTorch CUDA:', torch.version.cuda)
-print('CUDA toolkit:', nvcc_version)
-print('GPUs:', names)
-subprocess.run(['nvidia-smi', 'topo', '-m'], check=True)
-PY
-
-"${CUDA_HOME}/bin/nvcc" --version
-
-# ---------- 编译依赖 ----------
-# 版本固定后，H800 与 Ascend 的报告才容易复现和追踪。
-python3 -m pip install \
-  "nvidia-nccl-cu${DEEPEP_CUDA_MAJOR}==2.30.4" --no-deps
-python3 -m pip install \
-  "nvidia-nvshmem-cu${DEEPEP_CUDA_MAJOR}==3.3.20" --no-deps
-
-# CUDA extension 会引用 fmt 子模块。只初始化这个子模块。
-git submodule update --init third-party/fmt
-
-# ---------- 编译当前仓库的 CUDA extension ----------
-DEEP_EP_PLATFORM=cuda TORCH_CUDA_ARCH_LIST=9.0 \
-  python3 setup.py build_ext --inplace --force
-
-# import 会执行 NCCL 二进制一致性检查，也会初始化 JIT。
-python3 - &lt;&lt;'PY'
-import torch
-import deep_ep
-from deep_ep import _C
-
-platform = _C.get_platform()
-if platform != 'cuda':
-    raise SystemExit(f'ERROR: 编译出的 extension 平台是 {platform!r}，不是 cuda')
-print('DeepEP:', deep_ep.__version__)
-print('DeepEP platform:', platform)
-print('Device 0:', torch.cuda.get_device_name(0))
-PY
-
-# ---------- 创建结果目录并执行 2-rank Gin 预检 ----------
-DEEPEP_RESULT_ROOT="$(dirname "${DEEPEP_ROOT}")/deepep-results"
-DEEPEP_RESULT_DIR="${DEEPEP_RESULT_ROOT}/h800-representative-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "${DEEPEP_RESULT_DIR}"
-
-python3 tests/benchmark/check_cuda_gin.py \
-  --log-dir "${DEEPEP_RESULT_DIR}/gin-preflight" \
-  --master-port "${MASTER_PORT}"
-
-# ---------- 运行 H800 x 8 representative case ----------
-echo "Git commit: $(git rev-parse HEAD)"
-echo "Result dir: ${DEEPEP_RESULT_DIR}"
-
-python3 tests/benchmark/run_ep.py \
-  --backend cuda \
-  --profile representative \
-  --output-dir "${DEEPEP_RESULT_DIR}"
-
-# ---------- 验收并打印五项结果 ----------
-test -s "${DEEPEP_RESULT_DIR}/workload.json"
-test -s "${DEEPEP_RESULT_DIR}/benchmark.json"
-test -s "${DEEPEP_RESULT_DIR}/benchmark.md"
-test -s "${DEEPEP_RESULT_DIR}/run.log"
-
-python3 - "${DEEPEP_RESULT_DIR}/benchmark.json" &lt;&lt;'PY'
-import json
-import sys
-
-report = json.load(open(sys.argv[1], encoding='utf-8'))
-if report['case_summary'] != {'total': 1, 'pending': 0, 'passed': 1, 'failed': 0}:
-    raise SystemExit(f"ERROR: case 未通过: {report['case_summary']}")
-if report['failures']:
-    raise SystemExit(f"ERROR: benchmark failures: {report['failures']}")
-
-print('\nH800 representative result')
-print(f"device: {report['device']['name']}")
-print(f"fingerprint: {report['workload_fingerprint']}")
-print(f"{'operation':&lt;22} {'mean_us':&gt;12} {'p50_us':&gt;12} {'p95_us':&gt;12} {'GB/s':&gt;12}")
-for op in report['cases'][0]['operations']:
-    timing = op['device_seconds']
-    print(
-        f"{op['operation_id']:&lt;22} "
-        f"{timing['mean'] * 1e6:&gt;12.3f} "
-        f"{timing['p50'] * 1e6:&gt;12.3f} "
-        f"{timing['p95'] * 1e6:&gt;12.3f} "
-        f"{op['logical_gbps']:&gt;12.3f}"
-    )
-PY
-
-sha256sum \
-  "${DEEPEP_RESULT_DIR}/workload.json" \
-  "${DEEPEP_RESULT_DIR}/benchmark.json"
-
-echo
-echo "SUCCESS: ${DEEPEP_RESULT_DIR}"
-echo "可读报告: ${DEEPEP_RESULT_DIR}/benchmark.md"</code></pre>
+    <pre class="shell" id="copy-run"><code>bash tests/benchmark/run_h800_representative.sh</code></pre>
+    <p>脚本可以从任意目录启动，但上面的相对路径命令需要在仓库根目录执行。运行 <code>bash tests/benchmark/run_h800_representative.sh --help</code> 可查看 <code>CUDA_HOME</code>、<code>CUDA_VISIBLE_DEVICES</code>、<code>MASTER_PORT</code> 和 <code>DEEPEP_RESULT_ROOT</code> 的覆盖方式。</p>
 
     <div class="band danger"><strong>不要设置 <code>EP_SUPPRESS_NCCL_CHECK=1</code>。</strong>DeepEP 会检查 PyTorch 实际加载的 NCCL 与编译链接的 NCCL 是否为同一个二进制。绕过检查可能让程序能启动，却把不一致的通信栈带进性能数据。</div>
   </section>
@@ -262,10 +90,11 @@ echo "可读报告: ${DEEPEP_RESULT_DIR}/benchmark.md"</code></pre>
 Device 0: NVIDIA H800 ...</code></pre>
 
     <h3>4.3 先用 2 rank 判断 Gin 能力</h3>
-    <p><code>check_cuda_gin.py</code> 使用小 shape 依次探测 direct Gin、hybrid Gin 和禁用 Gin 的基础路径。只有 direct Gin 成功时才返回 0 并继续正式测试；其他情况会停止，避免自动切换通信模式后仍把结果当作同一口径。</p>
+    <p><code>check_cuda_gin.py</code> 先检查 JIT 必需的 <code>${CUDA_HOME}/bin/cuobjdump</code>，再使用合法的最小 <code>hidden=256</code> 依次探测 direct Gin、hybrid Gin 和禁用 Gin 的基础路径。只有 direct Gin 成功时才返回 0 并继续正式测试；其他情况会停止，避免自动切换通信模式后仍把结果当作同一口径。</p>
     <div class="table-wrap"><table>
       <thead><tr><th>脚本结论</th><th>含义和下一步</th></tr></thead>
       <tbody>
+        <tr><td><code>CUOBJDUMP_UNAVAILABLE</code></td><td>JIT 使用的 CUDA toolkit 中缺少可执行的 <code>bin/cuobjdump</code>。安装对应 toolkit 组件并确认 <code>CUDA_HOME</code>；CUDA 13.0 的包名通常是 <code>cuda-cuobjdump-13-0</code>。</td></tr>
         <tr><td><code>DIRECT_GIN_AVAILABLE</code></td><td>direct Gin 可用，可以继续当前 representative parity 测试。</td></tr>
         <tr><td><code>HYBRID_GIN_ONLY</code></td><td>direct Gin 不可用而 hybrid Gin 可用，通常表示 multi-plane/multi-rail 网络与当前 direct parity 口径不匹配。检查网络配置，或者为 hybrid 测试建立单独口径。</td></tr>
         <tr><td><code>GIN_UNAVAILABLE_BASE_RUNTIME_OK</code></td><td>direct 和 hybrid Gin 都不可用，但禁用 Gin 后基础路径成功。重点检查 NCCL network plugin、RDMA 和 GPUDirect RDMA。</td></tr>
@@ -313,6 +142,7 @@ Device 0: NVIDIA H800 ...</code></pre>
         <tr><td><code>Cannot find package: nvshmem</code></td><td>NVSHMEM wheel 缺失，或使用了另一个 Python。</td><td>安装与 <code>torch.version.cuda</code> major 相同的 <code>nvidia-nvshmem-cuXX==3.3.20</code>。</td></tr>
         <tr><td><code>Duplicate NCCL runtime</code> / <code>Invalid NCCL versions</code></td><td>PyTorch 加载的 NCCL 与 DeepEP 链接的 NCCL 不一致，常见于系统库、conda 库和 pip wheel 混用。</td><td>清理 <code>LD_LIBRARY_PATH</code> 中多余 NCCL，使用同一 Python 环境重装 PyTorch/NCCL。不要关闭检查。</td></tr>
         <tr><td><code>NCCL Gin is unavailable</code></td><td>当前 NCCL communicator 没有提供可用的 Gin 类型。版本号满足要求也可能因 NVLink、RDMA、驱动、网络插件或多平面网络配置而不可用。</td><td>查看 <code>gin-preflight/</code> 中的自动判定和日志，再检查 <code>nvidia-smi topo -m</code>、RDMA 设备、GPUDirect RDMA 和 NCCL 实际选择的网络插件。脚本中的 <code>EP_DISABLE_GIN=1</code> 仅用于诊断基础路径，不会用于正式 representative case。</td></tr>
+        <tr><td><code>kernel_runtime.hpp:33</code> / <code>exit_code == 0</code></td><td>DeepEP JIT 调用的 <code>${CUDA_HOME}/bin/cuobjdump</code> 缺失或不可执行。</td><td>CUDA 13.0 安装 <code>cuda-cuobjdump-13-0</code>，然后运行 <code>${CUDA_HOME}/bin/cuobjdump --version</code>。完整 runner 和 Gin preflight 都会提前检查这一项。</td></tr>
         <tr><td><code>fmt/core.h: No such file</code></td><td><code>third-party/fmt</code> 子模块未初始化。</td><td>运行 <code>git submodule update --init third-party/fmt</code>。</td></tr>
         <tr><td><code>cuda/std/...</code> 或 CCCL header 缺失</td><td><code>CUDA_HOME</code> 指向 runtime-only 目录，或 toolkit 不完整。</td><td>指向包含 <code>bin/nvcc</code> 和 <code>include/cccl</code> 的 CUDA toolkit。</td></tr>
         <tr><td>初始化卡住或 <code>Address already in use</code></td><td><code>MASTER_PORT=8361</code> 被其他任务占用。</td><td>八个进程都结束后换一个空闲端口，例如 <code>export MASTER_PORT=18361</code>，再整体重跑。</td></tr>
@@ -340,6 +170,7 @@ python3 -m pip show nvidia-nccl-cu12 nvidia-nccl-cu13 nvidia-nvshmem-cu12 nvidia
   <section>
     <h2>8. 源码和主资料</h2>
     <ul>
+      <li><a href="../../../tests/benchmark/run_h800_representative.sh"><code>tests/benchmark/run_h800_representative.sh</code></a>：H800 安装、编译、Gin 预检、representative 运行和结果验收的一键入口。</li>
       <li><a href="../../../tests/benchmark/profiles.py"><code>tests/benchmark/profiles.py</code></a>：representative 的固定 shape、case、warmup 和 iteration。</li>
       <li><a href="../../../tests/benchmark/check_cuda_gin.py"><code>tests/benchmark/check_cuda_gin.py</code></a>：2-rank direct、hybrid 和 non-Gin 自动预检与结论分类。</li>
       <li><a href="../../../tests/benchmark/run_ep.py"><code>tests/benchmark/run_ep.py</code></a>：统一运行入口、输出目录和报告发布。</li>
