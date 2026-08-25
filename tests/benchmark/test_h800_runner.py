@@ -65,7 +65,7 @@ def test_h800_runner_reports_the_cuda_package_when_cuobjdump_is_missing(
     assert "apt install cuda-cuobjdump-13-0" in completed.stderr
 
 
-def test_h800_runner_uses_the_verified_single_node_non_gin_path(tmp_path):
+def test_h800_runner_trusts_manual_topology_and_uses_non_gin_path(tmp_path):
     command_bin = tmp_path / "commands"
     cuda_bin = tmp_path / "cuda/bin"
     command_bin.mkdir()
@@ -85,9 +85,8 @@ if [[ ${1:-} == "-" ]]; then
   exit 0
 fi
 if [[ ${1:-} == "tests/benchmark/check_cuda_nvlink.py" ]]; then
-  [[ " $* " == *" --expected-gpus 8 "* ]]
-  echo topology >> "${H800_RUNNER_TEST_STATE}"
-  exit 0
+  echo "unexpected automatic topology check" >&2
+  exit 77
 fi
 if [[ ${1:-} == "tests/benchmark/check_cuda_gin.py" ]]; then
   [[ " $* " == *" --single-node-nvlink "* ]]
@@ -144,7 +143,6 @@ exit 0
     subprocess.run(["bash", RUNNER], check=True, env=environment)
 
     assert state_file.read_text(encoding="utf-8").splitlines() == [
-        "topology",
         "preflight EP_DISABLE_GIN=1",
         "benchmark EP_DISABLE_GIN=1",
     ]

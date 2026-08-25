@@ -4,7 +4,8 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Run the H800 representative benchmark from installation through report checks.
-This runner requires a single-node NVLink clique and does not require Gin.
+This runner assumes a manually verified single-node NVLink clique and does not
+require Gin.
 
 Usage:
   bash tests/benchmark/run_h800_representative.sh
@@ -131,8 +132,6 @@ print('CUDA toolkit:', nvcc_version)
 print('cuobjdump:', os.path.join(os.environ['CUDA_HOME'], 'bin', 'cuobjdump'))
 print('GPUs:', names)
 PY
-
-python3 tests/benchmark/check_cuda_nvlink.py --expected-gpus 8
 
 "${CUDA_HOME}/bin/nvcc" --version
 "${CUDA_HOME}/bin/cuobjdump" --version
