@@ -40,11 +40,13 @@ service interval. The producer and service columns are useful for detecting a
 change in this benchmark's pipeline, but they are not independent standalone
 kernel timings. `Total` is the acceptance latency.
 
-This is deliberately a batched-put transport probe. Production direct
-dispatch flushes and publishes control after each peer payload, whereas this
-benchmark issues all nonzero peer puts followed by one flush. The probe is an
-upper data-plane reference and does not reproduce the production command
-schedule.
+This is deliberately a batched-put transport probe. Non-pipelined production
+direct dispatch also issues all nonzero peer payload puts followed by one
+payload flush. Production then publishes count, generation, and signal control
+for every remote peer and executes a device barrier. The optional chunked
+pipeline repeats the payload batch for each chunk. This probe stops after the
+single payload flush, so it is an upper data-plane reference rather than a
+reproduction of the complete production protocol.
 
 For iteration `i`, latency is the slowest participating rank:
 
@@ -244,9 +246,9 @@ exactly 2.42% of production dispatch, for three reasons:
 1. transport-only moves `2.290 GB` of remote, deduplicated payload, whereas the
    full dispatch logical-byte formula counts `7.786 GB`, including traffic
    categories that this probe deliberately omits;
-2. transport-only issues at most seven large contiguous puts per rank, while
-   production dispatch performs grouping, offset and metadata work and may
-   fragment transport differently; and
+2. transport-only ends after one batch of at most seven large contiguous puts
+   and one flush, while production adds per-peer control publication and a
+   device barrier and may use multiple batches when chunking is enabled; and
 3. the probe excludes scale movement, token packing, local-rank work, consumer
    copies, production SQE assembly, and synchronization between those stages.
 
@@ -307,14 +309,17 @@ larger remaining targets.
 
 ### Optimization order implied by the measurements
 
-1. Reproduce the transport-only remote-byte matrix inside production dispatch,
-   then separate command parsing, WQE/SQE construction, SQ posting, HCOMM
-   service, and CQ wait. This identifies how much of the `5.734 ms` service
-   submit span comes from control work rather than payload movement.
-2. Compare the production schedule of 30 commands and seven payload puts per
-   rank with the probe's seven contiguous puts followed by one final flush.
-   Test command batching and flush placement independently so ordering changes
-   remain attributable and reviewable.
+1. Add a benchmark-only production release ablation using the same staging
+   buffers and remote-byte matrix: stop after payload flush, then add the 21
+   per-peer control commands, then add the device barrier. The current 30
+   commands consist of seven payload puts, one payload flush, three control
+   commands for each of seven remote peers, and one barrier. This experiment
+   assigns the gap to payload, control, or barrier without changing production
+   ordering.
+2. Within the dominant release segment, separate command validation, address
+   and registered-buffer lookup, WQE/SQE construction, SQ copy and doorbell,
+   HCOMM service, and CQ polling. The existing `5.734 ms` service-submit span
+   combines most of these costs and cannot select a code change by itself.
 3. Reduce record staging and output copies. The main candidates are fusing
    packing with chunk publication, allowing transport to consume completed
    chunks immediately, and writing received records closer to their final
