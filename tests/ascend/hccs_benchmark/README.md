@@ -298,6 +298,12 @@ each phase:
   command capacity of 36, so queue saturation does not justify adding another
   transport channel.
 
+`service_submit` is currently derived as total service cycles minus CQ drain
+cycles. The device barrier also polls remote generation counters, but those
+poll cycles are not recorded in the CQ drain counter. The reported
+`5.734 ms` therefore includes any barrier polling time and must not be treated
+as a standalone measurement of WQE/SQE construction or SQ posting.
+
 The same P3 profile shows a different balance for combine. Combine takes
 `141.098 ms` with `47.147 ms` producer, `60.302 ms` network, and `18.424 ms`
 consumer phase maxima. Reduced combine takes `168.954 ms`, with `74.430 ms`
@@ -318,8 +324,9 @@ larger remaining targets.
    ordering.
 2. Within the dominant release segment, separate command validation, address
    and registered-buffer lookup, WQE/SQE construction, SQ copy and doorbell,
-   HCOMM service, and CQ polling. The existing `5.734 ms` service-submit span
-   combines most of these costs and cannot select a code change by itself.
+   HCOMM service, CQ polling, and barrier generation polling. The existing
+   `5.734 ms` service-submit span combines most of these costs and cannot
+   select a code change by itself.
 3. Reduce record staging and output copies. The main candidates are fusing
    packing with chunk publication, allowing transport to consume completed
    chunks immediately, and writing received records closer to their final
