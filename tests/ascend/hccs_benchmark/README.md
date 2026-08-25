@@ -259,6 +259,79 @@ consumer copy. Link-level HCCS tuning should not be the first optimization
 target unless that aligned profile shows production service time well above
 this transport-only baseline.
 
+### Bottleneck conclusion
+
+The measurements separate several layers that are easy to conflate:
+
+| Layer | Evidence | Conclusion |
+| --- | --- | --- |
+| Large-message HCCS link | P2P reaches `52.282 GB/s`; ring reaches `51.194 GB/s` per active sender, or `97.92%` of P2P | The one-peer path remains stable under eight-rank concurrency. |
+| Eight-rank topology | The 32 MiB/peer all-to-all reaches `85.63%` of an independent-link extrapolation | Topology and concurrent traffic cost about `14.37%` against that reference, but still deliver `2507.178 GB/s` aggregate. |
+| Representative transport data plane | The nonuniform workload reaches `2535.046 GB/s`, within `1.11%` of the uniform all-to-all point | Representative rank imbalance is not a material large-message penalty. |
+| Full dispatch software path | Full dispatch takes `37.305 ms`, compared with `0.903 ms` for the narrower transport-only probe | Packing, command scheduling, consumer work, synchronization, and other omitted production stages dominate the gap. |
+
+The last row is not a claim that HCOMM consumes only `2.42%` of dispatch time.
+The byte formulas and command schedules differ, as described above. It does
+show that raw link tuning is unlikely to produce the largest end-to-end gain.
+
+The retained P3 representative profile gives a more specific view of the
+production path. Its ordinary dispatch result was `36.176 ms`, with the
+following independently aggregated max-rank phase times:
+
+| Production phase | Time | Largest measured subphases |
+| --- | ---: | --- |
+| Producer | `4.470 ms` | record packing `3.860 ms`; rank prefix `0.575 ms` |
+| Network | `6.748 ms` | service submit `5.734 ms`; CQ wait `0.851 ms`; publication `0.163 ms` |
+| Consumer | `8.787 ms` | output copy `4.857 ms`; expert prefix `2.788 ms`; expert count `0.339 ms` |
+
+The phase maxima may come from different ranks, so they must not be summed and
+treated as an end-to-end trace. They are still useful for ranking work within
+each phase:
+
+- record packing accounts for most of the measured producer time;
+- service submission, which includes command validation, address resolution,
+  WQE/SQE construction, and request posting, is much larger than CQ polling;
+- output copy and expert prefix account for most of consumer compute; and
+- final SQ/CQ depths are `0/0`, with high-water marks of only `4/4` against a
+  command capacity of 36, so queue saturation does not justify adding another
+  transport channel.
+
+The same P3 profile shows a different balance for combine. Combine takes
+`141.098 ms` with `47.147 ms` producer, `60.302 ms` network, and `18.424 ms`
+consumer phase maxima. Reduced combine takes `168.954 ms`, with `74.430 ms`
+producer, `62.896 ms` network, and `18.419 ms` consumer phase maxima. Their
+producer record spans are `45.336 ms` and `72.613 ms`, respectively. The
+dispatch transport-only probe does not isolate combine traffic, but the P3
+figures make combine record movement and production transport scheduling the
+larger remaining targets.
+
+### Optimization order implied by the measurements
+
+1. Reproduce the transport-only remote-byte matrix inside production dispatch,
+   then separate command parsing, WQE/SQE construction, SQ posting, HCOMM
+   service, and CQ wait. This identifies how much of the `5.734 ms` service
+   submit span comes from control work rather than payload movement.
+2. Compare the production schedule of 30 commands and seven payload puts per
+   rank with the probe's seven contiguous puts followed by one final flush.
+   Test command batching and flush placement independently so ordering changes
+   remain attributable and reviewable.
+3. Reduce record staging and output copies. The main candidates are fusing
+   packing with chunk publication, allowing transport to consume completed
+   chunks immediately, and writing received records closer to their final
+   expert-major layout.
+4. Parallelize or reuse rank and expert prefix results. The measured
+   `producer_prefix` and `epilogue_expert_prefix` spans are large enough to
+   optimize independently of link throughput.
+5. Apply producer/network/consumer overlap after shortening the serial work in
+   each phase. Do not add channels unless new SQ/CQ telemetry shows sustained
+   occupancy near capacity.
+
+The detailed production phase definitions and aggregation caveats are in
+[`epv2-ascend-p3-overlap-optimization.md`](../../../docs/ascend-design/epv2-ascend-p3-overlap-optimization.md).
+The narrower comparison with external expert-count, prefix, scale-copy, and
+SQE-construction measurements is in
+[`epv2-ascend-stage-timing-analysis.md`](../../../docs/ascend-design/epv2-ascend-stage-timing-analysis.md).
+
 ## Result integrity
 
 | Artifact | SHA-256 |
