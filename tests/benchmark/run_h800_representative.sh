@@ -4,6 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Run the H800 representative benchmark from installation through report checks.
+This runner requires a single-node NVLink clique and does not require Gin.
 
 Usage:
   bash tests/benchmark/run_h800_representative.sh
@@ -43,7 +44,7 @@ export WORLD_SIZE=1
 export RANK=0
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-8361}"
-export EP_DISABLE_GIN=0
+export EP_DISABLE_GIN=1
 export EP_SUPPRESS_NCCL_CHECK=0
 
 command -v python3 >/dev/null || {
@@ -129,8 +130,9 @@ print('PyTorch CUDA:', torch.version.cuda)
 print('CUDA toolkit:', nvcc_version)
 print('cuobjdump:', os.path.join(os.environ['CUDA_HOME'], 'bin', 'cuobjdump'))
 print('GPUs:', names)
-subprocess.run(['nvidia-smi', 'topo', '-m'], check=True)
 PY
+
+python3 tests/benchmark/check_cuda_nvlink.py --expected-gpus 8
 
 "${CUDA_HOME}/bin/nvcc" --version
 "${CUDA_HOME}/bin/cuobjdump" --version
@@ -164,7 +166,8 @@ mkdir -p "${DEEPEP_RESULT_DIR}"
 
 python3 tests/benchmark/check_cuda_gin.py \
   --log-dir "${DEEPEP_RESULT_DIR}/gin-preflight" \
-  --master-port "${MASTER_PORT}"
+  --master-port "${MASTER_PORT}" \
+  --single-node-nvlink
 
 echo "Git commit: $(git rev-parse HEAD)"
 echo "Result dir: ${DEEPEP_RESULT_DIR}"

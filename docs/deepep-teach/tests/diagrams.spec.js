@@ -116,6 +116,11 @@ test('H800 lesson renders the runner and Gin setup guidance', async ({ page }) =
     await expect(page.getByText('CUOBJDUMP_UNAVAILABLE', { exact: true }))
       .toBeVisible();
     await expect(page.getByText(
+      'SINGLE_NODE_NVLINK_READY',
+      { exact: true },
+    ).first())
+      .toBeVisible();
+    await expect(page.getByText(
       'GIN_UNAVAILABLE_BASE_RUNTIME_OK',
       { exact: true },
     )).toBeVisible();

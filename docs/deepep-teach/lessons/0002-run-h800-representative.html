@@ -57,7 +57,7 @@
       <li>八张 GPU 的设备名包含 <code>H800</code>，并且当前用户有权访问 GPU 0 到 GPU 7。</li>
       <li>系统有 CUDA toolkit，<code>nvcc</code> 版本不低于 12.3。</li>
       <li>当前 Python 环境已经安装 CUDA 版 PyTorch 2.10 或更高版本。PyTorch wheel 必须按服务器镜像和驱动安装，这一步不适合由通用脚本猜测。</li>
-      <li>NCCL 2.30.4 或更高版本必须在实际运行时提供 Gin。使用跨节点或网络 Gin 时，还需要可用的 RDMA 网卡、驱动和网络插件，并启用 GPUDirect RDMA；只安装 NCCL wheel 不能保证 Gin 可用。</li>
+      <li>NCCL 2.30.4 或更高版本。当前教程限定单机 8 卡完整 NVLink clique，因此不要求 Gin；跨节点运行才需要 Gin、RDMA 网卡、驱动、网络插件和 GPUDirect RDMA。</li>
       <li>机器能访问 PyPI 和 GitHub；如果是离线环境，需要提前准备 NCCL、NVSHMEM wheel 和 <code>third-party/fmt</code> 子模块。</li>
       <li>至少有一个空闲 TCP 端口。教程固定使用 <code>8361</code>。</li>
     </ul>
@@ -82,26 +82,27 @@ git rev-parse HEAD</code></pre>
     <h2>4. 命令做了哪些事</h2>
     <h3>4.1 根据 PyTorch CUDA 版本选择 wheel</h3>
     <p><code>torch.version.cuda</code> 是 PyTorch wheel 的 CUDA family。复制块从中取 major，并安装同 family 的 NCCL 2.30.4 和 NVSHMEM 3.3.20。例如 PyTorch 报 CUDA 12.x 时，安装包名是 <code>nvidia-nccl-cu12</code> 和 <code>nvidia-nvshmem-cu12</code>。</p>
-    <p>当前 CUDA extension 即使只跑 EPv2，也会在构建阶段链接 legacy NVSHMEM 源码和静态 device library。因此不能因为 representative case 使用 NCCL Gin 就省掉 NVSHMEM 安装。</p>
+    <p>当前 CUDA extension 即使只跑单机 EPv2，也会在构建阶段链接 legacy NVSHMEM 源码和静态 device library。因此运行时不使用 Gin，也不能省掉 NVSHMEM 安装。</p>
 
     <h3>4.2 强制编译 SM90 CUDA extension</h3>
     <p>H800 是 Hopper 架构，编译目标是 <code>TORCH_CUDA_ARCH_LIST=9.0</code>。<code>--inplace --force</code> 会在当前源码树重新生成 <code>deep_ep/_C*.so</code>，避免误用之前留下的 Ascend extension。编译完成后的 import 必须打印：</p>
     <pre><code>DeepEP platform: cuda
 Device 0: NVIDIA H800 ...</code></pre>
 
-    <h3>4.3 先用 2 rank 判断 Gin 能力</h3>
-    <p><code>check_cuda_gin.py</code> 先检查 JIT 必需的 <code>${CUDA_HOME}/bin/cuobjdump</code>，再使用合法的最小 <code>hidden=256</code> 依次探测 direct Gin、hybrid Gin 和禁用 Gin 的基础路径。只有 direct Gin 成功时才返回 0 并继续正式测试；其他情况会停止，避免自动切换通信模式后仍把结果当作同一口径。</p>
+    <h3>4.3 验证 NVLink 拓扑和 2-rank 基础路径</h3>
+    <p><code>check_cuda_nvlink.py</code> 解析 <code>nvidia-smi topo -m</code>，要求系统恰好有 8 张 GPU，且任意两张之间都是 <code>NV8</code>。确认没有 scale-out domain 后，<code>check_cuda_gin.py --single-node-nvlink</code> 检查 JIT 必需的 <code>${CUDA_HOME}/bin/cuobjdump</code>，再使用合法的最小 <code>hidden=256</code> 和 <code>EP_DISABLE_GIN=1</code> 运行 2-rank fallback。它不会探测对单机拓扑无意义的 hybrid/railed Gin。</p>
     <div class="table-wrap"><table>
       <thead><tr><th>脚本结论</th><th>含义和下一步</th></tr></thead>
       <tbody>
         <tr><td><code>CUOBJDUMP_UNAVAILABLE</code></td><td>JIT 使用的 CUDA toolkit 中缺少可执行的 <code>bin/cuobjdump</code>。安装对应 toolkit 组件并确认 <code>CUDA_HOME</code>；CUDA 13.0 的包名通常是 <code>cuda-cuobjdump-13-0</code>。</td></tr>
+        <tr><td><code>SINGLE_NODE_NVLINK_READY</code></td><td>完整 8 卡 NVLink clique 已由 runner 验证，禁用 Gin 的 2-rank 路径成功。正式单机 representative 继续保持 <code>EP_DISABLE_GIN=1</code>。</td></tr>
         <tr><td><code>DIRECT_GIN_AVAILABLE</code></td><td>direct Gin 可用，可以继续当前 representative parity 测试。</td></tr>
         <tr><td><code>HYBRID_GIN_ONLY</code></td><td>direct Gin 不可用而 hybrid Gin 可用，通常表示 multi-plane/multi-rail 网络与当前 direct parity 口径不匹配。检查网络配置，或者为 hybrid 测试建立单独口径。</td></tr>
         <tr><td><code>GIN_UNAVAILABLE_BASE_RUNTIME_OK</code></td><td>direct 和 hybrid Gin 都不可用，但禁用 Gin 后基础路径成功。重点检查 NCCL network plugin、RDMA 和 GPUDirect RDMA。</td></tr>
         <tr><td><code>PROBE_FAILED</code></td><td>探针遇到的不是已知 Gin unavailable 错误，例如 OOM 或设备映射错误。直接查看对应日志，不要按网络问题处理。</td></tr>
       </tbody>
     </table></div>
-    <p>探针日志保存在结果目录的 <code>gin-preflight/direct.log</code>、<code>hybrid.log</code> 和 <code>fallback.log</code>。脚本按需执行，已经得到结论后不会继续运行无关探针。</p>
+    <p>当前单机 runner 只生成 <code>gin-preflight/fallback.log</code>。直接调用不带 <code>--single-node-nvlink</code> 的通用探针时，才会按需生成 <code>direct.log</code>、<code>hybrid.log</code> 和 <code>fallback.log</code>，用于存在 scale-out domain 的环境。</p>
 
     <h3>4.4 benchmark wrapper 固定测试合同</h3>
     <p>不要直接手写 8192、7168、top-k 8 等参数调用 <code>tests/elastic/test_ep.py</code>。统一入口 <code>tests/benchmark/run_ep.py</code> 会选择固定 case，生成 workload fingerprint，验证设备名包含 H800，并检查五条 operation record 都存在。</p>
@@ -141,7 +142,7 @@ Device 0: NVIDIA H800 ...</code></pre>
         <tr><td><code>Cannot find package: nccl</code></td><td>NCCL wheel 没装进当前 Python 环境，或 pip/python 不是同一个环境。</td><td>始终用 <code>python3 -m pip</code> 安装，并检查 <code>python3 -m pip show nvidia-nccl-cu12</code> 或 <code>cu13</code>。</td></tr>
         <tr><td><code>Cannot find package: nvshmem</code></td><td>NVSHMEM wheel 缺失，或使用了另一个 Python。</td><td>安装与 <code>torch.version.cuda</code> major 相同的 <code>nvidia-nvshmem-cuXX==3.3.20</code>。</td></tr>
         <tr><td><code>Duplicate NCCL runtime</code> / <code>Invalid NCCL versions</code></td><td>PyTorch 加载的 NCCL 与 DeepEP 链接的 NCCL 不一致，常见于系统库、conda 库和 pip wheel 混用。</td><td>清理 <code>LD_LIBRARY_PATH</code> 中多余 NCCL，使用同一 Python 环境重装 PyTorch/NCCL。不要关闭检查。</td></tr>
-        <tr><td><code>NCCL Gin is unavailable</code></td><td>当前 NCCL communicator 没有提供可用的 Gin 类型。版本号满足要求也可能因 NVLink、RDMA、驱动、网络插件或多平面网络配置而不可用。</td><td>查看 <code>gin-preflight/</code> 中的自动判定和日志，再检查 <code>nvidia-smi topo -m</code>、RDMA 设备、GPUDirect RDMA 和 NCCL 实际选择的网络插件。脚本中的 <code>EP_DISABLE_GIN=1</code> 仅用于诊断基础路径，不会用于正式 representative case。</td></tr>
+        <tr><td><code>NCCL Gin is unavailable</code></td><td>当前 NCCL communicator 没有提供可用的 Gin 类型。单机完整 NVLink clique 没有 scale-out rail，不需要 Gin；跨节点时才表示网络能力缺失。</td><td>单机运行应由 runner 得到 <code>SINGLE_NODE_NVLINK_READY</code>。跨节点运行再检查 RDMA、GPUDirect RDMA、NCCL network plugin 和 multi-plane 配置。</td></tr>
         <tr><td><code>kernel_runtime.hpp:33</code> / <code>exit_code == 0</code></td><td>DeepEP JIT 调用的 <code>${CUDA_HOME}/bin/cuobjdump</code> 缺失或不可执行。</td><td>CUDA 13.0 安装 <code>cuda-cuobjdump-13-0</code>，然后运行 <code>${CUDA_HOME}/bin/cuobjdump --version</code>。完整 runner 和 Gin preflight 都会提前检查这一项。</td></tr>
         <tr><td><code>fmt/core.h: No such file</code></td><td><code>third-party/fmt</code> 子模块未初始化。</td><td>运行 <code>git submodule update --init third-party/fmt</code>。</td></tr>
         <tr><td><code>cuda/std/...</code> 或 CCCL header 缺失</td><td><code>CUDA_HOME</code> 指向 runtime-only 目录，或 toolkit 不完整。</td><td>指向包含 <code>bin/nvcc</code> 和 <code>include/cccl</code> 的 CUDA toolkit。</td></tr>
@@ -163,7 +164,7 @@ python3 -m pip show nvidia-nccl-cu12 nvidia-nccl-cu13 nvidia-nvshmem-cu12 nvidia
   <section>
     <h2>7. 跑完后的自检</h2>
     <details class="quiz"><summary>问题 1：为什么不直接运行 <code>python tests/elastic/test_ep.py</code>？</summary><div class="answer">统一 wrapper 会固定 representative profile、生成 workload fingerprint、验证 H800 设备和报告 schema，并以原子方式发布最终 JSON/Markdown。直接调用底层脚本更容易漏参数。</div></details>
-    <details class="quiz"><summary>问题 2：为什么单机 H800 测试仍要安装 NVSHMEM？</summary><div class="answer">当前 CUDA extension 的构建仍包含 legacy NVSHMEM 源码和 device static library。代表 case 运行时走 NCCL Gin，不等于构建时可以缺少 NVSHMEM。</div></details>
+    <details class="quiz"><summary>问题 2：为什么单机 H800 测试仍要安装 NVSHMEM？</summary><div class="answer">当前 CUDA extension 的构建仍包含 legacy NVSHMEM 源码和 device static library。单机运行时禁用 Gin，不等于构建时可以缺少 NVSHMEM。</div></details>
     <details class="quiz"><summary>问题 3：哪份文件应传给 Ascend 侧锁定相同 workload？</summary><div class="answer"><code>workload.json</code>。Ascend wrapper 使用 <code>--workload-manifest</code> 读取它，并验证内容与 representative profile 完全一致。</div></details>
   </section>
 
@@ -171,6 +172,7 @@ python3 -m pip show nvidia-nccl-cu12 nvidia-nccl-cu13 nvidia-nvshmem-cu12 nvidia
     <h2>8. 源码和主资料</h2>
     <ul>
       <li><a href="../../../tests/benchmark/run_h800_representative.sh"><code>tests/benchmark/run_h800_representative.sh</code></a>：H800 安装、编译、Gin 预检、representative 运行和结果验收的一键入口。</li>
+      <li><a href="../../../tests/benchmark/check_cuda_nvlink.py"><code>tests/benchmark/check_cuda_nvlink.py</code></a>：验证 8 张 GPU 构成完整 NVLink clique。</li>
       <li><a href="../../../tests/benchmark/profiles.py"><code>tests/benchmark/profiles.py</code></a>：representative 的固定 shape、case、warmup 和 iteration。</li>
       <li><a href="../../../tests/benchmark/check_cuda_gin.py"><code>tests/benchmark/check_cuda_gin.py</code></a>：2-rank direct、hybrid 和 non-Gin 自动预检与结论分类。</li>
       <li><a href="../../../tests/benchmark/run_ep.py"><code>tests/benchmark/run_ep.py</code></a>：统一运行入口、输出目录和报告发布。</li>

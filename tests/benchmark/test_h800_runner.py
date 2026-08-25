@@ -7,6 +7,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPOSITORY_ROOT / "tests/benchmark/run_h800_representative.sh"
 
 
+def write_executable(path, content):
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
 def test_h800_runner_is_valid_bash():
     subprocess.run(["bash", "-n", RUNNER], check=True)
 
@@ -23,6 +28,7 @@ def test_h800_runner_help_documents_environment_overrides():
     assert "CUDA_HOME" in completed.stdout
     assert "MASTER_PORT" in completed.stdout
     assert "DEEPEP_RESULT_ROOT" in completed.stdout
+    assert "single-node NVLink" in completed.stdout
 
 
 def test_h800_runner_reports_the_cuda_package_when_cuobjdump_is_missing(
@@ -57,3 +63,88 @@ def test_h800_runner_reports_the_cuda_package_when_cuobjdump_is_missing(
     assert completed.returncode == 1
     assert f"{cuda_bin}/cuobjdump is missing" in completed.stderr
     assert "apt install cuda-cuobjdump-13-0" in completed.stderr
+
+
+def test_h800_runner_uses_the_verified_single_node_non_gin_path(tmp_path):
+    command_bin = tmp_path / "commands"
+    cuda_bin = tmp_path / "cuda/bin"
+    command_bin.mkdir()
+    cuda_bin.mkdir(parents=True)
+    state_file = tmp_path / "runner-state"
+    result_root = tmp_path / "results"
+
+    write_executable(
+        command_bin / "python3",
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${1:-} == "-" ]]; then
+  body="$(cat)"
+  if [[ ${body} == *"print(torch.version.cuda.split('.')[0])"* ]]; then
+    echo 13
+  fi
+  exit 0
+fi
+if [[ ${1:-} == "tests/benchmark/check_cuda_nvlink.py" ]]; then
+  [[ " $* " == *" --expected-gpus 8 "* ]]
+  echo topology >> "${H800_RUNNER_TEST_STATE}"
+  exit 0
+fi
+if [[ ${1:-} == "tests/benchmark/check_cuda_gin.py" ]]; then
+  [[ " $* " == *" --single-node-nvlink "* ]]
+  echo "preflight EP_DISABLE_GIN=${EP_DISABLE_GIN}" >> "${H800_RUNNER_TEST_STATE}"
+  exit 0
+fi
+if [[ ${1:-} == "tests/benchmark/run_ep.py" ]]; then
+  while (( $# )); do
+    if [[ $1 == "--output-dir" ]]; then
+      output_dir=$2
+      break
+    fi
+    shift
+  done
+  mkdir -p "${output_dir}"
+  echo '{}' > "${output_dir}/workload.json"
+  echo '{}' > "${output_dir}/benchmark.json"
+  echo report > "${output_dir}/benchmark.md"
+  echo log > "${output_dir}/run.log"
+  echo "benchmark EP_DISABLE_GIN=${EP_DISABLE_GIN}" >> "${H800_RUNNER_TEST_STATE}"
+  exit 0
+fi
+exit 0
+""",
+    )
+    write_executable(
+        command_bin / "nvidia-smi",
+        "#!/usr/bin/env bash\nexit 0\n",
+    )
+    write_executable(
+        command_bin / "git",
+        """#!/usr/bin/env bash
+if [[ ${1:-} == "rev-parse" ]]; then
+  echo 0123456789abcdef
+fi
+exit 0
+""",
+    )
+    write_executable(
+        cuda_bin / "nvcc",
+        "#!/usr/bin/env bash\necho 'Cuda compilation tools, release 13.0'\n",
+    )
+    write_executable(
+        cuda_bin / "cuobjdump",
+        "#!/usr/bin/env bash\necho 'cuobjdump 13.0'\n",
+    )
+
+    environment = os.environ.copy()
+    environment["CUDA_HOME"] = str(cuda_bin.parent)
+    environment["DEEPEP_RESULT_ROOT"] = str(result_root)
+    environment["H800_RUNNER_TEST_STATE"] = str(state_file)
+    environment["PATH"] = f"{command_bin}{os.pathsep}{environment['PATH']}"
+
+    subprocess.run(["bash", RUNNER], check=True, env=environment)
+
+    assert state_file.read_text(encoding="utf-8").splitlines() == [
+        "topology",
+        "preflight EP_DISABLE_GIN=1",
+        "benchmark EP_DISABLE_GIN=1",
+    ]

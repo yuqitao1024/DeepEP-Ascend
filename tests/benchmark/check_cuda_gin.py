@@ -21,6 +21,7 @@ class ProbeStatus(Enum):
 
 class Conclusion(Enum):
     CUOBJDUMP_UNAVAILABLE = "CUOBJDUMP_UNAVAILABLE"
+    SINGLE_NODE_NVLINK_READY = "SINGLE_NODE_NVLINK_READY"
     DIRECT_GIN_AVAILABLE = "DIRECT_GIN_AVAILABLE"
     HYBRID_GIN_ONLY = "HYBRID_GIN_ONLY"
     GIN_UNAVAILABLE_BASE_RUNTIME_OK = "GIN_UNAVAILABLE_BASE_RUNTIME_OK"
@@ -134,6 +135,7 @@ def run_preflight(
     cuobjdump_checker=_check_cuobjdump,
     timeout_seconds=120,
     master_port=8361,
+    single_node_nvlink=False,
 ):
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -164,6 +166,12 @@ def run_preflight(
         print(f"Gin preflight {mode}: exit={exit_code}, log={log_path}")
         return _probe_status(exit_code, output)
 
+    if single_node_nvlink:
+        fallback = probe("fallback", hybrid_mode=False, disable_gin=True)
+        if fallback is ProbeStatus.AVAILABLE:
+            return Conclusion.SINGLE_NODE_NVLINK_READY
+        return Conclusion.PROBE_FAILED
+
     direct = probe("direct", hybrid_mode=False, disable_gin=False)
     if direct is ProbeStatus.AVAILABLE:
         return Conclusion.DIRECT_GIN_AVAILABLE
@@ -189,6 +197,14 @@ def build_parser():
     parser.add_argument("--log-dir", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=int, default=120)
     parser.add_argument("--master-port", type=int, default=8361)
+    parser.add_argument(
+        "--single-node-nvlink",
+        action="store_true",
+        help=(
+            "run only the non-Gin 2-rank path after the caller has verified "
+            "that all benchmark GPUs form one NVLink clique"
+        ),
+    )
     return parser
 
 
@@ -196,6 +212,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     conclusion = run_preflight(
         args.log_dir,
+        single_node_nvlink=args.single_node_nvlink,
         timeout_seconds=args.timeout_seconds,
         master_port=args.master_port,
     )
@@ -209,6 +226,12 @@ def main(argv=None):
             file=sys.stderr,
         )
         return 5
+    if conclusion is Conclusion.SINGLE_NODE_NVLINK_READY:
+        print(
+            "The non-Gin 2-rank path is ready for the verified single-node "
+            "NVLink topology. Keep EP_DISABLE_GIN=1 for the representative run."
+        )
+        return 0
     if conclusion is Conclusion.DIRECT_GIN_AVAILABLE:
         print("Direct Gin is available; representative parity can continue.")
         return 0

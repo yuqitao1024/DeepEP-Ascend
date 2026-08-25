@@ -91,6 +91,68 @@ def test_preflight_stops_when_hybrid_fails_for_an_unrelated_reason(tmp_path):
     assert modes == ["direct", "hybrid"]
 
 
+def test_single_node_nvlink_preflight_runs_only_the_non_gin_path(tmp_path):
+    calls = []
+
+    def fake_runner(mode, command, environment, log_path, timeout_seconds):
+        calls.append((mode, command, environment, log_path, timeout_seconds))
+        return 0, "single-node ready"
+
+    conclusion = preflight.run_preflight(
+        tmp_path,
+        command_runner=fake_runner,
+        cuobjdump_checker=available_cuobjdump,
+        single_node_nvlink=True,
+    )
+
+    assert conclusion.value == "SINGLE_NODE_NVLINK_READY"
+    assert [call[0] for call in calls] == ["fallback"]
+    _, command, environment, _, _ = calls[0]
+    assert environment["EP_DISABLE_GIN"] == "1"
+    hybrid_index = command.index("--allow-hybrid-mode")
+    assert command[hybrid_index + 1] == "0"
+
+
+def test_single_node_nvlink_cli_returns_success(tmp_path, monkeypatch, capsys):
+    arguments = {}
+
+    def fake_preflight(*args, **kwargs):
+        arguments.update(kwargs)
+        return preflight.Conclusion.SINGLE_NODE_NVLINK_READY
+
+    monkeypatch.setattr(preflight, "run_preflight", fake_preflight)
+
+    exit_code = preflight.main([
+        "--log-dir", str(tmp_path),
+        "--single-node-nvlink",
+    ])
+
+    assert exit_code == 0
+    assert arguments["single_node_nvlink"] is True
+    assert "GIN_PREFLIGHT_CONCLUSION=SINGLE_NODE_NVLINK_READY" in (
+        capsys.readouterr().out
+    )
+
+
+def test_run_preflight_preserves_the_original_positional_arguments(tmp_path):
+    calls = []
+
+    def fake_runner(mode, command, environment, log_path, timeout_seconds):
+        calls.append((mode, environment["MASTER_PORT"], timeout_seconds))
+        return 0, "direct ready"
+
+    conclusion = preflight.run_preflight(
+        tmp_path,
+        fake_runner,
+        available_cuobjdump,
+        17,
+        18361,
+    )
+
+    assert conclusion.value == "DIRECT_GIN_AVAILABLE"
+    assert calls == [("direct", "18361", 17)]
+
+
 def test_preflight_stops_before_launching_ranks_when_cuobjdump_is_missing(
     tmp_path, monkeypatch
 ):
