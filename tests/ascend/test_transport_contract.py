@@ -35,6 +35,7 @@ class AscendTransportContractTest(unittest.TestCase):
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)
 
+
     def test_public_transport_headers_have_no_vendor_dependencies(self):
         forbidden = ("cuda", "nccl", "nvshmem", "acl/", "hccl", "cann",
                      "torch_npu", "kernel_operator")

@@ -8,6 +8,11 @@ namespace deep_ep::ascend::elastic {
 
 struct HybridRouteRecord;
 
+#ifndef DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE
+#define DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE inline constexpr
+#define DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE_LOCAL 1
+#endif
+
 struct DispatchChunkPlan {
     std::uint64_t shard_capacity = 0;
     std::uint64_t chunk_slots = 0;
@@ -52,6 +57,14 @@ inline constexpr bool dispatch_chunk_peer_range(
     return true;
 }
 
+enum class DirectReleaseSegment : std::uint8_t {
+    kNone,
+    kAll,
+    kPayload,
+    kControl,
+    kBarrier,
+};
+
 enum class DirectDispatchStage : std::uint8_t {
     kFull,
     kProducerControl,
@@ -68,6 +81,8 @@ enum class DirectDispatchStage : std::uint8_t {
     kEpilogueMetadata,
     kEpilogueCopy,
     kEpilogueComplete,
+    kProducerReleaseControl,
+    kProducerReleaseBarrier,
 };
 
 inline constexpr DirectDispatchStage kFirstDirectDispatchEpilogueStage =
@@ -76,7 +91,7 @@ inline constexpr DirectDispatchStage kLastDirectDispatchEpilogueStage =
     DirectDispatchStage::kEpilogueComplete;
 
 struct DirectDispatchPipeline {
-    DirectDispatchStage stages[13]{};
+    DirectDispatchStage stages[15]{};
     std::uint32_t count = 0;
 };
 
@@ -98,6 +113,45 @@ inline constexpr DirectDispatchPipeline direct_dispatch_pipeline(
         DirectDispatchStage::kEpilogueComplete,
     }, cpu_sync ? 10U : 13U};
     return pipeline;
+}
+
+inline constexpr DirectDispatchPipeline direct_dispatch_profile_pipeline(
+    bool cpu_sync) noexcept {
+    DirectDispatchPipeline pipeline{{
+        DirectDispatchStage::kProducerControl,
+        DirectDispatchStage::kProducerGroup,
+        DirectDispatchStage::kProducerPrefix,
+        DirectDispatchStage::kProducerRecord,
+        DirectDispatchStage::kProducerRelease,
+        DirectDispatchStage::kProducerReleaseControl,
+        DirectDispatchStage::kProducerReleaseBarrier,
+        DirectDispatchStage::kEpilogueAcquire,
+        DirectDispatchStage::kEpilogueValidate,
+        DirectDispatchStage::kEpilogueValidateReduce,
+        DirectDispatchStage::kEpilogueExpertCount,
+        DirectDispatchStage::kEpilogueExpertPrefix,
+        DirectDispatchStage::kEpilogueMetadata,
+        DirectDispatchStage::kEpilogueCopy,
+        DirectDispatchStage::kEpilogueComplete,
+    }, cpu_sync ? 12U : 15U};
+    return pipeline;
+}
+
+DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE DirectReleaseSegment
+direct_dispatch_release_segment(
+    DirectDispatchStage stage, bool profile_enabled) noexcept {
+    if (stage == DirectDispatchStage::kFull)
+        return DirectReleaseSegment::kAll;
+    if (stage == DirectDispatchStage::kProducerRelease)
+        return profile_enabled ? DirectReleaseSegment::kPayload :
+                                 DirectReleaseSegment::kAll;
+    if (profile_enabled &&
+        stage == DirectDispatchStage::kProducerReleaseControl)
+        return DirectReleaseSegment::kControl;
+    if (profile_enabled &&
+        stage == DirectDispatchStage::kProducerReleaseBarrier)
+        return DirectReleaseSegment::kBarrier;
+    return DirectReleaseSegment::kNone;
 }
 
 inline constexpr DirectDispatchPipeline
@@ -150,10 +204,12 @@ enum class DirectCombineStage : std::uint8_t {
     kEpilogueReduce,
     kEpilogueWeights,
     kEpilogueComplete,
+    kProducerReleaseControl,
+    kProducerReleaseBarrier,
 };
 
 struct DirectCombinePipeline {
-    DirectCombineStage stages[11]{};
+    DirectCombineStage stages[13]{};
     std::uint32_t count = 0;
 };
 
@@ -172,6 +228,47 @@ inline constexpr DirectCombinePipeline direct_combine_pipeline() noexcept {
         DirectCombineStage::kEpilogueComplete,
     }, 11U};
 }
+
+inline constexpr DirectCombinePipeline
+direct_combine_profile_pipeline() noexcept {
+    return {{
+        DirectCombineStage::kProducerControl,
+        DirectCombineStage::kProducerPlan,
+        DirectCombineStage::kProducerPlanPrefix,
+        DirectCombineStage::kProducerRecord,
+        DirectCombineStage::kProducerRelease,
+        DirectCombineStage::kProducerReleaseControl,
+        DirectCombineStage::kProducerReleaseBarrier,
+        DirectCombineStage::kEpilogueAcquire,
+        DirectCombineStage::kEpilogueValidate,
+        DirectCombineStage::kEpilogueValidateReduce,
+        DirectCombineStage::kEpilogueReduce,
+        DirectCombineStage::kEpilogueWeights,
+        DirectCombineStage::kEpilogueComplete,
+    }, 13U};
+}
+
+DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE DirectReleaseSegment
+direct_combine_release_segment(
+    DirectCombineStage stage, bool profile_enabled) noexcept {
+    if (stage == DirectCombineStage::kFull)
+        return DirectReleaseSegment::kAll;
+    if (stage == DirectCombineStage::kProducerRelease)
+        return profile_enabled ? DirectReleaseSegment::kPayload :
+                                 DirectReleaseSegment::kAll;
+    if (profile_enabled &&
+        stage == DirectCombineStage::kProducerReleaseControl)
+        return DirectReleaseSegment::kControl;
+    if (profile_enabled &&
+        stage == DirectCombineStage::kProducerReleaseBarrier)
+        return DirectReleaseSegment::kBarrier;
+    return DirectReleaseSegment::kNone;
+}
+
+#if defined(DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE_LOCAL)
+#undef DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE_LOCAL
+#undef DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE
+#endif
 
 inline constexpr bool direct_combine_data_stage(
     DirectCombineStage stage) noexcept {
@@ -370,6 +467,8 @@ struct DispatchArguments {
     std::uint32_t pipeline_chunk_index = 0;
     std::uint32_t pipeline_final_chunk = 1;
     std::uint64_t pipeline_chunk_slots = 0;
+    std::uint32_t consumer_tile_bytes = 512;
+    std::uint32_t parallel_prefix = 0;
 };
 
 struct CombineArguments {
@@ -391,6 +490,7 @@ struct CombineArguments {
     std::uint64_t num_source_rows = 0;
     std::uint64_t num_input_rows = 0;
     std::uintptr_t local_window_base = 0;
+    std::uint32_t expanded_vector_reduce = 0;
 };
 
 }  // namespace deep_ep::ascend::elastic

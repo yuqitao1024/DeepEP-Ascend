@@ -20,11 +20,24 @@ from tests.ascend.benchmark.bench_ep import build_parser, _selected_case_ids
 from tests.ascend.benchmark.runtime import (
     AscendRuntime,
     PreparedCase,
+    _aggregate_rank_operations,
     _aggregate_stage_profiles,
+    _build_operation_work_counts,
     _configure_stage_profile_environment,
+    _derive_host_envelope_samples,
+    _derive_stage_timeline,
+    _payload_rows,
 )
 from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
 from tests.ascend.benchmark.timing import NpuEventTimer
+from tests.ascend.benchmark.timeline import (
+    operation_stage_semantics,
+    stage_semantic,
+)
+from tests.ascend.benchmark.timeline_report import (
+    build_timeline_report,
+    render_timeline_markdown,
+)
 from tests.ascend.benchmark import workloads
 from tests.ascend.benchmark.workloads import classify_ascend_case
 from tests.utils.ep_benchmark_core import build_dispatch_arguments
@@ -59,6 +72,21 @@ FP8_ASYNC_CASES = (
     "fp8-drop-event",
     "fp8-destroy-pending-retry",
 )
+
+WORK_COUNT_KEYS = {
+    "input_tokens",
+    "valid_routes",
+    "received_records",
+    "expanded_slots",
+    "input_rows",
+    "output_tokens",
+    "hidden_elements",
+    "topk_elements",
+}
+
+
+def _literal_work_counts(value=1):
+    return {key: value for key in WORK_COUNT_KEYS}
 
 
 def test_case_matrix_matches_upstream_order_and_size():
@@ -833,6 +861,12 @@ def test_timed_handle_operations_prepare_current_handles_outside_measurement():
         traffic={operation_id: {} for operation_id in (
             "dispatch", "expanded_dispatch", "cached_dispatch", "combine",
             "reduced_combine")},
+        work_counts={
+            operation_id: _literal_work_counts()
+            for operation_id in (
+                "dispatch", "expanded_dispatch", "cached_dispatch", "combine",
+                "reduced_combine")
+        },
     )
     prepared.prepare_launches = {
         "cached_dispatch": prepare("cached"),
@@ -907,6 +941,10 @@ def test_stage_profile_capture_runs_outside_event_timing():
         launches={operation_id: launch for operation_id in operation_ids},
         prepare_launches={},
         traffic={operation_id: {} for operation_id in operation_ids},
+        work_counts={
+            operation_id: _literal_work_counts()
+            for operation_id in operation_ids
+        },
     )
     runtime = AscendRuntime.__new__(AscendRuntime)
     runtime.buffer = Buffer()
@@ -926,6 +964,92 @@ def test_stage_profile_capture_runs_outside_event_timing():
     assert events.count("reset") == len(operation_ids)
     assert events.count("read") == len(operation_ids)
     assert events.count("synchronize") == len(operation_ids)
+    assert all(record["work_counts"] == _literal_work_counts()
+               for record in records)
+    assert all(record["logical_byte_components"] == {}
+               for record in records)
+
+
+def test_work_counts_and_logical_components_use_rank_max_and_byte_sum():
+    ranks = []
+    for rank in range(2):
+        ranks.append([
+            {
+                "operation_id": operation_id,
+                "device_samples": [0.001 + rank * 0.0001],
+                "wall_samples": [0.002 + rank * 0.0001],
+                "logical_bytes": {"scaleup": 100 + rank},
+                "logical_byte_components": {"scaleup": 100 + rank},
+                "work_counts": _literal_work_counts(7 + rank),
+            }
+            for operation_id in (
+                "dispatch", "expanded_dispatch", "cached_dispatch", "combine",
+                "reduced_combine",
+            )
+        ])
+
+    operations = _aggregate_rank_operations(ranks)
+
+    assert len(operations) == 5
+    assert operations[0]["work_counts"] == _literal_work_counts(8)
+    assert operations[0]["logical_bytes"] == {"scaleup": 201}
+    assert operations[0]["logical_byte_components"] == {"scaleup": 201}
+    assert operations[0]["per_rank"][0]["work_counts"] == (
+        _literal_work_counts(7)
+    )
+
+
+def test_operation_work_counts_describe_literal_dispatch_and_combine_rows():
+    counts = _build_operation_work_counts(
+        SimpleNamespace(num_tokens=8, hidden=16, num_topk=2),
+        valid_routes=12,
+        normal_input_rows=8,
+        normal_received_records=10,
+        expanded_slots=20,
+        combine_input_rows=10,
+        reduced_input_rows=20,
+    )
+
+    assert counts["dispatch"] == {
+        "input_tokens": 8,
+        "valid_routes": 12,
+        "received_records": 10,
+        "expanded_slots": 0,
+        "input_rows": 8,
+        "output_tokens": 10,
+        "hidden_elements": 128,
+        "topk_elements": 16,
+    }
+    assert counts["expanded_dispatch"] == (
+        counts["dispatch"] | {"expanded_slots": 20, "output_tokens": 20}
+    )
+    assert counts["cached_dispatch"] == counts["dispatch"]
+    assert counts["combine"] == {
+        "input_tokens": 8,
+        "valid_routes": 12,
+        "received_records": 10,
+        "expanded_slots": 0,
+        "input_rows": 10,
+        "output_tokens": 8,
+        "hidden_elements": 160,
+        "topk_elements": 16,
+    }
+    assert counts["reduced_combine"] == (
+        counts["combine"] | {
+            "expanded_slots": 20,
+            "input_rows": 20,
+            "hidden_elements": 320,
+        }
+    )
+
+
+def test_payload_rows_uses_fp8_payload_instead_of_scale_tuple():
+    bf16 = SimpleNamespace(shape=(8, 7168))
+    fp8_payload = SimpleNamespace(shape=(9, 7168))
+    fp8_scales = SimpleNamespace(shape=(9, 56))
+
+    assert _payload_rows(bf16) == 8
+    assert _payload_rows((fp8_payload, fp8_scales)) == 9
 
 
 def _literal_stage_profile(rank, *, generation=9, operation="dispatch"):
@@ -951,11 +1075,90 @@ def _literal_stage_profile(rank, *, generation=9, operation="dispatch"):
             "publication": 20,
             "service_submit": 30,
             "cq_wait": 10,
+            "barrier_wait": 20,
             "consumer_wait": 40,
             "consumer_compute": 50,
             "epilogue": 10,
         },
+        "service": {
+            "start": 100,
+            "end": 200 + rank * 10,
+            "cycles": 100 + rank * 10,
+            "wait_cycles": 10,
+            "payload_command_cycles": 40 + rank * 5,
+            "control_command_cycles": 15,
+            "flush_command_cycles": 9,
+            "barrier_command_cycles": 30,
+            "barrier_poll_cycles": 20 + rank * 2,
+        },
     }
+
+
+@pytest.mark.parametrize(
+    ("operation_id", "raw_name", "stage_id"),
+    (
+        ("dispatch", "producer_control", "D0"),
+        ("expanded_dispatch", "producer_group", "D1"),
+        ("cached_dispatch", "producer_prefix", "D2"),
+        ("dispatch", "producer_record", "D3"),
+        ("dispatch", "release_payload", "D4"),
+        ("dispatch", "release_control", "D4"),
+        ("dispatch", "release_barrier", "D4"),
+        ("dispatch", "epilogue_acquire", "D5"),
+        ("dispatch", "epilogue_validate", "D5"),
+        ("dispatch", "epilogue_validate_reduce", "D5"),
+        ("dispatch", "epilogue_expert_count", "D5"),
+        ("dispatch", "epilogue_expert_prefix", "D6"),
+        ("dispatch", "epilogue_metadata", "D7"),
+        ("dispatch", "epilogue_copy", "D8"),
+        ("dispatch", "epilogue_complete", "F0"),
+        ("combine", "producer_control", "C0"),
+        ("reduced_combine", "producer_plan", "C1"),
+        ("combine", "producer_plan_prefix", "C1"),
+        ("combine", "producer_record", "C2"),
+        ("combine", "producer_local_copy", "C3"),
+        ("combine", "release_payload", "C4"),
+        ("combine", "release_control", "C4"),
+        ("combine", "release_barrier", "C4"),
+        ("combine", "epilogue_acquire", "C5"),
+        ("combine", "epilogue_validate", "C5"),
+        ("combine", "epilogue_validate_reduce", "C5"),
+        ("combine", "epilogue_reduce", "C6"),
+        ("combine", "epilogue_weights", "C7"),
+        ("combine", "epilogue_complete", "F0"),
+    ),
+)
+def test_stage_semantic_maps_raw_runtime_stages_to_stable_ids(
+    operation_id, raw_name, stage_id,
+):
+    semantic = stage_semantic(operation_id, raw_name)
+
+    assert semantic.stage_id == stage_id
+    assert semantic.short_name
+    assert semantic.ascend_functions
+    assert semantic.cuda_counterpart
+    assert isinstance(semantic.work_count_keys, tuple)
+
+
+def test_stage_semantic_marks_combine_local_staging_as_not_independently_timed():
+    semantic = stage_semantic("combine", "producer_local_copy")
+
+    assert semantic.stage_id == "C3"
+    assert semantic.independently_timed is False
+    assert semantic.ascend_functions == (
+        "direct_combine_producer_local_copy_vf",
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation_id", "raw_name"),
+    (("dispatch", "mystery"), ("combine", "mystery"), ("unknown", "full")),
+)
+def test_stage_semantic_rejects_unknown_operations_and_stages(
+    operation_id, raw_name,
+):
+    with pytest.raises(ValueError, match="stage semantic"):
+        stage_semantic(operation_id, raw_name)
 
 
 def test_stage_profile_rank_aggregation_derives_literal_block_span():
@@ -966,7 +1169,77 @@ def test_stage_profile_rank_aggregation_derives_literal_block_span():
     assert aggregated["generation"] == 9
     assert aggregated["stage_spans_cycles"] == {"producer_control": 60}
     assert aggregated["phase_cycles"]["producer"] == 70
-    assert aggregated["optimistic_speedup_ceiling"] == pytest.approx(2.3)
+    assert aggregated["phase_cycles"]["barrier_wait"] == 20
+    assert aggregated["pipeline_cycles"]["network"] == 80
+    assert aggregated["service_cycles"] == {
+        "cycles": 110,
+        "wait_cycles": 10,
+        "payload_command_cycles": 45,
+        "control_command_cycles": 15,
+        "flush_command_cycles": 9,
+        "barrier_command_cycles": 30,
+        "barrier_poll_cycles": 22,
+    }
+    assert aggregated["optimistic_speedup_ceiling"] == pytest.approx(2.5)
+    assert aggregated["per_rank"][0]["stages"][0] == {
+        "id": 1,
+        "name": "producer_control",
+        "block_count": 2,
+        "blocks": [
+            {"block": 0, "start": 100, "end": 130},
+            {"block": 1, "start": 90, "end": 150},
+        ],
+        "stage_id": "D0",
+        "short_name": "control",
+        "ascend_functions": ("direct_dispatch_producer_control_vf",),
+        "cuda_counterpart": (
+            "dispatch_impl prologue and notify-warps setup"
+        ),
+        "work_count_keys": ("input_tokens",),
+        "independently_timed": True,
+        "start": 90,
+        "end": 150,
+        "span_cycles": 60,
+    }
+
+
+def test_stage_timeline_derives_idle_and_overlap_from_literal_intervals():
+    stages = [
+        {
+            "name": "producer",
+            "start": 90,
+            "end": 150,
+            "span_cycles": 60,
+        },
+        {
+            "name": "release",
+            "start": 170,
+            "end": 200,
+            "span_cycles": 30,
+        },
+        {
+            "name": "consumer",
+            "start": 190,
+            "end": 230,
+            "span_cycles": 40,
+        },
+    ]
+
+    assert _derive_stage_timeline(stages) == {
+        "start": 90,
+        "end": 230,
+        "envelope_cycles": 140,
+        "active_cycles": 120,
+        "idle_cycles": 20,
+        "overlap_cycles": 10,
+    }
+
+
+def test_host_envelope_overhead_uses_paired_wall_and_device_samples():
+    assert _derive_host_envelope_samples(
+        wall_samples=[0.002, 0.004],
+        device_samples=[0.0015, 0.003],
+    ) == pytest.approx([0.0005, 0.001])
 
 
 def test_stage_profile_rank_aggregation_maps_full_only_span_to_a_phase():
@@ -982,6 +1255,7 @@ def test_stage_profile_rank_aggregation_maps_full_only_span_to_a_phase():
         "publication": 0,
         "service_submit": 0,
         "cq_wait": 0,
+        "barrier_wait": 0,
         "consumer_wait": 0,
         "consumer_compute": 0,
         "epilogue": 0,
@@ -990,6 +1264,8 @@ def test_stage_profile_rank_aggregation_maps_full_only_span_to_a_phase():
     aggregated = _aggregate_stage_profiles("dispatch", [profile])
 
     assert aggregated["stage_spans_cycles"] == {"full": 140}
+    assert aggregated["per_rank"][0]["stages"][0]["stage_id"] == "FULL"
+    assert aggregated["per_rank"][0]["stages"][0]["cuda_counterpart"] == ""
     assert aggregated["phase_cycles"]["producer"] == 140
     assert aggregated["pipeline_cycles"] == {
         "producer": 140,
@@ -997,6 +1273,47 @@ def test_stage_profile_rank_aggregation_maps_full_only_span_to_a_phase():
         "consumer": 0,
     }
     assert aggregated["optimistic_speedup_ceiling"] == pytest.approx(1.0)
+
+
+def test_stage_profile_rank_aggregation_rejects_unmapped_runtime_stage():
+    profile = _literal_stage_profile(0)
+    profile["stages"][0]["name"] = "mystery"
+
+    with pytest.raises(ValueError, match="stage semantic"):
+        _aggregate_stage_profiles("dispatch", [profile])
+
+
+def test_stage_profile_rank_aggregation_includes_host_timeline_maxima():
+    profiles = [_literal_stage_profile(0), _literal_stage_profile(1)]
+    profiles[0]["host_timeline_ns"] = {
+        "dispatch_synchronize": 100,
+        "dispatch_completion_wait": 300,
+        "total": 400,
+    }
+    profiles[1]["host_timeline_ns"] = {
+        "dispatch_synchronize": 120,
+        "dispatch_completion_wait": 250,
+        "total": 370,
+    }
+
+    aggregated = _aggregate_stage_profiles("dispatch", profiles)
+
+    assert aggregated["host_timeline_ns"] == {
+        "dispatch_synchronize": 120,
+        "dispatch_completion_wait": 300,
+        "total": 400,
+    }
+
+
+def test_stage_profile_exposes_only_semantically_relevant_work_counts():
+    counts = _literal_work_counts(3)
+
+    aggregated = _aggregate_stage_profiles(
+        "dispatch", [_literal_stage_profile(0)], rank_work_counts=[counts])
+
+    stage = aggregated["per_rank"][0]["stages"][0]
+    assert stage["stage_id"] == "D0"
+    assert stage["work_counts"] == {"input_tokens": 3}
 
 
 @pytest.mark.parametrize(
@@ -1017,15 +1334,235 @@ def test_stage_profile_rank_aggregation_rejects_mismatched_identity(
 
 
 def test_stage_profile_rank_aggregation_reports_unavailable_reason_first():
+    command_metrics = {
+        "command_count": 3,
+        "put_command_count": 7,
+    }
+    service = {"start": 100, "end": 200}
     profiles = [
-        {"available": False, "reason": "stale_generation"},
+        {
+            "available": False,
+            "reason": "stale_generation",
+            "command_metrics": command_metrics,
+            "service": service,
+        },
         _literal_stage_profile(1),
     ]
 
-    with pytest.raises(
-            ValueError,
-            match="stage profile unavailable on rank 0: stale_generation"):
+    with pytest.raises(ValueError) as error:
         _aggregate_stage_profiles("dispatch", profiles)
+    message = str(error.value)
+    assert "stage profile unavailable on rank 0: stale_generation" in message
+    assert repr(command_metrics) in message
+    assert repr(service) in message
+
+
+def _literal_timeline_operation(operation_id, raw_stages):
+    stages = []
+    for index, (raw_name, stage_id) in enumerate(raw_stages):
+        start = 100 + index * 10
+        stages.append({
+            "name": raw_name,
+            "stage_id": stage_id,
+            "start": start,
+            "end": start + 5,
+            "span_cycles": 5,
+        })
+    return {
+        "operation_id": operation_id,
+        "logical_byte_components": {"scaleup": 100},
+        "work_counts": _literal_work_counts(7),
+        "per_rank": [{
+            "rank": 0,
+            "logical_byte_components": {"scaleup": 100},
+            "work_counts": _literal_work_counts(7),
+        }],
+        "stage_profile": {
+            "device_timeline_cycles": {
+                "envelope_cycles": len(stages) * 10 - 5,
+                "active_cycles": len(stages) * 5,
+                "idle_cycles": (len(stages) - 1) * 5,
+                "overlap_cycles": 0,
+            },
+            "host_timeline_ns": {"total": 2_000_000},
+            "per_rank": [{
+                "rank": 0,
+                "host_timeline_ns": {"total": 2_000_000},
+                "device_timeline_cycles": {
+                    "start": 100,
+                    "end": 100 + len(stages) * 10 - 5,
+                    "envelope_cycles": len(stages) * 10 - 5,
+                    "active_cycles": len(stages) * 5,
+                    "idle_cycles": (len(stages) - 1) * 5,
+                    "overlap_cycles": 0,
+                },
+                "stages": stages,
+            }],
+        },
+    }
+
+
+def _literal_timeline_report():
+    dispatch_stages = (
+        ("producer_control", "D0"),
+        ("producer_group", "D1"),
+        ("producer_prefix", "D2"),
+        ("producer_record", "D3"),
+        ("release_payload", "D4"),
+        ("epilogue_acquire", "D5"),
+        ("epilogue_expert_prefix", "D6"),
+        ("epilogue_metadata", "D7"),
+        ("epilogue_copy", "D8"),
+        ("epilogue_complete", "F0"),
+    )
+    combine_stages = (
+        ("producer_control", "C0"),
+        ("producer_plan", "C1"),
+        ("producer_record", "C2"),
+        ("release_payload", "C4"),
+        ("epilogue_acquire", "C5"),
+        ("epilogue_reduce", "C6"),
+        ("epilogue_weights", "C7"),
+        ("epilogue_complete", "F0"),
+    )
+    return {
+        "schema_version": 3,
+        "platform": "ascend",
+        "git_commit": "abc123",
+        "world_size": 1,
+        "workload_fingerprint": "f" * 64,
+        "execution_protocol": {
+            "allow_multiple_reduction": 1,
+            "stage_profile": 1,
+        },
+        "cases": [{
+            "case_id": "representative",
+            "status": "passed",
+            "operations": [
+                _literal_timeline_operation("combine", combine_stages),
+                _literal_timeline_operation("dispatch", dispatch_stages),
+            ],
+        }],
+    }
+
+
+def test_operation_stage_semantics_include_virtual_c3_in_stable_order():
+    assert tuple(
+        semantic.stage_id
+        for semantic in operation_stage_semantics("combine")
+    ) == ("C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "F0")
+
+
+def test_timeline_report_builds_deterministic_per_rank_stage_rows():
+    timeline = build_timeline_report(_literal_timeline_report())
+
+    assert timeline["timeline_schema_version"] == 1
+    assert timeline["source"] == {
+        "schema_version": 3,
+        "platform": "ascend",
+        "git_commit": "abc123",
+        "world_size": 1,
+        "workload_fingerprint": "f" * 64,
+    }
+    assert [row["stage_id"] for row in timeline["rows"]] == [
+        "D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "F0",
+        "C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "F0",
+    ]
+    assert timeline["rows"][0] == {
+        "case_id": "representative",
+        "operation_id": "dispatch",
+        "rank": 0,
+        "stage_id": "D0",
+        "short_name": "control",
+        "measurement_status": "measured",
+        "raw_stages": ["producer_control"],
+        "start_cycles": 100,
+        "end_cycles": 105,
+        "envelope_cycles": 5,
+        "active_cycles": 5,
+        "idle_cycles": 0,
+        "overlap_cycles": 0,
+        "operation_timeline_cycles": {
+            "start": 100,
+            "end": 195,
+            "envelope_cycles": 95,
+            "active_cycles": 50,
+            "idle_cycles": 45,
+            "overlap_cycles": 0,
+        },
+        "host_timeline_ns": {"total": 2_000_000},
+        "work_counts": {"input_tokens": 7},
+        "logical_byte_components": {"scaleup": 100},
+        "ascend_functions": ["direct_dispatch_producer_control_vf"],
+        "cuda_counterpart": "dispatch_impl prologue and notify-warps setup",
+    }
+    c3 = next(row for row in timeline["rows"] if row["stage_id"] == "C3")
+    assert c3["measurement_status"] == "not_independently_timed"
+    assert c3["start_cycles"] is None
+    assert c3["end_cycles"] is None
+    assert c3["raw_stages"] == []
+
+
+def test_timeline_markdown_keeps_cycles_and_formats_host_nanoseconds():
+    markdown = render_timeline_markdown(_literal_timeline_report())
+
+    assert "| Case | Operation | Rank | Stage |" in markdown
+    assert "| representative | dispatch | 0 | D0 control |" in markdown
+    assert "100-105 cycles" in markdown
+    assert "2.000 ms" in markdown
+    assert "direct_dispatch_producer_control_vf" in markdown
+    assert "dispatch_impl prologue and notify-warps setup" in markdown
+    assert "device ms" not in markdown
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    (
+        (lambda report: report["execution_protocol"].update(stage_profile=0),
+         "stage_profile"),
+        (lambda report: report["cases"][0]["operations"][0][
+            "stage_profile"].pop("per_rank"), "rank profiles"),
+        (lambda report: report["cases"][0]["operations"][0][
+            "stage_profile"]["per_rank"][0]["stages"][0].update(
+                stage_id="D0"), "stage ID"),
+        (lambda report: report["cases"][0]["operations"][0][
+            "stage_profile"]["per_rank"][0]["stages"][0].update(end=99),
+         "interval"),
+        (lambda report: report["cases"][0]["operations"][0].pop(
+            "work_counts"), "work counts"),
+    ),
+)
+def test_timeline_report_rejects_incomplete_or_inconsistent_profiles(
+    mutate, match,
+):
+    report = _literal_timeline_report()
+    mutate(report)
+
+    with pytest.raises(ValueError, match=match):
+        build_timeline_report(report)
+
+
+def test_timeline_report_cli_emits_json(tmp_path):
+    report_path = tmp_path / "profile.json"
+    report_path.write_text(json.dumps(_literal_timeline_report()))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tests.ascend.benchmark.timeline_report",
+            str(report_path),
+            "--format",
+            "json",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["rows"][0]["stage_id"] == "D0"
 
 
 def test_fp8_empty_input_case_requests_exact_column_major_output():

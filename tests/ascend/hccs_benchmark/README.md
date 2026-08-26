@@ -343,6 +343,9 @@ The detailed production phase definitions and aggregation caveats are in
 The narrower comparison with external expert-count, prefix, scale-copy, and
 SQE-construction measurements is in
 [`epv2-ascend-stage-timing-analysis.md`](../../../docs/ascend-design/epv2-ascend-stage-timing-analysis.md).
+The implementation and acceptance contract for the resulting P4.0-P4.4 work
+is in
+[`epv2-ascend-p4-production-path-optimization.md`](../../../docs/ascend-design/epv2-ascend-p4-production-path-optimization.md).
 
 ## Result integrity
 

@@ -36,6 +36,7 @@
 #include "elastic/operation_coordinator.hpp"
 #include "elastic/runtime.hpp"
 #include "runtime/cann_runtime.hpp"
+#include "runtime/host_timeline.hpp"
 #include "transport/topology_config.hpp"
 
 namespace deep_ep::ascend {
@@ -648,6 +649,8 @@ class ElasticBuffer {
     std::shared_ptr<elastic::AsyncBufferState> async_state_;
     std::uint64_t barrier_timeout_cycles_ = 0;
     std::uint64_t completion_timeout_ms_ = 5000;
+    bool stage_profile_enabled_ = false;
+    mutable runtime::HostTimelineProfile host_timeline_profile_{};
 #if DEEP_EP_ASCEND_TESTING
     std::shared_ptr<ElasticBufferTestingLifecycleControl>
         testing_lifecycle_control_;
@@ -705,6 +708,17 @@ class ElasticBuffer {
             lease.activate(), "DeepEP Ascend backend: ", operation,
             " generation space is exhausted; this buffer is poisoned");
         return lease.generation();
+    }
+
+    std::uint64_t host_profile_start() const noexcept {
+        return stage_profile_enabled_ ? runtime::host_timestamp_ns() : 0;
+    }
+
+    void host_profile_record(
+        runtime::HostTimelinePhase phase, std::uint64_t start_ns) const noexcept {
+        if (stage_profile_enabled_)
+            (void)host_timeline_profile_.record(
+                phase, start_ns, runtime::host_timestamp_ns());
     }
 
     static constexpr auto kCombineCapabilities =
@@ -907,6 +921,9 @@ class ElasticBuffer {
                 std::move(resources), dispatch_family,
                 last_dispatch_generation, rank);
         resources_ = completion_resources_->runtime();
+        stage_profile_enabled_ = transport::has_capability(
+            resources_->transport()->capabilities(),
+            transport::TransportCapability::kStageProfile);
         async_state_ = std::make_shared<elastic::AsyncBufferState>(
             completion_resources_, completion_timeout_ms);
     }
@@ -965,6 +982,7 @@ public:
             num_cpu_buffer_bytes, allow_hybrid_mode, sl_idx, 1};
         config.stage_profile_enabled =
             environment_is("DEEP_EP_ASCEND_PROFILE_STAGES", "1");
+        stage_profile_enabled_ = config.stage_profile_enabled;
         const auto topology_status =
             transport::configure_transport_topology_from_environment(&config);
         if (!topology_status.ok())
@@ -1086,6 +1104,7 @@ public:
         std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
         TORCH_CHECK(resources_ != nullptr,
                     "DeepEP Ascend backend: runtime is destroyed");
+        host_timeline_profile_.reset(0);
         const auto status = host_transport()->reset_stage_profile();
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
@@ -1139,6 +1158,29 @@ public:
             unavailable("partial_generation");
             return result;
         }
+        pybind11::dict command_metrics;
+        command_metrics["command_count"] = profile.command_count;
+        command_metrics["put_command_count"] = profile.put_command_count;
+        command_metrics["payload_bytes"] = profile.command_bytes;
+        command_metrics["sq_depth"] = profile.sq_depth;
+        command_metrics["cq_depth"] = profile.cq_depth;
+        command_metrics["sq_high_watermark"] = profile.sq_high_watermark;
+        command_metrics["cq_high_watermark"] = profile.cq_high_watermark;
+        result["command_metrics"] = command_metrics;
+        pybind11::dict raw_service;
+        raw_service["start"] = profile.service_start_cycles;
+        raw_service["end"] = profile.service_end_cycles;
+        raw_service["wait_cycles"] = profile.wait_cycles;
+        raw_service["payload_command_cycles"] =
+            profile.payload_command_cycles;
+        raw_service["control_command_cycles"] =
+            profile.control_command_cycles;
+        raw_service["flush_command_cycles"] =
+            profile.flush_command_cycles;
+        raw_service["barrier_command_cycles"] =
+            profile.barrier_command_cycles;
+        raw_service["barrier_poll_cycles"] = profile.barrier_poll_cycles;
+        result["service"] = raw_service;
         const auto command_metrics_status =
             transport::transport_stage_profile_command_metrics_status(
                 profile, true);
@@ -1164,18 +1206,20 @@ public:
             transport::TransportProfileOperation::kDispatch;
         constexpr const char* dispatch_stage_names[] = {
             "full", "producer_control", "producer_group",
-            "producer_prefix", "producer_record", "producer_release",
+            "producer_prefix", "producer_record", "release_payload",
             "epilogue_acquire", "epilogue_validate",
             "epilogue_validate_reduce", "epilogue_expert_count",
             "epilogue_expert_prefix", "epilogue_metadata",
-            "epilogue_copy", "epilogue_complete",
+            "epilogue_copy", "epilogue_complete", "release_control",
+            "release_barrier",
         };
         constexpr const char* combine_stage_names[] = {
             "full", "producer_control", "producer_plan",
-            "producer_plan_prefix", "producer_record", "producer_release",
+            "producer_plan_prefix", "producer_record", "release_payload",
             "epilogue_acquire", "epilogue_validate",
             "epilogue_validate_reduce", "epilogue_reduce",
-            "epilogue_weights", "epilogue_complete",
+            "epilogue_weights", "epilogue_complete", "release_control",
+            "release_barrier",
         };
         const auto stage_name = [
             dispatch, &dispatch_stage_names,
@@ -1242,7 +1286,7 @@ public:
 
         if (!transport::transport_stage_profile_service_cycles_valid(
                 profile.service_start_cycles, profile.service_end_cycles,
-                profile.wait_cycles)) {
+                profile.wait_cycles, profile.barrier_poll_cycles)) {
             unavailable("invalid_service_cycles");
             return result;
         }
@@ -1251,31 +1295,19 @@ public:
         const auto phases = transport::derive_stage_profile_phase_cycles(
             profile.operation, profile.valid_stage_mask, stage_spans,
             profile.service_start_cycles, profile.service_end_cycles,
-            profile.wait_cycles);
+            profile.wait_cycles, profile.barrier_poll_cycles);
 
         pybind11::dict phase_cycles;
         phase_cycles["producer"] = phases.producer;
         phase_cycles["publication"] = phases.publication;
         phase_cycles["service_submit"] = phases.service_submit;
         phase_cycles["cq_wait"] = phases.cq_wait;
+        phase_cycles["barrier_wait"] = phases.barrier_wait;
         phase_cycles["consumer_wait"] = phases.consumer_wait;
         phase_cycles["consumer_compute"] = phases.consumer_compute;
         phase_cycles["epilogue"] = phases.epilogue;
 
-        pybind11::dict command_metrics;
-        command_metrics["command_count"] = profile.command_count;
-        command_metrics["put_command_count"] = profile.put_command_count;
-        command_metrics["payload_bytes"] = profile.command_bytes;
-        command_metrics["sq_depth"] = profile.sq_depth;
-        command_metrics["cq_depth"] = profile.cq_depth;
-        command_metrics["sq_high_watermark"] = profile.sq_high_watermark;
-        command_metrics["cq_high_watermark"] = profile.cq_high_watermark;
-
-        pybind11::dict service;
-        service["start"] = profile.service_start_cycles;
-        service["end"] = profile.service_end_cycles;
-        service["cycles"] = service_cycles;
-        service["wait_cycles"] = profile.wait_cycles;
+        raw_service["cycles"] = service_cycles;
 
         result["available"] = true;
         result["abi_version"] = profile.abi_version;
@@ -1283,9 +1315,19 @@ public:
         result["generation"] = profile.generation;
         result["completion_generation"] = profile.completion_generation;
         result["stages"] = stages;
-        result["command_metrics"] = command_metrics;
-        result["service"] = service;
+        result["service"] = raw_service;
         result["phase_cycles"] = phase_cycles;
+        if (host_timeline_profile_.generation == profile.generation) {
+            pybind11::dict host_timeline_ns;
+            for (std::size_t index = 0;
+                 index < runtime::HostTimelineProfile::kPhaseCount; ++index) {
+                const auto phase = static_cast<runtime::HostTimelinePhase>(index);
+                host_timeline_ns[runtime::host_timeline_phase_name(phase)] =
+                    host_timeline_profile_.phase_ns(phase);
+            }
+            host_timeline_ns["total"] = host_timeline_profile_.total_ns();
+            result["host_timeline_ns"] = host_timeline_ns;
+        }
         return result;
     }
 
@@ -1549,6 +1591,9 @@ public:
              const bool& do_cpu_sync, const bool& do_expand,
              const bool& do_zero_padding,
              const bool& use_tma_aligned_col_major_sf) const {
+        if (stage_profile_enabled_)
+            host_timeline_profile_.reset(0);
+        const auto dispatch_prelaunch_start_ns = host_profile_start();
         TORCH_CHECK(!cumulative_local_expert_recv_stats.has_value(),
                     "DeepEP Ascend backend: dispatch does not support "
                     "cumulative expert stats");
@@ -1559,10 +1604,48 @@ public:
         TORCH_CHECK(!previous_event.has_value() || allocate_on_comm_stream,
                     "DeepEP Ascend backend: dispatch previous_event requires "
                     "allocate_on_comm_stream=True");
-        const bool split_dispatch = !cached_mode && do_cpu_sync &&
-            !allow_hybrid_mode_;
         const bool stream_mode = previous_event.has_value() ||
             async_with_compute_stream || allocate_on_comm_stream;
+        elastic::DispatchDevicePrefixConfig device_prefix_config{};
+        const auto device_prefix_config_status =
+            elastic::select_dispatch_device_prefix_config(
+                std::getenv("DEEP_EP_ASCEND_DISPATCH_DEVICE_PREFIX"),
+                cached_mode, do_cpu_sync, allow_hybrid_mode_, stream_mode,
+                &device_prefix_config);
+        TORCH_CHECK(
+            device_prefix_config_status !=
+                elastic::DispatchDevicePrefixConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_DISPATCH_DEVICE_PREFIX must be 0 or 1");
+        const bool split_dispatch = !cached_mode && do_cpu_sync &&
+            !allow_hybrid_mode_ && !device_prefix_config.enabled;
+        elastic::DispatchConsumerTileConfig consumer_tile_config{};
+        const auto consumer_tile_config_status =
+            elastic::select_dispatch_consumer_tile_config(
+                std::getenv(
+                    "DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES"),
+                device_prefix_config.enabled, cached_mode, do_cpu_sync,
+                do_expand, allow_hybrid_mode_, stream_mode,
+                &consumer_tile_config);
+        TORCH_CHECK(
+            consumer_tile_config_status !=
+                elastic::DispatchConsumerTileConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES must be one of "
+            "512, 1024, 2048, or 4096");
+        elastic::DispatchParallelPrefixConfig parallel_prefix_config{};
+        const auto parallel_prefix_config_status =
+            elastic::select_dispatch_parallel_prefix_config(
+                std::getenv(
+                    "DEEP_EP_ASCEND_DISPATCH_PARALLEL_PREFIX"),
+                device_prefix_config.enabled, cached_mode, do_cpu_sync,
+                do_expand, allow_hybrid_mode_, stream_mode,
+                &parallel_prefix_config);
+        TORCH_CHECK(
+            parallel_prefix_config_status !=
+                elastic::DispatchParallelPrefixConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_DISPATCH_PARALLEL_PREFIX must be 0 or 1");
         TORCH_CHECK(!stream_mode ||
                         ((cached_mode || split_dispatch) &&
                          !allow_hybrid_mode_),
@@ -1724,10 +1807,21 @@ public:
             capacity * static_cast<std::uint64_t>(num_ranks_);
         const auto local_experts = experts / static_cast<std::uint64_t>(num_ranks_);
         const auto expanded_records = tiling.dispatch_output_capacity;
+        constexpr std::uint64_t kCountBridgeAlignmentElements = 16;
+        const auto count_bridge_layout = elastic::dispatch_count_bridge_layout(
+            static_cast<std::uint64_t>(num_ranks_), experts, local_experts,
+            kCountBridgeAlignmentElements);
         TORCH_CHECK(max_recv_tokens <= static_cast<std::uint64_t>(
                         std::numeric_limits<int>::max()) &&
                         expanded_records <= static_cast<std::uint64_t>(
-                            std::numeric_limits<int>::max()),
+                            std::numeric_limits<int>::max()) &&
+                        count_bridge_layout.valid &&
+                        count_bridge_layout.kernel_elements <=
+                            static_cast<std::uint64_t>(
+                                std::numeric_limits<int64_t>::max()) &&
+                        count_bridge_layout.public_elements <=
+                            static_cast<std::uint64_t>(
+                                std::numeric_limits<int64_t>::max()),
                     "DeepEP Ascend backend: dispatch output count overflow");
 
         runtime::StreamIdentity dispatch_stream;
@@ -1781,17 +1875,30 @@ public:
         torch::Tensor rank_prefix;
         torch::Tensor expert_prefix;
         torch::Tensor unaligned;
+        torch::Tensor public_count_bridge;
         torch::Tensor destination_slots;
         torch::Tensor source_metadata;
-        auto kernel_expert_prefix = torch::empty(
-            {num_experts + 1}, int_options);
-        auto kernel_unaligned = torch::empty(
-            {num_experts}, int_options);
+        auto kernel_count_bridge = torch::empty(
+            {static_cast<int64_t>(count_bridge_layout.kernel_elements)},
+            int_options);
+        auto kernel_expert_prefix = kernel_count_bridge.narrow(
+            0,
+            static_cast<int64_t>(
+                count_bridge_layout.kernel_expert_prefix_offset),
+            num_experts + 1);
+        auto kernel_unaligned = kernel_count_bridge.narrow(
+            0,
+            static_cast<int64_t>(count_bridge_layout.kernel_unaligned_offset),
+            num_experts);
         std::vector<std::int32_t> host_rank_prefix(num_ranks_);
         std::vector<std::int32_t> host_kernel_expert_prefix(num_experts + 1);
         std::vector<std::int32_t> host_kernel_unaligned(num_experts);
         std::vector<std::int32_t> host_expert_prefix(local_experts);
         std::vector<std::int32_t> host_unaligned(local_experts);
+        std::vector<std::int32_t> host_kernel_count_bridge(
+            static_cast<std::size_t>(count_bridge_layout.kernel_elements));
+        std::vector<std::int32_t> host_public_count_bridge(
+            static_cast<std::size_t>(count_bridge_layout.public_elements));
         std::vector<elastic::HybridRouteRecord> host_route_records;
         std::vector<int> per_expert_list;
         int num_expanded_tokens = 0;
@@ -2015,11 +2122,23 @@ public:
             per_expert_list = *cached_num_recv_tokens_per_expert_list;
             num_expanded_tokens = *cached_num_expanded_tokens;
         } else {
-            rank_prefix = torch::empty({num_ranks_}, int_options);
-            expert_prefix = torch::empty(
-                {static_cast<int64_t>(local_experts)}, int_options);
-            unaligned = torch::empty(
-                {static_cast<int64_t>(local_experts)}, int_options);
+            rank_prefix = kernel_count_bridge.narrow(
+                0,
+                static_cast<int64_t>(count_bridge_layout.rank_prefix_offset),
+                num_ranks_);
+            public_count_bridge = torch::empty(
+                {static_cast<int64_t>(count_bridge_layout.public_elements)},
+                int_options);
+            expert_prefix = public_count_bridge.narrow(
+                0,
+                static_cast<int64_t>(
+                    count_bridge_layout.public_expert_prefix_offset),
+                static_cast<int64_t>(local_experts));
+            unaligned = public_count_bridge.narrow(
+                0,
+                static_cast<int64_t>(
+                    count_bridge_layout.public_unaligned_offset),
+                static_cast<int64_t>(local_experts));
             destination_slots = torch::empty({x.size(0), topk_idx.size(1)}, int_options);
             source_metadata = torch::empty(
                 {static_cast<int64_t>(split_dispatch ? 0 : max_recv_tokens),
@@ -2177,6 +2296,9 @@ public:
         }
         arguments.timeout_cycles = barrier_timeout_cycles_;
         arguments.pipeline_chunk_slots = pipeline_config.chunk_slots;
+        arguments.consumer_tile_bytes = consumer_tile_config.tile_bytes;
+        arguments.parallel_prefix =
+            parallel_prefix_config.enabled ? 1U : 0U;
         runtime::StreamIdentity stream = dispatch_stream;
         if (!use_comm_stream) {
             status = resources_->current_stream(&stream);
@@ -2202,6 +2324,11 @@ public:
 #endif
         const auto generation = activate_operation(lease, "dispatch");
         arguments.generation = generation;
+        host_profile_record(
+            runtime::HostTimelinePhase::kDispatchPrelaunchSetup,
+            dispatch_prelaunch_start_ns);
+        if (stage_profile_enabled_)
+            (void)host_timeline_profile_.bind_generation(generation);
         if (cached_mode) {
             const auto committed_descriptor = allow_hybrid_mode_ ?
                 elastic::make_attested_hybrid_dispatch_handle_descriptor(
@@ -2284,6 +2411,7 @@ public:
                     destination_slots, descriptor_tensor, std::nullopt,
                     std::move(event)};
         }
+        auto host_phase_start_ns = host_profile_start();
         status = resources_->synchronize_stream(stream.raw);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
@@ -2304,23 +2432,36 @@ public:
             diagnostic.error != transport::DeviceTransportError::kNone ||
             diagnostic.generation != generation)
             raise_dispatch_diagnostic(diagnostic, "reported failure");
+        host_profile_record(
+            runtime::HostTimelinePhase::kDispatchSynchronize,
+            host_phase_start_ns);
         if (!cached_mode) {
+            host_phase_start_ns = host_profile_start();
             status = resources_->copy_to_host(
-                host_rank_prefix.data(), rank_prefix.data_ptr(),
+                host_kernel_count_bridge.data(),
+                kernel_count_bridge.data_ptr(),
+                host_kernel_count_bridge.size() * sizeof(std::int32_t));
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            std::memcpy(
+                host_rank_prefix.data(),
+                host_kernel_count_bridge.data() +
+                    count_bridge_layout.rank_prefix_offset,
                 host_rank_prefix.size() * sizeof(std::int32_t));
-            if (!status.ok())
-                raise_transport_status(status, rank_idx_);
-            status = resources_->copy_to_host(
+            std::memcpy(
                 host_kernel_expert_prefix.data(),
-                kernel_expert_prefix.data_ptr(),
+                host_kernel_count_bridge.data() +
+                    count_bridge_layout.kernel_expert_prefix_offset,
                 host_kernel_expert_prefix.size() * sizeof(std::int32_t));
-            if (!status.ok())
-                raise_transport_status(status, rank_idx_);
-            status = resources_->copy_to_host(
-                host_kernel_unaligned.data(), kernel_unaligned.data_ptr(),
+            std::memcpy(
+                host_kernel_unaligned.data(),
+                host_kernel_count_bridge.data() +
+                    count_bridge_layout.kernel_unaligned_offset,
                 host_kernel_unaligned.size() * sizeof(std::int32_t));
-            if (!status.ok())
-                raise_transport_status(status, rank_idx_);
+            host_profile_record(
+                runtime::HostTimelinePhase::kDispatchCountsToHost,
+                host_phase_start_ns);
+            host_phase_start_ns = host_profile_start();
             std::int32_t expanded_tail = 0;
             for (int expert = 0; expert < num_experts; ++expert) {
                 const std::int32_t actual = host_kernel_unaligned[expert];
@@ -2361,16 +2502,32 @@ public:
                         host_kernel_expert_prefix[num_experts],
                         ", expected_tail=", expanded_tail);
             num_expanded_tokens = expanded_tail;
-            status = resources_->copy_from_host(
-                expert_prefix.data_ptr(), host_expert_prefix.data(),
+            host_profile_record(
+                runtime::HostTimelinePhase::kDispatchHostPrefix,
+                host_phase_start_ns);
+            host_phase_start_ns = host_profile_start();
+            std::fill(
+                host_public_count_bridge.begin(),
+                host_public_count_bridge.end(), 0);
+            std::memcpy(
+                host_public_count_bridge.data() +
+                    count_bridge_layout.public_expert_prefix_offset,
+                host_expert_prefix.data(),
                 host_expert_prefix.size() * sizeof(std::int32_t));
-            if (!status.ok())
-                raise_transport_status(status, rank_idx_);
-            status = resources_->copy_from_host(
-                unaligned.data_ptr(), host_unaligned.data(),
+            std::memcpy(
+                host_public_count_bridge.data() +
+                    count_bridge_layout.public_unaligned_offset,
+                host_unaligned.data(),
                 host_unaligned.size() * sizeof(std::int32_t));
+            status = resources_->copy_from_host(
+                public_count_bridge.data_ptr(),
+                host_public_count_bridge.data(),
+                host_public_count_bridge.size() * sizeof(std::int32_t));
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
+            host_profile_record(
+                runtime::HostTimelinePhase::kDispatchPrefixToDevice,
+                host_phase_start_ns);
         }
         const int num_recv_tokens = host_rank_prefix.back();
         TORCH_CHECK(num_recv_tokens >= 0 &&
@@ -2378,7 +2535,9 @@ public:
                         num_expanded_tokens >= 0 &&
                         num_expanded_tokens <= static_cast<int>(expanded_records),
                     "DeepEP Ascend backend: dispatch returned invalid output counts");
+        std::uint64_t epilogue_setup_start_ns = 0;
         if (split_dispatch) {
+            host_phase_start_ns = host_profile_start();
             const auto output_tokens = static_cast<int64_t>(
                 do_expand ? num_expanded_tokens : num_recv_tokens);
             recv_x = torch::empty({output_tokens, x.size(1)}, x.options());
@@ -2421,6 +2580,11 @@ public:
             retain(recv_topk_indices);
             retain(recv_topk_weights);
 
+            host_profile_record(
+                runtime::HostTimelinePhase::kDispatchOutputAllocation,
+                host_phase_start_ns);
+
+            epilogue_setup_start_ns = host_profile_start();
             completion = resources_->create_event();
             if (!completion.status.ok())
                 raise_transport_status(completion.status, rank_idx_);
@@ -2509,11 +2673,19 @@ public:
                 generation, descriptor_tensor, committed_descriptor,
                 dispatch_descriptor_snapshot(
                     committed_descriptor, host_route_records));
+            host_profile_record(
+                runtime::HostTimelinePhase::kDispatchEpilogueSetup,
+                epilogue_setup_start_ns);
+            host_phase_start_ns = host_profile_start();
             const auto epilogue_status =
                 elastic::launch_internal_dispatch_epilogue(
                     arguments, tiling, storage, stream.raw);
             if (!epilogue_status.ok())
                 raise_launch_status(epilogue_status, rank_idx_);
+            host_profile_record(
+                runtime::HostTimelinePhase::kDispatchEpilogueSubmit,
+                host_phase_start_ns);
+            host_phase_start_ns = host_profile_start();
             if (use_comm_stream)
                 predecessor_guard.copy_to(predecessors.front());
             const auto completion_offset =
@@ -2534,13 +2706,20 @@ public:
                 (void)published.operation->finish(0);
                 raise_transport_status(status, rank_idx_);
             }
+            host_profile_record(
+                runtime::HostTimelinePhase::kDispatchCompletionRecord,
+                host_phase_start_ns);
             if (async_with_compute_stream) {
                 event.emplace(
                     completion.event, published.operation, async_state_);
             } else {
+                host_phase_start_ns = host_profile_start();
                 status = published.operation->finish(5000);
                 if (!status.ok())
                     raise_transport_status(status, rank_idx_);
+                host_profile_record(
+                    runtime::HostTimelinePhase::kDispatchCompletionWait,
+                    host_phase_start_ns);
             }
         } else {
             status = resources_->copy_from_host(
@@ -2615,6 +2794,9 @@ public:
             const bool& async_with_compute_stream,
             const bool& allocate_on_comm_stream,
             const bool& use_expanded_layout) const {
+        if (stage_profile_enabled_)
+            host_timeline_profile_.reset(0);
+        auto combine_host_phase_start_ns = host_profile_start();
         TORCH_CHECK(!previous_event_before_epilogue.has_value(),
                     "DeepEP Ascend backend: combine does not support "
                     "previous_event_before_epilogue");
@@ -2699,6 +2881,19 @@ public:
         const auto num_input_rows = static_cast<std::uint64_t>(x.size(0));
         const auto num_topk =
             static_cast<std::uint64_t>(combined_topk_idx.size(1));
+        elastic::CombineExpandedVectorReduceConfig expanded_reduce_config{};
+        const auto expanded_reduce_config_status =
+            elastic::select_combine_expanded_vector_reduce_config(
+                std::getenv(
+                    "DEEP_EP_ASCEND_COMBINE_EXPANDED_VECTOR_REDUCE"),
+                !allow_hybrid_mode_, use_expanded_layout,
+                allow_multiple_reduction_, allow_hybrid_mode_, num_topk,
+                &expanded_reduce_config);
+        TORCH_CHECK(
+            expanded_reduce_config_status !=
+                elastic::CombineExpandedVectorReduceConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_COMBINE_EXPANDED_VECTOR_REDUCE must be 0 or 1");
         const auto capacity =
             static_cast<std::uint64_t>(num_max_tokens_per_rank);
         const auto maximum_source_rows =
@@ -2734,6 +2929,10 @@ public:
                         "DeepEP Ascend backend: combine bias shape mismatch");
         }
 
+        host_profile_record(
+            runtime::HostTimelinePhase::kCombinePrelaunchSetup,
+            combine_host_phase_start_ns);
+        combine_host_phase_start_ns = host_profile_start();
         elastic::DispatchHandleDescriptor descriptor{};
         status = resources_->copy_to_host(
             &descriptor, token_metadata_at_forward->data_ptr(),
@@ -2788,6 +2987,10 @@ public:
                     raise_transport_status(status, rank_idx_);
             }
         }
+        host_profile_record(
+            runtime::HostTimelinePhase::kCombineHandleToHost,
+            combine_host_phase_start_ns);
+        combine_host_phase_start_ns = host_profile_start();
         const auto expected_descriptor = allow_hybrid_mode_ ?
             elastic::make_attested_hybrid_dispatch_handle_descriptor(
                 completion_resources_->dispatch_family(),
@@ -2837,6 +3040,10 @@ public:
             "DeepEP Ascend backend: combine source metadata shape or "
             "capacity mismatch");
 
+        host_profile_record(
+            runtime::HostTimelinePhase::kCombineHostValidation,
+            combine_host_phase_start_ns);
+        combine_host_phase_start_ns = host_profile_start();
         std::vector<std::int32_t> host_prefix(num_ranks_);
         std::vector<std::int32_t> host_metadata(
             static_cast<std::size_t>(num_source_rows * (num_topk + 2)));
@@ -2853,6 +3060,10 @@ public:
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
         }
+        host_profile_record(
+            runtime::HostTimelinePhase::kCombineMetadataToHost,
+            combine_host_phase_start_ns);
+        combine_host_phase_start_ns = host_profile_start();
         std::uint64_t previous_end = 0;
         for (int destination_rank = 0; destination_rank < num_ranks_;
              ++destination_rank) {
@@ -2911,6 +3122,10 @@ public:
                             static_cast<std::uint64_t>(num_buffer_bytes_) &&
                         tiling.workspace_bytes <= resources_->workspace_bytes(),
                     "DeepEP Ascend backend: combine capacity exceeds runtime storage");
+        host_profile_record(
+            runtime::HostTimelinePhase::kCombineHostValidation,
+            combine_host_phase_start_ns);
+        combine_host_phase_start_ns = host_profile_start();
         runtime::StreamIdentity current_stream;
         status = resources_->current_stream(&current_stream);
         if (!status.ok())
@@ -2954,6 +3169,10 @@ public:
             allocation_guard.emplace(get_comm_stream());
 #endif
 
+        host_profile_record(
+            runtime::HostTimelinePhase::kCombineStreamSetup,
+            combine_host_phase_start_ns);
+        combine_host_phase_start_ns = host_profile_start();
         auto combined_x = torch::empty(
             {combined_topk_idx.size(0), x.size(1)}, x.options());
         std::optional<torch::Tensor> combined_weights;
@@ -2961,6 +3180,10 @@ public:
             combined_weights = torch::empty(
                 {combined_topk_idx.size(0), combined_topk_idx.size(1)},
                 topk_weights->options());
+        host_profile_record(
+            runtime::HostTimelinePhase::kCombineOutputAllocation,
+            combine_host_phase_start_ns);
+        combine_host_phase_start_ns = host_profile_start();
 
         std::vector<std::optional<torch::Tensor>> retained_tensors;
         const auto retain = [&retained_tensors](
@@ -3022,11 +3245,15 @@ public:
 #endif
         const auto generation = activate_operation(lease, "combine");
         arguments.generation = generation;
+        if (stage_profile_enabled_)
+            (void)host_timeline_profile_.bind_generation(generation);
         arguments.timeout_cycles = barrier_timeout_cycles_;
         arguments.num_source_rows = num_source_rows;
         arguments.num_input_rows = num_input_rows;
         arguments.local_window_base = reinterpret_cast<std::uintptr_t>(
             resources_->window_base());
+        arguments.expanded_vector_reduce =
+            expanded_reduce_config.enabled ? 1U : 0U;
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_),
             resources_->workspace_bytes()};
@@ -3049,20 +3276,31 @@ public:
         if (!published.status.ok())
             raise_transport_status(published.status, rank_idx_);
         predecessor_guard.dismiss();
+        host_profile_record(
+            runtime::HostTimelinePhase::kCombineSubmit,
+            combine_host_phase_start_ns);
+        combine_host_phase_start_ns = host_profile_start();
         status = completion.event->record(stream);
         if (!status.ok()) {
             (void)published.operation->finish(0);
             raise_transport_status(status, rank_idx_);
         }
+        host_profile_record(
+            runtime::HostTimelinePhase::kCombineCompletionRecord,
+            combine_host_phase_start_ns);
 
         std::optional<EventHandle> event;
         if (async_with_compute_stream) {
             event.emplace(
                 completion.event, published.operation, async_state_);
         } else {
+            combine_host_phase_start_ns = host_profile_start();
             status = published.operation->finish(5000);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
+            host_profile_record(
+                runtime::HostTimelinePhase::kCombineCompletionWait,
+                combine_host_phase_start_ns);
         }
         return {combined_x, combined_weights, std::move(event)};
     }

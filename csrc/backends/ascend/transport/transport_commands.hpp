@@ -15,7 +15,6 @@ inline constexpr std::uint32_t kScaleUpTeamMask = 1U;
 inline constexpr std::uint32_t kScaleOutTeamMask = 2U;
 inline constexpr std::uint32_t kWorldTeamMask =
     kScaleUpTeamMask | kScaleOutTeamMask;
-
 enum class TransportCommandOpcode : std::uint32_t {
     kNone,
     kPut,

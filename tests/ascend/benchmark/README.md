@@ -211,6 +211,23 @@ phase accounting, transport command counters, and an optimistic pipeline
 ceiling. Such a report records `stage_profile: 1` and is intentionally not
 comparable with a normal latency report.
 
+Render the captured profile as a validated P5 parity timeline:
+
+```bash
+PYTHONPATH=. python -m tests.ascend.benchmark.timeline_report \
+  ascend-report.json --format json > p5-timeline.json
+
+PYTHONPATH=. python -m tests.ascend.benchmark.timeline_report \
+  ascend-report.json --format markdown > p5-timeline.md
+```
+
+The renderer emits one row for each case, operation, rank, and stable P5 stage
+ID. Device timestamps stay in cycles because the report does not assume a
+device-cycle frequency. Host intervals are converted from nanoseconds to
+milliseconds. Combine C3 remains visible as `not_independently_timed` until the
+runtime exposes a separate local-staging interval; no duration is inferred from
+its neighboring stages.
+
 ## Suite classification
 
 | Classification | Cases | Ascend behavior | Reason |

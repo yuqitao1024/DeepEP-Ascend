@@ -581,6 +581,12 @@ public:
                      profile.sq_high_watermark != pressure_depth - 1 ||
                      profile.cq_high_watermark != pressure_depth - 1 ||
                      profile.wait_cycles == 0 ||
+                     profile.flags != 0 ||
+                     profile.payload_command_cycles != 0 ||
+                     profile.control_command_cycles != 0 ||
+                     profile.flush_command_cycles != 0 ||
+                     profile.barrier_command_cycles != 0 ||
+                     profile.barrier_poll_cycles != 0 ||
                      transport::transport_stage_profile_command_metrics_status(
                          profile, true) !=
                          transport::TransportStageProfileCommandMetricsStatus::
@@ -588,13 +594,25 @@ public:
                     write_error(
                         error, error_capacity,
                         "mixed profile failure: commands=%u puts=%u bytes=%llu "
-                        "depth=%u/%u hwm=%u/%u expected_hwm=%u wait=%llu",
+                        "depth=%u/%u hwm=%u/%u expected_hwm=%u wait=%llu "
+                        "payload=%llu control=%llu flush=%llu barrier=%llu "
+                        "barrier_poll=%llu",
                         profile.command_count, profile.put_command_count,
                         static_cast<unsigned long long>(profile.command_bytes),
                         profile.sq_depth, profile.cq_depth,
                         profile.sq_high_watermark,
                         profile.cq_high_watermark, pressure_depth - 1,
-                        static_cast<unsigned long long>(profile.wait_cycles));
+                        static_cast<unsigned long long>(profile.wait_cycles),
+                        static_cast<unsigned long long>(
+                            profile.payload_command_cycles),
+                        static_cast<unsigned long long>(
+                            profile.control_command_cycles),
+                        static_cast<unsigned long long>(
+                            profile.flush_command_cycles),
+                        static_cast<unsigned long long>(
+                            profile.barrier_command_cycles),
+                        static_cast<unsigned long long>(
+                            profile.barrier_poll_cycles));
                     return false;
                 }
             }

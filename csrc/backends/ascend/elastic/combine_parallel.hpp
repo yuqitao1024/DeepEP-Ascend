@@ -7,6 +7,120 @@ namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kCombineRecordsPerTile = 128;
 
+struct CombineProducerPayloadCopyPlan {
+    bool valid = false;
+    std::uint64_t vector_elements = 0;
+    std::uint64_t scalar_begin = 0;
+};
+
+enum class CombineExpandedVectorReduceConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct CombineExpandedVectorReduceConfig {
+    bool enabled = false;
+};
+
+inline CombineExpandedVectorReduceConfigStatus
+select_combine_expanded_vector_reduce_config(
+    const char* value, bool direct, bool expanded,
+    bool allow_multiple_reduction, bool hybrid, std::uint64_t num_topk,
+    CombineExpandedVectorReduceConfig* output) noexcept {
+    if (output == nullptr)
+        return CombineExpandedVectorReduceConfigStatus::kInvalid;
+    *output = {};
+    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+        return CombineExpandedVectorReduceConfigStatus::kDisabled;
+    if (value[0] != '1' || value[1] != '\0')
+        return CombineExpandedVectorReduceConfigStatus::kInvalid;
+    if (!direct || !expanded || !allow_multiple_reduction || hybrid ||
+        num_topk == 0 || num_topk > 32)
+        return CombineExpandedVectorReduceConfigStatus::kDisabled;
+    output->enabled = true;
+    return CombineExpandedVectorReduceConfigStatus::kEnabled;
+}
+
+constexpr CombineProducerPayloadCopyPlan
+combine_expanded_producer_payload_plan(
+    std::uint64_t hidden_elements, std::uint64_t vector_tile_elements,
+    std::uint64_t data_copy_alignment_elements, bool enabled) noexcept {
+    if (vector_tile_elements == 0 || data_copy_alignment_elements == 0 ||
+        vector_tile_elements % data_copy_alignment_elements != 0)
+        return {};
+    const std::uint64_t vector_elements = enabled ?
+        hidden_elements - hidden_elements % vector_tile_elements : 0;
+    return {true, vector_elements, vector_elements};
+}
+
+constexpr CombineProducerPayloadCopyPlan combine_producer_payload_copy_plan(
+    std::uint64_t hidden_elements, std::uint64_t vector_tile_elements,
+    std::uint64_t data_copy_alignment_elements, bool expanded) noexcept {
+    if (vector_tile_elements == 0 || data_copy_alignment_elements == 0 ||
+        vector_tile_elements % data_copy_alignment_elements != 0)
+        return {};
+    const std::uint64_t vector_elements =
+        expanded || hidden_elements % data_copy_alignment_elements != 0 ? 0 :
+        hidden_elements - hidden_elements % vector_tile_elements;
+    return {true, vector_elements, vector_elements};
+}
+
+#if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && \
+    DEEP_EP_ASCEND_AICORE_URMA_SERVICE
+__aicore__ inline CombineProducerPayloadCopyPlan
+aicore_combine_expanded_producer_payload_plan(
+    std::uint64_t hidden_elements, std::uint64_t vector_tile_elements,
+    std::uint64_t data_copy_alignment_elements, bool enabled) noexcept {
+    if (vector_tile_elements == 0 || data_copy_alignment_elements == 0 ||
+        vector_tile_elements % data_copy_alignment_elements != 0)
+        return {};
+    const std::uint64_t vector_elements = enabled ?
+        hidden_elements - hidden_elements % vector_tile_elements : 0;
+    return {true, vector_elements, vector_elements};
+}
+
+__aicore__ inline CombineProducerPayloadCopyPlan
+aicore_combine_producer_payload_copy_plan(
+    std::uint64_t hidden_elements, std::uint64_t vector_tile_elements,
+    std::uint64_t data_copy_alignment_elements, bool expanded) noexcept {
+    if (vector_tile_elements == 0 || data_copy_alignment_elements == 0 ||
+        vector_tile_elements % data_copy_alignment_elements != 0)
+        return {};
+    const std::uint64_t vector_elements =
+        expanded || hidden_elements % data_copy_alignment_elements != 0 ? 0 :
+        hidden_elements - hidden_elements % vector_tile_elements;
+    return {true, vector_elements, vector_elements};
+}
+#endif
+
+#if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline CombineProducerPayloadCopyPlan
+simt_combine_expanded_producer_payload_plan(
+    std::uint64_t hidden_elements, std::uint64_t vector_tile_elements,
+    std::uint64_t data_copy_alignment_elements, bool enabled) noexcept {
+    if (vector_tile_elements == 0 || data_copy_alignment_elements == 0 ||
+        vector_tile_elements % data_copy_alignment_elements != 0)
+        return {};
+    const std::uint64_t vector_elements = enabled ?
+        hidden_elements - hidden_elements % vector_tile_elements : 0;
+    return {true, vector_elements, vector_elements};
+}
+
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline CombineProducerPayloadCopyPlan
+simt_combine_producer_payload_copy_plan(
+    std::uint64_t hidden_elements, std::uint64_t vector_tile_elements,
+    std::uint64_t data_copy_alignment_elements, bool expanded) noexcept {
+    if (vector_tile_elements == 0 || data_copy_alignment_elements == 0 ||
+        vector_tile_elements % data_copy_alignment_elements != 0)
+        return {};
+    const std::uint64_t vector_elements =
+        expanded || hidden_elements % data_copy_alignment_elements != 0 ? 0 :
+        hidden_elements - hidden_elements % vector_tile_elements;
+    return {true, vector_elements, vector_elements};
+}
+#endif
+
 constexpr bool combine_tile_count(
     std::uint64_t record_count, std::uint64_t* tile_count) noexcept {
     if (tile_count == nullptr)

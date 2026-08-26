@@ -385,7 +385,7 @@ boundary without adding GEMM time to the five-operation benchmark.
 | D8 output copy | `direct_dispatch_epilogue_copy_outputs_vf` plus AICore DataCopy path | per-warp TMA load/store in `dispatch_copy_epilogue_impl` |
 | C0 control | `direct_combine_producer_control_vf` | combine kernel prologue and workspace setup in `combine_impl` |
 | C1 plan/prefix | `direct_combine_producer_plan_vf`, `direct_combine_producer_plan_prefix_vf` | contributor metadata traversal and prefix in `combine_impl` |
-| C2 record | `direct_combine_producer_record_vf` and vector payload implementation | TMA copy or warp-cooperative local reduction in `combine_impl` |
+| C2 record | `direct_combine_producer_record_vf`, normal vector payload copy, and `direct_combine_producer_expanded_vector_reduce_impl` | TMA copy or warp-cooperative local reduction in `combine_impl` |
 | C3 local staging | `direct_combine_producer_local_copy_vf` | local-copy and send-buffer preparation in `combine_impl` |
 | C4 publication | `direct_combine_producer_release_vf` | Gin put and final GPU barrier in `combine_impl` |
 | C5 contributor slots | `direct_combine_epilogue_validate_vf`, prepare-vector-slots, and slot workspace stages | warp ballot, exchange, and `compute_topk_slots` |
@@ -458,6 +458,31 @@ P5.0 is complete when the report can answer:
 5. which Ascend GM round trips have no CUDA counterpart; and
 6. which long interval is computation, arrival skew, or communication wait.
 
+#### P5.0 measured baseline
+
+P5.0 is complete on the retained P4 tree. NPU8P task
+`task_20260826_181006_24299589105` ran the representative EP8 case with 30
+warmups and 30 measured samples for all five operations. The workload
+fingerprint was
+`d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`.
+The raw profile SHA-256 was
+`e0ebde74557e24ef3ef0eb6ee6ad73f20d716488fbb6a1062917c0b53f625ef3`.
+
+| Operation | Mean (ms) | p50 (ms) | p95 (ms) | Logical GB/s |
+| --- | ---: | ---: | ---: | ---: |
+| Dispatch | 36.016 | 35.814 | 37.755 | 216.185 |
+| Expanded Dispatch | 37.403 | 37.523 | 38.776 | 247.349 |
+| Cached Dispatch | 85.272 | 85.315 | 87.318 | 91.309 |
+| Combine | 105.785 | 105.657 | 107.976 | 103.050 |
+| Reduced Combine | 168.096 | 168.126 | 169.730 | 64.851 |
+
+The normal Dispatch attribution selected P5.1 before P5.2: D3 record packing
+was `3,863,793 cycles`, the network envelope was `7,854,781 cycles`, D5-D8
+consumer work was `8,628,304 cycles`, and measured producer/transport overlap
+was zero. The split host path contained a `0.343 ms` count copy, `0.004 ms`
+CPU prefix, `0.345 ms` prefix publication, and a `16.158 ms` maximum-rank
+synchronization interval.
+
 ### 9.2 P5.1: Producer/transport chunk overlap
 
 P5.1 is the first performance implementation after P5.0. It replaces the
@@ -481,6 +506,25 @@ hybrid, and scale-out paths keep their existing schedule until the lifecycle
 is qualified. Chunk count is a measured tiling choice, not an unrestricted
 runtime knob.
 
+#### P5.1 retention result
+
+The current tree already contained the P3.2 two-stream, two-request-slot,
+2,048-slot chunk pipeline. P5.1 therefore requalified that implementation
+instead of adding a second protocol. NPU8P task
+`task_20260826_181658_245649824291` ran baseline A, candidate A, candidate B,
+and baseline B from the same binary and immutable workload manifest.
+
+| Operation | Baseline mean (ms) | Candidate mean (ms) | Mean delta | Baseline p95 (ms) | Candidate p95 (ms) | p95 delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 36.983 | 39.086 | +5.69% | 38.924 | 41.003 | +5.34% |
+| Expanded Dispatch | 37.839 | 39.869 | +5.36% | 39.824 | 41.398 | +3.95% |
+| Cached Dispatch | 85.330 | 84.738 | -0.69% | 87.039 | 86.551 | -0.56% |
+| Combine | 104.212 | 104.356 | +0.14% | 106.281 | 105.980 | -0.28% |
+| Reduced Combine | 167.933 | 168.119 | +0.11% | 170.007 | 169.622 | -0.23% |
+
+P5.1 is rejected for this tree. The 2,048-slot pipeline remains experimental
+and disabled by default; later P5 candidates must not stack on it.
+
 ### 9.3 P5.2: Remove the host count bridge from the critical path
 
 P5.2 selects one of two approaches from P5.0 evidence:
@@ -493,6 +537,54 @@ The design must preserve exact public tensor shapes, zero-token behavior,
 cached-handle validation, stream ownership, and error propagation. CPU prefix
 arithmetic is not the target; the target is the dependency and copy chain
 around it.
+
+#### P5.2 retained implementation and evidence
+
+The retained candidate is selected only by
+`DEEP_EP_ASCEND_DISPATCH_DEVICE_PREFIX=1` and only for direct, uncached,
+synchronous, non-hybrid, non-stream Dispatch. It preallocates the maximum
+receive capacity and launches D5-D8/F0 as one continuous device pipeline. One
+final stream synchronization is followed by count readback, public-result
+validation, exact-shape tensor narrowing, and publication of the public prefix
+tensor. Cached, hybrid, asynchronous/event, communication-stream, expanded
+protocol semantics, and the rejected P5.1 chunk pipeline are unchanged.
+
+This distinction matters: P5.2 removes the D6-to-D7 host dependency; it does
+not remove the final D2H count read or the H2D publication needed by the public
+return contract. The host timeline fields still report those final copies,
+but they no longer sit between D6 and D7. Across eight ranks, the measured
+D6-end to D7-start gap changed as follows:
+
+| Gap metric | P5.0 split path (cycles) | P5.2 device path (cycles) |
+| --- | ---: | ---: |
+| Minimum | 379,287 | 2,042 |
+| Median | 973,796 | 2,673 |
+| Maximum | 1,229,521 | 3,053 |
+| Mean | 933,451 | 2,561 |
+
+Build task `task_20260826_183246_252565021205` and two-rank correctness task
+`task_20260826_183457_253242031277` both exited zero. The correctness task ran
+one baseline and two candidate generations; normal, expanded, and cached
+Dispatch plus normal and reduced Combine all passed. EP8 ABBA task
+`task_20260826_183635_253767416396` used 8,192 tokens/rank, hidden 7,168,
+top-k 8, 256 experts, FP8 Dispatch, BF16 Combine, alignment 128, 72 blocks,
+30 warmups, and 30 samples. All four reports used workload fingerprint
+`d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`.
+
+| Operation | Baseline mean (ms) | Candidate mean (ms) | Mean delta | Baseline p95 (ms) | Candidate p95 (ms) | p95 delta | Baseline GB/s | Candidate GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 37.439 | 35.620 | -4.86% | 40.114 | 37.541 | -6.41% | 208.001 | 218.627 |
+| Expanded Dispatch | 37.663 | 37.246 | -1.11% | 39.469 | 39.736 | +0.68% | 245.740 | 248.429 |
+| Cached Dispatch | 84.627 | 84.696 | +0.08% | 86.127 | 86.160 | +0.04% | 92.039 | 91.931 |
+| Combine | 104.956 | 105.139 | +0.17% | 106.210 | 106.559 | +0.33% | 103.872 | 103.688 |
+| Reduced Combine | 168.240 | 168.289 | +0.03% | 170.143 | 169.687 | -0.27% | 64.796 | 64.777 |
+
+The Dispatch mean and p95 improvements exceed the baseline and candidate
+pair variation (`2.54%` and `2.77%` for the mean). The other four operations
+remain within run-to-run variation. Candidate profile task
+`task_20260826_184235_255533624664` exited zero; its raw profile SHA-256 is
+`93c27e312d6c9f03bdb30c007b805679e6a1c42be42190623fa884ad12fad680`.
+P5.2 is therefore retained behind its experimental environment switch.
 
 ### 9.4 P5.3: Consumer metadata and copy parallelism
 
@@ -508,20 +600,306 @@ Candidates use record-oriented or subgroup-oriented work distribution and
 reuse already valid compact source bases and counts. They must not restore a
 scan over all reserved source slots or introduce a new full GM temporary.
 
+#### P5.3 retained D8 consumer-copy tile
+
+The first P5.3 slice targets D8 because the retained P5.2 profile measured it
+at about `4.53M` cycles and it was the largest deterministic consumer-copy
+stage. The implementation adds
+`DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES` with four same-binary AICore
+specializations: 512, 1,024, 2,048, and 4,096 bytes. It is eligible only with
+the P5.2 device-prefix path for direct, uncached, synchronous, non-expanded,
+non-hybrid, non-stream Dispatch. The 512-byte specialization remains the
+control. DataCopy handles the 32-byte-aligned body, while SIMT handles only a
+sub-32-byte suffix. Producer D3 and the other Dispatch modes are unchanged.
+
+Build task `task_20260826_190337_295817018989` exited zero after correcting
+two build-plumbing omissions found by the first remote compile. Two-rank task
+`task_20260826_190932_297407620387` then passed BF16 hidden width 7,184 for
+all four tile sizes and all five operations, including the 16-byte scalar
+tail. EP8 screening task `task_20260826_191240_298247132314` used the
+representative workload and produced:
+
+| D8 tile | Dispatch mean (ms) | Dispatch p95 (ms) | Logical GB/s |
+| ---: | ---: | ---: | ---: |
+| 512 bytes | 34.767 | 36.952 | 223.949 |
+| 1,024 bytes | 33.073 | 34.952 | 235.425 |
+| 2,048 bytes | 30.763 | 32.242 | 253.096 |
+| 4,096 bytes | 31.222 | 32.419 | 249.381 |
+
+The 2,048-byte tile was selected. The 4,096-byte candidate was not selected
+because it was slower for normal Dispatch and its screening run moved cached
+Dispatch backward by about `2.37%`.
+
+The first formal ABBA task `task_20260826_191704_299593930433` encountered a
+single non-deterministic AIV vector timeout while preparing candidate A on
+ranks 6 and 7. Candidate-only retry
+`task_20260826_195330_307725124919` passed 30 of 30 measured iterations, and
+the complete clean ABBA task `task_20260826_195502_308644325056` exited zero.
+All reports used workload fingerprint
+`d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`.
+
+| Operation | Baseline mean (ms) | Candidate mean (ms) | Mean delta | Baseline p95 (ms) | Candidate p95 (ms) | p95 delta | Baseline GB/s | Candidate GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 34.782 | 31.851 | -8.43% | 36.639 | 33.646 | -8.17% | 223.928 | 244.467 |
+| Expanded Dispatch | 37.186 | 36.200 | -2.65% | 40.163 | 37.822 | -5.83% | 248.800 | 255.638 |
+| Cached Dispatch | 84.904 | 84.337 | -0.67% | 86.841 | 86.032 | -0.93% | 91.714 | 92.323 |
+| Combine | 104.632 | 104.458 | -0.17% | 106.156 | 106.257 | +0.10% | 104.186 | 104.360 |
+| Reduced Combine | 168.101 | 168.511 | +0.24% | 169.919 | 169.723 | -0.12% | 64.849 | 64.693 |
+
+Baseline and candidate Dispatch pair variation was `3.6975%` and `1.6549%`,
+respectively. The normal Dispatch mean and p95 changes exceed that variation,
+while the other operations remain within run-to-run movement.
+
+Candidate profile task `task_20260826_200056_312173825076` exited zero. Its
+raw profile SHA-256 is
+`326b7ff07f14bcbccd8ca161553ae69d37f9d163d95fe35d8524f8a99c7c141e`.
+D8 changed from a P5.2 eight-rank mean/max of
+`4,576,035 / 4,696,548 cycles` to
+`1,661,183 / 1,678,658 cycles`, a `63.7% / 64.3%` reduction. The end-to-end
+gain is smaller because D3 packing, D4 publication/transport, D5 counting,
+and D6 prefix remain serialized around D8. D6 is now the longest stable
+consumer substage at an eight-rank mean of about `2.774M cycles`, so it is the
+next P5.3 optimization target.
+
+The 2,048-byte specialization is retained as an opt-in configuration together
+with P5.2. It is not made unconditional for cached, expanded, asynchronous,
+hybrid, stream, or device-prefix-disabled calls.
+
+Final two-rank gate `task_20260826_200913_349307319589` reran the retained
+tree after the profile. It exited zero with one passing representative case
+for each of the four tile sizes and all five operations. The local focused
+suite also passed `238` tests and `48` subtests.
+
+#### P5.3 retained parallel D6 expert prefix
+
+The second P5.3 slice replaces the serial local-expert tile scan in D6 with an
+opt-in same-binary candidate selected by
+`DEEP_EP_ASCEND_DISPATCH_PARALLEL_PREFIX=1`. It has the same eligibility as
+the retained P5.2 device-prefix path and the 2,048-byte D8 candidate. For the
+representative EP8 shape, 32 active SIMT threads each own one of the 32 local
+experts. Each active thread converts that expert's per-source-tile counts into
+exclusive tile prefixes and publishes the expert total. A block fence and
+barrier make those totals visible before thread 0 performs the smaller rank
+prefix, 256-entry global expert prefix, alignment, capacity check, and final
+publication. The disabled path retains the serial D6 algorithm as the control.
+
+The work changes from one thread scanning all local-expert columns,
+
+```text
+T_serial proportional to local_experts * source_tiles,
+```
+
+to one column per active thread followed by a short serial tail,
+
+```text
+T_parallel proportional to source_tiles + global_experts + barrier_cost.
+```
+
+This is not a change to token routing or prefix semantics. It only changes who
+computes independent local-expert columns. All 512 threads reach the barrier;
+threads without a local-expert column participate only in synchronization.
+
+Build task `task_20260826_202800_353682926752` completed the ASC compile and
+extension link. Two-rank correctness task
+`task_20260826_203249_354704121753` tested hidden widths 7,168 and 7,184, one
+serial generation and two parallel generations, including the 16-byte D8
+scalar tail. All five operations passed. EP8 ABBA task
+`task_20260826_203622_35559387802` used the same representative workload,
+72 blocks, 30 warmups, 30 samples, and fingerprint
+`d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`.
+
+| Operation | Baseline mean (ms) | Candidate mean (ms) | Mean delta | Baseline p95 (ms) | Candidate p95 (ms) | p95 delta | Candidate GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 32.536 | 29.553 | -9.17% | 33.864 | 31.329 | -7.49% | 263.462 |
+| Expanded Dispatch | 36.627 | 36.845 | +0.59% | 38.509 | 39.693 | +3.07% | 251.124 |
+| Cached Dispatch | 85.009 | 84.515 | -0.58% | 86.315 | 86.621 | +0.36% | 92.127 |
+| Combine | 105.014 | 104.295 | -0.68% | 106.487 | 106.497 | +0.01% | 104.525 |
+| Reduced Combine | 168.745 | 168.199 | -0.32% | 170.174 | 169.873 | -0.18% | 64.812 |
+
+Dispatch baseline and candidate mean pair variation was `3.2650%` and
+`0.0508%`, respectively. The mean and p95 gains exceed that variation. The
+other operation changes are within their own pair variation or isolated p95
+movement, and the candidate changes neither their eligible path nor outputs.
+The parallel D6 candidate is therefore retained behind its selector.
+
+The first profile attempts exposed a profiling-only compiler issue rather
+than a production-path or parallel-prefix failure. The large inlined service
+loop lost `service_start_cycles` across code generation; candidate and serial
+baseline reproduced the same AIV PC failure. Profiling now uses direct service
+start/end and per-command count writes plus a noinline boundary only for the
+`ProfileEnabled=true` service specialization. The non-profile production
+specialization remains inline. Build task
+`task_20260826_220753_381377626032` passed after this correction, and final
+EP8 profile task `task_20260826_221014_381982612120` exited zero with one
+passing case. The raw profile, JSON timeline, and Markdown timeline SHA-256
+values are, respectively:
+
+```text
+b1952b315a1dda1869e7e0990bd54554ac4874bd4f16ba7a03512159e79e718c
+71ab05a3e4296a59db50545e3471363358310dd608f738c6bfe699289ee8e576
+d6794e23921a0801e6209c5421bb589427681440efa5ffd752cdb7022c9e83fd
+```
+
+The final eight-rank profile changes D6 from the previous approximately
+`2.774M cycles` to a mean/max of `189,738 / 190,141 cycles`, about a `93.2%`
+mean reduction. D8 remains stable at `1,665,678 / 1,683,667 cycles`. The main
+normal-Dispatch stages are now:
+
+| Stage | Eight-rank mean (cycles) | Minimum | Maximum | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| D3 packing | 3,822,134 | 3,786,297 | 3,864,876 | Largest stable compute stage |
+| D4 publication/transport | 3,283,054 | 1,271,594 | 7,077,599 | Largest rank skew; includes exposed communication/control time |
+| D5 expert count | 945,567 | 943,557 | 947,805 | Stable serialized consumer work |
+| D6 expert prefix | 189,738 | 188,669 | 190,141 | No longer a bottleneck |
+| D7 destination/metadata | 202,294 | 200,468 | 203,800 | Small stable stage |
+| D8 output copy | 1,665,678 | 1,647,687 | 1,683,667 | Second-largest stable compute stage |
+
+D3 is therefore the next normal-Dispatch compute target. D4 must first be
+split by service/publication timing before treating its `7.08M-cycle` rank
+tail as packing work. P5.4 remains the next operation-level target because
+Reduced Combine still spends about `71.7M cycles` in C2 expanded contributor
+payload reduction and record packing before communication.
+
+Final two-rank retained-tree task `task_20260826_221835_38598815525`
+repeated hidden widths 7,168 and 7,184 with one serial generation and two
+parallel generations. All five operations passed, including the 16-element
+scalar tail, after the final profiler changes.
+
 ### 9.5 P5.4: Reduced Combine parity
 
-P5.4 aligns the expanded/reduced path with CUDA's cooperative structure:
+P5.4 aligns the expanded/reduced producer path with CUDA's cooperative
+structure. The pre-P5.4 implementation evaluated the following scalar loop
+nest for every output record:
 
-- resolve contributor ranks and slots once per token;
-- retain contributor state across hidden chunks where the compiler permits;
-- assign one qualified subgroup or data unit to a token or hidden tile;
-- use vector/DataCopy movement for aligned bodies;
-- restrict scalar loops to tails and unsupported shapes; and
-- avoid a separate GM round trip when grouping and reduction can share a
-  qualified kernel boundary.
+```text
+for hidden in [0, H):
+    sum = 0
+    for lane in [0, K):
+        input_row = metadata[2 + lane]
+        if input_row != -1:
+            sum += BF16_to_FP32(x[input_row, hidden])
+    record[hidden] = FP32_to_BF16(sum)
+```
+
+For representative `H=7168` and `K=8`, this repeatedly reads and checks the
+same eight contributor indices 7,168 times per record. P5.4 instead resolves
+the valid contributor rows once, then reduces 256 hidden elements at a time:
+
+```text
+input_rows = valid metadata[2:2 + K] in increasing lane order
+for hidden_tile in [0, floor(H / 256) * 256) step 256:
+    accumulation[0:256] = FP32(0)
+    for input_row in input_rows:
+        contribution = BF16_to_FP32(x[input_row, hidden_tile:hidden_tile+256])
+        accumulation += contribution
+    record[hidden_tile:hidden_tile+256] = FP32_to_BF16_RINT(accumulation)
+```
+
+The implementation has these boundaries:
+
+- `DEEP_EP_ASCEND_COMBINE_EXPANDED_VECTOR_REDUCE=1` enables the candidate;
+  unset and `0` preserve the scalar control, and all other values fail fast;
+- eligibility requires direct, expanded, non-hybrid Combine with
+  `allow_multiple_reduction=true` and top-k in `[1, 32]`;
+- `CombineArguments::expanded_vector_reduce` carries one 32-bit selector to
+  the kernel without changing `CoreTiling` ABI;
+- `direct_combine_producer_record_vf` still writes weights, metadata, headers,
+  protocol state, and the scalar tail;
+- `direct_combine_producer_expanded_vector_reduce_impl` owns the aligned body,
+  collects at most 32 valid input rows once per record, and uses
+  `DataCopy -> Cast(BF16 to FP32) -> Add -> Cast(CAST_RINT) -> DataCopy`;
+- contributor accumulation order remains increasing top-k lane order, so the
+  candidate preserves the scalar reference's floating-point order;
+- hidden 7,168 is entirely vectorized; hidden 7,184 vectorizes 7,168 elements
+  and leaves a 16-element SIMT tail; and
+- normal Combine, expanded Combine without multiple reduction, hybrid
+  Combine, transport release, consumer reduction, and every Dispatch path are
+  unchanged.
 
 Normal Combine remains the control because P4.1 already retained its
-256-element BF16 DataCopy path.
+256-element BF16 DataCopy path. The P5.4 selector remains opt-in so the same
+binary contains both implementations for later regression checks.
+
+#### P5.4 verification and retention
+
+The local selector/copy-plan compile probe covers unset, `0`, `1`, invalid
+text, every ineligible mode, top-k 0 and 33, and hidden 7,168 and 7,184. The
+four focused local suites passed with `243 passed, 48 subtests passed`.
+
+NPU8P build task `task_20260826_223311_3882849615` compiled `combine.asc` and
+linked the extension successfully. Two-rank task
+`task_20260826_223657_3891415496` ran hidden widths 7,168 and 7,184 with one
+disabled run and two enabled runs per width. All five operations passed the
+benchmark reference checks, including the 16-element scalar tail.
+
+The retained EP8 ABBA task `task_20260826_224101_39009137554` used 72 data
+blocks, 30 warmups, 30 measured iterations, and the fixed workload:
+
+```text
+case: ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0
+world_size=8, num_tokens=8192, hidden=7168
+num_topk=8, num_experts=256, seed=0
+workload fingerprint:
+d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00
+```
+
+Only `DEEP_EP_ASCEND_COMBINE_EXPANDED_VECTOR_REDUCE` changed between ABBA
+legs. All previously retained P5 selectors stayed enabled.
+
+| Operation | Baseline mean (ms) | Candidate mean (ms) | Mean delta | Baseline p95 (ms) | Candidate p95 (ms) | P95 delta | Baseline pair variation | Candidate pair variation | Candidate logical GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 29.986 | 29.699 | -0.95% | 32.040 | 31.877 | -0.51% | 0.82% | 4.25% | 262.282 |
+| Expanded Dispatch | 37.227 | 37.119 | -0.29% | 39.867 | 38.224 | -4.12% | 2.30% | 2.14% | 249.269 |
+| Cached Dispatch | 86.069 | 85.532 | -0.62% | 87.955 | 87.206 | -0.85% | 0.48% | 0.20% | 91.032 |
+| Combine | 105.629 | 105.155 | -0.45% | 107.284 | 106.426 | -0.80% | 0.29% | 0.41% | 103.669 |
+| Reduced Combine | 169.878 | 107.066 | **-36.97%** | 171.565 | 108.320 | **-36.86%** | 0.15% | 0.81% | 101.819 |
+
+The other four operations show no stable regression. Reduced Combine improves
+far beyond either ABBA pair's variation, so the candidate is retained.
+
+Candidate profile task `task_20260826_224621_391511730234` confirms that the
+end-to-end movement comes from C2 rather than a measurement shift:
+
+| Reduced Combine stage | P5.3 mean cycles | P5.4 mean cycles | Delta | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| C1 contributor plan/prefix | 1,791,914 | 1,791,751 | -0.01% | Unchanged as intended |
+| C2 contributor record packing | 71,698,890 | 9,729,492 | **-86.43%** | Repeated scalar top-k scans replaced by vector reduction |
+| C4 publication/transport | 56,476,244 | 56,720,708 | +0.43% | Unchanged within run variation; now the largest stage |
+| C5 validation/slots | 10,751,069 | 10,645,874 | -0.98% | Unchanged consumer path |
+| C6 final reduction | 7,435,896 | 7,438,467 | +0.03% | Unchanged consumer reduction |
+| C7 weights | 23,288 | 23,126 | -0.70% | Unchanged metadata tail |
+
+C2 maximum is `9,845,416 cycles`, down from `71,807,703`. The remaining
+Reduced Combine critical path is C4 at about `56.7M cycles`, followed by C5,
+C2, and C6. P5.5 should therefore split and optimize C4 publication/service
+before spending more effort on contributor planning.
+
+Raw evidence SHA-256 values:
+
+```text
+40779c65fd82d58120c66dfd89f015e917e7793f7cd79fe7a4a3e62cf65d2713  baseline-a.json
+1c0dadb0659bde4a7e90ae458cd4fb45c686534301febcc389f28767ab416aad  baseline-b.json
+26b6f04be8980dd8db52a4adddcb501a199e94ddefb700978c4a936a91e8941d  candidate-a.json
+71b651d4c16274ac3dba1258e45f7af419787afa4d427edb732dee1883069690  candidate-b.json
+fbcbb5f369120c8b1466ebec7f381e58fd205a1e0b62d5b36a58064f795ad2b9  p5-4-profile.json
+fba23dccd4a62ea303ba64b9c06ca7d6a84743e7547017571106c3de2c6c1cfc  p5-4-timeline.json
+c8aa1a54023fc850c5a321d592cbf4dfbb48a5eedfcf637cc5ffadbeeaed57c1  p5-4-timeline.md
+```
+
+Two-rank correctness evidence SHA-256 values:
+
+```text
+7c24c6602d4baed57aafd4009ab59b813186a5727d8307740b58ae06b1a0f53c  hidden-7168-baseline.json
+28fd99b9e8fc337879015ddee596d334fc1cfd77338729baf4b9436f2d3fb01c  hidden-7168-candidate-a.json
+8088b185de5dde606be0355f3e4b0c1c2f037dc9b81cee4d5b67014e949091bf  hidden-7168-candidate-b.json
+780733668523e4435f2cc73b05fe95ce7944193f58f3d216b218cc4df49225c1  hidden-7184-baseline.json
+73253afa65819c883e78e74115f2896535418f6768f0d20b79ce850f15d81f1d  hidden-7184-candidate-a.json
+2729734da0c9b615c0b68db2b2149ecaf87852d9aff4bf153e9ddc6f4797fdbe  hidden-7184-candidate-b.json
+```
+
+Final retained-tree task `task_20260826_225215_392492315659` repeated the
+same two-rank 7,168/7,184 gate after the documentation and evidence update;
+all five operations passed in the disabled run and both enabled runs.
 
 ### 9.6 P5.5: SIMT/HCOMM control and service
 
@@ -538,6 +916,309 @@ Direct SIMT URMA doorbell submission remains outside the first response
 because CANN 9.2 does not expose the required operation to the current SIMT VF
 environment. Replacing the staged architecture requires a separately
 qualified vendor interface or compiler/runtime capability.
+
+#### P5.5.0: rejected staged-release fence elision
+
+The first P5.5 experiment tested whether the `system_fence()` at the beginning
+of each separately launched direct Combine release stage was redundant. The
+hypothesis was deliberately narrow: same-stream kernel launch order might
+already make the producer's staging writes visible before the later payload,
+control, or barrier release kernel consumes them. The experimental selector
+could skip the fence only for `kProducerRelease`,
+`kProducerReleaseControl`, and `kProducerReleaseBarrier`.
+`DirectCombineStage::kFull`, hybrid Combine, one-block Combine, expanded
+Combine without multiple reduction, and every same-kernel release path kept
+the fence.
+
+Local contract verification passed before the experiment with `335 passed, 6
+skipped, 67 subtests passed`. NPU8P build task
+`task_20260826_230918_39518336387` completed successfully. Two-rank task
+`task_20260826_231303_396082127844` covered hidden widths 7,168 and 7,184,
+unset and explicit-zero baselines, and two enabled generations. All five
+operations passed. EP8 ABBA task `task_20260826_231811_3973041715` and profile
+task `task_20260826_232338_3987472193` used the representative workload
+fingerprint
+`d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`.
+
+| Operation | Baseline mean (ms) | Candidate mean (ms) | Mean delta | Baseline p95 (ms) | Candidate p95 (ms) | P95 delta | Baseline pair variation | Candidate logical GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 29.018 | 29.475 | +1.58% | 30.439 | 31.368 | +3.05% | 4.09% | 264.461 |
+| Expanded Dispatch | 36.306 | 36.855 | +1.51% | 38.015 | 38.892 | +2.31% | 2.05% | 251.167 |
+| Cached Dispatch | 88.728 | 85.998 | -3.08% | 99.773 | 87.878 | -11.92% | 7.49% | 90.540 |
+| Combine | 104.470 | 104.851 | +0.36% | 105.967 | 107.288 | +1.25% | 0.05% | 103.975 |
+| Reduced Combine | 106.037 | 106.904 | **+0.82%** | 107.467 | 108.748 | **+1.19%** | 0.33% | 101.972 |
+
+Cached Dispatch's apparent movement is within its unusually large baseline
+pair variation and cannot be attributed to a Combine-only selector. The
+relevant Reduced Combine result is a regression beyond baseline pair noise.
+The targeted profile reaches the same conclusion:
+
+| Reduced Combine metric | Retained P5.4 | Fence candidate | Delta |
+| --- | ---: | ---: | ---: |
+| C4 publication phase | 51,474,281 | 51,812,426 cycles | +0.66% |
+| C4 release-payload span | 53,093,000 | 53,452,000 cycles | +0.68% |
+| CQ wait | 1,531,957 | 1,566,136 cycles | +2.23% |
+| Device mean | 105.235 | 107.750 ms | +2.39% |
+
+The result rejects the hypothesis that the roughly 51-million-cycle C4
+publication phase is primarily fence overhead. It remains dominated by
+payload publication and service work. The selector, kernel argument, helper,
+and tests were therefore removed completely. The retained P5.4 files were
+restored byte-for-byte, the focused post-revert suite passed with `131 passed,
+48 subtests passed`, and `git diff --check` passed.
+
+Raw evidence SHA-256 values:
+
+```text
+d677c3eb126532fc850bbc473520a30a3d62e54ceff7a7aa1304dafc8f47a32a  baseline-a.json
+dd0e8051ea473ebc18892c9cfcfdf45aa5365621e52486bc560a270375d3cd8a  baseline-b.json
+3e759df113244391b9f9e4953491dcb3e82e6406f59980ecc0636b702053265c  candidate-a.json
+8d81a4575a68acba920ba126272d9686aaa4734c1b3ce669c086f9e0e75e6766  candidate-b.json
+5d5f53d0aa4966e46072a425e85c4273cff5d47f24f53bccd1d635dfe8d99567  hidden-7168-baseline-unset.json
+fdc454b375ae98a322ea773837b272227570011e0eefd41e79bb6ebc4fd3e1b5  hidden-7168-baseline-zero.json
+933a9ded20a3d3777d18071b6ee2d992a52638ea9ba6f4141484115dac057be2  hidden-7168-candidate-a.json
+0ca77a7a7eaf7f689affac7590238ee6b08165f44852e6952394e79e1147d57a  hidden-7168-candidate-b.json
+7577f9c84d7411e8d328ff4c0dad4281f3eaa6cc738e9fa4fb77554e72600c70  hidden-7184-baseline-unset.json
+c51e30afbe85bd1c50ea67009b3532541642879697c194664aa07a471c93fb23  hidden-7184-baseline-zero.json
+1a21c01ce46321c996f52f14ccbb2683a6e80267fbe76dc729cf20f5d0155f28  hidden-7184-candidate-a.json
+4019c8638312f376848a5dba840ce9d8160c13c43fe665cde8a82df109d03c9e  hidden-7184-candidate-b.json
+71d938f59f718399189a2f9c2b2a3442ce1ee1fd68b9cdc8368921cdb6346251  p5-5-profile.json
+ba56ffb473709a4d2afcdddefa4e9ecee16a0f3fce72b702c7299ef91b27a0dd  p5-5-timeline.json
+d0097df21d3c33cdc0368835a888fde233a3764307641a33a23cb3b5123d7484  p5-5-timeline.md
+```
+
+#### P5.5.1: rejected adjacent control-request doorbell batching
+
+The second P5.5 experiment targeted the repeated AICore service work for the
+adjacent count and generation `kPutValue64` commands emitted by direct
+Dispatch and Combine. The experiment was deliberately narrower than control
+write coalescing. Two compatible commands still produced two ordinary
+64-byte inline URMA WQEs with their original destination addresses, values,
+ordering bits, and completion semantics. The service resolved the common
+peer and SQ once, copied both WQEs, and published one final SQ head and
+doorbell instead of publishing after each WQE.
+
+The opt-in selector was
+`DEEP_EP_ASCEND_TRANSPORT_BATCH_CONTROL_REQUESTS`. Unset and `0` selected the
+retained single-request path; `1` enabled the experiment; every other value
+failed buffer construction. A pair was eligible only when both commands were
+valid adjacent `kPutValue64` operations with the same team, logical peer,
+world peer, and channel. Payload puts, remote adds, signals, flushes,
+barriers, singleton controls, invalid lookahead, and different routes all
+kept the existing path. This boundary matters: the experiment reduced SQ
+bookkeeping and doorbell publication, but did not reduce the number of WQEs
+or network control writes.
+
+The first build task, `task_20260826_235018_402260816333`, found two real
+Bisheng portability errors in the host-tested implementation: an ordinary C++
+reference could not bind a `__gm__ TransportCommand`, and the batch helper
+called `resolve_remote_target` before its declaration. The implementation was
+changed to use address-space-aware pointers and an explicit forward
+declaration. Build task `task_20260826_235336_40286907359` then completed with
+`exit=0`. The complete local Ascend suite passed with `334 passed, 6 skipped,
+67 subtests passed` before NPU validation.
+
+Two-rank correctness task `task_20260826_235957_404142732249` covered hidden
+widths 7,168 and 7,184, unset and explicit-zero baselines, and two enabled
+generations. Every run contained all five operations and two device and wall
+samples per operation. All eight reports passed without a timeout, stale
+generation, or protocol error.
+
+EP8 ABBA task `task_20260827_000503_405357617375` used 72 data blocks, 30
+warmups, 30 samples, and the representative workload fingerprint
+`d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`.
+Only the batch selector changed in baseline-A, candidate-A, candidate-B,
+baseline-B order.
+
+| Operation | Baseline mean (ms) | Candidate mean (ms) | Mean delta | Baseline p95 (ms) | Candidate p95 (ms) | P95 delta | Baseline pair variation | Candidate pair variation | Candidate logical GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 30.152 | 28.876 | -4.23% | 31.981 | 30.446 | -4.80% | 0.03% | 5.11% | 269.820 |
+| Expanded Dispatch | 37.216 | 36.304 | -2.45% | 38.864 | 39.251 | +1.00% | 1.61% | 4.98% | 254.994 |
+| Cached Dispatch | 85.322 | 84.145 | -1.38% | 86.791 | 85.713 | -1.24% | 1.80% | 0.92% | 92.534 |
+| Combine | 105.500 | 104.962 | -0.51% | 106.852 | 106.802 | -0.05% | 0.12% | 0.05% | 103.858 |
+| Reduced Combine | 106.357 | 108.519 | **+2.03%** | 108.080 | 119.061 | **+10.16%** | 1.53% | 5.36% | 100.527 |
+
+Dispatch's apparent mean improvement is smaller than the candidate pair
+variation, and Expanded Dispatch has the same problem while its p95 moves in
+the opposite direction. Combine is effectively flat. Reduced Combine has a
+clear mean and tail regression, so the same-binary ABBA result does not meet
+the retention gate.
+
+Profile task `task_20260827_001049_406881120448` confirms that the intended
+mechanism executed. The `release_control` span falls by about 17% to 19% for
+all five operations. It also shows why the change does not provide a stable
+end-to-end win: control publication is only about 0.22 million cycles in a
+publication path dominated by payload transfer, service progress, and remote
+completion. The profile comparison below uses the retained P5.4 profile as a
+stage-attribution reference; the ABBA table remains the end-to-end decision
+source.
+
+| Operation | Release control, P5.4 -> candidate | Service-submit delta | CQ-wait delta | Profile device-mean delta |
+| --- | ---: | ---: | ---: | ---: |
+| Dispatch | 268,375 -> 223,197 cycles (-16.83%) | -0.03% | -9.92% | +0.52% |
+| Expanded Dispatch | 269,099 -> 222,511 cycles (-17.31%) | -23.48% | +1.34% | -3.72% |
+| Cached Dispatch | 268,421 -> 222,559 cycles (-17.09%) | +5.95% | +1.54% | -1.71% |
+| Combine | 268,012 -> 219,441 cycles (-18.12%) | -4.60% | +0.64% | -0.76% |
+| Reduced Combine | 267,894 -> 218,323 cycles (-18.50%) | -4.94% | +1.62% | +0.67% |
+
+For Reduced Combine, publication moves from `51,474,281` to `51,819,354`
+cycles (`+0.67%`), service-submit falls from `11,599,540` to `11,026,621`
+cycles (`-4.94%`), and CQ wait rises from `1,531,957` to `1,556,709` cycles
+(`+1.62%`). The saved control work is therefore too small to shorten the
+critical path and is accompanied by the CQ regression prohibited by the P5
+retention rules.
+
+The candidate was rejected. Its selector, transport flag, batch SQ helper,
+two-WQE post path, lookahead dispatch, and candidate-specific tests were
+removed completely. The result does not reject control-path optimization in
+general. It rejects paying lookahead and branching cost merely to share SQ
+state and one doorbell while still emitting two WQEs. A later control
+candidate should first reduce WQE count or cache per-peer metadata across a
+larger command run, and it must demonstrate lower service and CQ time in the
+same-binary ABBA gate.
+
+After removal, retained-tree build task
+`task_20260827_002245_40862966010` completed with `exit=0`. Final two-rank
+task `task_20260827_002643_411322231830` ran on devices 6 and 7 and repeated
+the P5.4 gate at hidden widths 7,168 and 7,184. The disabled baseline and both
+retained vector-reduction generations passed all five operations. The final
+local suite passed with `334 passed, 6 skipped, 67 subtests passed`, and
+`git diff --check` passed.
+
+ABBA and profile evidence SHA-256 values:
+
+```text
+bc1be2a156b3f135bff252f9cfd044c1d035ae7b51eec93fd33b81a90f5f0ef3  baseline-a.json
+4d94e41b6af5a1578dca94b5fb14afb5626c967968cf532d0c66055b9dba415e  baseline-b.json
+aa49a0a9e8ddf89441c4e12ef71222c12f6ad32213c9687b1a53e1daed920a59  candidate-a.json
+93f46f2f7bdbb6813f42839c189d910d97d54bf64f1adba2ad26b06c39a947f8  candidate-b.json
+c40c1971e2327b9bb8ced5532ac7e41c2c2df569ccbc7d1ac0ffa2a6fe8d1373  profile.json
+c63832dea25ffb68402cd272cbae5e8f47d9de5046a3ef93bd6c7a4259629a12  timeline.json
+4dfc87b7da298abebe62a9839422d0cc23592621a0309e3a7a8e4b0d1328b3b9  timeline.md
+```
+
+Two-rank correctness evidence SHA-256 values:
+
+```text
+b30c34cbf39a8a6baba45a19178f5b9034ae152cc45a06731eea629833437082  hidden-7168-baseline-unset.json
+9fb83af2bd9930f69634d1cd92ebac968a8752332049d3096b944515a51c876a  hidden-7168-baseline-zero.json
+a6212c5ff0a14b1b2d6d157b323c82330c96143bea26d2de8b2a1bcc61b3f7fc  hidden-7168-candidate-a.json
+827cbee4b86b832fc83f3ed9bbdb3e81fee403a7239e35cf646a4c732b278d4c  hidden-7168-candidate-b.json
+9f30e6f4a03fb23b341855401deae50141e3d73706f45fdb40f3e51e3774b2ac  hidden-7184-baseline-unset.json
+de0902b2a7a2855f7218264c759096332ef49a8ad9bd9279bf71e472dc6a3402  hidden-7184-baseline-zero.json
+0c81b4c83c01bb61957cc589cd15e2d194e1e08735bed4b70c809850930708ee  hidden-7184-candidate-a.json
+9820205fd1d5be573c74c3033f4b7ecd376c9ba8672dd0c90d59a35e00dc3967  hidden-7184-candidate-b.json
+```
+
+#### P5.5.2: rejected single-entry execution metadata cache
+
+The third P5.5 experiment tested whether repeated route, queue, and registered
+buffer lookup was a material part of AICore HCOMM service time. It added one
+execution-local cache entry to `service::execute_body()`. For `kPut` and
+`kPutValue64`, the entry retained the most recently used `(world_peer,
+channel)` route, channel/SQ/CQ pointers, an SQ WQE metadata snapshot, and the
+most recently matched local and remote registered-buffer ranges. A route or
+range miss fell back to the original lookup and refreshed the entry. Signal,
+FAA, flush, barrier, SQ publication, completion, and ordering behavior did not
+change.
+
+The selector was `DEEP_EP_ASCEND_TRANSPORT_METADATA_CACHE`. Unset and `0`
+selected the retained path, `1` enabled the candidate, and any other value
+failed buffer construction. The cache existed for one service execution only;
+it was neither shared across AICore invocations nor persisted in the staged
+transport ABI. This boundary avoided stale channel or registration state, but
+also limited reuse to adjacent commands that happened to use the same route
+and registered range.
+
+The focused local suite passed with `163 passed, 3 skipped, 48 subtests
+passed`, and the complete Ascend suite passed with `334 passed, 6 skipped, 67
+subtests passed`. NPU8P build task `task_20260827_004433_4057514136`
+completed with `exit=0` and did not report a Bisheng address-space or resource
+overflow error. Two-rank task `task_20260827_004806_622329541` covered hidden
+widths 7,168 and 7,184, unset and explicit-zero baselines, and two enabled
+generations. All five operations passed.
+
+EP8 ABBA task `task_20260827_005218_7304613896` used 72 data blocks, 30
+warmups, 30 samples, and the representative workload fingerprint
+`d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`.
+Only the metadata-cache selector changed in baseline-A, candidate-A,
+candidate-B, baseline-B order.
+
+| Operation | Baseline mean (ms) | Candidate mean (ms) | Mean delta | Baseline p95 (ms) | Candidate p95 (ms) | P95 delta | Baseline pair variation | Candidate pair variation | Candidate logical GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 29.422 | 28.962 | -1.57% | 32.257 | 30.780 | -4.58% | 2.90% | 5.59% | 269.050 |
+| Expanded Dispatch | 35.957 | 36.422 | +1.29% | 37.967 | 38.108 | +0.37% | 1.23% | 4.71% | 254.150 |
+| Cached Dispatch | 85.090 | 85.079 | -0.01% | 86.910 | 86.694 | -0.25% | 0.08% | 1.15% | 91.519 |
+| Combine | 104.776 | 105.292 | +0.49% | 106.583 | 108.503 | +1.80% | 0.26% | 2.00% | 103.543 |
+| Reduced Combine | 104.861 | 107.627 | **+2.64%** | 106.992 | 111.184 | **+3.92%** | 0.55% | 1.58% | 101.293 |
+
+Dispatch's apparent improvement is smaller than the candidate pair
+variation, while Expanded Dispatch and both Combine variants regress. Reduced
+Combine moves beyond baseline pair noise in both mean and p95. The same-binary
+ABBA result therefore rejects the candidate without relying on a percentage
+retention threshold.
+
+Profile task `task_20260827_005656_8667710097` confirms why lower lookup work
+does not translate into lower end-to-end time. The table compares the
+candidate profile with the retained P5.4 attribution profile. It is useful for
+mechanism diagnosis; the ABBA table remains the retention decision source.
+
+| Operation | Service-submit delta | CQ-wait delta | Publication delta | Profile device-mean delta |
+| --- | ---: | ---: | ---: | ---: |
+| Dispatch | -36.03% | -8.55% | -1.22% | +4.12% |
+| Expanded Dispatch | -3.89% | +3.45% | -2.86% | +0.60% |
+| Cached Dispatch | +1.70% | +1.86% | +2.01% | -0.10% |
+| Combine | +17.23% | -1.19% | -0.09% | +0.13% |
+| Reduced Combine | -26.67% | +2.15% | +0.63% | +1.09% |
+
+The cache can reduce measured service-submit time in one run, but the effect
+is not consistent across operations. For Reduced Combine, service-submit
+moves from `11,599,540` to `8,505,500` cycles while CQ wait increases from
+`1,531,957` to `1,564,948` cycles and publication increases from `51,474,281`
+to `51,798,862` cycles. Its release-payload span also rises from `53,093,252`
+to `53,408,832` cycles. Route/range lookup is therefore not the limiting part
+of this critical path. The extra per-command cache branch and state traffic do
+not produce stable overlap or shorten remote completion.
+
+The candidate was rejected. Its selector, staged flag, cache helper and state,
+cached lookup branches, and candidate-specific tests were removed. A future
+service optimization should operate on a larger unit than a single-entry
+lookup cache: reduce WQE or command count, overlap independent work with
+barrier/CQ progress, or change service scheduling only after profile evidence
+shows which queue is saturated.
+
+After removal, retained-tree build task
+`task_20260827_010949_10444816059` completed with `exit=0`. Final two-rank
+task `task_20260827_011322_1130982954` ran on devices 6 and 7 and repeated
+the P5.4 gate at hidden widths 7,168 and 7,184. The disabled baseline and both
+retained vector-reduction generations passed all five operations. The final
+local suite passed with `334 passed, 6 skipped, 67 subtests passed`, and
+`git diff --check` passed.
+
+ABBA and profile evidence SHA-256 values:
+
+```text
+f686f0cc73fcfcb948ca2c58dbb20ca4e57af7308fed383f2b1a8df579d9f7b0  baseline-a.json
+01b02d17ea3a550b86edb113cc10abfd931a8bf3175bbba53abd34d104e1801c  baseline-b.json
+b439cbe926253278cdcd621e05afc75f1f7d0c36d3ec6aaf5cf8e81bab5f865a  candidate-a.json
+a2e0fc8308b2e66fb9575cf0d7742f200b924b628594fdaa6a7834f3346bea08  candidate-b.json
+8327b00f9be48dc56720fdd46840f18c2863061365488e1df3111424ea72c6c3  profile.json
+9e6682d59233560e5086c638ff2eda2c18be6065587ed1f4948fc8188a41cdb2  timeline.json
+e19856ddccd3a397443f04817a2b63342ad4632ea026cebd50dd273b3ae34cd1  timeline.md
+```
+
+Two-rank correctness evidence SHA-256 values:
+
+```text
+2f5fa43af370b609074bd00a5a8f2bf8570bd5c3749da09ce9eec067cdf6d3a5  hidden-7168-baseline-unset.json
+4e82a80e8611302c0deb16d9fa0fa3e04df51b5318feebf39a5eab6d890d443f  hidden-7168-baseline-zero.json
+234c5ab94d3377a2e306f05e8f5a001d856dc9558b6a3a754434d34f6c46fd79  hidden-7168-candidate-a.json
+964e82ccdbf093c6eb64ed85f3befe32090d3b5bdf0d62f7984cb0f521ed900f  hidden-7168-candidate-b.json
+6ce183bd3960abdfd991484f3a48bb26e21cc6d129a45177f7f8e0c2c1329c85  hidden-7184-baseline-unset.json
+cb330314c36578d94a492552455a1cc219a1e0f9c900307735a897e1414055a7  hidden-7184-baseline-zero.json
+8fbbd236505586d132f09de3ac77fabd935c558948cd9010701bce446c563189  hidden-7184-candidate-a.json
+cca7a2d814cd57656c1d105153f19106880ccc7106b2ddef3e13805bbc1da4f0  hidden-7184-candidate-b.json
+```
 
 ## 10. Decision and Retention Rules
 

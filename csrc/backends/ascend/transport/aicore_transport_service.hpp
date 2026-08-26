@@ -1154,6 +1154,11 @@ __aicore__ inline void begin_profile(
     profile->service_start_cycles = 0;
     profile->service_end_cycles = 0;
     profile->wait_cycles = 0;
+    profile->payload_command_cycles = 0;
+    profile->control_command_cycles = 0;
+    profile->flush_command_cycles = 0;
+    profile->barrier_command_cycles = 0;
+    profile->barrier_poll_cycles = 0;
     aicore::system_fence();
     aicore::flush_stage_profile_header(profile);
 }
@@ -1168,14 +1173,26 @@ __aicore__ inline void complete_profile(
     aicore::flush_stage_profile_header(profile);
 }
 
+__aicore__ inline std::uint64_t device_stage_profile_pipeline_mask(
+    TransportProfileOperation operation, bool release_ablation) {
+    if (operation == TransportProfileOperation::kDispatch)
+        return release_ablation ? kTransportDispatchReleaseAblationStageMask :
+                                  kTransportDispatchPipelineStageMask;
+    if (operation == TransportProfileOperation::kCombine)
+        return release_ablation ? kTransportCombineReleaseAblationStageMask :
+                                  kTransportCombinePipelineStageMask;
+    return 0;
+}
+
 __aicore__ inline std::uint64_t stage_profile_completed_mask(
-    TransportProfileOperation operation, std::uint32_t stage) {
+    TransportProfileOperation operation, std::uint32_t stage,
+    bool release_ablation) {
     if (stage == 0)
         return kTransportStageProfileFullMask;
     if (operation == TransportProfileOperation::kDispatch && stage == 13)
-        return kTransportDispatchPipelineStageMask;
+        return device_stage_profile_pipeline_mask(operation, release_ablation);
     if (operation == TransportProfileOperation::kCombine && stage == 11)
-        return kTransportCombinePipelineStageMask;
+        return device_stage_profile_pipeline_mask(operation, release_ablation);
     return 0;
 }
 
@@ -1192,6 +1209,13 @@ __aicore__ inline void record_stage_start(
         return;
     profile->operation = operation;
     profile->generation = generation;
+    const bool release_ablation_stage =
+        (operation == TransportProfileOperation::kDispatch && stage >= 14) ||
+        (operation == TransportProfileOperation::kCombine && stage >= 12);
+    if (block == 0 && release_ablation_stage) {
+        profile->flags |= kTransportStageProfileReleaseAblation;
+        aicore::flush_stage_profile_header(profile);
+    }
     auto* cycles = &profile->stages[stage].blocks[block];
     cycles->start = record_transport_stage_start(
         cycles->start,
@@ -1221,7 +1245,9 @@ __aicore__ inline void record_stage_end(
     if (block == 0)
         aicore::flush_cacheline(&profile->stages[stage]);
     if (block == 0 && complete_operation) {
-        profile->valid_stage_mask = stage_profile_completed_mask(operation, stage);
+        profile->valid_stage_mask = stage_profile_completed_mask(
+            operation, stage,
+            (profile->flags & kTransportStageProfileReleaseAblation) != 0);
         complete_profile(context, generation);
     }
 }
@@ -1264,7 +1290,7 @@ __aicore__ inline void reset(
 }
 
 template <bool ProfileEnabled = true>
-__aicore__ inline void execute(const DeviceTransportContext& context) {
+__aicore__ inline void execute_body(const DeviceTransportContext& context) {
     auto* staged = detail::staged_context(context);
     auto* queue = detail::command_queue(context);
     if (!detail::valid_registered_queue(staged, queue))
@@ -1297,13 +1323,15 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
         queue->commands);
     const std::uint32_t count = queue->count;
     __gm__ TransportStageProfile* profile = nullptr;
-    std::uint64_t service_start_cycles = 0;
     if constexpr (ProfileEnabled)
         profile = detail::profile_buffer<ProfileEnabled>(context);
     if constexpr (ProfileEnabled) {
-        if (profile != nullptr)
-            service_start_cycles = static_cast<std::uint64_t>(
-                AscendC::GetSystemCycle());
+        if (profile != nullptr) {
+            profile->service_start_cycles =
+                record_transport_stage_start(
+                    profile->service_start_cycles,
+                    static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+        }
     }
 
     for (std::uint32_t index = command_begin; index < count; ++index) {
@@ -1311,6 +1339,7 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
         aicore::flush_cacheline(current);
         if constexpr (ProfileEnabled) {
             if (profile != nullptr) {
+                ++profile->command_count;
                 profile->command_bytes +=
                     command::aicore_profile_payload_bytes(
                         current->opcode, current->bytes);
@@ -1469,23 +1498,30 @@ __aicore__ inline void execute(const DeviceTransportContext& context) {
     state->consumed_generation = queue->generation;
     if constexpr (ProfileEnabled) {
         if (profile != nullptr) {
-            const auto accumulated = accumulate_transport_service_interval(
-                profile->command_count, profile->service_start_cycles,
-                profile->service_end_cycles, command_begin, count,
-                service_start_cycles,
-                static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
-            if (accumulated.valid) {
-                profile->command_count = accumulated.command_count;
-                profile->service_start_cycles =
-                    accumulated.service_start_cycles;
-                profile->service_end_cycles = accumulated.service_end_cycles;
-            }
+            profile->service_end_cycles =
+                record_transport_stage_end(
+                    profile->service_start_cycles,
+                    profile->service_end_cycles,
+                    static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
             detail::update_queue_profile<ProfileEnabled>(context, profile);
             aicore::flush_stage_profile_header(profile);
         }
     }
     aicore::system_fence();
     aicore::flush_cacheline(state);
+}
+
+__aicore__ static __attribute__((noinline)) void execute_profiled(
+    const DeviceTransportContext& context) {
+    execute_body<true>(context);
+}
+
+template <bool ProfileEnabled = true>
+__aicore__ inline void execute(const DeviceTransportContext& context) {
+    if constexpr (ProfileEnabled)
+        execute_profiled(context);
+    else
+        execute_body<false>(context);
 }
 
 #endif

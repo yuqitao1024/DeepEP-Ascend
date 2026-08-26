@@ -145,6 +145,7 @@ class Tensor {
     Device device_{};
     std::shared_ptr<std::vector<std::uint8_t>> storage_ =
         std::make_shared<std::vector<std::uint8_t>>(2);
+    std::size_t storage_offset_elements_ = 0;
 public:
     Tensor() = default;
     Tensor(std::initializer_list<std::int64_t> sizes, TensorOptions options)
@@ -180,10 +181,25 @@ public:
     TensorOptions options() const {
         return TensorOptions().dtype(type_).device(device_.index());
     }
-    void* data_ptr() const { return numel() == 0 ? nullptr : storage_->data(); }
+    void* data_ptr() const {
+        return numel() == 0 ? nullptr :
+            storage_->data() + storage_offset_elements_ * bytes();
+    }
     template <typename T>
     T* data_ptr() const { return static_cast<T*>(data_ptr()); }
-    Tensor narrow(std::int64_t dimension, std::int64_t, std::int64_t length) const { auto result = *this; result.sizes_[dimension] = length; return result; }
+    Tensor narrow(std::int64_t dimension, std::int64_t start,
+                  std::int64_t length) const {
+        if (dimension < 0 ||
+            dimension >= static_cast<std::int64_t>(sizes_.size()) ||
+            start < 0 || length < 0 || start > sizes_[dimension] ||
+            length > sizes_[dimension] - start)
+            throw std::out_of_range("invalid tensor narrow");
+        auto result = *this;
+        result.storage_offset_elements_ +=
+            static_cast<std::size_t>(start * strides_[dimension]);
+        result.sizes_[dimension] = length;
+        return result;
+    }
     Tensor clone() const {
         auto result = *this;
         result.storage_ =

@@ -1,6 +1,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <type_traits>
 
@@ -36,7 +37,8 @@ static_assert(kTransportProfileMaxBlocks == 72);
 static_assert(sizeof(TransportStageBlockCycles) == 64);
 static_assert(alignof(TransportStageBlockCycles) == 64);
 static_assert(offsetof(TransportStageProfile, command_bytes) == 64);
-static_assert(kTransportStageProfileHeaderCacheLineCount == 2);
+static_assert(kTransportStageProfileAbiVersion == 2);
+static_assert(kTransportStageProfileHeaderCacheLineCount == 3);
 static_assert(kDefaultOptions == 0);
 static_assert((kAggregateRequests & kDefaultOptions) == 0);
 static_assert(kNoCapabilities == 0);
@@ -94,6 +96,10 @@ int main() {
         ((std::uint64_t{1} << 14U) - 1U) & ~full_mask;
     constexpr auto combine_pipeline_mask =
         ((std::uint64_t{1} << 12U) - 1U) & ~full_mask;
+    constexpr auto dispatch_release_ablation_mask =
+        ((std::uint64_t{1} << 16U) - 1U) & ~full_mask;
+    constexpr auto combine_release_ablation_mask =
+        ((std::uint64_t{1} << 14U) - 1U) & ~full_mask;
     constexpr auto observed_dispatch_mask =
         (std::uint64_t{1} << 1U) | (std::uint64_t{1} << 2U) |
         (std::uint64_t{1} << 3U) | (std::uint64_t{1} << 5U) |
@@ -121,7 +127,27 @@ int main() {
             TransportStageProfileMaskStatus::kValid ||
         stage_profile_mask_status(
             TransportProfileOperation::kCombine, combine_pipeline_mask) !=
-            TransportStageProfileMaskStatus::kValid)
+            TransportStageProfileMaskStatus::kValid ||
+        stage_profile_mask_status(
+            TransportProfileOperation::kDispatch,
+            dispatch_release_ablation_mask) !=
+            TransportStageProfileMaskStatus::kValid ||
+        stage_profile_mask_status(
+            TransportProfileOperation::kCombine,
+            combine_release_ablation_mask) !=
+            TransportStageProfileMaskStatus::kValid ||
+        transport_stage_profile_pipeline_mask(
+            TransportProfileOperation::kDispatch, false) !=
+            dispatch_pipeline_mask ||
+        transport_stage_profile_pipeline_mask(
+            TransportProfileOperation::kCombine, false) !=
+            combine_pipeline_mask ||
+        transport_stage_profile_pipeline_mask(
+            TransportProfileOperation::kDispatch, true) !=
+            dispatch_release_ablation_mask ||
+        transport_stage_profile_pipeline_mask(
+            TransportProfileOperation::kCombine, true) !=
+            combine_release_ablation_mask)
         return 6;
     if (stage_profile_mask_status(
             TransportProfileOperation::kDispatch, observed_dispatch_mask) !=
@@ -146,6 +172,66 @@ int main() {
         transport_stage_profile_service_cycles_valid(10, 20, 11) ||
         !transport_stage_profile_service_cycles_valid(10, 20, 10))
         return 7;
+
+    TransportServiceCycleBreakdown command_cycles{};
+    auto recorded_cycles = record_transport_service_cycles(
+        command_cycles, TransportServiceCycleClass::kPayload, 100, 140);
+    if (!recorded_cycles.valid ||
+        recorded_cycles.cycles.payload_command_cycles != 40 ||
+        recorded_cycles.cycles.control_command_cycles != 0 ||
+        recorded_cycles.cycles.flush_command_cycles != 0 ||
+        recorded_cycles.cycles.barrier_command_cycles != 0 ||
+        recorded_cycles.cycles.barrier_poll_cycles != 0)
+        return 48;
+    recorded_cycles = record_transport_service_cycles(
+        recorded_cycles.cycles, TransportServiceCycleClass::kControl,
+        200, 215);
+    recorded_cycles = record_transport_service_cycles(
+        recorded_cycles.cycles, TransportServiceCycleClass::kFlush,
+        300, 309);
+    recorded_cycles = record_transport_service_cycles(
+        recorded_cycles.cycles, TransportServiceCycleClass::kBarrier,
+        400, 430);
+    recorded_cycles = record_transport_service_cycles(
+        recorded_cycles.cycles, TransportServiceCycleClass::kBarrierPoll,
+        410, 428);
+    if (!recorded_cycles.valid ||
+        recorded_cycles.cycles.payload_command_cycles != 40 ||
+        recorded_cycles.cycles.control_command_cycles != 15 ||
+        recorded_cycles.cycles.flush_command_cycles != 9 ||
+        recorded_cycles.cycles.barrier_command_cycles != 30 ||
+        recorded_cycles.cycles.barrier_poll_cycles != 18)
+        return 49;
+
+    const auto reject_zero_start = record_transport_service_cycles(
+        recorded_cycles.cycles, TransportServiceCycleClass::kPayload, 0, 9);
+    const auto reject_reversed = record_transport_service_cycles(
+        recorded_cycles.cycles, TransportServiceCycleClass::kControl, 20, 19);
+    const auto reject_unclassified = record_transport_service_cycles(
+        recorded_cycles.cycles, TransportServiceCycleClass::kUnclassified,
+        20, 21);
+    command_cycles.payload_command_cycles =
+        std::numeric_limits<std::uint64_t>::max() - 3;
+    const auto reject_overflow = record_transport_service_cycles(
+        command_cycles, TransportServiceCycleClass::kPayload, 100, 104);
+    if (reject_zero_start.valid || reject_reversed.valid ||
+        reject_unclassified.valid ||
+        reject_overflow.valid ||
+        reject_zero_start.cycles.payload_command_cycles != 40 ||
+        reject_reversed.cycles.control_command_cycles != 15 ||
+        reject_overflow.cycles.payload_command_cycles !=
+            std::numeric_limits<std::uint64_t>::max() - 3)
+        return 50;
+
+    const auto scalar_counter = accumulate_transport_service_counter(
+        7, 100, 140);
+    if (scalar_counter != 47 ||
+        accumulate_transport_service_counter(scalar_counter, 0, 9) != 47 ||
+        accumulate_transport_service_counter(scalar_counter, 20, 19) != 47 ||
+        accumulate_transport_service_counter(
+            std::numeric_limits<std::uint64_t>::max() - 3,
+            100, 104) != std::numeric_limits<std::uint64_t>::max() - 3)
+        return 51;
 
     auto accumulated_service = accumulate_transport_service_interval(
         0, 0, 0, 0, 4, 100, 160);
@@ -176,6 +262,12 @@ int main() {
             accumulated_service.service_start_cycles,
             accumulated_service.service_end_cycles, 5, 4, 260, 270).valid)
         return 46;
+    if (accumulate_transport_service_command_count(3, 4, 9) != 8 ||
+        accumulate_transport_service_command_count(3, 9, 4) != 3 ||
+        accumulate_transport_service_command_count(
+            std::numeric_limits<std::uint32_t>::max() - 2, 0, 3) !=
+            std::numeric_limits<std::uint32_t>::max() - 2)
+        return 55;
     const auto first_stage_start = record_transport_stage_start(0, 100);
     const auto first_stage_end = record_transport_stage_end(
         first_stage_start, 0, 160);
@@ -301,17 +393,53 @@ int main() {
             invalid_metrics, false) !=
             TransportStageProfileCommandMetricsStatus::kValid)
         return 43;
+    invalid_metrics = {};
+    invalid_metrics.payload_command_cycles = 1;
+    if (!expect_metric_status(
+            invalid_metrics,
+            TransportStageProfileCommandMetricsStatus::
+                kQueueActivityWithoutCommands,
+            "queue_activity_without_commands"))
+        return 53;
+    invalid_metrics = valid_metrics;
+    invalid_metrics.barrier_command_cycles = 10;
+    invalid_metrics.barrier_poll_cycles = 11;
+    if (!expect_metric_status(
+            invalid_metrics,
+            TransportStageProfileCommandMetricsStatus::
+                kBarrierPollExceedsBarrierCommand,
+            "barrier_poll_exceeds_barrier_command"))
+        return 54;
 
     std::array<std::uint64_t, kTransportProfileStageCount> stage_spans{};
     stage_spans[0] = 140;
     const auto full_phases = derive_stage_profile_phase_cycles(
         TransportProfileOperation::kDispatch, full_mask, stage_spans.data(),
-        100, 200, 20);
+        100, 200, 10, 20);
     if (full_phases.producer != 140 || full_phases.publication != 0 ||
         full_phases.service_submit != 0 || full_phases.cq_wait != 0 ||
+        full_phases.barrier_wait != 0 ||
         full_phases.consumer_wait != 0 ||
         full_phases.consumer_compute != 0 || full_phases.epilogue != 0)
         return 8;
+
+    stage_spans[0] = 0;
+    stage_spans[5] = 130;
+    const auto pipeline_phases = derive_stage_profile_phase_cycles(
+        TransportProfileOperation::kDispatch, dispatch_pipeline_mask,
+        stage_spans.data(), 100, 200, 10, 20);
+    if (pipeline_phases.publication != 30 ||
+        pipeline_phases.service_submit != 70 ||
+        pipeline_phases.cq_wait != 10 ||
+        pipeline_phases.barrier_wait != 20)
+        return 51;
+    const auto invalid_wait_phases = derive_stage_profile_phase_cycles(
+        TransportProfileOperation::kDispatch, dispatch_pipeline_mask,
+        stage_spans.data(), 100, 200, 81, 20);
+    if (invalid_wait_phases.service_submit != 0 ||
+        invalid_wait_phases.cq_wait != 0 ||
+        invalid_wait_phases.barrier_wait != 0)
+        return 52;
 
     const auto no_action = RemoteAction::none();
     const auto signal_add = RemoteAction::signal_add(128, 7);

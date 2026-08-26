@@ -9,6 +9,103 @@ namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint32_t kMaximumDispatchPipelineChunks = 8;
 
+enum class DispatchParallelPrefixConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct DispatchParallelPrefixConfig {
+    bool enabled = false;
+};
+
+inline DispatchParallelPrefixConfigStatus
+select_dispatch_parallel_prefix_config(
+    const char* value, bool device_prefix_enabled, bool cached_mode,
+    bool cpu_sync, bool expanded, bool hybrid_mode, bool stream_mode,
+    DispatchParallelPrefixConfig* output) noexcept {
+    if (output == nullptr)
+        return DispatchParallelPrefixConfigStatus::kInvalid;
+    *output = {};
+    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+        return DispatchParallelPrefixConfigStatus::kDisabled;
+    if (value[0] != '1' || value[1] != '\0')
+        return DispatchParallelPrefixConfigStatus::kInvalid;
+    if (!device_prefix_enabled || cached_mode || !cpu_sync || expanded ||
+        hybrid_mode || stream_mode)
+        return DispatchParallelPrefixConfigStatus::kDisabled;
+    output->enabled = true;
+    return DispatchParallelPrefixConfigStatus::kEnabled;
+}
+
+enum class DispatchConsumerTileConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct DispatchConsumerTileConfig {
+    std::uint32_t tile_bytes = 512;
+};
+
+inline DispatchConsumerTileConfigStatus select_dispatch_consumer_tile_config(
+    const char* value, bool device_prefix_enabled, bool cached_mode,
+    bool cpu_sync, bool expanded, bool hybrid_mode, bool stream_mode,
+    DispatchConsumerTileConfig* output) noexcept {
+    if (output == nullptr)
+        return DispatchConsumerTileConfigStatus::kInvalid;
+    *output = {};
+    if (value == nullptr)
+        return DispatchConsumerTileConfigStatus::kDisabled;
+    if (*value == '\0')
+        return DispatchConsumerTileConfigStatus::kInvalid;
+
+    std::uint32_t tile_bytes = 0;
+    for (const char* cursor = value; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9')
+            return DispatchConsumerTileConfigStatus::kInvalid;
+        const auto digit = static_cast<std::uint32_t>(*cursor - '0');
+        if (tile_bytes >
+            (std::numeric_limits<std::uint32_t>::max() - digit) / 10U)
+            return DispatchConsumerTileConfigStatus::kInvalid;
+        tile_bytes = tile_bytes * 10U + digit;
+    }
+    if (tile_bytes != 512 && tile_bytes != 1024 && tile_bytes != 2048 &&
+        tile_bytes != 4096)
+        return DispatchConsumerTileConfigStatus::kInvalid;
+    if (tile_bytes == 512 || !device_prefix_enabled || cached_mode ||
+        !cpu_sync || expanded || hybrid_mode || stream_mode)
+        return DispatchConsumerTileConfigStatus::kDisabled;
+    output->tile_bytes = tile_bytes;
+    return DispatchConsumerTileConfigStatus::kEnabled;
+}
+
+enum class DispatchDevicePrefixConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct DispatchDevicePrefixConfig {
+    bool enabled = false;
+};
+
+inline DispatchDevicePrefixConfigStatus select_dispatch_device_prefix_config(
+    const char* value, bool cached_mode, bool cpu_sync, bool hybrid_mode,
+    bool stream_mode, DispatchDevicePrefixConfig* output) noexcept {
+    if (output == nullptr)
+        return DispatchDevicePrefixConfigStatus::kInvalid;
+    *output = {};
+    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+        return DispatchDevicePrefixConfigStatus::kDisabled;
+    if (value[0] != '1' || value[1] != '\0')
+        return DispatchDevicePrefixConfigStatus::kInvalid;
+    if (cached_mode || !cpu_sync || hybrid_mode || stream_mode)
+        return DispatchDevicePrefixConfigStatus::kDisabled;
+    output->enabled = true;
+    return DispatchDevicePrefixConfigStatus::kEnabled;
+}
+
 enum class DispatchPipelineConfigStatus : std::uint8_t {
     kDisabled,
     kEnabled,

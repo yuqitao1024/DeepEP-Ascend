@@ -30,6 +30,8 @@ PRODUCTION_COMBINE_SEMANTICS_PROBE = \
     ROOT / "tests/ascend/production_combine_semantics_probe.cpp"
 PRODUCTION_COMBINE_PRODUCER_PROBE = \
     ROOT / "tests/ascend/production_combine_producer_probe.cpp"
+COMBINE_PARALLEL_AICORE_CALLEE_PROBE = \
+    ROOT / "tests/ascend/combine_parallel_aicore_callee_probe.cpp"
 PRODUCTION_COMBINE_DEVICE_POINTER_PROBE = \
     ROOT / "tests/ascend/production_combine_device_pointer_probe.cpp"
 PRODUCTION_DISPATCH_STATE_PROBE = \
@@ -75,6 +77,7 @@ STREAM_EVENT_CAPABILITY_PROBE = \
 STREAM_EVENT_CAPABILITY_RUNNER = \
     ROOT / "tests/ascend/stream_event/run_capability_probe.py"
 ASYNC_RUNTIME_PROBE = ROOT / "tests/ascend/async_runtime_probe.cpp"
+HOST_TIMELINE_PROBE = ROOT / "tests/ascend/host_timeline_probe.cpp"
 ELASTIC_BINDING_PROBE = ROOT / "tests/ascend/elastic_binding_probe.cpp"
 ELASTIC = ROOT / "csrc/backends/ascend/elastic"
 CORE_OPS = ROOT / "tests/ascend/core_ops"
@@ -225,6 +228,110 @@ def _valid_component_rank(rank):
 
 
 class AscendCoreOperatorContractTest(unittest.TestCase):
+    def test_invalid_stage_profile_exposes_raw_command_metrics(self):
+        source = (
+            ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        begin = source.index("    pybind11::dict get_stage_profile() const")
+        end = source.index("\n    c10::Stream get_comm_stream() const", begin)
+        profile = source[begin:end]
+        validation = profile.index(
+            "const auto command_metrics_status =")
+        construction = profile.index("pybind11::dict command_metrics;")
+        publication = profile.index(
+            'result["command_metrics"] = command_metrics;')
+        service_construction = profile.index("pybind11::dict raw_service;")
+        service_publication = profile.index(
+            'result["service"] = raw_service;')
+
+        self.assertLess(construction, validation)
+        self.assertLess(publication, validation)
+        self.assertLess(service_construction, validation)
+        self.assertLess(service_publication, validation)
+
+    def test_transport_service_profile_avoids_long_lived_interval_state(self):
+        source = (
+            ROOT /
+            "csrc/backends/ascend/transport/aicore_transport_service.hpp"
+        ).read_text()
+        begin = source.index(
+            "__aicore__ inline void execute_body(")
+        end = source.index(
+            "\ntemplate <bool ProfileEnabled = true>\n"
+            "__aicore__ inline void execute(", begin)
+        execute = source[begin:end]
+
+        self.assertIn(
+            "profile->service_start_cycles =\n"
+            "                record_transport_stage_start(", execute)
+        command_loop = execute[
+            execute.index("for (std::uint32_t index = command_begin;"):
+            execute.index("        bool success = true;")
+        ]
+        self.assertIn("++profile->command_count;", command_loop)
+        self.assertIn(
+            "profile->service_end_cycles =\n"
+            "                record_transport_stage_end(", execute)
+        self.assertNotIn("std::uint64_t service_start_cycles = 0;", execute)
+        self.assertNotIn("accumulate_transport_service_interval(", execute)
+
+    def test_profiled_transport_service_has_a_noinline_codegen_boundary(self):
+        source = (
+            ROOT /
+            "csrc/backends/ascend/transport/aicore_transport_service.hpp"
+        ).read_text()
+        self.assertIn(
+            "__aicore__ static __attribute__((noinline)) void "
+            "execute_profiled(", source)
+
+        begin = source.index(
+            "__aicore__ inline void execute(const DeviceTransportContext&")
+        execute = source[begin:]
+        self.assertIn(
+            "if constexpr (ProfileEnabled)\n"
+            "        execute_profiled(context);\n"
+            "    else\n"
+            "        execute_body<false>(context);",
+            execute)
+
+    def test_host_timeline_accumulates_literal_phase_intervals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "host_timeline_probe"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(HOST_TIMELINE_PROBE), "-o", str(binary)],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_combine_host_timeline_covers_prelaunch_and_completion_path(self):
+        source = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        begin = source.index(
+            "    combine(const torch::Tensor& x,")
+        end = source.index("\n    }\n};", begin)
+        combine = source[begin:end]
+
+        self.assertIn("host_timeline_profile_.reset(0);", combine)
+        self.assertIn("host_timeline_profile_.bind_generation(generation)", combine)
+        expected_phase_counts = {
+            "kCombinePrelaunchSetup": 1,
+            "kCombineHostValidation": 2,
+        }
+        for phase in (
+                "kCombineHandleToHost",
+                "kCombineMetadataToHost",
+                "kCombineStreamSetup",
+                "kCombineOutputAllocation",
+                "kCombineSubmit",
+                "kCombineCompletionRecord",
+                "kCombineCompletionWait"):
+            expected_phase_counts[phase] = 1
+        for phase, count in expected_phase_counts.items():
+            self.assertEqual(
+                combine.count(f"HostTimelinePhase::{phase}"), count, phase)
+
     def test_direct_device_hot_path_uses_32_bit_control_indices(self):
         """Keeps shape iteration narrow while addresses and offsets stay wide."""
         kernels = (ELASTIC / "kernels.hpp").read_text()
@@ -355,7 +462,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "direct_combine_producer_record_vf": (
                     "const std::uint32_t num_source_rows_u32",
                     "for (std::uint32_t row = grid.first",
-                    "for (std::uint32_t hidden = 0",
+                    "for (std::uint32_t hidden =",
                 ),
                 "direct_combine_epilogue_vector_reduce_impl": (
                     "const std::uint32_t num_tokens_u32",
@@ -545,6 +652,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "launch_num_threads / kTopkSubgroupWidth", producer)
         self.assertIn(
             "block_index * subgroups_per_block + subgroup", producer)
+
         self.assertIn(
             "block_count * subgroups_per_block", producer)
         self.assertIn("tile < tile_count_u32", producer)
@@ -575,6 +683,63 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertLess(
             epilogue.index("HardEvent::MTE2_MTE3"),
             epilogue.index("HardEvent::MTE3_MTE2"))
+
+    def test_dispatch_consumer_tile_specializations(self):
+        source = (ELASTIC / "dispatch.asc").read_text()
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        buffer = (
+            ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        dispatch = buffer[
+            buffer.index("    dispatch(const torch::Tensor& x"):
+            buffer.index("    combine(const torch::Tensor& x")
+        ]
+
+        self.assertIn("std::uint32_t consumer_tile_bytes = 512;", kernels)
+        self.assertIn(
+            '"DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES"', dispatch)
+        self.assertIn("select_dispatch_consumer_tile_config(", dispatch)
+        self.assertIn(
+            "arguments.consumer_tile_bytes = "
+            "consumer_tile_config.tile_bytes;", dispatch)
+
+        vector_signature = (
+            "template <std::uint32_t TileBytes>\n"
+            "__aicore__ inline void "
+            "direct_dispatch_epilogue_vector_payload_impl")
+        vector_begin = source.index(vector_signature)
+        vector_end = source.index("\n}\n", vector_begin)
+        vector_copy = source[vector_begin:vector_end]
+        for marker in (
+                "dispatch_consumer_copy_plan(",
+                "pipe.InitBuffer(payload_buffer, TileBytes)",
+                "const std::uint32_t copy_bytes",
+                "AscendC::DataCopy(", "copy_bytes"):
+            self.assertIn(marker, vector_copy)
+
+        for tile_bytes in (512, 1024, 2048, 4096):
+            self.assertEqual(
+                source.count(
+                    "direct_dispatch_epilogue_vector_payload_impl<"
+                    f"{tile_bytes}>("),
+                1,
+            )
+        self.assertIn(
+            "consumer_copy_plan.scalar_begin", source)
+
+        copy_kernel_begin = source.index(
+            "__global__ __vector__ void dispatch_copy_kernel")
+        copy_kernel_end = source.index("\n}", copy_kernel_begin)
+        copy_kernel = source[copy_kernel_begin:copy_kernel_end]
+        self.assertIn(
+            "std::uint32_t consumer_tile_bytes, "
+            "std::uint32_t parallel_prefix,\n    CoreTiling tiling)",
+            copy_kernel,
+        )
+        epilogue_launcher = source[source.index(
+            'extern "C" int deep_ep_ascend_launch_dispatch_epilogue'):]
+        self.assertIn(
+            "arguments.consumer_tile_bytes, arguments.parallel_prefix, "
+            "tiling", epilogue_launcher)
 
         store_begin = source.index(
             "direct_dispatch_store_scale_factor_pack")
@@ -620,6 +785,84 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         hybrid_signature = source[hybrid_begin:hybrid_body]
         self.assertNotIn("hidden_copy_begin", hybrid_signature)
 
+    def test_dispatch_parallel_expert_prefix_candidate(self):
+        source = (ELASTIC / "dispatch.asc").read_text()
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        buffer = (
+            ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        dispatch = buffer[
+            buffer.index("    dispatch(const torch::Tensor& x"):
+            buffer.index("    combine(const torch::Tensor& x")
+        ]
+
+        self.assertIn("std::uint32_t parallel_prefix = 0;", kernels)
+        self.assertIn(
+            '"DEEP_EP_ASCEND_DISPATCH_PARALLEL_PREFIX"', dispatch)
+        self.assertIn("select_dispatch_parallel_prefix_config(", dispatch)
+        self.assertRegex(
+            dispatch,
+            r"arguments\.parallel_prefix =\s*"
+            r"parallel_prefix_config\.enabled \? 1U : 0U;",
+        )
+
+        signature = (
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_epilogue_parallel_prefix_vf")
+        begin = source.index(signature)
+        end = source.index("\n}\n", begin)
+        candidate = source[begin:end]
+        for marker in (
+                "dispatch_simt_expert_prefix_worker_plan(",
+                "const std::uint32_t local_expert = threadIdx.x",
+                "tile < tile_count_u32", "tile_counts[index] = prefix",
+                "unaligned_per_expert[expert] =",
+                "asc_threadfence_block();", "asc_syncthreads();"):
+            self.assertIn(marker, candidate)
+        self.assertLess(
+            candidate.index("asc_threadfence_block();"),
+            candidate.index("asc_syncthreads();"),
+        )
+        barrier_end = candidate.index("asc_syncthreads();")
+        self.assertNotIn("return;", candidate[:barrier_end])
+        self.assertIn("if (threadIdx.x != 0)", candidate[barrier_end:])
+
+        self.assertIn("direct_dispatch_epilogue_prefix_vf", source)
+        prefix_launch = source[source.index(
+            "(STAGE) == DirectDispatchStage::kEpilogueExpertPrefix"):]
+        prefix_launch = prefix_launch[:prefix_launch.index(
+            "(STAGE) == DirectDispatchStage::kEpilogueMetadata")]
+        self.assertIn("parallel_prefix != 0", prefix_launch)
+        self.assertIn(
+            "asc_vf_call<direct_dispatch_epilogue_parallel_prefix_vf>",
+            prefix_launch,
+        )
+        self.assertIn(
+            "asc_vf_call<direct_dispatch_epilogue_prefix_vf>",
+            prefix_launch,
+        )
+
+    def test_dispatch_output_copy_uses_compact_receive_domain(self):
+        source = (ELASTIC / "dispatch.asc").read_text()
+        for function_name in (
+                "direct_dispatch_epilogue_vector_payload_impl",
+                "direct_dispatch_epilogue_copy_outputs_vf"):
+            begin = source.index(f"inline void {function_name}")
+            end = source.index("\n}\n", begin)
+            function = source[begin:end]
+            for marker in (
+                    "last_source_rank", "total_records",
+                    "copies_per_record", "compact_record"):
+                self.assertIn(marker, function)
+            self.assertIn(
+                "total_records * copies_per_record", function)
+
+        copy_begin = source.index(
+            "inline void direct_dispatch_epilogue_copy_outputs_vf")
+        copy_end = source.index("\n}\n", copy_begin)
+        self.assertIn(
+            "direct_dispatch_compact_record_coordinates(",
+            source[copy_begin:copy_end])
+
     def test_direct_combine_launcher_consumes_stage_pipeline(self):
         """Catches keeping direct combine data stages on one AI Vector."""
         source = (ELASTIC / "combine.asc").read_text()
@@ -651,6 +894,86 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         reduce_end = source.index("\n}\n", reduce_begin)
         reduction = source[reduce_begin:reduce_end]
         self.assertIn("direct_subgroup_grid_stride(", reduction)
+
+    def test_direct_normal_combine_producer_uses_vector_payload_copy(self):
+        """Catches restoring per-element BF16 conversion for normal records."""
+        source = (ELASTIC / "combine.asc").read_text()
+        vector_signature = (
+            "__aicore__ inline void "
+            "direct_combine_producer_vector_payload_impl")
+        vector_begin = source.index(vector_signature)
+        vector_end = source.index("\n}\n", vector_begin)
+        vector_copy = source[vector_begin:vector_end]
+        for marker in (
+                "AscendC::GetBlockIdx()", "AscendC::GetBlockNum()",
+                "AscendC::GlobalTensor<bfloat16_t>", "AscendC::DataCopy",
+                "combine_producer_payload_copy_plan(",
+                "combine_producer_tile_rank_count_offset"):
+            self.assertIn(marker, vector_copy)
+
+        record_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_combine_producer_record_vf")
+        record_end = source.index("\n}\n", record_begin)
+        record = source[record_begin:record_end]
+        self.assertIn("payload_plan.scalar_begin", record)
+        self.assertIn("combine_reduce_expanded_lanes(", record)
+
+        kernel = source[source.index(
+            "__global__ __vector__ void combine_kernel"):]
+        record_call = kernel.index(
+            "asc_vf_call<direct_combine_producer_record_vf>")
+        vector_call = kernel.index(
+            "direct_combine_producer_vector_payload_impl(", record_call)
+        boundary = kernel[record_call:vector_call]
+        self.assertIn("asc_sync_vec();", boundary)
+        self.assertIn(
+            "asc_sync_data_barrier(mem_dsb_t::DSB_DDR);", boundary)
+
+    def test_reduced_combine_producer_uses_opt_in_vector_reduction(self):
+        """Catches rescanning top-k once per hidden element in reduced combine."""
+        source = (ELASTIC / "combine.asc").read_text()
+        header = (ELASTIC / "kernels.hpp").read_text()
+        host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+
+        self.assertIn("expanded_vector_reduce", header)
+        self.assertIn(
+            '"DEEP_EP_ASCEND_COMBINE_EXPANDED_VECTOR_REDUCE"', host)
+        self.assertIn(
+            "select_combine_expanded_vector_reduce_config(", host)
+        self.assertIn(
+            "arguments.expanded_vector_reduce =", host)
+
+        signature = (
+            "__aicore__ inline void "
+            "direct_combine_producer_expanded_vector_reduce_impl")
+        vector_begin = source.index(signature)
+        vector_end = source.index("\n}\n", vector_begin)
+        vector_reduce = source[vector_begin:vector_end]
+        rows = vector_reduce.index("std::int32_t input_rows[32]")
+        hidden = vector_reduce.index(
+            "for (std::uint32_t hidden = 0;", rows)
+        self.assertLess(rows, hidden)
+        for marker in (
+                "AscendC::Duplicate(", "AscendC::DataCopy(",
+                "AscendC::Cast(", "AscendC::Add(",
+                "AscendC::RoundMode::CAST_RINT"):
+            self.assertIn(marker, vector_reduce)
+
+        record_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_combine_producer_record_vf")
+        record_end = source.index("\n}\n", record_begin)
+        record = source[record_begin:record_end]
+        self.assertIn(
+            "combine_expanded_producer_payload_plan(", record)
+        self.assertIn("expanded_payload_plan.scalar_begin", record)
+
+        kernel = source[source.index(
+            "__global__ __vector__ void combine_kernel"):]
+        self.assertIn(
+            "direct_combine_producer_expanded_vector_reduce_impl(", kernel)
+        self.assertIn("arguments.expanded_vector_reduce", kernel)
 
     def test_topk_grouping_compile_probe_contract(self):
         """Catches an uncompiled ballot adapter or a native match-any dependency."""
@@ -2100,6 +2423,43 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 capture_output=True, text=True, check=False)
             self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
 
+            run_result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run_result.returncode, 0, run_result.stderr)
+
+    def test_dispatch_device_prefix_strategy_controls_host_split(self):
+        source = (
+            ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        dispatch = source[
+            source.index("    dispatch(const torch::Tensor& x"):
+            source.index("    combine(const torch::Tensor& x")
+        ]
+
+        self.assertIn(
+            '"DEEP_EP_ASCEND_DISPATCH_DEVICE_PREFIX"', dispatch)
+        self.assertIn("select_dispatch_device_prefix_config(", dispatch)
+        self.assertRegex(
+            dispatch,
+            r"const bool split_dispatch = !cached_mode && do_cpu_sync &&\s+"
+            r"!allow_hybrid_mode_ && !device_prefix_config\.enabled;")
+        self.assertIn(
+            "split_dispatch ? 0 : max_recv_tokens", dispatch)
+        self.assertIn(
+            "split_dispatch ? 0 :\n"
+            "            (do_expand ? expanded_records : max_recv_tokens)",
+            dispatch)
+
+    def test_combine_payload_copy_plan_is_aicore_callable(self):
+        """Catches calling a host-only copy-plan helper from combine.asc."""
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "combine_parallel_aicore"
+            compile_result = subprocess.run(
+                ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                 f"-I{ROOT}", str(COMBINE_PARALLEL_AICORE_CALLEE_PROBE),
+                 "-o", str(binary)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(compile_result.returncode, 0,
+                             compile_result.stderr)
             run_result = subprocess.run(
                 [str(binary)], capture_output=True, text=True, check=False)
             self.assertEqual(run_result.returncode, 0, run_result.stderr)

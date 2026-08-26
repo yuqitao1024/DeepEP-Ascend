@@ -119,6 +119,8 @@ static_assert(__builtin_has_attribute(
 static_assert(__builtin_has_attribute(
     command::aicore_profile_payload_bytes, noinline));
 static_assert(__builtin_has_attribute(
+    command::aicore_transport_service_cycle_class, noinline));
+static_assert(__builtin_has_attribute(
     sync_layout::aicore_barrier_offset, noinline));
 
 __aicore__ bool aicore_execution_helpers_probe() {
@@ -137,6 +139,27 @@ __aicore__ bool aicore_execution_helpers_probe() {
                transport::TransportCommandOpcode::kPutValue64, 0) == 8 &&
            command::aicore_profile_payload_bytes(
                transport::TransportCommandOpcode::kFlush, 0) == 0 &&
+           command::aicore_transport_service_cycle_class(
+               transport::TransportCommandOpcode::kPut) ==
+               transport::TransportServiceCycleClass::kPayload &&
+           command::aicore_transport_service_cycle_class(
+               transport::TransportCommandOpcode::kPutValue64) ==
+               transport::TransportServiceCycleClass::kControl &&
+           command::aicore_transport_service_cycle_class(
+               transport::TransportCommandOpcode::kRemoteAdd64) ==
+               transport::TransportServiceCycleClass::kControl &&
+           command::aicore_transport_service_cycle_class(
+               transport::TransportCommandOpcode::kSignal) ==
+               transport::TransportServiceCycleClass::kControl &&
+           command::aicore_transport_service_cycle_class(
+               transport::TransportCommandOpcode::kFlush) ==
+               transport::TransportServiceCycleClass::kFlush &&
+           command::aicore_transport_service_cycle_class(
+               transport::TransportCommandOpcode::kBarrier) ==
+               transport::TransportServiceCycleClass::kBarrier &&
+           command::aicore_transport_service_cycle_class(
+               transport::TransportCommandOpcode::kNone) ==
+               transport::TransportServiceCycleClass::kUnclassified &&
            command::aicore_valid_staged_context_header(
                transport::kTransportCommandAbiVersion,
                sizeof(transport::StagedTransportContext),

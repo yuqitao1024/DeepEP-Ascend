@@ -45,6 +45,24 @@ aicore_profile_payload_bytes(
     }
 }
 
+DEEP_EP_ASCEND_AICORE_EXECUTION_INLINE TransportServiceCycleClass
+aicore_transport_service_cycle_class(TransportCommandOpcode opcode) {
+    switch (opcode) {
+        case TransportCommandOpcode::kPut:
+            return TransportServiceCycleClass::kPayload;
+        case TransportCommandOpcode::kPutValue64:
+        case TransportCommandOpcode::kRemoteAdd64:
+        case TransportCommandOpcode::kSignal:
+            return TransportServiceCycleClass::kControl;
+        case TransportCommandOpcode::kFlush:
+            return TransportServiceCycleClass::kFlush;
+        case TransportCommandOpcode::kBarrier:
+            return TransportServiceCycleClass::kBarrier;
+        default:
+            return TransportServiceCycleClass::kUnclassified;
+    }
+}
+
 DEEP_EP_ASCEND_AICORE_EXECUTION_INLINE TransportQueueDepthSnapshot
 aicore_merge_queue_depth_snapshots(
     TransportQueueDepthSnapshot aggregate,

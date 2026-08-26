@@ -1,4 +1,5 @@
 import os
+import math
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from tests.ascend.benchmark.timing import (
     logical_gbps,
     summarize_samples,
 )
+from tests.ascend.benchmark.timeline import stage_semantic
 from tests.ascend.benchmark.workloads import classify_ascend_case
 from tests.utils.ep_benchmark_core import (
     PERFORMANCE_OPERATIONS,
@@ -38,6 +40,16 @@ from tests.utils.ep_benchmark_manifest import (
 BF16_TOLERANCE = 1 / 128
 NUM_SMS = 72
 NUM_QPS = 0
+WORK_COUNT_KEYS = frozenset({
+    "input_tokens",
+    "valid_routes",
+    "received_records",
+    "expanded_slots",
+    "input_rows",
+    "output_tokens",
+    "hidden_elements",
+    "topk_elements",
+})
 
 
 class TorchNpuEventBackend:
@@ -61,10 +73,26 @@ class PreparedCase:
     launches: dict[str, Callable[[], Any]]
     prepare_launches: dict[str, Callable[[], Any]]
     traffic: dict[str, dict[str, int]]
+    work_counts: dict[str, dict[str, int]]
+
+    def __post_init__(self) -> None:
+        if set(self.work_counts) != set(PERFORMANCE_OPERATIONS):
+            raise ValueError("work counts operation set")
+        for operation_id, counts in self.work_counts.items():
+            if set(counts) != WORK_COUNT_KEYS:
+                raise ValueError(f"work counts keys for {operation_id}")
+            if any(type(value) is not int or value < 0
+                   for value in counts.values()):
+                raise ValueError(f"work counts values for {operation_id}")
 
 
 def _tensor_bytes(tensor: Any) -> int:
     return tensor.numel() * tensor.element_size()
+
+
+def _payload_rows(value: Any) -> int:
+    payload = value[0] if isinstance(value, tuple) else value
+    return payload.shape[0]
 
 
 def _summary_dict(samples: list[float]) -> dict[str, float]:
@@ -73,6 +101,138 @@ def _summary_dict(samples: list[float]) -> dict[str, float]:
 
 def _total_logical_bytes(traffic: dict[str, int]) -> int:
     return sum(traffic.values())
+
+
+def _build_operation_work_counts(
+    spec: WorkloadSpec,
+    *,
+    valid_routes: int,
+    normal_input_rows: int,
+    normal_received_records: int,
+    expanded_slots: int,
+    combine_input_rows: int,
+    reduced_input_rows: int,
+) -> dict[str, dict[str, int]]:
+    values = (
+        spec.num_tokens,
+        spec.hidden,
+        spec.num_topk,
+        valid_routes,
+        normal_input_rows,
+        normal_received_records,
+        expanded_slots,
+        combine_input_rows,
+        reduced_input_rows,
+    )
+    if any(type(value) is not int or value < 0 for value in values):
+        raise ValueError("operation work count inputs")
+
+    dispatch = {
+        "input_tokens": spec.num_tokens,
+        "valid_routes": valid_routes,
+        "received_records": normal_received_records,
+        "expanded_slots": 0,
+        "input_rows": normal_input_rows,
+        "output_tokens": normal_received_records,
+        "hidden_elements": normal_input_rows * spec.hidden,
+        "topk_elements": normal_input_rows * spec.num_topk,
+    }
+    combine = {
+        "input_tokens": spec.num_tokens,
+        "valid_routes": valid_routes,
+        "received_records": normal_received_records,
+        "expanded_slots": 0,
+        "input_rows": combine_input_rows,
+        "output_tokens": spec.num_tokens,
+        "hidden_elements": combine_input_rows * spec.hidden,
+        "topk_elements": spec.num_tokens * spec.num_topk,
+    }
+    return {
+        "dispatch": dispatch,
+        "expanded_dispatch": dispatch | {
+            "expanded_slots": expanded_slots,
+            "output_tokens": expanded_slots,
+        },
+        "cached_dispatch": dict(dispatch),
+        "combine": combine,
+        "reduced_combine": combine | {
+            "expanded_slots": expanded_slots,
+            "input_rows": reduced_input_rows,
+            "hidden_elements": reduced_input_rows * spec.hidden,
+        },
+    }
+
+
+def _derive_host_envelope_samples(
+    wall_samples: list[float],
+    device_samples: list[float],
+) -> list[float]:
+    if not wall_samples or len(wall_samples) != len(device_samples):
+        raise ValueError("host envelope requires paired timing samples")
+    overhead = []
+    for wall, device in zip(wall_samples, device_samples):
+        if (
+            not math.isfinite(wall)
+            or not math.isfinite(device)
+            or wall <= 0.0
+            or device <= 0.0
+            or wall < device
+        ):
+            raise ValueError("host envelope timing samples are invalid")
+        overhead.append(wall - device)
+    return overhead
+
+
+def _derive_stage_timeline(stages: list[dict[str, Any]]) -> dict[str, int]:
+    if not stages:
+        return {
+            "start": 0,
+            "end": 0,
+            "envelope_cycles": 0,
+            "active_cycles": 0,
+            "idle_cycles": 0,
+            "overlap_cycles": 0,
+        }
+    intervals = []
+    summed_spans = 0
+    for stage in stages:
+        start = stage.get("start")
+        end = stage.get("end")
+        span = stage.get("span_cycles")
+        if (
+            type(start) is not int
+            or type(end) is not int
+            or type(span) is not int
+            or start <= 0
+            or end < start
+            or span != end - start
+        ):
+            raise ValueError("stage timeline interval")
+        intervals.append((start, end))
+        summed_spans += span
+
+    intervals.sort()
+    timeline_start = intervals[0][0]
+    timeline_end = intervals[0][1]
+    active_cycles = 0
+    merged_start, merged_end = intervals[0]
+    for start, end in intervals[1:]:
+        timeline_end = max(timeline_end, end)
+        if start > merged_end:
+            active_cycles += merged_end - merged_start
+            merged_start, merged_end = start, end
+        else:
+            merged_end = max(merged_end, end)
+    active_cycles += merged_end - merged_start
+    envelope_cycles = timeline_end - timeline_start
+    return {
+        "start": timeline_start,
+        "end": timeline_end,
+        "envelope_cycles": envelope_cycles,
+        "active_cycles": active_cycles,
+        "idle_cycles": envelope_cycles - active_cycles,
+        "overlap_cycles": summed_spans - active_cycles,
+    }
 
 
 def _configure_stage_profile_environment(enabled: bool) -> None:
@@ -86,9 +246,14 @@ def _configure_stage_profile_environment(enabled: bool) -> None:
 def _aggregate_stage_profiles(
     operation_id: str,
     rank_profiles: list[dict[str, Any]],
+    rank_work_counts: list[dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     if not rank_profiles:
         raise ValueError("stage profile requires at least one rank")
+    if rank_work_counts is not None and len(rank_work_counts) != len(
+        rank_profiles
+    ):
+        raise ValueError("stage profile work count rank mismatch")
     expected_operation = (
         "dispatch" if operation_id in {
             "dispatch", "expanded_dispatch", "cached_dispatch"
@@ -99,7 +264,10 @@ def _aggregate_stage_profiles(
             reason = profile.get("reason", "unknown")
             details = {
                 key: profile[key]
-                for key in ("stage", "block", "start", "end")
+                for key in (
+                    "stage", "block", "start", "end", "command_metrics",
+                    "service",
+                )
                 if key in profile
             }
             suffix = f": {details!r}" if details else ""
@@ -121,11 +289,23 @@ def _aggregate_stage_profiles(
     generation = next(iter(generations))
     phase_names = (
         "producer", "publication", "service_submit", "cq_wait",
+        "barrier_wait",
         "consumer_wait", "consumer_compute", "epilogue",
+    )
+    service_cycle_names = (
+        "cycles", "wait_cycles", "payload_command_cycles",
+        "control_command_cycles", "flush_command_cycles",
+        "barrier_command_cycles", "barrier_poll_cycles",
     )
     per_rank = []
     stage_spans: dict[str, int] = {}
+    host_timeline_ns: dict[str, int] | None = None
+    timeline_cycle_names = (
+        "envelope_cycles", "active_cycles", "idle_cycles", "overlap_cycles",
+    )
+    device_timeline_cycles = {name: 0 for name in timeline_cycle_names}
     phase_cycles = {name: 0 for name in phase_names}
+    service_cycles = {name: 0 for name in service_cycle_names}
     for rank, profile in enumerate(rank_profiles):
         if profile.get("completion_generation") != generation:
             raise ValueError("stage profile completion generation mismatch")
@@ -149,7 +329,36 @@ def _aggregate_stage_profiles(
                 raise ValueError("stage profile stage name")
             stage_spans[stage_name] = max(
                 stage_spans.get(stage_name, 0), span)
-            rank_stages.append(dict(stage, span_cycles=span))
+            semantic = (
+                {
+                    "stage_id": "FULL",
+                    "short_name": "full instrumentation fallback",
+                    "ascend_functions": (),
+                    "cuda_counterpart": "",
+                    "work_count_keys": (),
+                    "independently_timed": True,
+                }
+                if stage_name == "full"
+                else asdict(stage_semantic(operation_id, stage_name))
+            )
+            rank_stages.append(dict(
+                stage,
+                **semantic,
+                **({
+                    "work_counts": {
+                        key: rank_work_counts[rank][key]
+                        for key in semantic["work_count_keys"]
+                    },
+                } if rank_work_counts is not None else {}),
+                start=min(starts),
+                end=max(ends),
+                span_cycles=span,
+            ))
+
+        rank_timeline = _derive_stage_timeline(rank_stages)
+        for name in timeline_cycle_names:
+            device_timeline_cycles[name] = max(
+                device_timeline_cycles[name], rank_timeline[name])
 
         rank_phases = profile.get("phase_cycles")
         if not isinstance(rank_phases, dict) or set(rank_phases) != set(
@@ -172,12 +381,42 @@ def _aggregate_stage_profiles(
             rank_phases["producer"] = full_stages[0]["span_cycles"]
         for name in phase_names:
             phase_cycles[name] = max(phase_cycles[name], rank_phases[name])
-        per_rank.append(dict(profile, rank=rank, stages=rank_stages))
+        rank_service = profile.get("service")
+        if not isinstance(rank_service, dict):
+            raise ValueError("stage profile service cycles")
+        for name in service_cycle_names:
+            value = rank_service.get(name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"stage profile service cycles.{name}")
+            service_cycles[name] = max(service_cycles[name], value)
+        rank_host_timeline = profile.get("host_timeline_ns")
+        if rank_host_timeline is not None:
+            if not isinstance(rank_host_timeline, dict) or not rank_host_timeline:
+                raise ValueError("stage profile host timeline")
+            if host_timeline_ns is None:
+                host_timeline_ns = {name: 0 for name in rank_host_timeline}
+            if set(rank_host_timeline) != set(host_timeline_ns):
+                raise ValueError("stage profile host timeline fields")
+            for name, value in rank_host_timeline.items():
+                if type(value) is not int or value < 0:
+                    raise ValueError(f"stage profile host timeline.{name}")
+                host_timeline_ns[name] = max(host_timeline_ns[name], value)
+        elif any(
+            candidate.get("host_timeline_ns") is not None
+            for candidate in rank_profiles
+        ):
+            raise ValueError("stage profile host timeline missing from one rank")
+        per_rank.append(dict(
+            profile, rank=rank, stages=rank_stages,
+            device_timeline_cycles=rank_timeline,
+        ))
 
     producer = phase_cycles["producer"]
     network = sum(
         phase_cycles[name]
-        for name in ("publication", "service_submit", "cq_wait")
+        for name in (
+            "publication", "service_submit", "cq_wait", "barrier_wait"
+        )
     )
     consumer = sum(
         phase_cycles[name]
@@ -185,11 +424,13 @@ def _aggregate_stage_profiles(
     )
     total = producer + network + consumer
     ceiling = total / max(producer, network, consumer) if total else 1.0
-    return {
+    result = {
         "operation": expected_operation,
         "generation": generation,
         "stage_spans_cycles": stage_spans,
+        "device_timeline_cycles": device_timeline_cycles,
         "phase_cycles": phase_cycles,
+        "service_cycles": service_cycles,
         "pipeline_cycles": {
             "producer": producer,
             "network": network,
@@ -198,6 +439,9 @@ def _aggregate_stage_profiles(
         "optimistic_speedup_ceiling": ceiling,
         "per_rank": per_rank,
     }
+    if host_timeline_ns is not None:
+        result["host_timeline_ns"] = host_timeline_ns
+    return result
 
 
 def _aggregate_rank_operations(
@@ -222,6 +466,10 @@ def _aggregate_rank_operations(
                 for key in record["logical_bytes"]
             })
         }
+        work_counts = {
+            key: max(record["work_counts"][key] for record in rank_records)
+            for key in sorted(WORK_COUNT_KEYS)
+        }
         mean_seconds = summarize_samples(device_samples).mean
         operations.append({
             "operation_id": operation_id,
@@ -231,6 +479,8 @@ def _aggregate_rank_operations(
             "device_samples": device_samples,
             "wall_samples": wall_samples,
             "logical_bytes": logical_bytes,
+            "logical_byte_components": dict(logical_bytes),
+            "work_counts": work_counts,
             "logical_gbps": logical_gbps(
                 _total_logical_bytes(logical_bytes), mean_seconds
             ),
@@ -240,6 +490,10 @@ def _aggregate_rank_operations(
                     "device_seconds": _summary_dict(record["device_samples"]),
                     "wall_seconds": _summary_dict(record["wall_samples"]),
                     "logical_bytes": record["logical_bytes"],
+                    "logical_byte_components": record[
+                        "logical_byte_components"
+                    ],
+                    "work_counts": record["work_counts"],
                 }
                 for rank, record in enumerate(rank_records)
             ],
@@ -249,7 +503,20 @@ def _aggregate_rank_operations(
             if any(profile is None for profile in profiles):
                 raise ValueError("stage profile missing from one or more ranks")
             operations[-1]["stage_profile"] = _aggregate_stage_profiles(
-                operation_id, profiles)
+                operation_id,
+                profiles,
+                rank_work_counts=[
+                    record["work_counts"] for record in rank_records
+                ],
+            )
+            host_envelope_samples = _derive_host_envelope_samples(
+                wall_samples, device_samples)
+            operations[-1]["stage_profile"]["host_envelope_seconds"] = (
+                _summary_dict(host_envelope_samples)
+            )
+            operations[-1]["stage_profile"]["host_envelope_samples"] = (
+                host_envelope_samples
+            )
     return operations
 
 
@@ -603,6 +870,19 @@ class AscendRuntime:
             num_expanded_tokens,
             bias,
         )
+        routes = self.manifest.ranks[self.rank].topk_idx
+        valid_routes = sum(
+            route >= 0 for row in routes for route in row
+        )
+        work_counts = _build_operation_work_counts(
+            spec,
+            valid_routes=valid_routes,
+            normal_input_rows=_payload_rows(x),
+            normal_received_records=num_recv_tokens,
+            expanded_slots=num_expanded_tokens,
+            combine_input_rows=input_for_combine.shape[0],
+            reduced_input_rows=input_for_reduced.shape[0],
+        )
         return PreparedCase(
             case=case,
             x=x,
@@ -612,6 +892,7 @@ class AscendRuntime:
             launches=launches,
             prepare_launches=prepare_launches,
             traffic=traffic,
+            work_counts=work_counts,
         )
 
     def _check_case(
@@ -882,6 +1163,8 @@ class AscendRuntime:
                 "device_samples": device_samples,
                 "wall_samples": wall_samples,
                 "logical_bytes": prepared.traffic[operation_id],
+                "logical_byte_components": prepared.traffic[operation_id],
+                "work_counts": prepared.work_counts[operation_id],
             }
             if getattr(self.args, "profile_stages", False):
                 def capture_profile():

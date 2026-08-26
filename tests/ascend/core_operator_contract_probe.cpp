@@ -206,6 +206,181 @@ bool topk_grouping_reference_contract() {
 }  // namespace
 
 int main() {
+    DispatchDevicePrefixConfig device_prefix_config{};
+    if (select_dispatch_device_prefix_config(
+            "1", false, true, false, false,
+            &device_prefix_config) !=
+                DispatchDevicePrefixConfigStatus::kEnabled ||
+        !device_prefix_config.enabled)
+        return 95;
+    if (select_dispatch_device_prefix_config(
+            nullptr, false, true, false, false,
+            &device_prefix_config) !=
+                DispatchDevicePrefixConfigStatus::kDisabled ||
+        device_prefix_config.enabled ||
+        select_dispatch_device_prefix_config(
+            "0", false, true, false, false,
+            &device_prefix_config) !=
+                DispatchDevicePrefixConfigStatus::kDisabled ||
+        device_prefix_config.enabled)
+        return 96;
+    for (const auto invalid_value : {"", "2", "true", "01"}) {
+        if (select_dispatch_device_prefix_config(
+                invalid_value, false, true, false, false,
+                &device_prefix_config) !=
+                    DispatchDevicePrefixConfigStatus::kInvalid)
+            return 97;
+    }
+    const DispatchDevicePrefixConfigStatus device_prefix_disabled_cases[] = {
+        select_dispatch_device_prefix_config(
+            "1", true, true, false, false, &device_prefix_config),
+        select_dispatch_device_prefix_config(
+            "1", false, false, false, false, &device_prefix_config),
+        select_dispatch_device_prefix_config(
+            "1", false, true, true, false, &device_prefix_config),
+        select_dispatch_device_prefix_config(
+            "1", false, true, false, true, &device_prefix_config),
+    };
+    for (const auto status : device_prefix_disabled_cases) {
+        if (status != DispatchDevicePrefixConfigStatus::kDisabled ||
+            device_prefix_config.enabled)
+            return 98;
+    }
+    DispatchConsumerTileConfig consumer_tile_config{};
+    if (select_dispatch_consumer_tile_config(
+            "1024", true, false, true, false, false, false,
+            &consumer_tile_config) !=
+                DispatchConsumerTileConfigStatus::kEnabled ||
+        consumer_tile_config.tile_bytes != 1024)
+        return 99;
+    for (const auto baseline_value : {static_cast<const char*>(nullptr),
+                                      "512"}) {
+        if (select_dispatch_consumer_tile_config(
+                baseline_value, true, false, true, false, false, false,
+                &consumer_tile_config) !=
+                    DispatchConsumerTileConfigStatus::kDisabled ||
+            consumer_tile_config.tile_bytes != 512)
+            return 100;
+    }
+    for (const auto candidate_value : {"1024", "2048", "4096"}) {
+        if (select_dispatch_consumer_tile_config(
+                candidate_value, true, false, true, false, false, false,
+                &consumer_tile_config) !=
+                    DispatchConsumerTileConfigStatus::kEnabled)
+            return 101;
+    }
+    for (const auto invalid_value :
+         {"", "0", "256", "8192", " 1024", "+1024", "1024x"}) {
+        if (select_dispatch_consumer_tile_config(
+                invalid_value, true, false, true, false, false, false,
+                &consumer_tile_config) !=
+                    DispatchConsumerTileConfigStatus::kInvalid)
+            return 102;
+    }
+    const DispatchConsumerTileConfigStatus consumer_tile_disabled_cases[] = {
+        select_dispatch_consumer_tile_config(
+            "1024", false, false, true, false, false, false,
+            &consumer_tile_config),
+        select_dispatch_consumer_tile_config(
+            "1024", true, true, true, false, false, false,
+            &consumer_tile_config),
+        select_dispatch_consumer_tile_config(
+            "1024", true, false, false, false, false, false,
+            &consumer_tile_config),
+        select_dispatch_consumer_tile_config(
+            "1024", true, false, true, true, false, false,
+            &consumer_tile_config),
+        select_dispatch_consumer_tile_config(
+            "1024", true, false, true, false, true, false,
+            &consumer_tile_config),
+        select_dispatch_consumer_tile_config(
+            "1024", true, false, true, false, false, true,
+            &consumer_tile_config),
+    };
+    for (const auto status : consumer_tile_disabled_cases) {
+        if (status != DispatchConsumerTileConfigStatus::kDisabled ||
+            consumer_tile_config.tile_bytes != 512)
+            return 103;
+    }
+    const auto common_consumer_copy =
+        dispatch_consumer_copy_plan(7168, 1024, 32);
+    const auto tailed_consumer_copy =
+        dispatch_consumer_copy_plan(7184, 1024, 32);
+    const auto invalid_consumer_copy =
+        dispatch_consumer_copy_plan(7168, 1000, 32);
+    if (!common_consumer_copy.valid ||
+        common_consumer_copy.vector_bytes != 7168 ||
+        common_consumer_copy.tile_count != 7 ||
+        common_consumer_copy.scalar_begin != 7168 ||
+        !tailed_consumer_copy.valid ||
+        tailed_consumer_copy.vector_bytes != 7168 ||
+        tailed_consumer_copy.tile_count != 7 ||
+        tailed_consumer_copy.scalar_begin != 7168 ||
+        invalid_consumer_copy.valid)
+        return 104;
+    DispatchParallelPrefixConfig parallel_prefix_config{};
+    if (select_dispatch_parallel_prefix_config(
+            "1", true, false, true, false, false, false,
+            &parallel_prefix_config) !=
+                DispatchParallelPrefixConfigStatus::kEnabled ||
+        !parallel_prefix_config.enabled)
+        return 105;
+    for (const auto baseline_value : {static_cast<const char*>(nullptr),
+                                      "0"}) {
+        if (select_dispatch_parallel_prefix_config(
+                baseline_value, true, false, true, false, false, false,
+                &parallel_prefix_config) !=
+                    DispatchParallelPrefixConfigStatus::kDisabled ||
+            parallel_prefix_config.enabled)
+            return 106;
+    }
+    for (const auto invalid_value : {"", "2", "true", "01"}) {
+        if (select_dispatch_parallel_prefix_config(
+                invalid_value, true, false, true, false, false, false,
+                &parallel_prefix_config) !=
+                    DispatchParallelPrefixConfigStatus::kInvalid)
+            return 107;
+    }
+    const DispatchParallelPrefixConfigStatus
+        parallel_prefix_disabled_cases[] = {
+            select_dispatch_parallel_prefix_config(
+                "1", false, false, true, false, false, false,
+                &parallel_prefix_config),
+            select_dispatch_parallel_prefix_config(
+                "1", true, true, true, false, false, false,
+                &parallel_prefix_config),
+            select_dispatch_parallel_prefix_config(
+                "1", true, false, false, false, false, false,
+                &parallel_prefix_config),
+            select_dispatch_parallel_prefix_config(
+                "1", true, false, true, true, false, false,
+                &parallel_prefix_config),
+            select_dispatch_parallel_prefix_config(
+                "1", true, false, true, false, true, false,
+                &parallel_prefix_config),
+            select_dispatch_parallel_prefix_config(
+                "1", true, false, true, false, false, true,
+                &parallel_prefix_config),
+        };
+    for (const auto status : parallel_prefix_disabled_cases) {
+        if (status != DispatchParallelPrefixConfigStatus::kDisabled ||
+            parallel_prefix_config.enabled)
+            return 108;
+    }
+    const auto representative_prefix_workers =
+        dispatch_expert_prefix_worker_plan(256, 8, 512);
+    const auto invalid_expert_divisibility =
+        dispatch_expert_prefix_worker_plan(255, 8, 512);
+    const auto insufficient_prefix_threads =
+        dispatch_expert_prefix_worker_plan(256, 8, 31);
+    const auto invalid_prefix_world =
+        dispatch_expert_prefix_worker_plan(256, 0, 512);
+    if (!representative_prefix_workers.valid ||
+        representative_prefix_workers.local_experts != 32 ||
+        representative_prefix_workers.active_threads != 32 ||
+        invalid_expert_divisibility.valid ||
+        insufficient_prefix_threads.valid || invalid_prefix_world.valid)
+        return 109;
     DispatchPipelineConfig pipeline_config{};
     if (select_dispatch_pipeline_config(
             "2048", false, true, false, false, 8, 8192,
@@ -398,6 +573,49 @@ int main() {
         direct_dispatch_cached_bitmap_owner(1) ||
         direct_dispatch_cached_bitmap_owner(71))
         return 78;
+    const std::uint64_t compact_source_bases[] = {0, 2, 2, 5};
+    const std::uint64_t compact_source_counts[] = {2, 0, 3, 1};
+    if (!dispatch_compact_record_coordinates(
+            0, compact_source_bases, compact_source_counts, 4,
+            &source_rank, &source_slot) ||
+        source_rank != 0 || source_slot != 0 ||
+        !dispatch_compact_record_coordinates(
+            1, compact_source_bases, compact_source_counts, 4,
+            &source_rank, &source_slot) ||
+        source_rank != 0 || source_slot != 1 ||
+        !dispatch_compact_record_coordinates(
+            2, compact_source_bases, compact_source_counts, 4,
+            &source_rank, &source_slot) ||
+        source_rank != 2 || source_slot != 0 ||
+        !dispatch_compact_record_coordinates(
+            4, compact_source_bases, compact_source_counts, 4,
+            &source_rank, &source_slot) ||
+        source_rank != 2 || source_slot != 2 ||
+        !dispatch_compact_record_coordinates(
+            5, compact_source_bases, compact_source_counts, 4,
+            &source_rank, &source_slot) ||
+        source_rank != 3 || source_slot != 0 ||
+        dispatch_compact_record_coordinates(
+            6, compact_source_bases, compact_source_counts, 4,
+            &source_rank, &source_slot) ||
+        dispatch_compact_record_coordinates(
+            0, nullptr, compact_source_counts, 4,
+            &source_rank, &source_slot) ||
+        dispatch_compact_record_coordinates(
+            0, compact_source_bases, compact_source_counts, 0,
+            &source_rank, &source_slot))
+        return 95;
+    const auto count_bridge = dispatch_count_bridge_layout(8, 256, 32, 16);
+    const auto invalid_count_bridge =
+        dispatch_count_bridge_layout(0, 256, 32, 16);
+    if (!count_bridge.valid || count_bridge.rank_prefix_offset != 0 ||
+        count_bridge.kernel_expert_prefix_offset != 16 ||
+        count_bridge.kernel_unaligned_offset != 288 ||
+        count_bridge.kernel_elements != 544 ||
+        count_bridge.public_expert_prefix_offset != 0 ||
+        count_bridge.public_unaligned_offset != 32 ||
+        count_bridge.public_elements != 64 || invalid_count_bridge.valid)
+        return 96;
     std::uint64_t expert_tile_index = 0;
     std::uint64_t destination = 0;
     if (!dispatch_expert_tile_index(
@@ -464,6 +682,97 @@ int main() {
             5, 3, 8, &combine_destination_slot))
         return 74;
 
+    const auto common_normal_payload = combine_producer_payload_copy_plan(
+        7168, 256, 16, false);
+    const auto tail_normal_payload = combine_producer_payload_copy_plan(
+        272, 256, 16, false);
+    const auto unaligned_normal_payload = combine_producer_payload_copy_plan(
+        257, 256, 16, false);
+    const auto expanded_payload = combine_producer_payload_copy_plan(
+        7168, 256, 16, true);
+    const auto invalid_payload = combine_producer_payload_copy_plan(
+        7168, 0, 16, false);
+    if (!common_normal_payload.valid ||
+        common_normal_payload.vector_elements != 7168 ||
+        common_normal_payload.scalar_begin != 7168 ||
+        !tail_normal_payload.valid ||
+        tail_normal_payload.vector_elements != 256 ||
+        tail_normal_payload.scalar_begin != 256 ||
+        !unaligned_normal_payload.valid ||
+        unaligned_normal_payload.vector_elements != 0 ||
+        unaligned_normal_payload.scalar_begin != 0 ||
+        !expanded_payload.valid || expanded_payload.vector_elements != 0 ||
+        expanded_payload.scalar_begin != 0 || invalid_payload.valid)
+        return 79;
+
+    CombineExpandedVectorReduceConfig expanded_reduce_config{};
+    if (select_combine_expanded_vector_reduce_config(
+            nullptr, true, true, true, false, 8,
+            &expanded_reduce_config) !=
+            CombineExpandedVectorReduceConfigStatus::kDisabled ||
+        expanded_reduce_config.enabled ||
+        select_combine_expanded_vector_reduce_config(
+            "0", true, true, true, false, 8,
+            &expanded_reduce_config) !=
+            CombineExpandedVectorReduceConfigStatus::kDisabled ||
+        select_combine_expanded_vector_reduce_config(
+            "1", true, true, true, false, 8,
+            &expanded_reduce_config) !=
+            CombineExpandedVectorReduceConfigStatus::kEnabled ||
+        !expanded_reduce_config.enabled ||
+        select_combine_expanded_vector_reduce_config(
+            "2", true, true, true, false, 8,
+            &expanded_reduce_config) !=
+            CombineExpandedVectorReduceConfigStatus::kInvalid ||
+        select_combine_expanded_vector_reduce_config(
+            "1", false, true, true, false, 8,
+            &expanded_reduce_config) !=
+            CombineExpandedVectorReduceConfigStatus::kDisabled ||
+        select_combine_expanded_vector_reduce_config(
+            "1", true, false, true, false, 8,
+            &expanded_reduce_config) !=
+            CombineExpandedVectorReduceConfigStatus::kDisabled ||
+        select_combine_expanded_vector_reduce_config(
+            "1", true, true, false, false, 8,
+            &expanded_reduce_config) !=
+            CombineExpandedVectorReduceConfigStatus::kDisabled ||
+        select_combine_expanded_vector_reduce_config(
+            "1", true, true, true, true, 8,
+            &expanded_reduce_config) !=
+            CombineExpandedVectorReduceConfigStatus::kDisabled ||
+        select_combine_expanded_vector_reduce_config(
+            "1", true, true, true, false, 0,
+            &expanded_reduce_config) !=
+            CombineExpandedVectorReduceConfigStatus::kDisabled ||
+        select_combine_expanded_vector_reduce_config(
+            "1", true, true, true, false, 33,
+            &expanded_reduce_config) !=
+            CombineExpandedVectorReduceConfigStatus::kDisabled ||
+        select_combine_expanded_vector_reduce_config(
+            "1", true, true, true, false, 8, nullptr) !=
+            CombineExpandedVectorReduceConfigStatus::kInvalid)
+        return 87;
+
+    const auto aligned_expanded_reduce =
+        combine_expanded_producer_payload_plan(7168, 256, 16, true);
+    const auto tail_expanded_reduce =
+        combine_expanded_producer_payload_plan(7184, 256, 16, true);
+    const auto disabled_expanded_reduce =
+        combine_expanded_producer_payload_plan(7168, 256, 16, false);
+    const auto invalid_expanded_reduce =
+        combine_expanded_producer_payload_plan(7168, 255, 16, true);
+    if (!aligned_expanded_reduce.valid ||
+        aligned_expanded_reduce.vector_elements != 7168 ||
+        aligned_expanded_reduce.scalar_begin != 7168 ||
+        !tail_expanded_reduce.valid ||
+        tail_expanded_reduce.vector_elements != 7168 ||
+        tail_expanded_reduce.scalar_begin != 7168 ||
+        !disabled_expanded_reduce.valid ||
+        disabled_expanded_reduce.vector_elements != 0 ||
+        disabled_expanded_reduce.scalar_begin != 0 ||
+        invalid_expanded_reduce.valid)
+        return 88;
+
     CoreTiling tiling{};
     auto input = valid_input();
     auto status = build_core_tiling(input, &tiling);
@@ -519,6 +828,55 @@ int main() {
         cpu_sync_pipeline.stages[9] !=
             DirectDispatchStage::kEpilogueExpertPrefix)
         return 46;
+    const auto dispatch_profile_pipeline =
+        direct_dispatch_profile_pipeline(false);
+    const DirectDispatchStage expected_dispatch_profile_stages[] = {
+        DirectDispatchStage::kProducerControl,
+        DirectDispatchStage::kProducerGroup,
+        DirectDispatchStage::kProducerPrefix,
+        DirectDispatchStage::kProducerRecord,
+        DirectDispatchStage::kProducerRelease,
+        DirectDispatchStage::kProducerReleaseControl,
+        DirectDispatchStage::kProducerReleaseBarrier,
+        DirectDispatchStage::kEpilogueAcquire,
+        DirectDispatchStage::kEpilogueValidate,
+        DirectDispatchStage::kEpilogueValidateReduce,
+        DirectDispatchStage::kEpilogueExpertCount,
+        DirectDispatchStage::kEpilogueExpertPrefix,
+        DirectDispatchStage::kEpilogueMetadata,
+        DirectDispatchStage::kEpilogueCopy,
+        DirectDispatchStage::kEpilogueComplete,
+    };
+    if (dispatch_profile_pipeline.count != 15)
+        return 80;
+    for (std::uint32_t index = 0;
+         index < dispatch_profile_pipeline.count; ++index) {
+        if (dispatch_profile_pipeline.stages[index] !=
+            expected_dispatch_profile_stages[index])
+            return 81;
+    }
+    const auto cpu_sync_profile_pipeline =
+        direct_dispatch_profile_pipeline(true);
+    if (cpu_sync_profile_pipeline.count != 12 ||
+        cpu_sync_profile_pipeline.stages[11] !=
+            DirectDispatchStage::kEpilogueExpertPrefix)
+        return 82;
+    if (direct_dispatch_release_segment(
+            DirectDispatchStage::kFull, true) !=
+            DirectReleaseSegment::kAll ||
+        direct_dispatch_release_segment(
+            DirectDispatchStage::kProducerRelease, false) !=
+            DirectReleaseSegment::kAll ||
+        direct_dispatch_release_segment(
+            DirectDispatchStage::kProducerRelease, true) !=
+            DirectReleaseSegment::kPayload ||
+        direct_dispatch_release_segment(
+            DirectDispatchStage::kProducerReleaseControl, true) !=
+            DirectReleaseSegment::kControl ||
+        direct_dispatch_release_segment(
+            DirectDispatchStage::kProducerReleaseBarrier, true) !=
+            DirectReleaseSegment::kBarrier)
+        return 83;
     const auto epilogue_pipeline = direct_dispatch_epilogue_pipeline();
     if (epilogue_pipeline.count != 3 ||
         epilogue_pipeline.stages[0] !=
@@ -577,6 +935,46 @@ int main() {
             launch.num_threads != 512 || launch.dynamic_ub_bytes != 0)
             return 51;
     }
+    const auto combine_profile_pipeline = direct_combine_profile_pipeline();
+    const DirectCombineStage expected_combine_profile_stages[] = {
+        DirectCombineStage::kProducerControl,
+        DirectCombineStage::kProducerPlan,
+        DirectCombineStage::kProducerPlanPrefix,
+        DirectCombineStage::kProducerRecord,
+        DirectCombineStage::kProducerRelease,
+        DirectCombineStage::kProducerReleaseControl,
+        DirectCombineStage::kProducerReleaseBarrier,
+        DirectCombineStage::kEpilogueAcquire,
+        DirectCombineStage::kEpilogueValidate,
+        DirectCombineStage::kEpilogueValidateReduce,
+        DirectCombineStage::kEpilogueReduce,
+        DirectCombineStage::kEpilogueWeights,
+        DirectCombineStage::kEpilogueComplete,
+    };
+    if (combine_profile_pipeline.count != 13)
+        return 84;
+    for (std::uint32_t index = 0;
+         index < combine_profile_pipeline.count; ++index) {
+        if (combine_profile_pipeline.stages[index] !=
+            expected_combine_profile_stages[index])
+            return 85;
+    }
+    if (direct_combine_release_segment(
+            DirectCombineStage::kFull, true) !=
+            DirectReleaseSegment::kAll ||
+        direct_combine_release_segment(
+            DirectCombineStage::kProducerRelease, false) !=
+            DirectReleaseSegment::kAll ||
+        direct_combine_release_segment(
+            DirectCombineStage::kProducerRelease, true) !=
+            DirectReleaseSegment::kPayload ||
+        direct_combine_release_segment(
+            DirectCombineStage::kProducerReleaseControl, true) !=
+            DirectReleaseSegment::kControl ||
+        direct_combine_release_segment(
+            DirectCombineStage::kProducerReleaseBarrier, true) !=
+            DirectReleaseSegment::kBarrier)
+        return 86;
     auto representative_input = input;
     representative_input.num_tokens = 8192;
     representative_input.num_max_tokens_per_rank = 8192;
