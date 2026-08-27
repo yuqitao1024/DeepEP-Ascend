@@ -23,6 +23,76 @@ struct CombineExpandedVectorReduceConfig {
     bool enabled = false;
 };
 
+enum class CombineLocalCopyDataCopyConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct CombineLocalCopyDataCopyConfig {
+    bool enabled = false;
+    std::uint32_t tile_bytes = 0;
+};
+
+struct CombineLocalCopyPlan {
+    bool valid = false;
+    std::uint64_t vector_bytes = 0;
+    std::uint64_t scalar_begin = 0;
+};
+
+inline CombineLocalCopyDataCopyConfigStatus
+select_combine_local_copy_datacopy_config(
+    const char* value, bool direct, bool hybrid,
+    CombineLocalCopyDataCopyConfig* output) noexcept {
+    if (output == nullptr)
+        return CombineLocalCopyDataCopyConfigStatus::kInvalid;
+    *output = {};
+    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+        return CombineLocalCopyDataCopyConfigStatus::kDisabled;
+    std::uint32_t tile_bytes = 0;
+    if (value[0] == '1' && value[1] == '\0')
+        tile_bytes = 32768;
+    else if (value[0] == '5' && value[1] == '1' && value[2] == '2' &&
+             value[3] == '\0')
+        tile_bytes = 512;
+    else if (value[0] == '1' && value[1] == '0' && value[2] == '2' &&
+             value[3] == '4' && value[4] == '\0')
+        tile_bytes = 1024;
+    else if (value[0] == '2' && value[1] == '0' && value[2] == '4' &&
+             value[3] == '8' && value[4] == '\0')
+        tile_bytes = 2048;
+    else if (value[0] == '4' && value[1] == '0' && value[2] == '9' &&
+             value[3] == '6' && value[4] == '\0')
+        tile_bytes = 4096;
+    else if (value[0] == '8' && value[1] == '1' && value[2] == '9' &&
+             value[3] == '2' && value[4] == '\0')
+        tile_bytes = 8192;
+    else if (value[0] == '1' && value[1] == '6' && value[2] == '3' &&
+             value[3] == '8' && value[4] == '4' && value[5] == '\0')
+        tile_bytes = 16384;
+    else if (value[0] == '3' && value[1] == '2' && value[2] == '7' &&
+             value[3] == '6' && value[4] == '8' && value[5] == '\0')
+        tile_bytes = 32768;
+    else
+        return CombineLocalCopyDataCopyConfigStatus::kInvalid;
+    if (!direct || hybrid)
+        return CombineLocalCopyDataCopyConfigStatus::kDisabled;
+    output->enabled = true;
+    output->tile_bytes = tile_bytes;
+    return CombineLocalCopyDataCopyConfigStatus::kEnabled;
+}
+
+constexpr CombineLocalCopyPlan combine_local_copy_plan(
+    std::uint64_t bytes, std::uint64_t vector_tile_bytes,
+    std::uint64_t data_copy_alignment_bytes, bool enabled) noexcept {
+    if (vector_tile_bytes == 0 || data_copy_alignment_bytes == 0 ||
+        vector_tile_bytes % data_copy_alignment_bytes != 0)
+        return {};
+    const std::uint64_t vector_bytes = enabled ?
+        bytes - bytes % vector_tile_bytes : 0;
+    return {true, vector_bytes, vector_bytes};
+}
+
 inline CombineExpandedVectorReduceConfigStatus
 select_combine_expanded_vector_reduce_config(
     const char* value, bool direct, bool expanded,
@@ -92,6 +162,17 @@ aicore_combine_producer_payload_copy_plan(
         hidden_elements - hidden_elements % vector_tile_elements;
     return {true, vector_elements, vector_elements};
 }
+
+__aicore__ inline CombineLocalCopyPlan aicore_combine_local_copy_plan(
+    std::uint64_t bytes, std::uint64_t vector_tile_bytes,
+    std::uint64_t data_copy_alignment_bytes, bool enabled) noexcept {
+    if (vector_tile_bytes == 0 || data_copy_alignment_bytes == 0 ||
+        vector_tile_bytes % data_copy_alignment_bytes != 0)
+        return {};
+    const std::uint64_t vector_bytes = enabled ?
+        bytes - bytes % vector_tile_bytes : 0;
+    return {true, vector_bytes, vector_bytes};
+}
 #endif
 
 #if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
@@ -118,6 +199,18 @@ simt_combine_producer_payload_copy_plan(
         expanded || hidden_elements % data_copy_alignment_elements != 0 ? 0 :
         hidden_elements - hidden_elements % vector_tile_elements;
     return {true, vector_elements, vector_elements};
+}
+
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline CombineLocalCopyPlan
+simt_combine_local_copy_plan(
+    std::uint64_t bytes, std::uint64_t vector_tile_bytes,
+    std::uint64_t data_copy_alignment_bytes, bool enabled) noexcept {
+    if (vector_tile_bytes == 0 || data_copy_alignment_bytes == 0 ||
+        vector_tile_bytes % data_copy_alignment_bytes != 0)
+        return {};
+    const std::uint64_t vector_bytes = enabled ?
+        bytes - bytes % vector_tile_bytes : 0;
+    return {true, vector_bytes, vector_bytes};
 }
 #endif
 

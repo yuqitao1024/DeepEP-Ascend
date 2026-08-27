@@ -1219,7 +1219,7 @@ public:
             "epilogue_acquire", "epilogue_validate",
             "epilogue_validate_reduce", "epilogue_reduce",
             "epilogue_weights", "epilogue_complete", "release_control",
-            "release_barrier",
+            "release_barrier", "producer_local_copy",
         };
         const auto stage_name = [
             dispatch, &dispatch_stage_names,
@@ -2894,6 +2894,18 @@ public:
                 elastic::CombineExpandedVectorReduceConfigStatus::kInvalid,
             "DeepEP Ascend backend: "
             "DEEP_EP_ASCEND_COMBINE_EXPANDED_VECTOR_REDUCE must be 0 or 1");
+        elastic::CombineLocalCopyDataCopyConfig local_copy_config{};
+        const auto local_copy_config_status =
+            elastic::select_combine_local_copy_datacopy_config(
+                std::getenv(
+                    "DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY"),
+                !allow_hybrid_mode_, allow_hybrid_mode_, &local_copy_config);
+        TORCH_CHECK(
+            local_copy_config_status !=
+                elastic::CombineLocalCopyDataCopyConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY must be 0, 1, "
+            "512, 1024, 2048, 4096, 8192, 16384, or 32768");
         const auto capacity =
             static_cast<std::uint64_t>(num_max_tokens_per_rank);
         const auto maximum_source_rows =
@@ -3254,6 +3266,8 @@ public:
             resources_->window_base());
         arguments.expanded_vector_reduce =
             expanded_reduce_config.enabled ? 1U : 0U;
+        arguments.local_copy_datacopy = local_copy_config.enabled ?
+            local_copy_config.tile_bytes : 0U;
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_),
             resources_->workspace_bytes()};

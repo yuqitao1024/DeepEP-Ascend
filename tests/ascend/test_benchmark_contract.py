@@ -1140,11 +1140,11 @@ def test_stage_semantic_maps_raw_runtime_stages_to_stable_ids(
     assert isinstance(semantic.work_count_keys, tuple)
 
 
-def test_stage_semantic_marks_combine_local_staging_as_not_independently_timed():
+def test_stage_semantic_marks_combine_local_staging_as_independently_timed():
     semantic = stage_semantic("combine", "producer_local_copy")
 
     assert semantic.stage_id == "C3"
-    assert semantic.independently_timed is False
+    assert semantic.independently_timed is True
     assert semantic.ascend_functions == (
         "direct_combine_producer_local_copy_vf",
     )
@@ -1419,6 +1419,7 @@ def _literal_timeline_report():
         ("producer_control", "C0"),
         ("producer_plan", "C1"),
         ("producer_record", "C2"),
+        ("producer_local_copy", "C3"),
         ("release_payload", "C4"),
         ("epilogue_acquire", "C5"),
         ("epilogue_reduce", "C6"),
@@ -1497,10 +1498,10 @@ def test_timeline_report_builds_deterministic_per_rank_stage_rows():
         "cuda_counterpart": "dispatch_impl prologue and notify-warps setup",
     }
     c3 = next(row for row in timeline["rows"] if row["stage_id"] == "C3")
-    assert c3["measurement_status"] == "not_independently_timed"
-    assert c3["start_cycles"] is None
-    assert c3["end_cycles"] is None
-    assert c3["raw_stages"] == []
+    assert c3["measurement_status"] == "measured"
+    assert c3["start_cycles"] == 130
+    assert c3["end_cycles"] == 135
+    assert c3["raw_stages"] == ["producer_local_copy"]
 
 
 def test_timeline_markdown_keeps_cycles_and_formats_host_nanoseconds():

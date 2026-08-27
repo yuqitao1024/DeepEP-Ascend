@@ -99,7 +99,7 @@ int main() {
     constexpr auto dispatch_release_ablation_mask =
         ((std::uint64_t{1} << 16U) - 1U) & ~full_mask;
     constexpr auto combine_release_ablation_mask =
-        ((std::uint64_t{1} << 14U) - 1U) & ~full_mask;
+        ((std::uint64_t{1} << 15U) - 1U) & ~full_mask;
     constexpr auto observed_dispatch_mask =
         (std::uint64_t{1} << 1U) | (std::uint64_t{1} << 2U) |
         (std::uint64_t{1} << 3U) | (std::uint64_t{1} << 5U) |

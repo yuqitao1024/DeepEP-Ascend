@@ -773,6 +773,83 @@ int main() {
         invalid_expanded_reduce.valid)
         return 88;
 
+    CombineLocalCopyDataCopyConfig local_copy_config{};
+    if (select_combine_local_copy_datacopy_config(
+            nullptr, true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kDisabled ||
+        local_copy_config.enabled ||
+        select_combine_local_copy_datacopy_config(
+            "0", true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kDisabled ||
+        select_combine_local_copy_datacopy_config(
+            "1", true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kEnabled ||
+        !local_copy_config.enabled || local_copy_config.tile_bytes != 32768 ||
+        select_combine_local_copy_datacopy_config(
+            "512", true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kEnabled ||
+        local_copy_config.tile_bytes != 512 ||
+        select_combine_local_copy_datacopy_config(
+            "1024", true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kEnabled ||
+        local_copy_config.tile_bytes != 1024 ||
+        select_combine_local_copy_datacopy_config(
+            "2048", true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kEnabled ||
+        local_copy_config.tile_bytes != 2048 ||
+        select_combine_local_copy_datacopy_config(
+            "4096", true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kEnabled ||
+        local_copy_config.tile_bytes != 4096 ||
+        select_combine_local_copy_datacopy_config(
+            "8192", true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kEnabled ||
+        local_copy_config.tile_bytes != 8192 ||
+        select_combine_local_copy_datacopy_config(
+            "16384", true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kEnabled ||
+        local_copy_config.tile_bytes != 16384 ||
+        select_combine_local_copy_datacopy_config(
+            "32768", true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kEnabled ||
+        local_copy_config.tile_bytes != 32768 ||
+        select_combine_local_copy_datacopy_config(
+            "256", true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kInvalid ||
+        select_combine_local_copy_datacopy_config(
+            "2", true, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kInvalid ||
+        select_combine_local_copy_datacopy_config(
+            "1", false, false, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kDisabled ||
+        select_combine_local_copy_datacopy_config(
+            "1", true, true, &local_copy_config) !=
+            CombineLocalCopyDataCopyConfigStatus::kDisabled ||
+        select_combine_local_copy_datacopy_config(
+            "1", true, false, nullptr) !=
+            CombineLocalCopyDataCopyConfigStatus::kInvalid)
+        return 89;
+
+    const auto aligned_local_copy =
+        combine_local_copy_plan(14336, 256, 32, true);
+    const auto tail_local_copy =
+        combine_local_copy_plan(14368, 256, 32, true);
+    const auto disabled_local_copy =
+        combine_local_copy_plan(14368, 256, 32, false);
+    const auto invalid_local_copy =
+        combine_local_copy_plan(14368, 255, 32, true);
+    if (!aligned_local_copy.valid ||
+        aligned_local_copy.vector_bytes != 14336 ||
+        aligned_local_copy.scalar_begin != 14336 ||
+        !tail_local_copy.valid ||
+        tail_local_copy.vector_bytes != 14336 ||
+        tail_local_copy.scalar_begin != 14336 ||
+        !disabled_local_copy.valid ||
+        disabled_local_copy.vector_bytes != 0 ||
+        disabled_local_copy.scalar_begin != 0 ||
+        invalid_local_copy.valid)
+        return 90;
+
     CoreTiling tiling{};
     auto input = valid_input();
     auto status = build_core_tiling(input, &tiling);
@@ -941,6 +1018,7 @@ int main() {
         DirectCombineStage::kProducerPlan,
         DirectCombineStage::kProducerPlanPrefix,
         DirectCombineStage::kProducerRecord,
+        DirectCombineStage::kProducerLocalCopy,
         DirectCombineStage::kProducerRelease,
         DirectCombineStage::kProducerReleaseControl,
         DirectCombineStage::kProducerReleaseBarrier,
@@ -951,7 +1029,7 @@ int main() {
         DirectCombineStage::kEpilogueWeights,
         DirectCombineStage::kEpilogueComplete,
     };
-    if (combine_profile_pipeline.count != 13)
+    if (combine_profile_pipeline.count != 14)
         return 84;
     for (std::uint32_t index = 0;
          index < combine_profile_pipeline.count; ++index) {
@@ -959,6 +1037,12 @@ int main() {
             expected_combine_profile_stages[index])
             return 85;
     }
+    const auto combine_local_copy_launch = direct_combine_stage_launch(
+        tiling, DirectCombineStage::kProducerLocalCopy);
+    if (combine_local_copy_launch.num_blocks != 1U ||
+        combine_local_copy_launch.num_threads != 512U ||
+        combine_local_copy_launch.dynamic_ub_bytes != 0U)
+        return 116;
     if (direct_combine_release_segment(
             DirectCombineStage::kFull, true) !=
             DirectReleaseSegment::kAll ||
@@ -973,7 +1057,10 @@ int main() {
             DirectReleaseSegment::kControl ||
         direct_combine_release_segment(
             DirectCombineStage::kProducerReleaseBarrier, true) !=
-            DirectReleaseSegment::kBarrier)
+            DirectReleaseSegment::kBarrier ||
+        direct_combine_release_segment(
+            DirectCombineStage::kProducerLocalCopy, true) !=
+            DirectReleaseSegment::kNone)
         return 86;
     auto representative_input = input;
     representative_input.num_tokens = 8192;

@@ -206,10 +206,11 @@ enum class DirectCombineStage : std::uint8_t {
     kEpilogueComplete,
     kProducerReleaseControl,
     kProducerReleaseBarrier,
+    kProducerLocalCopy,
 };
 
 struct DirectCombinePipeline {
-    DirectCombineStage stages[13]{};
+    DirectCombineStage stages[14]{};
     std::uint32_t count = 0;
 };
 
@@ -236,6 +237,7 @@ direct_combine_profile_pipeline() noexcept {
         DirectCombineStage::kProducerPlan,
         DirectCombineStage::kProducerPlanPrefix,
         DirectCombineStage::kProducerRecord,
+        DirectCombineStage::kProducerLocalCopy,
         DirectCombineStage::kProducerRelease,
         DirectCombineStage::kProducerReleaseControl,
         DirectCombineStage::kProducerReleaseBarrier,
@@ -245,7 +247,7 @@ direct_combine_profile_pipeline() noexcept {
         DirectCombineStage::kEpilogueReduce,
         DirectCombineStage::kEpilogueWeights,
         DirectCombineStage::kEpilogueComplete,
-    }, 13U};
+    }, 14U};
 }
 
 DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE DirectReleaseSegment
@@ -491,6 +493,7 @@ struct CombineArguments {
     std::uint64_t num_input_rows = 0;
     std::uintptr_t local_window_base = 0;
     std::uint32_t expanded_vector_reduce = 0;
+    std::uint32_t local_copy_datacopy = 0;
 };
 
 }  // namespace deep_ep::ascend::elastic

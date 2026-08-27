@@ -188,7 +188,6 @@ _COMBINE_STAGES = MappingProxyType({
         ("direct_combine_producer_local_copy_vf",),
         "local-copy and send-buffer preparation in combine_impl",
         ("input_rows", "hidden_elements", "topk_elements"),
-        independently_timed=False,
     ),
     "release_payload": StageSemantic(
         "C4", "publication",

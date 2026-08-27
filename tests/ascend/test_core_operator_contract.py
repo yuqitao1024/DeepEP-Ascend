@@ -441,9 +441,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 ),
                 "direct_combine_epilogue_reduce_errors_vf": (
                     "const std::uint32_t tile_count_u32",
-                    "const std::uint32_t slot_count",
                     "for (std::uint32_t tile = 0",
-                    "for (std::uint32_t receive_slot = 0",
                 ),
         }.items():
             begin = combine.index(f"inline void {function_name}")
@@ -975,6 +973,85 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "direct_combine_producer_expanded_vector_reduce_impl(", kernel)
         self.assertIn("arguments.expanded_vector_reduce", kernel)
 
+    def test_direct_combine_local_copy_uses_opt_in_datacopy_body(self):
+        """Catches restoring a byte-at-a-time copy for the local rank shard."""
+        source = (ELASTIC / "combine.asc").read_text()
+        header = (ELASTIC / "kernels.hpp").read_text()
+        host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+
+        self.assertIn("local_copy_datacopy", header)
+        self.assertIn(
+            '"DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY"', host)
+        self.assertIn(
+            "select_combine_local_copy_datacopy_config(", host)
+        self.assertIn("arguments.local_copy_datacopy =", host)
+
+        signature = (
+            "__aicore__ inline void "
+            "direct_combine_producer_local_copy_impl")
+        copy_begin = source.index(signature)
+        copy_end = source.index("\n}\n", copy_begin)
+        local_copy = source[copy_begin:copy_end]
+        for marker in (
+                "AscendC::GetBlockIdx()", "AscendC::GetBlockNum()",
+                "AscendC::GlobalTensor<std::uint8_t>",
+                "AscendC::DataCopy(", "combine_local_copy_plan("):
+            self.assertIn(marker, local_copy)
+
+        tail_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_combine_producer_local_copy_vf")
+        tail_end = source.index("\n}\n", tail_begin)
+        tail = source[tail_begin:tail_end]
+        self.assertIn("copy_plan.scalar_begin", tail)
+
+        kernel = source[source.index(
+            "__global__ __vector__ void combine_kernel"):]
+        datacopy_call = kernel.index(
+            "direct_combine_producer_local_copy_impl<512>(")
+        tail_call = kernel.index(
+            "asc_vf_call<direct_combine_producer_local_copy_vf>",
+            datacopy_call)
+        release_call = kernel.index(
+            "asc_vf_call<direct_combine_producer_release_vf>", tail_call)
+        boundary = kernel[datacopy_call:release_call]
+        self.assertIn("asc_sync_vec();", boundary)
+        self.assertIn(
+            "asc_sync_data_barrier(mem_dsb_t::DSB_DDR);", boundary)
+        self.assertIn("local_copy_datacopy", boundary)
+        for tile_bytes in (512, 1024, 2048, 4096, 8192, 16384, 32768):
+            self.assertIn(
+                f"direct_combine_producer_local_copy_impl<{tile_bytes}>(",
+                boundary)
+        self.assertIn(
+            "kCombineLocalCopyDefaultTileBytes = 32768", source)
+
+    def test_direct_combine_validation_builds_slots_in_parallel(self):
+        """Catches restoring the serial receive-record slot-map pass."""
+        source = (ELASTIC / "combine.asc").read_text()
+        self.assertIn(
+            '#include "simt_api/device_atomic_functions.h"', source)
+
+        validate_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_combine_epilogue_validate_vf")
+        validate_end = source.index("\n}\n", validate_begin)
+        validate = source[validate_begin:validate_end]
+        for marker in (
+                "workspace_slot_offset", "auto* slots",
+                "asc_atomic_cas(slots + index, -1,",
+                "CombineProtocolError::kDuplicateRecord"):
+            self.assertIn(marker, validate)
+
+        reduce_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_combine_epilogue_reduce_errors_vf")
+        reduce_end = source.index("\n}\n", reduce_begin)
+        reduce = source[reduce_begin:reduce_end]
+        self.assertNotIn("for (int contributor_rank", reduce)
+        self.assertNotIn("record_indices[logical]", reduce)
+        self.assertNotIn("slots[index]", reduce)
+
     def test_topk_grouping_compile_probe_contract(self):
         """Catches an uncompiled ballot adapter or a native match-any dependency."""
         header = (ELASTIC / "topk_grouping.hpp").read_text()
@@ -1278,9 +1355,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("direct_block_distributed_grid_stride(", validate)
         self.assertIn("kCombineRecordsPerTile", validate)
         self.assertIn("combine_receive_tile_error_offset", validate)
-        self.assertIn("combine_receive_record_index_offset", validate)
+        self.assertIn("workspace_slot_offset", validate)
         self.assertIn("combine_simt_receive_record_coordinates(", validate)
-        self.assertNotIn("slots[index] =", validate)
+        self.assertIn("asc_atomic_cas(slots + index, -1,", validate)
+        self.assertIn("CombineProtocolError::kDuplicateRecord", validate)
 
         validate_reduce = source[source.index(
             "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_reduce_errors_vf"):
@@ -1288,9 +1366,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "DEEP_EP_ASCEND_SIMT_CALLEE std::uint32_t\n"
                 "topk_compact_owner_ordinal")]
         self.assertIn("combine_receive_tile_error_offset", validate_reduce)
-        self.assertIn("combine_receive_record_index_offset", validate_reduce)
-        self.assertIn("CombineProtocolError::kDuplicateRecord", validate_reduce)
-        self.assertIn("slots[index] =", validate_reduce)
+        self.assertNotIn("combine_receive_record_index_offset", validate_reduce)
+        self.assertNotIn("for (int contributor_rank", validate_reduce)
+        self.assertNotIn("slots[index]", validate_reduce)
 
         producer_control = kernel.index(
             "stage == DirectCombineStage::kProducerControl")

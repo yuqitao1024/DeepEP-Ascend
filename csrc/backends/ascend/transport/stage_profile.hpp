@@ -245,7 +245,7 @@ inline constexpr std::uint64_t kTransportCombinePipelineStageMask =
 inline constexpr std::uint64_t kTransportDispatchReleaseAblationStageMask =
     ((std::uint64_t{1} << 16U) - 1U) & ~kTransportStageProfileFullMask;
 inline constexpr std::uint64_t kTransportCombineReleaseAblationStageMask =
-    ((std::uint64_t{1} << 14U) - 1U) & ~kTransportStageProfileFullMask;
+    ((std::uint64_t{1} << 15U) - 1U) & ~kTransportStageProfileFullMask;
 
 inline constexpr std::uint64_t transport_stage_profile_pipeline_mask(
     TransportProfileOperation operation, bool release_ablation) noexcept {
@@ -435,7 +435,10 @@ inline TransportStageProfilePhaseCycles derive_stage_profile_phase_cycles(
         (release_ablation ? stage_spans[
             operation == TransportProfileOperation::kDispatch ? 14 : 12] : 0) +
         (release_ablation ? stage_spans[
-            operation == TransportProfileOperation::kDispatch ? 15 : 13] : 0);
+            operation == TransportProfileOperation::kDispatch ? 15 : 13] : 0) +
+        (release_ablation &&
+             operation == TransportProfileOperation::kCombine ?
+             stage_spans[14] : 0);
     phases.producer = sum_stages(1, 4);
     phases.publication = release_cycles > service_cycles ?
         release_cycles - service_cycles : 0;
