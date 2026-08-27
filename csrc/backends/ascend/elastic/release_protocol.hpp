@@ -74,6 +74,17 @@ publish_control_slot_and_release(
         transport::RemoteAction::signal_set(signal_index, generation));
 }
 
+template <typename Slot>
+DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE transport::DeviceAddress
+stage_outbound_control_slot(
+    Slot* slots, int destination_rank, std::uint64_t generation,
+    std::uint64_t count) {
+    auto* slot = &slots[destination_rank];
+    slot->generation = generation;
+    slot->count = count;
+    return reinterpret_cast<transport::DeviceAddress>(slot);
+}
+
 template <typename Transport>
 DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void publish_local_control(
     Transport& facade, transport::DeviceAddress count_address,

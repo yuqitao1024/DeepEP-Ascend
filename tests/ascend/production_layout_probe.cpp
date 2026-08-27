@@ -15,7 +15,7 @@ int main() {
     static_assert(std::is_standard_layout_v<SymmetricControlHeader>);
     static_assert(std::is_trivially_copyable_v<SymmetricControlHeader>);
     static_assert(sizeof(SymmetricControlHeader) == 32);
-    static_assert(kSymmetricWindowAbiVersion == 7);
+    static_assert(kSymmetricWindowAbiVersion == 8);
     static_assert(offsetof(SymmetricWindowLayout, abi_version) == 0);
     static_assert(offsetof(SymmetricWindowLayout, struct_size) == 4);
     static_assert(offsetof(SymmetricWindowLayout, control_offset) == 8);
@@ -66,6 +66,9 @@ int main() {
     CHECK(layout.combine_contributor_shard_bytes >=
           input.num_max_tokens_per_rank * layout.combine_record_bytes);
     CHECK(layout.combine_control_bytes ==
+          input.world_size * sizeof(CombineControlSlot));
+    CHECK(layout.combine_outbound_control_count == input.world_size);
+    CHECK(layout.combine_outbound_control_bytes ==
           input.world_size * sizeof(CombineControlSlot));
     CHECK(layout.combine_receive_shard_count == 2);
     CHECK(layout.combine_staging_shard_count == 2);
@@ -135,6 +138,11 @@ int main() {
           layout.combine_staging_offset);
     CHECK(layout.combine_staging_offset + layout.combine_staging_bytes <=
           layout.reserve_offset);
+    CHECK(layout.reserve_offset + layout.reserve_bytes <=
+          layout.combine_outbound_control_offset);
+    CHECK(layout.combine_outbound_control_offset +
+              layout.combine_outbound_control_bytes <=
+          layout.total_bytes);
     CHECK(layout.combine_offset + layout.combine_bytes <=
           layout.reserve_offset);
     CHECK(layout.total_bytes % kPublicElasticBufferAlignment == 0);
@@ -183,6 +191,9 @@ int main() {
     CHECK(direct_layout.combine_staging_shard_bytes == 2560);
     CHECK(direct_layout.combine_staging_shard_count == 4);
     CHECK(direct_layout.combine_staging_bytes == 10240);
+    CHECK(direct_layout.combine_outbound_control_offset == 43264);
+    CHECK(direct_layout.combine_outbound_control_bytes == 64);
+    CHECK(direct_layout.combine_outbound_control_count == 4);
     CHECK(direct_layout.combine_weight_offset == 256);
     CHECK(direct_layout.barrier_generation_offset == 32);
     CHECK(direct_layout.barrier_generation_bytes == 32);

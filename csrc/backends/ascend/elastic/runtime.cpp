@@ -201,6 +201,12 @@ bool same_symmetric_window_layout(
            lhs.combine_staging_shard_count ==
                rhs.combine_staging_shard_count &&
            lhs.combine_staging_bytes == rhs.combine_staging_bytes &&
+           lhs.combine_outbound_control_offset ==
+               rhs.combine_outbound_control_offset &&
+           lhs.combine_outbound_control_bytes ==
+               rhs.combine_outbound_control_bytes &&
+           lhs.combine_outbound_control_count ==
+               rhs.combine_outbound_control_count &&
            lhs.combine_weight_offset == rhs.combine_weight_offset &&
            lhs.barrier_generation_offset == rhs.barrier_generation_offset &&
            lhs.barrier_generation_bytes == rhs.barrier_generation_bytes &&

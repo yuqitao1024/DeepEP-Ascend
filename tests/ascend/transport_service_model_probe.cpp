@@ -369,6 +369,23 @@ void check_packed_control_publication_uses_one_put_before_signal() {
     CHECK(protocol.release_generation == 7);
 }
 
+void check_packed_control_staging_is_distinct_per_destination() {
+    ReleaseControlFixture slots[3]{};
+    const auto first = release_protocol::stage_outbound_control_slot(
+        slots, 0, 7, 11);
+    const auto second = release_protocol::stage_outbound_control_slot(
+        slots, 2, 7, 29);
+
+    CHECK(first == reinterpret_cast<transport::DeviceAddress>(&slots[0]));
+    CHECK(second == reinterpret_cast<transport::DeviceAddress>(&slots[2]));
+    CHECK(slots[0].generation == 7);
+    CHECK(slots[0].count == 11);
+    CHECK(slots[1].generation == 0);
+    CHECK(slots[1].count == 0);
+    CHECK(slots[2].generation == 7);
+    CHECK(slots[2].count == 29);
+}
+
 void reset_release_fixture(
     ReleaseProtocolModel* protocol, ReleaseControlFixture* slots,
     int canonical_slot) {
@@ -640,5 +657,6 @@ int main() {
     check_outbound_ingress_counts_survive_reset_after_publish();
     check_release_acquire_and_selected_barrier_sequence();
     check_packed_control_publication_uses_one_put_before_signal();
+    check_packed_control_staging_is_distinct_per_destination();
     return failures == 0 ? 0 : 1;
 }
