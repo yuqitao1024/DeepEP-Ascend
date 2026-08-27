@@ -258,13 +258,6 @@ struct ReleaseProtocolModel {
     std::uint64_t store_values[2]{};
     int store_events[2]{};
     int store_count = 0;
-    transport::DeviceAddress put_destination = 0;
-    transport::DeviceAddress put_source = 0;
-    std::size_t put_bytes = 0;
-    int put_event = 0;
-    int put_count = 0;
-    int put_value_count = 0;
-    int signal_event = 0;
 
     void system_fence() {
         staging_fenced = true;
@@ -272,17 +265,11 @@ struct ReleaseProtocolModel {
     }
 
     void put(
-        transport::TransportTeam, int,
-        transport::DeviceAddress destination,
-        transport::DeviceAddress source, std::size_t bytes,
+        transport::TransportTeam, int, transport::DeviceAddress,
+        transport::DeviceAddress, std::size_t,
         transport::CooperationScope, transport::MemorySegment,
         transport::DeviceOptions, const transport::RemoteAction&) {
         put_observed_staging_fence = staging_fenced;
-        put_destination = destination;
-        put_source = source;
-        put_bytes = bytes;
-        put_event = ++event_index;
-        ++put_count;
     }
 
     void flush(transport::CooperationScope scope) {
@@ -294,7 +281,6 @@ struct ReleaseProtocolModel {
         transport::TransportTeam, int, transport::DeviceAddress,
         std::uint64_t, std::uint32_t, transport::DeviceOptions) {
         control_published_after_payload = payload_visible;
-        ++put_value_count;
     }
 
     void signal(
@@ -302,7 +288,6 @@ struct ReleaseProtocolModel {
         const transport::RemoteAction& action) {
         CHECK(action.kind == transport::RemoteActionKind::kSignalSet);
         release_generation = action.value;
-        signal_event = ++event_index;
     }
 
     void wait_signal(
@@ -346,45 +331,6 @@ struct ReleaseControlFixture {
     std::uint64_t generation = 0;
     std::uint64_t count = 0;
 };
-
-void check_packed_control_publication_uses_one_put_before_signal() {
-    ReleaseProtocolModel protocol;
-    ReleaseControlFixture slot{7, 3};
-    const transport::TeamPeer route{
-        transport::TransportTeam::kWorld, 1, 1};
-    constexpr transport::DeviceAddress kRemoteSlot = 0x4000;
-    const auto local_slot = reinterpret_cast<transport::DeviceAddress>(&slot);
-
-    release_protocol::publish_control_slot_and_release(
-        protocol, route, kRemoteSlot, local_slot, sizeof(slot), 1, 7);
-
-    CHECK(protocol.put_count == 1);
-    CHECK(protocol.put_value_count == 0);
-    CHECK(protocol.put_destination == kRemoteSlot);
-    CHECK(protocol.put_source == local_slot);
-    CHECK(protocol.put_bytes == 16);
-    CHECK(protocol.fence_event > 0);
-    CHECK(protocol.put_event > protocol.fence_event);
-    CHECK(protocol.signal_event > protocol.put_event);
-    CHECK(protocol.release_generation == 7);
-}
-
-void check_packed_control_staging_is_distinct_per_destination() {
-    ReleaseControlFixture slots[3]{};
-    const auto first = release_protocol::stage_outbound_control_slot(
-        slots, 0, 7, 11);
-    const auto second = release_protocol::stage_outbound_control_slot(
-        slots, 2, 7, 29);
-
-    CHECK(first == reinterpret_cast<transport::DeviceAddress>(&slots[0]));
-    CHECK(second == reinterpret_cast<transport::DeviceAddress>(&slots[2]));
-    CHECK(slots[0].generation == 7);
-    CHECK(slots[0].count == 11);
-    CHECK(slots[1].generation == 0);
-    CHECK(slots[1].count == 0);
-    CHECK(slots[2].generation == 7);
-    CHECK(slots[2].count == 29);
-}
 
 void reset_release_fixture(
     ReleaseProtocolModel* protocol, ReleaseControlFixture* slots,
@@ -656,7 +602,5 @@ int main() {
     check_local_canonical_control_publication();
     check_outbound_ingress_counts_survive_reset_after_publish();
     check_release_acquire_and_selected_barrier_sequence();
-    check_packed_control_publication_uses_one_put_before_signal();
-    check_packed_control_staging_is_distinct_per_destination();
     return failures == 0 ? 0 : 1;
 }

@@ -10,7 +10,7 @@ namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kAscendElasticAlignment = 32;
 inline constexpr std::uint64_t kPublicElasticBufferAlignment = 2ULL << 20U;
-inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 8;
+inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 7;
 inline constexpr std::uint64_t kHybridRouteRecordBytes = 64;
 inline constexpr std::uint64_t kCombineControlSlotBytes =
     2 * sizeof(std::uint64_t);
@@ -378,9 +378,6 @@ struct SymmetricWindowLayout {
     std::uint64_t hybrid_dispatch_ingress_staging_shard_bytes = 0;
     std::uint64_t hybrid_dispatch_ingress_staging_shard_count = 0;
     std::uint64_t hybrid_dispatch_ingress_staging_bytes = 0;
-    std::uint64_t combine_outbound_control_offset = 0;
-    std::uint64_t combine_outbound_control_bytes = 0;
-    std::uint64_t combine_outbound_control_count = 0;
 };
 
 class LayoutBuilder {
@@ -537,8 +534,6 @@ inline LayoutStatus build_symmetric_window_layout(
             return LayoutStatus::overflow("combine record capacity overflow");
         if (!checked_multiply(input.world_size, kCombineControlSlotBytes,
                               &layout.combine_control_bytes) ||
-            !checked_multiply(input.world_size, kCombineControlSlotBytes,
-                              &layout.combine_outbound_control_bytes) ||
             !checked_multiply(combine_capacity, layout.combine_record_bytes,
                               &layout.combine_receive_shard_bytes) ||
             !checked_align(layout.combine_receive_shard_bytes,
@@ -559,7 +554,6 @@ inline LayoutStatus build_symmetric_window_layout(
             !checked_add(layout.combine_bytes, layout.combine_staging_bytes,
                          &layout.combine_bytes))
             return LayoutStatus::overflow("combine region size overflow");
-        layout.combine_outbound_control_count = input.world_size;
         layout.combine_contributor_shard_bytes =
             layout.combine_receive_shard_bytes;
         layout.combine_receive_shard_count = input.world_size;
@@ -662,8 +656,6 @@ inline LayoutStatus build_symmetric_window_layout(
                          &layout.hybrid_combine_return_shard_offset) ||
           !window.append(layout.hybrid_dispatch_ingress_staging_bytes,
                          &layout.hybrid_dispatch_ingress_staging_offset))) ||
-        !window.append(layout.combine_outbound_control_bytes,
-                       &layout.combine_outbound_control_offset) ||
         !window.finish(&layout.total_bytes, kPublicElasticBufferAlignment))
         return LayoutStatus::overflow("symmetric window size overflow");
     if (!checked_add(layout.control_offset, layout.barrier_generation_offset,

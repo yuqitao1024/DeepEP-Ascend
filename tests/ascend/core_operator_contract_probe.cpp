@@ -833,6 +833,15 @@ int main() {
     CombineVectorReduceTileConfig vector_reduce_tile_config{};
     if (select_combine_vector_reduce_tile_config(
             nullptr, true, false, &vector_reduce_tile_config) !=
+            CombineVectorReduceTileConfigStatus::kEnabled ||
+        !vector_reduce_tile_config.enabled ||
+        vector_reduce_tile_config.tile_elements != 512 ||
+        select_combine_vector_reduce_tile_config(
+            nullptr, false, false, &vector_reduce_tile_config) !=
+            CombineVectorReduceTileConfigStatus::kDisabled ||
+        vector_reduce_tile_config.enabled ||
+        select_combine_vector_reduce_tile_config(
+            nullptr, true, true, &vector_reduce_tile_config) !=
             CombineVectorReduceTileConfigStatus::kDisabled ||
         vector_reduce_tile_config.enabled ||
         select_combine_vector_reduce_tile_config(
@@ -860,32 +869,6 @@ int main() {
             "1", true, false, nullptr) !=
             CombineVectorReduceTileConfigStatus::kInvalid)
         return 90;
-
-    CombinePackedControlConfig packed_control_config{};
-    if (select_combine_packed_control_config(
-            nullptr, true, false, &packed_control_config) !=
-            CombinePackedControlConfigStatus::kDisabled ||
-        packed_control_config.enabled ||
-        select_combine_packed_control_config(
-            "0", true, false, &packed_control_config) !=
-            CombinePackedControlConfigStatus::kDisabled ||
-        select_combine_packed_control_config(
-            "1", true, false, &packed_control_config) !=
-            CombinePackedControlConfigStatus::kEnabled ||
-        !packed_control_config.enabled ||
-        select_combine_packed_control_config(
-            "2", true, false, &packed_control_config) !=
-            CombinePackedControlConfigStatus::kInvalid ||
-        select_combine_packed_control_config(
-            "1", false, false, &packed_control_config) !=
-            CombinePackedControlConfigStatus::kDisabled ||
-        select_combine_packed_control_config(
-            "1", true, true, &packed_control_config) !=
-            CombinePackedControlConfigStatus::kDisabled ||
-        select_combine_packed_control_config(
-            "1", true, false, nullptr) !=
-            CombinePackedControlConfigStatus::kInvalid)
-        return 91;
 
     const auto aligned_local_copy =
         combine_local_copy_plan(14336, 256, 32, true);

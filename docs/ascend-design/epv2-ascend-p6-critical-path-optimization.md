@@ -549,12 +549,14 @@ for each optional bias, then casts, accumulates, casts back, and stores. The
 per-tile queue and MTE/VEC instruction overhead is therefore paid
 `ceil(hidden / 256)` times per token.
 
-P6.5 adds an opt-in `DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE` selector:
+P6.5 uses `DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE` to select the qualified
+tile or reproduce the pre-P6.5 baseline:
 
 | Value | Meaning |
 | --- | --- |
-| unset or `0` | Retained `256`-element implementation |
-| `1` or `512` | Candidate `512`-element common-shape AOT instance |
+| unset | Qualified `512`-element common-shape AOT instance for direct, non-hybrid K=8/H=7168 |
+| `0` | Retained `256`-element baseline |
+| `1` or `512` | Explicitly select the qualified `512`-element instance |
 
 The candidate is selected only for direct, non-hybrid K=8/H=7168. Dynamic
 shapes and hybrid paths retain the existing implementation. For the
@@ -626,18 +628,35 @@ smaller end-to-end effect on Reduced Combine is expected because its producer
 record span is still about `60.5M cycles`; C6 is only a small fraction of that
 operation's critical path.
 
-P6.5 is retained as an opt-in qualified candidate. It is not made the default
-yet because the current evidence is two-rank, while the fixed acceptance
-target is EP8. A later EP8 ABBA can promote value `512` to the default without
-changing the AOT implementation.
+### 12.4 EP8 default-promotion gate
+
+Task `task_20260827_120206_32750712601` ran a balanced four-variant matrix on
+the representative EP8 workload: 8192 tokens per rank, hidden size 7168,
+top-k 8, 256 experts, FP8 Dispatch, BF16 Combine, 72 cores, 30 warmups, and 30
+measured samples. The order was `base -> P6.5 -> P6.7 -> both -> both -> P6.7
+-> P6.5 -> base`; all correctness preflights passed.
+
+| Operation | 256 baseline | P6.5 only | P6.5 latency main effect |
+| --- | ---: | ---: | ---: |
+| Dispatch | `28.327 ms` | `27.913 ms` | `+0.25%` factorial effect; selector is not read by Dispatch |
+| Expanded Dispatch | `36.142 ms` | `34.515 ms` | `-1.59%` factorial effect; selector is not read by Dispatch |
+| Cached Dispatch | `84.780 ms` | `83.842 ms` | `-0.28%` factorial effect; selector is not read by Dispatch |
+| Combine | `45.854 ms`, `237.74 GB/s` | `42.212 ms`, `258.25 GB/s` | `-8.25%` |
+| Reduced Combine | `47.739 ms`, `228.35 GB/s` | `44.795 ms`, `243.36 GB/s` | `-7.78%` |
+
+Across eight profile ranks, mean `consumer_compute` fell from about `7.464M`
+to `4.080M cycles`, a `45.3%` reduction consistent with changing 28 tile
+iterations to 14. P6.5 therefore passes the EP8 promotion gate. Unset now
+selects 512 for the qualified direct non-hybrid shape; explicit `0` remains
+the reproducible 256-element escape hatch. Unsupported modes remain disabled.
 
 ## 13. P6.6 persistent or fused scheduling gate
 
-P6.5 does not create evidence for launch fusion. Its candidate profile reports
-only `34,813 cycles` of idle device time for Combine and `34,197 cycles` for
-Reduced Combine. That is about `0.26%` and `0.05%` of their device envelopes,
-respectively. Removing every exposed launch gap would therefore be much
-smaller than the remaining producer, payload-release, and consumer spans.
+P6.5 does not create evidence for launch fusion. The final EP8 profile reports
+about `30.9K cycles` of mean idle device time for Combine and `31.1K cycles`
+for Reduced Combine, about `0.124%` and `0.125%` of their device envelopes.
+Removing every exposed launch gap would therefore be much smaller than the
+remaining producer, payload-release, and consumer spans.
 
 P6.6 is deferred at its entry gate. Persistent scheduling should be revisited
 only with a design that also removes repeated work or enables overlap without
@@ -687,10 +706,11 @@ longer constructed, copied to SQ, posted, or completed.
 
 ### 14.2 Selector and ordering contract
 
-`DEEP_EP_ASCEND_COMBINE_PACKED_CONTROL_PUT=1` enables the candidate only for
-direct, non-hybrid Combine. Unset or `0` preserves the two put-value baseline;
-other values fail buffer construction. Both paths remain in one binary for
-same-shape comparison.
+During qualification,
+`DEEP_EP_ASCEND_COMBINE_PACKED_CONTROL_PUT=1` enabled the candidate only for
+direct, non-hybrid Combine. Unset or `0` preserved the two put-value baseline,
+and both paths remained in one binary for same-shape comparison. The selector
+and candidate implementation were removed after the EP8 gate in Section 14.8.
 
 The candidate preserves these ordering rules:
 
@@ -825,7 +845,7 @@ profile therefore attributes the gain to removing control command
 construction, SQ publication, and completion work, not to changing HCCS
 payload bandwidth.
 
-### 14.7 Retention decision
+### 14.7 EP2 retention decision
 
 The 30-sample ABBA task `task_20260827_114718_412329022159` ran
 baseline-candidate-candidate-baseline with the same workload and binary:
@@ -835,11 +855,38 @@ baseline-candidate-candidate-baseline with the same workload and binary:
 | Combine | 22.469 ms | 19.141 ms | -14.81% |
 | Reduced Combine | 28.945 ms | 27.679 ms | -4.37% |
 
-Both operations improve in the aggregate, and the direction agrees with the
-command-count and service-submit evidence. P6.7 is retained as an opt-in,
-direct non-hybrid Combine candidate. It is not promoted to the default from
-EP2 evidence alone; EP8 ABBA remains the promotion gate for the expected
-`30 -> 23` command reduction.
+Both operations improved in the aggregate, and the direction agreed with the
+command-count and service-submit evidence. This was sufficient to retain P6.7
+for the EP8 gate, but not to promote it to production.
+
+### 14.8 EP8 rejection and production removal
+
+The balanced EP8 task `task_20260827_120206_32750712601` evaluated P6.7 both
+alone and together with P6.5. The transport mechanism worked on all eight
+ranks:
+
+```text
+commands:      30 -> 23
+put commands:   7 -> 14
+SQ/CQ depth:    0 -> 0
+```
+
+The end-to-end result did not follow the command reduction:
+
+| Operation | Baseline | P6.7 only | P6.7 latency main effect |
+| --- | ---: | ---: | ---: |
+| Combine | `45.854 ms`, `237.74 GB/s` | `46.904 ms`, `232.42 GB/s` | `+1.97%` |
+| Reduced Combine | `47.739 ms`, `228.35 GB/s` | `49.378 ms`, `220.77 GB/s` | `+1.74%` |
+
+P6.7-associated Dispatch drift was `+2.06%`. After using that unrelated drift
+as a process/order reference, the adjusted effects are approximately `-0.09%`
+for Combine and `-0.31%` for Reduced Combine: effectively flat. EP8
+`service_submit` also failed to improve reliably even though command counts
+fell. The candidate therefore fails the production gate. Its selector,
+kernel argument, outbound control staging, release helper, symmetric-window
+ABI change, and experiment-only tests are removed; the measured evidence is
+kept here to prevent repeating the same WQE-only optimization without new
+critical-path evidence.
 
 ## 15. P6 phase status
 
@@ -850,10 +897,38 @@ EP2 evidence alone; EP8 ABBA remains the promotion gate for the expected
 | P6.2 parallel slot map | Retained | Removes the second serial contributor scan |
 | P6.3 local-copy tile qualification | Retained | `32768 B` replaces the earlier `4096 B` recommendation |
 | P6.4 producer-rank decode shortcut | Rejected | Candidate removed after flat/negative screening |
-| P6.5 vector-reduction tile | EP2 qualified | Kept opt-in; EP8 default-promotion gate remains |
+| P6.5 vector-reduction tile | Retained | EP8 accepted; unset defaults to `512`, explicit `0` restores the `256` baseline |
 | P6.6 persistent/fused scheduling | Deferred | Current profile has no material launch gap |
-| P6.7 packed control publication | EP2 qualified | Kept opt-in; EP8 default-promotion gate remains |
+| P6.7 packed control publication | Rejected | Command reduction was real, but EP8 end-to-end gain was flat; production wiring removed |
 
-All planned P6 candidates have reached a measured decision. The phase is not
-an EP8 default-performance acceptance yet: P6.5 and P6.7 still require the
-representative EP8 ABBA gate before they can change unset-selector behavior.
+All planned P6 candidates have reached a measured EP8 decision. P6.5 is the
+only late-stage candidate promoted by the final gate; P6.6 remains deferred
+because the exposed idle envelope is too small, and P6.7 is removed after its
+command-count win failed to produce an end-to-end improvement.
+
+### 15.1 Final production acceptance
+
+The final source built and linked for `dav-3510` in
+`task_20260827_123909_81893513234`. The two-rank gate
+`task_20260827_124315_87150226626` passed the unset default, explicit `0`, and
+explicit `512` selector paths. The default path also passed normal,
+duplicate-same-rank-experts, specialized K=8/H=7168, malformed-handle, and
+sequential-100-generations cases.
+
+Task `task_20260827_124549_88898624709` then ran the final unset-selector EP8
+binary with the representative workload and 30 warmups plus 30 measured
+samples:
+
+| Operation | Mean | P50 | P95 | Logical bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| Dispatch | `28.575 ms` | `28.554 ms` | `30.383 ms` | `272.48 GB/s` |
+| Expanded Dispatch | `35.959 ms` | `36.080 ms` | `37.396 ms` | `257.28 GB/s` |
+| Cached Dispatch | `84.896 ms` | `84.722 ms` | `87.248 ms` | `91.71 GB/s` |
+| Combine | `43.691 ms` | `43.614 ms` | `45.617 ms` | `249.51 GB/s` |
+| Reduced Combine | `45.199 ms` | `45.072 ms` | `46.843 ms` | `241.18 GB/s` |
+
+The accompanying eight-rank profile reports about `4.079M cycles` mean
+`consumer_compute` for both Combine operations, confirming the P6.5 default.
+Every rank terminates with 30 commands, 7 put commands, and zero SQ/CQ depth,
+confirming that P6.7 production wiring is absent and the baseline publication
+protocol is restored.
