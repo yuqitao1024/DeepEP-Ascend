@@ -494,6 +494,7 @@ struct CombineArguments {
     std::uintptr_t local_window_base = 0;
     std::uint32_t expanded_vector_reduce = 0;
     std::uint32_t local_copy_datacopy = 0;
+    std::uint32_t vector_reduce_tile_elements = 0;
 };
 
 }  // namespace deep_ep::ascend::elastic

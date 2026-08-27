@@ -1184,6 +1184,32 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("combine_contributor_count_offset", source)
         self.assertNotIn("combine_contributor_entry_offset", source)
 
+    def test_combine_vector_reduce_tile_selector_contract(self):
+        """Catches a fixed 256-element C6 tile with no screening selector."""
+        source = (ELASTIC / "combine.asc").read_text()
+        header = (ELASTIC / "kernels.hpp").read_text()
+        host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        parallel = (ELASTIC / "combine_parallel.hpp").read_text()
+
+        self.assertIn("vector_reduce_tile_elements", header)
+        self.assertIn(
+            '"DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE"', host)
+        self.assertIn(
+            "select_combine_vector_reduce_tile_config(", host)
+        self.assertIn("arguments.vector_reduce_tile_elements", host)
+        self.assertIn(
+            "select_combine_vector_reduce_tile_config(", parallel)
+        self.assertIn("TileElements", source)
+        self.assertIn(
+            "direct_combine_epilogue_vector_reduce_impl<\n"
+            "                    kCombineCommonTopk, kCombineCommonHidden,\n"
+            "                    kCombineVectorReduceDefaultTileElements>",
+            source)
+        kernel = source[source.index(
+            "__global__ __vector__ void combine_kernel"):]
+        self.assertIn("vector_reduce_tile_elements", kernel)
+        self.assertIn("kCombineVectorReduceDefaultTileElements", source)
+
     def test_direct_combine_common_shape_specialization_contract(self):
         """Catches losing the K=8/H=7168 AOT path or dynamic fallback."""
         source = (ELASTIC / "combine.asc").read_text()
@@ -1191,12 +1217,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("kCombineCommonHidden = 7168", source)
         self.assertIn(
             "template <std::uint64_t StaticNumTopk,\n"
-            "          std::uint64_t StaticHiddenElements>",
+            "          std::uint64_t StaticHiddenElements,\n"
+            "          std::uint32_t TileElements",
             source)
         self.assertIn(
             "direct_combine_epilogue_vector_reduce_impl<\n"
-            "                    kCombineCommonTopk,\n"
-            "                    kCombineCommonHidden>",
+            "                    kCombineCommonTopk, kCombineCommonHidden>",
             source)
         self.assertIn(
             "direct_combine_epilogue_vector_reduce_impl<0, 0>", source)

@@ -830,6 +830,37 @@ int main() {
             CombineLocalCopyDataCopyConfigStatus::kInvalid)
         return 89;
 
+    CombineVectorReduceTileConfig vector_reduce_tile_config{};
+    if (select_combine_vector_reduce_tile_config(
+            nullptr, true, false, &vector_reduce_tile_config) !=
+            CombineVectorReduceTileConfigStatus::kDisabled ||
+        vector_reduce_tile_config.enabled ||
+        select_combine_vector_reduce_tile_config(
+            "0", true, false, &vector_reduce_tile_config) !=
+            CombineVectorReduceTileConfigStatus::kDisabled ||
+        select_combine_vector_reduce_tile_config(
+            "1", true, false, &vector_reduce_tile_config) !=
+            CombineVectorReduceTileConfigStatus::kEnabled ||
+        !vector_reduce_tile_config.enabled ||
+        vector_reduce_tile_config.tile_elements != 512 ||
+        select_combine_vector_reduce_tile_config(
+            "512", true, false, &vector_reduce_tile_config) !=
+            CombineVectorReduceTileConfigStatus::kEnabled ||
+        vector_reduce_tile_config.tile_elements != 512 ||
+        select_combine_vector_reduce_tile_config(
+            "256", true, false, &vector_reduce_tile_config) !=
+            CombineVectorReduceTileConfigStatus::kInvalid ||
+        select_combine_vector_reduce_tile_config(
+            "1", false, false, &vector_reduce_tile_config) !=
+            CombineVectorReduceTileConfigStatus::kDisabled ||
+        select_combine_vector_reduce_tile_config(
+            "1", true, true, &vector_reduce_tile_config) !=
+            CombineVectorReduceTileConfigStatus::kDisabled ||
+        select_combine_vector_reduce_tile_config(
+            "1", true, false, nullptr) !=
+            CombineVectorReduceTileConfigStatus::kInvalid)
+        return 90;
+
     const auto aligned_local_copy =
         combine_local_copy_plan(14336, 256, 32, true);
     const auto tail_local_copy =

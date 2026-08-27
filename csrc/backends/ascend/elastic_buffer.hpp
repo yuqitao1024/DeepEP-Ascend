@@ -2906,6 +2906,18 @@ public:
             "DeepEP Ascend backend: "
             "DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY must be 0, 1, "
             "512, 1024, 2048, 4096, 8192, 16384, or 32768");
+        elastic::CombineVectorReduceTileConfig vector_reduce_tile_config{};
+        const auto vector_reduce_tile_config_status =
+            elastic::select_combine_vector_reduce_tile_config(
+                std::getenv(
+                    "DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE"),
+                !allow_hybrid_mode_, allow_hybrid_mode_,
+                &vector_reduce_tile_config);
+        TORCH_CHECK(
+            vector_reduce_tile_config_status !=
+                elastic::CombineVectorReduceTileConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE must be 0, 1, or 512");
         const auto capacity =
             static_cast<std::uint64_t>(num_max_tokens_per_rank);
         const auto maximum_source_rows =
@@ -3268,6 +3280,9 @@ public:
             expanded_reduce_config.enabled ? 1U : 0U;
         arguments.local_copy_datacopy = local_copy_config.enabled ?
             local_copy_config.tile_bytes : 0U;
+        arguments.vector_reduce_tile_elements =
+            vector_reduce_tile_config.enabled ?
+                vector_reduce_tile_config.tile_elements : 0U;
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_),
             resources_->workspace_bytes()};

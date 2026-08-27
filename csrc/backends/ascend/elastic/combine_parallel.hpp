@@ -34,6 +34,41 @@ struct CombineLocalCopyDataCopyConfig {
     std::uint32_t tile_bytes = 0;
 };
 
+enum class CombineVectorReduceTileConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct CombineVectorReduceTileConfig {
+    bool enabled = false;
+    std::uint32_t tile_elements = 0;
+};
+
+inline CombineVectorReduceTileConfigStatus
+select_combine_vector_reduce_tile_config(
+    const char* value, bool direct, bool hybrid,
+    CombineVectorReduceTileConfig* output) noexcept {
+    if (output == nullptr)
+        return CombineVectorReduceTileConfigStatus::kInvalid;
+    *output = {};
+    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+        return CombineVectorReduceTileConfigStatus::kDisabled;
+    std::uint32_t tile_elements = 0;
+    if (value[0] == '1' && value[1] == '\0')
+        tile_elements = 512;
+    else if (value[0] == '5' && value[1] == '1' && value[2] == '2' &&
+             value[3] == '\0')
+        tile_elements = 512;
+    else
+        return CombineVectorReduceTileConfigStatus::kInvalid;
+    if (!direct || hybrid)
+        return CombineVectorReduceTileConfigStatus::kDisabled;
+    output->enabled = true;
+    output->tile_elements = tile_elements;
+    return CombineVectorReduceTileConfigStatus::kEnabled;
+}
+
 struct CombineLocalCopyPlan {
     bool valid = false;
     std::uint64_t vector_bytes = 0;

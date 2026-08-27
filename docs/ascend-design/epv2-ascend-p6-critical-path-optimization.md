@@ -538,3 +538,38 @@ therefore rejected and removed. The original rank-begin scan remains the
 defensive path for malformed metadata; P6.4 should only be revisited together
 with a producer layout that carries a trusted destination-rank side array and
 reduces a measured C2 span.
+
+## 12. P6.5 consumer vector-reduction tile candidate
+
+After P6.2 and P6.3, C6 `direct_combine_epilogue_vector_reduce_impl` is the
+largest remaining compute span on the consumer side (about `7.4M cycles`).
+The implementation currently processes `256` BF16 elements per AICore tile.
+For each tile it allocates and drains a VECIN tensor for every contributor and
+for each optional bias, then casts, accumulates, casts back, and stores. The
+per-tile queue and MTE/VEC instruction overhead is therefore paid
+`ceil(hidden / 256)` times per token.
+
+P6.5 adds an opt-in `DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE` selector:
+
+| Value | Meaning |
+| --- | --- |
+| unset or `0` | Retained `256`-element implementation |
+| `1` or `512` | Candidate `512`-element common-shape AOT instance |
+
+The candidate is selected only for direct, non-hybrid K=8/H=7168. Dynamic
+shapes and hybrid paths retain the existing implementation. For the
+representative shape, reduction iterations change from
+`7168 / 256 = 28` to `7168 / 512 = 14`; contributor traversal and BF16-to-FP32
+accumulation order do not change. The larger tile uses twice the UB for
+input/output and accumulation scratch, so compilation must confirm no
+register or local-memory spill before any performance decision.
+
+The candidate does not change record layout, slot mapping, transport commands,
+release ordering, or output rounding. `256` remains the baseline in the same
+binary so ABBA measurements isolate tile size. Acceptance requires host
+selector and AOT call-site tests, NPU8P compile/link, two-rank correctness for
+hidden `7168` and `7184` (including no-bias, one-bias, two-bias, duplicate
+same-rank experts, malformed handles, and two generations), EP8 10/10
+screening, and a stage profile showing C6 reduction work decreases. Only then
+will a 30-warmup/30-sample ABBA run be considered. A flat C6 profile or a
+noisy/negative end-to-end result rejects P6.5 and the selector is removed.
