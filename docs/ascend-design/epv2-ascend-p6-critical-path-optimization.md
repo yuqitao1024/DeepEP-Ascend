@@ -670,11 +670,10 @@ offset +0: generation (uint64)
 offset +8: count      (uint64)
 ```
 
-The direct Combine control stage already writes the canonical local slot
-before it publishes remote control. The candidate uses that local slot as the
-source of one 16-byte put to the corresponding remote slot, then sends the
-unchanged generation signal. Per remote peer, the WQE sequence changes from
-three writes to two:
+The candidate stages one destination-specific slot in registered outbound
+storage and uses it as the source of one 16-byte put to the corresponding
+remote canonical slot. It then sends the unchanged generation signal. Per
+remote peer, the WQE sequence changes from three writes to two:
 
 ```text
 baseline:  put-value(count), put-value(generation), signal(generation)
@@ -696,7 +695,8 @@ same-shape comparison.
 The candidate preserves these ordering rules:
 
 1. all contributor payload puts complete through the existing payload flush;
-2. the canonical local `{generation, count}` slot is written;
+2. the destination-specific outbound `{generation, count[destination]}` slot
+   is written;
 3. a device system fence makes the local slot visible to the transport
    service;
 4. one 16-byte put copies the slot to the remote canonical location;
@@ -725,3 +725,135 @@ cases. Device validation then requires:
 The candidate is removed if the command count does not fall, correctness
 changes, CQ wait grows enough to offset the saved WQE, or end-to-end results
 are flat after accounting for pair noise.
+
+### 14.4 Destination-specific staging correction
+
+The first device candidate incorrectly used
+`control_slots[transport_world_rank]` as the source for every remote put. That
+slot contains the count contributed to the local rank:
+
+```text
+control_slots[self].count = counts[self]
+```
+
+The value sent to destination `d` must instead be:
+
+```text
+remote_control[d].count = counts[d]
+```
+
+These values happen to match for symmetric routing, but not for the
+asymmetric routing used by the production correctness cases. The remote rank
+therefore received a valid generation with the wrong count, scanned beyond
+its valid contributor records, and reported `backend_status=6`
+(`kInvalidHeader`). This failure was reproduced by
+`task_20260827_111052_351613032610`.
+
+The corrected layout appends `world_size * 16 B` of registered outbound
+control storage to the symmetric-window tail. Existing control, receive,
+staging, reserve, and hybrid offsets do not move. `SymmetricWindowLayout`
+appends these fields and advances its ABI from 7 to 8:
+
+```text
+combine_outbound_control_offset
+combine_outbound_control_bytes
+combine_outbound_control_count
+```
+
+Before publishing destination `d`, the producer stages
+`{generation, counts[d]}` in `outbound_slots[d]`. The existing system fence
+then orders that GM write before the transport service reads the slot for the
+packed put. Per-destination slots also prevent one destination's control data
+from being overwritten while an earlier put is still consuming its source.
+
+### 14.5 Build and correctness evidence
+
+The corrected `combine.asc` compiled for `dav-3510` and the extension linked
+in `task_20260827_112258_368917227592`. The clean two-rank correctness gate
+`task_20260827_112844_3805038207` passed:
+
+```text
+selector unset: normal
+selector 0:     normal
+selector 1:     normal
+                duplicate-same-rank-experts
+                specialized-k8-hidden7168
+                malformed-handle
+                sequential-100-generations
+```
+
+The host regression contains a destination-distinct staging contract and ABI
+layout checks. Its final run passed `474` tests with `6` skipped and `67`
+subtests passed.
+
+### 14.6 Screening and transport profile
+
+The same-binary ten-sample screen
+`task_20260827_113302_38642468245` used the representative EP2 workload:
+8192 tokens per rank, hidden size 7168, top-k 8, 256 experts, FP8 Dispatch,
+BF16 Combine, 72 cores, 10 warmups, and 10 measured iterations.
+
+| Operation | Baseline | Packed control | Latency delta | Baseline logical GB/s | Packed logical GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 14.809 ms | 14.550 ms | -1.75% | 49.56 | 50.44 |
+| Expanded Dispatch | 22.032 ms | 21.239 ms | -3.60% | 72.13 | 74.82 |
+| Cached Dispatch | 68.663 ms | 67.765 ms | -1.31% | 10.69 | 10.83 |
+| Combine | 22.942 ms | 22.541 ms | -1.75% | 51.18 | 52.09 |
+| Reduced Combine | 29.186 ms | 29.081 ms | -0.36% | 40.23 | 40.38 |
+
+Dispatch does not read the selector, so its deltas measure process and pair
+drift rather than a candidate effect. The screen was therefore insufficient
+on its own to retain or reject the candidate.
+
+The paired stage profile `task_20260827_114355_40538195125` confirmed the
+intended mechanism on both ranks:
+
+| Metric | Baseline | Packed control | Interpretation |
+| --- | ---: | ---: | --- |
+| Commands per rank | 6 | 5 | One control WQE removed |
+| Put commands per rank | 1 | 2 | Payload put plus packed-control put |
+| SQ/CQ terminal depth | 0/0 | 0/0 | No leaked request or completion |
+| SQ/CQ high watermark | 4/4 | 3/3 | One fewer outstanding command |
+| Combine rank-0 `service_submit` | 814,586 | 59,448 cycles | -92.70% |
+| Reduced rank-0 `service_submit` | 2,125,479 | 59,735 cycles | -97.19% |
+| Combine rank-0 CQ wait | 2,300,536 | 2,329,942 cycles | +1.28% |
+| Reduced rank-0 CQ wait | 2,226,917 | 2,330,372 cycles | +4.65% |
+
+Payload bytes are unchanged. Publication and compute spans are nearly flat,
+while the submission span falls sharply and CQ wait rises only slightly. The
+profile therefore attributes the gain to removing control command
+construction, SQ publication, and completion work, not to changing HCCS
+payload bandwidth.
+
+### 14.7 Retention decision
+
+The 30-sample ABBA task `task_20260827_114718_412329022159` ran
+baseline-candidate-candidate-baseline with the same workload and binary:
+
+| Operation | Baseline ABBA mean | Packed-control ABBA mean | Latency delta |
+| --- | ---: | ---: | ---: |
+| Combine | 22.469 ms | 19.141 ms | -14.81% |
+| Reduced Combine | 28.945 ms | 27.679 ms | -4.37% |
+
+Both operations improve in the aggregate, and the direction agrees with the
+command-count and service-submit evidence. P6.7 is retained as an opt-in,
+direct non-hybrid Combine candidate. It is not promoted to the default from
+EP2 evidence alone; EP8 ABBA remains the promotion gate for the expected
+`30 -> 23` command reduction.
+
+## 15. P6 phase status
+
+| Item | Status | Production treatment |
+| --- | --- | --- |
+| P6.0 local DataCopy | Retained | `32768 B` is the qualified selector value |
+| P6.1 chunked producer/transport pipeline | Rejected | Production wiring removed; profile evidence retained |
+| P6.2 parallel slot map | Retained | Removes the second serial contributor scan |
+| P6.3 local-copy tile qualification | Retained | `32768 B` replaces the earlier `4096 B` recommendation |
+| P6.4 producer-rank decode shortcut | Rejected | Candidate removed after flat/negative screening |
+| P6.5 vector-reduction tile | EP2 qualified | Kept opt-in; EP8 default-promotion gate remains |
+| P6.6 persistent/fused scheduling | Deferred | Current profile has no material launch gap |
+| P6.7 packed control publication | EP2 qualified | Kept opt-in; EP8 default-promotion gate remains |
+
+All planned P6 candidates have reached a measured decision. The phase is not
+an EP8 default-performance acceptance yet: P6.5 and P6.7 still require the
+representative EP8 ABBA gate before they can change unset-selector behavior.
