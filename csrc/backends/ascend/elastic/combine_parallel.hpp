@@ -45,6 +45,32 @@ struct CombineVectorReduceTileConfig {
     std::uint32_t tile_elements = 0;
 };
 
+enum class CombinePackedControlConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct CombinePackedControlConfig {
+    bool enabled = false;
+};
+
+inline CombinePackedControlConfigStatus select_combine_packed_control_config(
+    const char* value, bool direct, bool hybrid,
+    CombinePackedControlConfig* output) noexcept {
+    if (output == nullptr)
+        return CombinePackedControlConfigStatus::kInvalid;
+    *output = {};
+    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+        return CombinePackedControlConfigStatus::kDisabled;
+    if (value[0] != '1' || value[1] != '\0')
+        return CombinePackedControlConfigStatus::kInvalid;
+    if (!direct || hybrid)
+        return CombinePackedControlConfigStatus::kDisabled;
+    output->enabled = true;
+    return CombinePackedControlConfigStatus::kEnabled;
+}
+
 inline CombineVectorReduceTileConfigStatus
 select_combine_vector_reduce_tile_config(
     const char* value, bool direct, bool hybrid,

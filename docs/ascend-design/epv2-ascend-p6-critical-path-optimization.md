@@ -644,3 +644,84 @@ only with a design that also removes repeated work or enables overlap without
 the per-chunk service inflation observed in P6.1; launch fusion alone is not a
 current high-priority candidate. P6 proceeds to P6.7 remote payload
 concurrency and WQE reduction.
+
+## 14. P6.7 packed control-slot publication candidate
+
+### 14.1 Why control WQE reduction is the first candidate
+
+The retained EP8 schedule emits 30 logical transport commands per rank:
+
+```text
+7 payload puts + 1 payload flush
++ 7 * (count put-value + generation put-value + release signal)
++ 1 world barrier
+= 30 commands
+```
+
+P5.5 batched adjacent control-request doorbells but retained all three WQEs
+per peer. It reduced the small control-release span without shortening the
+critical path. P6.7 therefore changes the amount of submitted work rather
+than repeating that experiment.
+
+`CombineControlSlot` is an aligned 16-byte pair:
+
+```text
+offset +0: generation (uint64)
+offset +8: count      (uint64)
+```
+
+The direct Combine control stage already writes the canonical local slot
+before it publishes remote control. The candidate uses that local slot as the
+source of one 16-byte put to the corresponding remote slot, then sends the
+unchanged generation signal. Per remote peer, the WQE sequence changes from
+three writes to two:
+
+```text
+baseline:  put-value(count), put-value(generation), signal(generation)
+candidate: put(slot[16 B]),                       signal(generation)
+```
+
+For EP8 this reduces logical commands from 30 to 23 and control write WQEs
+from 21 to 14. The seven payload puts, one payload flush, and barrier are
+unchanged. This is different from doorbell batching: one WQE per peer is no
+longer constructed, copied to SQ, posted, or completed.
+
+### 14.2 Selector and ordering contract
+
+`DEEP_EP_ASCEND_COMBINE_PACKED_CONTROL_PUT=1` enables the candidate only for
+direct, non-hybrid Combine. Unset or `0` preserves the two put-value baseline;
+other values fail buffer construction. Both paths remain in one binary for
+same-shape comparison.
+
+The candidate preserves these ordering rules:
+
+1. all contributor payload puts complete through the existing payload flush;
+2. the canonical local `{generation, count}` slot is written;
+3. a device system fence makes the local slot visible to the transport
+   service;
+4. one 16-byte put copies the slot to the remote canonical location;
+5. the existing release signal is submitted after the slot put;
+6. the existing world barrier and consumer acquire remain unchanged.
+
+The transport command ABI, remote slot layout, signal index, generation
+semantics, Dispatch, hybrid Combine, and scale-out routing do not change.
+
+### 14.3 Acceptance gate
+
+Host tests execute the release helper and require one 16-byte put, no
+put-value call, a fence before the put, and the signal after the put. Selector
+tests cover disabled, enabled, invalid, non-direct, hybrid, and null-output
+cases. Device validation then requires:
+
+1. `dav-3510` compilation and final extension link;
+2. two-rank normal, duplicate-same-rank, specialized K=8/H=7168,
+   malformed-handle, and repeated-generation correctness;
+3. same-binary baseline/candidate screening for all five operations;
+4. an enabled profile showing command count `6 -> 5` at EP2, completed SQ/CQ
+   state, and two total put opcodes: one payload put plus one packed-control
+   put;
+5. a stable reduction in Combine publication/service or end-to-end time.
+
+The candidate is removed if the command count does not fall, correctness
+changes, CQ wait grows enough to offset the saved WQE, or end-to-end results
+are flat after accounting for pair noise.

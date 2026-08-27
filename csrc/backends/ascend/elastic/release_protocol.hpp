@@ -57,6 +57,24 @@ DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void publish_control_and_release(
 }
 
 template <typename Transport>
+DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void
+publish_control_slot_and_release(
+    Transport& facade, const transport::TeamPeer& route,
+    transport::DeviceAddress destination_slot,
+    transport::DeviceAddress source_slot, std::size_t slot_bytes,
+    std::uint32_t signal_index, std::uint64_t generation) {
+    facade.system_fence();
+    facade.put(
+        route.team, route.peer, destination_slot, source_slot, slot_bytes,
+        transport::CooperationScope::kParticipant,
+        transport::MemorySegment::kDevice, transport::kDefaultOptions,
+        transport::RemoteAction::none());
+    facade.signal(
+        route.team, route.peer,
+        transport::RemoteAction::signal_set(signal_index, generation));
+}
+
+template <typename Transport>
 DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void publish_local_control(
     Transport& facade, transport::DeviceAddress count_address,
     std::uint64_t count, transport::DeviceAddress generation_address,

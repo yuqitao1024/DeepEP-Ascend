@@ -861,6 +861,32 @@ int main() {
             CombineVectorReduceTileConfigStatus::kInvalid)
         return 90;
 
+    CombinePackedControlConfig packed_control_config{};
+    if (select_combine_packed_control_config(
+            nullptr, true, false, &packed_control_config) !=
+            CombinePackedControlConfigStatus::kDisabled ||
+        packed_control_config.enabled ||
+        select_combine_packed_control_config(
+            "0", true, false, &packed_control_config) !=
+            CombinePackedControlConfigStatus::kDisabled ||
+        select_combine_packed_control_config(
+            "1", true, false, &packed_control_config) !=
+            CombinePackedControlConfigStatus::kEnabled ||
+        !packed_control_config.enabled ||
+        select_combine_packed_control_config(
+            "2", true, false, &packed_control_config) !=
+            CombinePackedControlConfigStatus::kInvalid ||
+        select_combine_packed_control_config(
+            "1", false, false, &packed_control_config) !=
+            CombinePackedControlConfigStatus::kDisabled ||
+        select_combine_packed_control_config(
+            "1", true, true, &packed_control_config) !=
+            CombinePackedControlConfigStatus::kDisabled ||
+        select_combine_packed_control_config(
+            "1", true, false, nullptr) !=
+            CombinePackedControlConfigStatus::kInvalid)
+        return 91;
+
     const auto aligned_local_copy =
         combine_local_copy_plan(14336, 256, 32, true);
     const auto tail_local_copy =

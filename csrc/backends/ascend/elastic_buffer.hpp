@@ -2918,6 +2918,17 @@ public:
                 elastic::CombineVectorReduceTileConfigStatus::kInvalid,
             "DeepEP Ascend backend: "
             "DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE must be 0, 1, or 512");
+        elastic::CombinePackedControlConfig packed_control_config{};
+        const auto packed_control_config_status =
+            elastic::select_combine_packed_control_config(
+                std::getenv("DEEP_EP_ASCEND_COMBINE_PACKED_CONTROL_PUT"),
+                !allow_hybrid_mode_, allow_hybrid_mode_,
+                &packed_control_config);
+        TORCH_CHECK(
+            packed_control_config_status !=
+                elastic::CombinePackedControlConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_COMBINE_PACKED_CONTROL_PUT must be 0 or 1");
         const auto capacity =
             static_cast<std::uint64_t>(num_max_tokens_per_rank);
         const auto maximum_source_rows =
@@ -3283,6 +3294,8 @@ public:
         arguments.vector_reduce_tile_elements =
             vector_reduce_tile_config.enabled ?
                 vector_reduce_tile_config.tile_elements : 0U;
+        arguments.packed_control_put =
+            packed_control_config.enabled ? 1U : 0U;
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_),
             resources_->workspace_bytes()};
