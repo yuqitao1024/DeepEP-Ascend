@@ -573,3 +573,74 @@ same-rank experts, malformed handles, and two generations), EP8 10/10
 screening, and a stage profile showing C6 reduction work decreases. Only then
 will a 30-warmup/30-sample ABBA run be considered. A flat C6 profile or a
 noisy/negative end-to-end result rejects P6.5 and the selector is removed.
+
+### 12.1 Build and correctness evidence
+
+The NPU extension build `task_20260827_103200_28675128835` completed
+successfully for `dav-3510`, including compilation of `combine.asc` and final
+extension linking. The two-rank correctness task
+`task_20260827_103542_292883530876` passed the normal, duplicate-same-rank
+expert, specialized K=8/H=7168, and malformed-handle cases. The selector did
+not change output values or protocol validation.
+
+### 12.2 Same-shape screening
+
+The two-rank 10-warmup/10-sample screening task
+`task_20260827_103806_29422868167` compared the two instances from the same
+binary:
+
+| Operation | 256 baseline | 512 candidate | Delta |
+| --- | ---: | ---: | ---: |
+| Dispatch | `19.174 ms` | `19.845 ms` | `+3.50%` |
+| Expanded Dispatch | `22.548 ms` | `22.634 ms` | `+0.38%` |
+| Cached Dispatch | `68.184 ms` | `68.737 ms` | `+0.81%` |
+| Combine | `23.924 ms` | `22.675 ms` | `-5.22%` |
+| Reduced Combine | `82.401 ms` | `80.912 ms` | `-1.81%` |
+
+Normal Combine logical bandwidth increased from `49.08` to `51.78 GB/s`;
+Reduced Combine increased from `14.25` to `14.51 GB/s`. The selector is not
+read by any Dispatch path, so the Dispatch deltas are cross-process pair drift
+rather than candidate work.
+
+### 12.3 Stage attribution and retention
+
+The baseline and candidate profiles ran successfully on devices 0 and 1 in
+`task_20260827_104304_296772130303` and
+`task_20260827_104427_297509419459`. An earlier candidate submission on
+devices 6 and 7, `task_20260827_104043_29542263948`, failed before kernel
+entry with stream resource allocation failure and is excluded from the
+comparison.
+
+| Profile span | 256 baseline | 512 candidate | Delta |
+| --- | ---: | ---: | ---: |
+| Combine C6 `epilogue_reduce` | `2,768,992` | `1,514,865` cycles | `-45.29%` |
+| Combine `consumer_compute` | `2,788,878` | `1,534,644` cycles | `-44.97%` |
+| Combine device envelope | `13,792,256` | `13,152,227` cycles | `-4.64%` |
+| Reduced C6 `epilogue_reduce` | `2,765,884` | `1,515,967` cycles | `-45.19%` |
+| Reduced `consumer_compute` | `2,786,537` | `1,536,329` cycles | `-44.87%` |
+| Reduced device envelope | `71,725,462` | `70,617,104` cycles | `-1.55%` |
+
+The C6 span falls by about half, matching the reduction in tile iterations
+from 28 to 14. Other Combine compute spans remain effectively unchanged. The
+smaller end-to-end effect on Reduced Combine is expected because its producer
+record span is still about `60.5M cycles`; C6 is only a small fraction of that
+operation's critical path.
+
+P6.5 is retained as an opt-in qualified candidate. It is not made the default
+yet because the current evidence is two-rank, while the fixed acceptance
+target is EP8. A later EP8 ABBA can promote value `512` to the default without
+changing the AOT implementation.
+
+## 13. P6.6 persistent or fused scheduling gate
+
+P6.5 does not create evidence for launch fusion. Its candidate profile reports
+only `34,813 cycles` of idle device time for Combine and `34,197 cycles` for
+Reduced Combine. That is about `0.26%` and `0.05%` of their device envelopes,
+respectively. Removing every exposed launch gap would therefore be much
+smaller than the remaining producer, payload-release, and consumer spans.
+
+P6.6 is deferred at its entry gate. Persistent scheduling should be revisited
+only with a design that also removes repeated work or enables overlap without
+the per-chunk service inflation observed in P6.1; launch fusion alone is not a
+current high-priority candidate. P6 proceeds to P6.7 remote payload
+concurrency and WQE reduction.
