@@ -10,7 +10,8 @@ namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kAscendElasticAlignment = 32;
 inline constexpr std::uint64_t kPublicElasticBufferAlignment = 2ULL << 20U;
-inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 7;
+inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 8;
+inline constexpr std::uint64_t kDispatchRoutePlanMaximumExperts = 256;
 inline constexpr std::uint64_t kHybridRouteRecordBytes = 64;
 inline constexpr std::uint64_t kCombineControlSlotBytes =
     2 * sizeof(std::uint64_t);
@@ -23,8 +24,9 @@ inline constexpr std::uint64_t kDirectCombineRecordTrailerBytes =
 inline constexpr std::uint64_t kHybridCombineRecordTrailerBytes =
     2 * kAscendElasticAlignment;
 inline constexpr std::uint64_t kDispatchGroupingTokensPerTile = 4;
-inline constexpr std::uint32_t kDispatchPipelineAbiVersion = 1;
+inline constexpr std::uint32_t kDispatchPipelineAbiVersion = 7;
 inline constexpr std::uint32_t kDispatchPipelineSlotCount = 2;
+inline constexpr std::uint32_t kDispatchPipelineMaximumProducerBlocks = 72;
 
 enum class CoreMode : std::uint8_t {
     kCached,
@@ -124,6 +126,36 @@ constexpr bool checked_align(
     return true;
 }
 
+struct DispatchRoutePlanLayout {
+    std::uint64_t expert_capacity = 0;
+    std::uint64_t slot_bytes = 0;
+    std::uint64_t total_bytes = 0;
+    bool valid = false;
+};
+
+constexpr DispatchRoutePlanLayout dispatch_route_plan_layout(
+    std::uint64_t world_size) noexcept {
+    DispatchRoutePlanLayout layout{};
+    if (world_size == 0)
+        return layout;
+    layout.expert_capacity =
+        (kDispatchRoutePlanMaximumExperts + world_size - 1) / world_size;
+    std::uint64_t expert_bytes = 0;
+    std::uint64_t unaligned_slot_bytes = 0;
+    if (!checked_multiply(
+            layout.expert_capacity, sizeof(std::uint64_t), &expert_bytes) ||
+        !checked_add(
+            sizeof(std::uint64_t) * 2, expert_bytes,
+            &unaligned_slot_bytes) ||
+        !checked_align(
+            unaligned_slot_bytes, kAscendElasticAlignment,
+            &layout.slot_bytes) ||
+        !checked_multiply(world_size, layout.slot_bytes, &layout.total_bytes))
+        return {};
+    layout.valid = true;
+    return layout;
+}
+
 constexpr bool checked_rank_slot_offset(
     std::uint64_t region_offset, std::uint64_t region_count, int rank,
     std::uint64_t* result) {
@@ -182,6 +214,11 @@ struct WorkspaceLayout {
     std::uint64_t dispatch_group_tile_offset = 0;
     std::uint64_t dispatch_group_tile_bytes = 0;
     std::uint64_t dispatch_group_tile_count = 0;
+    std::uint64_t dispatch_group_expert_count_offset = 0;
+    std::uint64_t dispatch_group_expert_count_bytes = 0;
+    std::uint64_t dispatch_group_expert_count = 0;
+    std::uint64_t dispatch_route_source_counts_offset = 0;
+    std::uint64_t dispatch_route_source_counts_bytes = 0;
     std::uint64_t dispatch_group_error_offset = 0;
     std::uint64_t dispatch_group_error_bytes = 0;
     std::uint64_t dispatch_rank_bitmap_offset = 0;
@@ -214,10 +251,33 @@ struct WorkspaceLayout {
 enum class DispatchPipelineSlotState : std::uint32_t {
     kEmpty,
     kProducing,
+    kScalarReady,
     kReady,
     kInFlight,
     kCompleted,
     kFailed,
+};
+
+enum class DispatchPipelineWorkerState : std::uint32_t {
+    kIdle,
+    kRunning,
+    kCompleted,
+    kFailed,
+};
+
+enum class DispatchPipelineDiagnosticStage : std::uint32_t {
+    kNone = 0,
+    kProducerStarted = 1,
+    kScalarReady = 2,
+    kHiddenProgressObserved = 3,
+    kPayloadReady = 4,
+    kReleaseStarted = 10,
+    kReleaseSawPayloadReady = 11,
+    kReleaseBatchTargetPublished = 12,
+    kReleaseBatchConsumed = 13,
+    kRequestCompleted = 14,
+    kFinalBatchTargetPublished = 15,
+    kReleaseCompleted = 16,
 };
 
 struct alignas(64) DispatchPipelineSlot {
@@ -226,7 +286,15 @@ struct alignas(64) DispatchPipelineSlot {
     std::uint64_t chunk_end = 0;
     std::uint32_t chunk_index = 0;
     DispatchPipelineSlotState state = DispatchPipelineSlotState::kEmpty;
-    std::uint64_t reserved = 0;
+    std::uint32_t scalar_blocks_completed = 0;
+    std::uint32_t hidden_blocks_completed = 0;
+    std::uint32_t published_chunk = UINT32_MAX;
+};
+
+struct alignas(64) DispatchPipelineBlockProgress {
+    std::uint64_t generation = 0;
+    std::uint32_t completed_chunk = UINT32_MAX;
+    std::uint32_t reserved[13]{};
 };
 
 struct alignas(64) DispatchPipelineState {
@@ -240,11 +308,28 @@ struct alignas(64) DispatchPipelineState {
         transport::DeviceTransportError::kNone;
     std::uint32_t reserved0 = 0;
     std::uint64_t reserved1[3]{};
+    std::uint64_t release_completed_generation = 0;
+    std::uint64_t producer_completed_generation = 0;
+    std::uint32_t release_batch_target = 0;
+    std::uint32_t release_batch_consumed = 0;
+    DispatchPipelineWorkerState release_worker_state =
+        DispatchPipelineWorkerState::kIdle;
+    DispatchPipelineWorkerState producer_worker_state =
+        DispatchPipelineWorkerState::kIdle;
+    DispatchPipelineDiagnosticStage diagnostic_stage =
+        DispatchPipelineDiagnosticStage::kNone;
+    std::uint32_t diagnostic_detail = 0;
+    std::uint64_t reserved2[3]{};
     DispatchPipelineSlot slots[kDispatchPipelineSlotCount]{};
+    DispatchPipelineBlockProgress
+        scalar_progress[kDispatchPipelineMaximumProducerBlocks]{};
+    DispatchPipelineBlockProgress
+        hidden_progress[kDispatchPipelineMaximumProducerBlocks]{};
 };
 
-static_assert(sizeof(DispatchPipelineSlot) == 64);
-static_assert(sizeof(DispatchPipelineState) == 192);
+static_assert(sizeof(DispatchPipelineSlot) == 128);
+static_assert(sizeof(DispatchPipelineBlockProgress) == 64);
+static_assert(sizeof(DispatchPipelineState) == 9600);
 static_assert(std::is_standard_layout_v<DispatchPipelineState>);
 static_assert(std::is_trivially_copyable_v<DispatchPipelineState>);
 
@@ -262,6 +347,13 @@ struct alignas(16) DispatchControlSlot {
 };
 
 static_assert(sizeof(DispatchControlSlot) == 16);
+
+struct alignas(16) DispatchRoutePlanSlotHeader {
+    std::uint64_t generation = 0;
+    std::uint64_t record_count = 0;
+};
+
+static_assert(sizeof(DispatchRoutePlanSlotHeader) == 16);
 
 enum class LayoutStatusCode : std::uint8_t {
     kSuccess,
@@ -378,6 +470,11 @@ struct SymmetricWindowLayout {
     std::uint64_t hybrid_dispatch_ingress_staging_shard_bytes = 0;
     std::uint64_t hybrid_dispatch_ingress_staging_shard_count = 0;
     std::uint64_t hybrid_dispatch_ingress_staging_bytes = 0;
+    std::uint64_t dispatch_route_plan_offset = 0;
+    std::uint64_t dispatch_route_plan_bytes = 0;
+    std::uint64_t dispatch_route_plan_count = 0;
+    std::uint64_t dispatch_route_plan_slot_bytes = 0;
+    std::uint64_t dispatch_route_plan_expert_capacity = 0;
 };
 
 class LayoutBuilder {
@@ -432,6 +529,13 @@ inline LayoutStatus build_symmetric_window_layout(
     layout.combine_contributor_shard_count = input.world_size;
     layout.barrier_generation_count = input.world_size;
     layout.barrier_completion_count = input.world_size;
+    const auto route_plan = dispatch_route_plan_layout(input.world_size);
+    if (!route_plan.valid)
+        return LayoutStatus::overflow("route plan layout overflow");
+    layout.dispatch_route_plan_count = input.world_size;
+    layout.dispatch_route_plan_expert_capacity = route_plan.expert_capacity;
+    layout.dispatch_route_plan_slot_bytes = route_plan.slot_bytes;
+    layout.dispatch_route_plan_bytes = route_plan.total_bytes;
 
     if (!checked_multiply(input.world_size, sizeof(std::uint64_t),
                           &layout.barrier_generation_bytes) ||
@@ -454,6 +558,9 @@ inline LayoutStatus build_symmetric_window_layout(
         !control.append(
             layout.dispatch_control_bytes,
             &layout.dispatch_control_offset) ||
+        !control.append(
+            layout.dispatch_route_plan_bytes,
+            &layout.dispatch_route_plan_offset) ||
         !control.finish(&layout.control_bytes))
         return LayoutStatus::overflow("control region layout overflow");
 

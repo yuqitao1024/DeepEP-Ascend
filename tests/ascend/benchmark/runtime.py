@@ -52,6 +52,22 @@ WORK_COUNT_KEYS = frozenset({
 })
 
 
+def _benchmark_timeout_seconds(environment: Any = os.environ) -> int:
+    raw_value = environment.get(
+        "DEEP_EP_ASCEND_BENCHMARK_TIMEOUT_SECS", "300")
+    try:
+        timeout_seconds = int(raw_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "DEEP_EP_ASCEND_BENCHMARK_TIMEOUT_SECS must be a positive integer"
+        ) from error
+    if timeout_seconds <= 0:
+        raise ValueError(
+            "DEEP_EP_ASCEND_BENCHMARK_TIMEOUT_SECS must be a positive integer"
+        )
+    return timeout_seconds
+
+
 class TorchNpuEventBackend:
     def __init__(self, torch_module: Any):
         self.torch = torch_module
@@ -93,6 +109,59 @@ def _tensor_bytes(tensor: Any) -> int:
 def _payload_rows(value: Any) -> int:
     payload = value[0] if isinstance(value, tuple) else value
     return payload.shape[0]
+
+
+def _early_route_plan_observability(
+    manifest: BenchmarkManifest,
+    *,
+    rank: int,
+    enabled: bool,
+) -> dict[str, Any]:
+    spec = manifest.spec
+    if not 0 <= rank < spec.world_size:
+        raise ValueError("early route plan rank")
+    local_experts = spec.num_experts // spec.world_size
+    rank_counts = [0] * spec.world_size
+    expert_counts = [
+        [0] * local_experts for _ in range(spec.world_size)
+    ]
+    for routes in manifest.ranks[rank].topk_idx:
+        destinations = set()
+        for expert in routes:
+            if expert < 0:
+                continue
+            destination = expert // local_experts
+            local_expert = expert % local_experts
+            destinations.add(destination)
+            expert_counts[destination][local_expert] += 1
+        for destination in destinations:
+            rank_counts[destination] += 1
+
+    maximum_experts = 256
+    expert_capacity = (
+        maximum_experts + spec.world_size - 1
+    ) // spec.world_size
+    slot_bytes = (
+        16 + expert_capacity * 8 + 31
+    ) // 32 * 32
+    remote_count = spec.world_size - 1
+    return {
+        "enabled": enabled,
+        "signal_index": 2,
+        "slot_bytes": slot_bytes,
+        "window_bytes": slot_bytes * spec.world_size,
+        "published_rank_counts": rank_counts,
+        "published_expert_counts": expert_counts,
+        "commands": {
+            "remote_put": remote_count if enabled else 0,
+            "flush": 2 if enabled and remote_count else 0,
+            "remote_signal": remote_count if enabled else 0,
+        },
+        "kernel_checks": {
+            "route_payload_count_parity": enabled,
+            "route_payload_generation_parity": enabled,
+        },
+    }
 
 
 def _summary_dict(samples: list[float]) -> dict[str, float]:
@@ -517,6 +586,22 @@ def _aggregate_rank_operations(
             operations[-1]["stage_profile"]["host_envelope_samples"] = (
                 host_envelope_samples
             )
+        route_plans = [record.get("route_plan") for record in rank_records]
+        if any(route_plan is not None for route_plan in route_plans):
+            if any(route_plan is None for route_plan in route_plans):
+                raise ValueError("route plan observability missing from one rank")
+            operations[-1]["route_plan"] = {
+                "enabled": all(
+                    route_plan["enabled"] for route_plan in route_plans
+                ),
+                "signal_index": route_plans[0]["signal_index"],
+                "slot_bytes": route_plans[0]["slot_bytes"],
+                "window_bytes": route_plans[0]["window_bytes"],
+                "per_rank": [
+                    dict(route_plan, rank=rank)
+                    for rank, route_plan in enumerate(route_plans)
+                ],
+            }
     return operations
 
 
@@ -604,8 +689,8 @@ class AscendRuntime:
             prefer_overlap_with_compute=False,
             num_allocated_qps=0,
             explicitly_destroy=True,
-            num_gpu_timeout_secs=300,
-            num_cpu_timeout_secs=300,
+            num_gpu_timeout_secs=_benchmark_timeout_seconds(),
+            num_cpu_timeout_secs=_benchmark_timeout_seconds(),
         )
 
     def destroy(self) -> None:
@@ -623,14 +708,23 @@ class AscendRuntime:
         )
         x = bf16_x
         if case.use_fp8_dispatch:
-            if spec.hidden % 128 != 0:
-                raise ValueError("FP8 benchmark hidden size must be divisible by 128")
-            grouped = bf16_x.float().reshape(
-                rank_workload.num_tokens, -1, 128)
+            scale_group_elements = 128
+            padded_hidden = (
+                (spec.hidden + scale_group_elements - 1)
+                // scale_group_elements
+                * scale_group_elements
+            )
+            quantization_input = bf16_x.float()
+            if padded_hidden != spec.hidden:
+                quantization_input = self.torch.nn.functional.pad(
+                    quantization_input, (0, padded_hidden - spec.hidden))
+            grouped = quantization_input.reshape(
+                rank_workload.num_tokens, -1, scale_group_elements)
             scales = grouped.abs().amax(dim=2).clamp(min=1e-4) / 448.0
             payload = (grouped / scales.unsqueeze(2)).to(
                 self.torch.float8_e4m3fn).reshape(
-                    rank_workload.num_tokens, spec.hidden).contiguous()
+                    rank_workload.num_tokens, padded_hidden
+                ).narrow(1, 0, spec.hidden).contiguous()
             x = (payload, scales.contiguous())
         topk_idx = self.torch.tensor(
             rank_workload.topk_idx,
@@ -1166,6 +1260,25 @@ class AscendRuntime:
                 "logical_byte_components": prepared.traffic[operation_id],
                 "work_counts": prepared.work_counts[operation_id],
             }
+            if operation_id == "dispatch" and hasattr(self, "manifest"):
+                selector_enabled = (
+                    os.environ.get(
+                        "DEEP_EP_ASCEND_DISPATCH_EARLY_ROUTE_PLAN"
+                    ) == "1"
+                    and getattr(case, "use_fp8_dispatch", False)
+                    and not getattr(case, "with_previous_event", False)
+                    and not getattr(case, "async_with_compute_stream", False)
+                    and not getattr(case, "allocate_on_comm_stream", False)
+                    and self.num_sms > 1
+                    and self.manifest.spec.num_experts <= 256
+                    and self.manifest.spec.num_topk <= 8
+                    and self.world_size <= 8
+                )
+                record["route_plan"] = _early_route_plan_observability(
+                    self.manifest,
+                    rank=self.rank,
+                    enabled=selector_enabled,
+                )
             if getattr(self.args, "profile_stages", False):
                 def capture_profile():
                     self.buffer.barrier(with_cpu_sync=True, sequential=True)

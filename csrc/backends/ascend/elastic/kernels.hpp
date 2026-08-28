@@ -13,11 +13,100 @@ struct HybridRouteRecord;
 #define DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE_LOCAL 1
 #endif
 
+#if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
+#define DEEP_EP_ASCEND_KERNEL_CALLEE __SIMT_DEVICE_FUNCTIONS_DECL__ inline
+#else
+#define DEEP_EP_ASCEND_KERNEL_CALLEE inline constexpr
+#endif
+
 struct DispatchChunkPlan {
     std::uint64_t shard_capacity = 0;
     std::uint64_t chunk_slots = 0;
     std::uint32_t chunk_count = 0;
 };
+
+struct DispatchSourceChunkPlan {
+    std::uint32_t token_count = 0;
+    std::uint32_t tile_count = 0;
+    std::uint32_t tokens_per_tile = 0;
+    std::uint32_t chunk_tiles = 0;
+    std::uint32_t chunk_count = 0;
+};
+
+inline constexpr bool build_dispatch_source_chunk_plan(
+    std::uint64_t token_count, std::uint64_t tokens_per_tile,
+    std::uint64_t chunk_tiles, DispatchSourceChunkPlan* output) noexcept {
+    if (output == nullptr || token_count == 0 || tokens_per_tile == 0 ||
+        chunk_tiles == 0 || token_count > UINT32_MAX ||
+        tokens_per_tile > UINT32_MAX || chunk_tiles > UINT32_MAX)
+        return false;
+    const auto tile_quotient = token_count / tokens_per_tile;
+    const auto tile_remainder = token_count % tokens_per_tile;
+    const auto tile_count = tile_quotient + (tile_remainder != 0);
+    if (tile_count == 0 || tile_count > UINT32_MAX)
+        return false;
+    const auto chunk_quotient = tile_count / chunk_tiles;
+    const auto chunk_remainder = tile_count % chunk_tiles;
+    const auto chunk_count = chunk_quotient + (chunk_remainder != 0);
+    if (chunk_count == 0 || chunk_count > UINT32_MAX)
+        return false;
+    *output = {
+        static_cast<std::uint32_t>(token_count),
+        static_cast<std::uint32_t>(tile_count),
+        static_cast<std::uint32_t>(tokens_per_tile),
+        static_cast<std::uint32_t>(chunk_tiles),
+        static_cast<std::uint32_t>(chunk_count),
+    };
+    return true;
+}
+
+inline constexpr bool dispatch_source_chunk_bounds(
+    const DispatchSourceChunkPlan& plan, std::uint32_t chunk_index,
+    std::uint32_t* tile_begin, std::uint32_t* tile_end,
+    std::uint32_t* token_begin, std::uint32_t* token_end) noexcept {
+    if (tile_begin == nullptr || tile_end == nullptr ||
+        token_begin == nullptr || token_end == nullptr ||
+        plan.token_count == 0 || plan.tile_count == 0 ||
+        plan.tokens_per_tile == 0 || plan.chunk_tiles == 0 ||
+        chunk_index >= plan.chunk_count)
+        return false;
+    const auto begin = static_cast<std::uint64_t>(chunk_index) *
+        plan.chunk_tiles;
+    const auto end = plan.chunk_tiles > plan.tile_count - begin ?
+        plan.tile_count : begin + plan.chunk_tiles;
+    const auto first_token = begin * plan.tokens_per_tile;
+    const auto last_token = end * plan.tokens_per_tile;
+    *tile_begin = static_cast<std::uint32_t>(begin);
+    *tile_end = static_cast<std::uint32_t>(end);
+    *token_begin = static_cast<std::uint32_t>(first_token);
+    *token_end = static_cast<std::uint32_t>(
+        last_token < plan.token_count ? last_token : plan.token_count);
+    return *tile_begin < *tile_end && *token_begin < *token_end;
+}
+
+inline constexpr bool dispatch_source_chunk_peer_range(
+    const DispatchSourceChunkPlan& plan, std::uint32_t chunk_index,
+    std::uint64_t prefix_at_begin, std::uint64_t prefix_at_end,
+    std::uint64_t destination_count, std::uint64_t* chunk_begin,
+    std::uint64_t* chunk_count) noexcept {
+    if (chunk_begin == nullptr || chunk_count == nullptr)
+        return false;
+    std::uint32_t tile_begin = 0;
+    std::uint32_t tile_end = 0;
+    std::uint32_t token_begin = 0;
+    std::uint32_t token_end = 0;
+    if (!dispatch_source_chunk_bounds(
+            plan, chunk_index, &tile_begin, &tile_end,
+            &token_begin, &token_end))
+        return false;
+    const std::uint64_t end = tile_end == plan.tile_count ?
+        destination_count : prefix_at_end;
+    if (prefix_at_begin > end || end > destination_count)
+        return false;
+    *chunk_begin = prefix_at_begin;
+    *chunk_count = end - prefix_at_begin;
+    return true;
+}
 
 inline constexpr bool build_dispatch_chunk_plan(
     std::uint64_t shard_capacity, std::uint64_t chunk_slots,
@@ -37,6 +126,119 @@ inline constexpr bool build_dispatch_chunk_plan(
 inline constexpr std::uint32_t dispatch_pipeline_slot(
     std::uint32_t chunk_index) noexcept {
     return chunk_index % kDispatchPipelineSlotCount;
+}
+
+inline constexpr bool dispatch_pipeline_slot_reusable(
+    const DispatchPipelineSlot& slot, std::uint32_t chunk_index) noexcept {
+    if (slot.state == DispatchPipelineSlotState::kEmpty)
+        return chunk_index < kDispatchPipelineSlotCount;
+    return slot.state == DispatchPipelineSlotState::kCompleted &&
+        slot.published_chunk <= UINT32_MAX - kDispatchPipelineSlotCount &&
+        slot.published_chunk + kDispatchPipelineSlotCount == chunk_index;
+}
+
+inline constexpr bool dispatch_pipeline_producer_must_wait_for_reuse(
+    std::uint32_t chunk_index) noexcept {
+    return chunk_index >= kDispatchPipelineSlotCount;
+}
+
+inline constexpr bool dispatch_pipeline_completion_is_last(
+    std::uint32_t completed_blocks,
+    std::uint32_t producer_blocks) noexcept {
+    return producer_blocks != 0 && completed_blocks < UINT32_MAX &&
+        completed_blocks + 1 == producer_blocks;
+}
+
+inline constexpr bool dispatch_pipeline_slot_ready_for_release(
+    const DispatchPipelineSlot& slot, std::uint64_t expected_generation,
+    std::uint64_t observed_generation, std::uint32_t chunk_index,
+    std::uint32_t producer_blocks) noexcept {
+    return expected_generation != 0 &&
+        observed_generation == expected_generation &&
+        slot.state == DispatchPipelineSlotState::kReady &&
+        slot.chunk_index == chunk_index &&
+        slot.published_chunk == chunk_index &&
+        slot.scalar_blocks_completed == producer_blocks &&
+        slot.hidden_blocks_completed == producer_blocks;
+}
+
+inline constexpr bool dispatch_pipeline_block_progress_ready(
+    const DispatchPipelineBlockProgress& progress,
+    std::uint64_t generation,
+    std::uint32_t chunk_index) noexcept {
+    return generation != 0 && chunk_index < UINT32_MAX &&
+        progress.generation == generation &&
+        progress.completed_chunk == chunk_index;
+}
+
+inline constexpr bool dispatch_pipeline_release_batch_pending(
+    std::uint32_t batch_target, std::uint32_t batch_consumed) noexcept {
+    return batch_target > batch_consumed;
+}
+
+inline constexpr bool dispatch_pipeline_release_batch_acknowledged(
+    std::uint32_t batch_target, std::uint32_t batch_consumed) noexcept {
+    return batch_target != 0 && batch_consumed >= batch_target;
+}
+
+inline constexpr bool dispatch_pipeline_wait_timed_out(
+    std::uint64_t start_cycles, std::uint64_t current_cycles,
+    std::uint64_t timeout_cycles) noexcept {
+    return timeout_cycles != 0 &&
+        current_cycles - start_cycles >= timeout_cycles;
+}
+
+#if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
+DEEP_EP_ASCEND_KERNEL_CALLEE std::uint32_t
+dispatch_simt_pipeline_slot(std::uint32_t chunk_index) noexcept {
+    return chunk_index % kDispatchPipelineSlotCount;
+}
+
+DEEP_EP_ASCEND_KERNEL_CALLEE bool
+dispatch_simt_pipeline_producer_must_wait_for_reuse(
+    std::uint32_t chunk_index) noexcept {
+    return chunk_index >= kDispatchPipelineSlotCount;
+}
+
+DEEP_EP_ASCEND_KERNEL_CALLEE bool
+dispatch_simt_pipeline_completion_is_last(
+    std::uint32_t completed_blocks,
+    std::uint32_t producer_blocks) noexcept {
+    return producer_blocks != 0 && completed_blocks < UINT32_MAX &&
+        completed_blocks + 1 == producer_blocks;
+}
+
+DEEP_EP_ASCEND_KERNEL_CALLEE bool
+dispatch_simt_pipeline_release_batch_acknowledged(
+    std::uint32_t batch_target, std::uint32_t batch_consumed) noexcept {
+    return batch_target != 0 && batch_consumed >= batch_target;
+}
+
+DEEP_EP_ASCEND_KERNEL_CALLEE bool dispatch_simt_pipeline_wait_timed_out(
+    std::uint64_t start_cycles, std::uint64_t current_cycles,
+    std::uint64_t timeout_cycles) noexcept {
+    return timeout_cycles != 0 &&
+        current_cycles - start_cycles >= timeout_cycles;
+}
+#endif
+
+DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE std::uint32_t
+dispatch_aicore_pipeline_slot(std::uint32_t chunk_index) noexcept {
+    return chunk_index % kDispatchPipelineSlotCount;
+}
+
+DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE bool
+dispatch_aicore_pipeline_release_batch_pending(
+    std::uint32_t batch_target, std::uint32_t batch_consumed) noexcept {
+    return batch_target > batch_consumed;
+}
+
+DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE bool
+dispatch_aicore_pipeline_wait_timed_out(
+    std::uint64_t start_cycles, std::uint64_t current_cycles,
+    std::uint64_t timeout_cycles) noexcept {
+    return timeout_cycles != 0 &&
+        current_cycles - start_cycles >= timeout_cycles;
 }
 
 inline constexpr bool dispatch_chunk_peer_range(
@@ -83,6 +285,8 @@ enum class DirectDispatchStage : std::uint8_t {
     kEpilogueComplete,
     kProducerReleaseControl,
     kProducerReleaseBarrier,
+    kProducerRecordPipeline,
+    kProducerReleasePipeline,
 };
 
 inline constexpr DirectDispatchStage kFirstDirectDispatchEpilogueStage =
@@ -178,6 +382,7 @@ inline constexpr bool direct_dispatch_data_stage(
     DirectDispatchStage stage) noexcept {
     return stage == DirectDispatchStage::kProducerGroup ||
            stage == DirectDispatchStage::kProducerRecord ||
+           stage == DirectDispatchStage::kProducerRecordPipeline ||
            stage == DirectDispatchStage::kEpilogueValidate ||
            stage == DirectDispatchStage::kEpilogueExpertCount ||
            stage == DirectDispatchStage::kEpilogueMetadata ||
@@ -304,12 +509,6 @@ struct ReleaseBoundary {
     int signal_sender_world_rank = 0;
     bool remote_acquire_required = false;
 };
-
-#if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
-#define DEEP_EP_ASCEND_KERNEL_CALLEE __SIMT_DEVICE_FUNCTIONS_DECL__ inline
-#else
-#define DEEP_EP_ASCEND_KERNEL_CALLEE inline constexpr
-#endif
 
 struct DirectDataGridStride {
     std::uint32_t first = 0;
@@ -469,8 +668,12 @@ struct DispatchArguments {
     std::uint32_t pipeline_chunk_index = 0;
     std::uint32_t pipeline_final_chunk = 1;
     std::uint64_t pipeline_chunk_slots = 0;
+    std::uint32_t pipeline_chunk_tiles = 0;
+    std::uint32_t pipeline_source_chunk = 0;
     std::uint32_t consumer_tile_bytes = 512;
     std::uint32_t parallel_prefix = 0;
+    std::uint32_t token_fanout = 0;
+    std::uint32_t early_route_plan = 0;
 };
 
 struct CombineArguments {

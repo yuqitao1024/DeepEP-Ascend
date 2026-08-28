@@ -26,6 +26,21 @@ def runtime_contract():
         "payload-signal-order": {
             **phased, "iterations": ORDERING_ITERATIONS,
         },
+        "route-signal-order": {
+            **phased, "synchronize_before_launch": True,
+        },
+        "route-signal-pre-barrier": {
+            **phased, "synchronize_before_launch": True,
+        },
+        "route-signal-post-barrier": {
+            **phased, "synchronize_before_launch": True,
+        },
+        "route-put-signal-order": {
+            **phased, "synchronize_before_launch": True,
+        },
+        "route-plan-order": {
+            **phased, "synchronize_before_launch": True,
+        },
         "barrier-repeat": {**phased, "iterations": 50},
         "queue-wrap": {**phased, "requires_sq_wrap": True},
         "profile-mixed": {

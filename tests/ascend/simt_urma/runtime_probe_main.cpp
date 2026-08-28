@@ -58,6 +58,13 @@ bool parse_case(const char* name, probe::RuntimeCase* runtime_case) {
         {"flush", probe::RuntimeCase::kFlush},
         {"async-lifecycle", probe::RuntimeCase::kAsyncLifecycle},
         {"payload-signal-order", probe::RuntimeCase::kPayloadSignalOrder},
+        {"route-signal-order", probe::RuntimeCase::kRouteSignalOrder},
+        {"route-signal-pre-barrier",
+         probe::RuntimeCase::kRouteSignalPreBarrier},
+        {"route-signal-post-barrier",
+         probe::RuntimeCase::kRouteSignalPostBarrier},
+        {"route-put-signal-order", probe::RuntimeCase::kRoutePutSignalOrder},
+        {"route-plan-order", probe::RuntimeCase::kRoutePlanOrder},
         {"barrier-repeat", probe::RuntimeCase::kBarrierRepeat},
         {"queue-wrap", probe::RuntimeCase::kQueueWrap},
         {"profile-mixed", probe::RuntimeCase::kProfileMixed},
@@ -458,6 +465,12 @@ public:
             const bool finalize_profile_pressure =
                 runtime_case == probe::RuntimeCase::kProfileMixed &&
                 pressure_remaining == 0;
+            const bool synchronize_ranks = finalize_profile_pressure ||
+                runtime_case == probe::RuntimeCase::kRouteSignalOrder ||
+                runtime_case == probe::RuntimeCase::kRouteSignalPreBarrier ||
+                runtime_case == probe::RuntimeCase::kRouteSignalPostBarrier ||
+                runtime_case == probe::RuntimeCase::kRoutePutSignalOrder ||
+                runtime_case == probe::RuntimeCase::kRoutePlanOrder;
             if (runtime_case == probe::RuntimeCase::kProfileMixed) {
                 operations = finalize_profile_pressure ? 1 :
                     static_cast<std::uint32_t>(std::min<std::uint64_t>(
@@ -467,8 +480,10 @@ public:
             state.source =
                 (static_cast<std::uint64_t>(rank + 1) << 32U) | generation;
             state.generation = generation;
+            for (std::uint64_t word = 0; word < probe::kRoutePlanWords; ++word)
+                state.route_source[word] = state.source + word;
             if (!probe::reset_synchronize_and_launch(
-                    finalize_profile_pressure, stream_,
+                    synchronize_ranks, stream_,
                     [&] {
                         return check_acl(
                             aclrtMemcpy(

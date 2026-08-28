@@ -14,6 +14,9 @@ inline constexpr std::uint32_t kMaxQueueWrapBatchOperations = 64;
 inline constexpr std::uint32_t kMixedProfileCommandCount = 6;
 inline constexpr std::uint32_t kMixedProfilePutCommandCount = 1;
 inline constexpr std::uint64_t kMixedProfilePayloadBytes = 24;
+inline constexpr std::uint64_t kRoutePlanBytes = 1056;
+inline constexpr std::uint64_t kRoutePlanWords =
+    kRoutePlanBytes / sizeof(std::uint64_t);
 
 constexpr std::uint32_t queue_wrap_batch_operations(
     std::uint32_t command_capacity) noexcept {
@@ -34,6 +37,11 @@ enum class RuntimeCase : std::uint32_t {
     kFlush,
     kAsyncLifecycle,
     kPayloadSignalOrder,
+    kRouteSignalOrder,
+    kRouteSignalPreBarrier,
+    kRouteSignalPostBarrier,
+    kRoutePutSignalOrder,
+    kRoutePlanOrder,
     kBarrierRepeat,
     kQueueWrap,
     kProfileMixed,
@@ -88,6 +96,8 @@ struct alignas(64) RuntimeState {
     std::uint32_t phase_sequence = 0;
     std::uint32_t success = 0;
     std::uint64_t generation = 0;
+    std::uint64_t route_source[kRoutePlanWords]{};
+    std::uint64_t route_destination[kRoutePlanWords]{};
     DeviceRequest request{};
     DeviceTransportDiagnostic diagnostic{};
 };

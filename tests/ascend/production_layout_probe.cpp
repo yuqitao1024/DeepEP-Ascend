@@ -15,7 +15,7 @@ int main() {
     static_assert(std::is_standard_layout_v<SymmetricControlHeader>);
     static_assert(std::is_trivially_copyable_v<SymmetricControlHeader>);
     static_assert(sizeof(SymmetricControlHeader) == 32);
-    static_assert(kSymmetricWindowAbiVersion == 7);
+    static_assert(kSymmetricWindowAbiVersion == 8);
     static_assert(offsetof(SymmetricWindowLayout, abi_version) == 0);
     static_assert(offsetof(SymmetricWindowLayout, struct_size) == 4);
     static_assert(offsetof(SymmetricWindowLayout, control_offset) == 8);
@@ -63,6 +63,16 @@ int main() {
               layout.dispatch_record_bytes);
     CHECK(layout.dispatch_control_bytes ==
           input.world_size * sizeof(DispatchControlSlot));
+    CHECK(layout.dispatch_route_plan_count == input.world_size);
+    CHECK(layout.dispatch_route_plan_expert_capacity == 128);
+    CHECK(layout.dispatch_route_plan_slot_bytes == 1056);
+    CHECK(layout.dispatch_route_plan_bytes ==
+          input.world_size * layout.dispatch_route_plan_slot_bytes);
+    CHECK(layout.dispatch_route_plan_offset % kAscendElasticAlignment == 0);
+    CHECK(layout.dispatch_control_offset + layout.dispatch_control_bytes <=
+          layout.dispatch_route_plan_offset);
+    CHECK(layout.dispatch_route_plan_offset +
+              layout.dispatch_route_plan_bytes <= layout.control_bytes);
     CHECK(layout.combine_contributor_shard_bytes >=
           input.num_max_tokens_per_rank * layout.combine_record_bytes);
     CHECK(layout.combine_control_bytes ==
@@ -139,7 +149,7 @@ int main() {
           layout.reserve_offset);
     CHECK(layout.total_bytes % kPublicElasticBufferAlignment == 0);
 
-    // These literals preserve the direct ABI-v4 geometry before hybrid tails.
+    // These literals preserve the direct ABI-v8 geometry before hybrid tails.
     SymmetricWindowInput direct_input{};
     direct_input.world_size = 4;
     direct_input.num_max_tokens_per_rank = 8;
@@ -149,37 +159,37 @@ int main() {
     SymmetricWindowLayout direct_layout{};
     CHECK(build_symmetric_window_layout(direct_input, &direct_layout).ok());
     CHECK(direct_layout.control_offset == 0);
-    CHECK(direct_layout.control_bytes == 160);
-    CHECK(direct_layout.dispatch_offset == 160);
+    CHECK(direct_layout.control_bytes == 2336);
+    CHECK(direct_layout.dispatch_offset == 2336);
     CHECK(direct_layout.dispatch_record_bytes == 352);
     CHECK(direct_layout.dispatch_source_shard_bytes == 2816);
     CHECK(direct_layout.dispatch_source_shard_count == 4);
     CHECK(direct_layout.dispatch_bytes == 22528);
-    CHECK(direct_layout.combine_offset == 22688);
+    CHECK(direct_layout.combine_offset == 24864);
     CHECK(direct_layout.combine_record_bytes == 320);
     CHECK(direct_layout.combine_contributor_shard_bytes == 2560);
     CHECK(direct_layout.combine_contributor_shard_count == 4);
     CHECK(direct_layout.combine_bytes == 20544);
-    CHECK(direct_layout.reserve_offset == 43232);
+    CHECK(direct_layout.reserve_offset == 45408);
     CHECK(direct_layout.reserve_bytes == 32);
     CHECK(direct_layout.total_bytes == 2097152);
     CHECK(direct_layout.dispatch_control_offset == 96);
     CHECK(direct_layout.dispatch_control_bytes == 64);
-    CHECK(direct_layout.dispatch_receive_offset == 160);
+    CHECK(direct_layout.dispatch_receive_offset == 2336);
     CHECK(direct_layout.dispatch_receive_shard_bytes == 2816);
     CHECK(direct_layout.dispatch_receive_shard_count == 4);
     CHECK(direct_layout.dispatch_receive_bytes == 11264);
-    CHECK(direct_layout.dispatch_staging_offset == 11424);
+    CHECK(direct_layout.dispatch_staging_offset == 13600);
     CHECK(direct_layout.dispatch_staging_shard_bytes == 2816);
     CHECK(direct_layout.dispatch_staging_shard_count == 4);
     CHECK(direct_layout.dispatch_staging_bytes == 11264);
-    CHECK(direct_layout.combine_control_offset == 22688);
+    CHECK(direct_layout.combine_control_offset == 24864);
     CHECK(direct_layout.combine_control_bytes == 64);
-    CHECK(direct_layout.combine_receive_offset == 22752);
+    CHECK(direct_layout.combine_receive_offset == 24928);
     CHECK(direct_layout.combine_receive_shard_bytes == 2560);
     CHECK(direct_layout.combine_receive_shard_count == 4);
     CHECK(direct_layout.combine_receive_bytes == 10240);
-    CHECK(direct_layout.combine_staging_offset == 32992);
+    CHECK(direct_layout.combine_staging_offset == 35168);
     CHECK(direct_layout.combine_staging_shard_bytes == 2560);
     CHECK(direct_layout.combine_staging_shard_count == 4);
     CHECK(direct_layout.combine_staging_bytes == 10240);
@@ -287,41 +297,41 @@ int main() {
     CHECK(hybrid_layout.combine_receive_shard_bytes == 2816);
     CHECK(hybrid_layout.combine_staging_shard_bytes == 2816);
     CHECK(hybrid_layout.combine_bytes == 22592);
-    CHECK(hybrid_layout.reserve_offset == 45280);
+    CHECK(hybrid_layout.reserve_offset == 47456);
     CHECK(hybrid_layout.reserve_bytes == direct_layout.reserve_bytes);
     CHECK(hybrid_layout.total_bytes >= direct_layout.total_bytes);
-    CHECK(hybrid_layout.hybrid_route_record_offset == 45312);
+    CHECK(hybrid_layout.hybrid_route_record_offset == 47488);
     CHECK(hybrid_layout.hybrid_route_record_count == 40);
     CHECK(hybrid_layout.hybrid_route_record_bytes == 2560);
-    CHECK(hybrid_layout.hybrid_dispatch_ingress_control_offset == 47872);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_control_offset == 50048);
     CHECK(hybrid_layout.hybrid_dispatch_ingress_control_count == 4);
     CHECK(hybrid_layout.hybrid_dispatch_ingress_control_bytes == 64);
-    CHECK(hybrid_layout.hybrid_dispatch_ingress_shard_offset == 47936);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_shard_offset == 50112);
     CHECK(hybrid_layout.hybrid_dispatch_ingress_shard_count == 4);
     CHECK(hybrid_layout.hybrid_dispatch_ingress_shard_bytes == 2816);
     CHECK(hybrid_layout.hybrid_dispatch_ingress_bytes == 11264);
-    CHECK(hybrid_layout.hybrid_dispatch_forward_control_offset == 59200);
+    CHECK(hybrid_layout.hybrid_dispatch_forward_control_offset == 61376);
     CHECK(hybrid_layout.hybrid_dispatch_forward_control_count == 4);
     CHECK(hybrid_layout.hybrid_dispatch_forward_control_bytes == 64);
-    CHECK(hybrid_layout.hybrid_dispatch_forward_shard_offset == 59264);
+    CHECK(hybrid_layout.hybrid_dispatch_forward_shard_offset == 61440);
     CHECK(hybrid_layout.hybrid_dispatch_forward_shard_count == 4);
     CHECK(hybrid_layout.hybrid_dispatch_forward_shard_bytes == 2816);
     CHECK(hybrid_layout.hybrid_dispatch_forward_bytes == 11264);
-    CHECK(hybrid_layout.hybrid_combine_reverse_forward_control_offset == 70528);
+    CHECK(hybrid_layout.hybrid_combine_reverse_forward_control_offset == 72704);
     CHECK(hybrid_layout.hybrid_combine_reverse_forward_control_count == 4);
     CHECK(hybrid_layout.hybrid_combine_reverse_forward_control_bytes == 64);
-    CHECK(hybrid_layout.hybrid_combine_reverse_forward_shard_offset == 70592);
+    CHECK(hybrid_layout.hybrid_combine_reverse_forward_shard_offset == 72768);
     CHECK(hybrid_layout.hybrid_combine_reverse_forward_shard_count == 4);
     CHECK(hybrid_layout.hybrid_combine_reverse_forward_shard_bytes == 2816);
     CHECK(hybrid_layout.hybrid_combine_reverse_forward_bytes == 11264);
-    CHECK(hybrid_layout.hybrid_combine_return_control_offset == 81856);
+    CHECK(hybrid_layout.hybrid_combine_return_control_offset == 84032);
     CHECK(hybrid_layout.hybrid_combine_return_control_count == 4);
     CHECK(hybrid_layout.hybrid_combine_return_control_bytes == 64);
-    CHECK(hybrid_layout.hybrid_combine_return_shard_offset == 81920);
+    CHECK(hybrid_layout.hybrid_combine_return_shard_offset == 84096);
     CHECK(hybrid_layout.hybrid_combine_return_shard_count == 4);
     CHECK(hybrid_layout.hybrid_combine_return_shard_bytes == 2816);
     CHECK(hybrid_layout.hybrid_combine_return_bytes == 11264);
-    CHECK(hybrid_layout.hybrid_dispatch_ingress_staging_offset == 93184);
+    CHECK(hybrid_layout.hybrid_dispatch_ingress_staging_offset == 95360);
     CHECK(hybrid_layout.hybrid_dispatch_ingress_staging_shard_count == 4);
     CHECK(hybrid_layout.hybrid_dispatch_ingress_staging_shard_bytes == 2816);
     CHECK(hybrid_layout.hybrid_dispatch_ingress_staging_bytes == 11264);

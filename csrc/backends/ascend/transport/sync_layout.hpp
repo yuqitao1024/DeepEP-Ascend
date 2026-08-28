@@ -15,6 +15,7 @@ inline constexpr std::uint32_t kLogicalSignalCount = 4;
 inline constexpr std::uint32_t kLogicalBarrierCount = 2;
 inline constexpr std::uint32_t kDispatchReleaseSignalIndex = 0;
 inline constexpr std::uint32_t kCombineReleaseSignalIndex = 1;
+inline constexpr std::uint32_t kDispatchRouteReadySignalIndex = 2;
 inline constexpr std::uint32_t kScaleOutBarrierIndex = 0;
 inline constexpr std::uint32_t kScaleUpBarrierIndex = 1;
 

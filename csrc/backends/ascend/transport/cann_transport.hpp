@@ -12,13 +12,17 @@ constexpr bool checked_scale_up_command_capacity(
     if (capacity == nullptr || world_size <= 0)
         return false;
     const auto peers = static_cast<std::uint64_t>(world_size - 1);
-    constexpr std::uint64_t kCommandsPerPeer = 5;
+    // ProducerControl leaves the normal payload/control release batch in the
+    // queue.  Early route publication adds one put and one signal per peer,
+    // plus its two drains and post-publication barrier.
+    constexpr std::uint64_t kCommandsPerPeer = 7;
+    constexpr std::uint64_t kFixedCommands = 4;
     if (peers >
-        (std::numeric_limits<std::uint32_t>::max() - 1ULL) /
+        (std::numeric_limits<std::uint32_t>::max() - kFixedCommands) /
             kCommandsPerPeer)
         return false;
     *capacity = static_cast<std::uint32_t>(
-        peers * kCommandsPerPeer + 1ULL);
+        peers * kCommandsPerPeer + kFixedCommands);
     return true;
 }
 

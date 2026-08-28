@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "combine_parallel.hpp"
+#include "dispatch_early_route_plan.hpp"
 #include "dispatch_parallel.hpp"
 #include "layout.hpp"
 #include "../transport/types.hpp"
@@ -50,6 +51,10 @@ struct CoreTilingInput {
 inline constexpr std::uint32_t kAscendMaxDataBlocks = 72;
 inline constexpr std::uint32_t kCoreTilingAbiVersion = 21;
 inline constexpr std::uint64_t kDirectDeviceIndexLimit = 0x7fffffffULL;
+
+constexpr std::uint64_t default_elastic_runtime_workspace_bytes() noexcept {
+    return 2 * kPublicElasticBufferAlignment;
+}
 
 struct CoreTiling {
     std::uint32_t abi_version = kCoreTilingAbiVersion;
@@ -214,6 +219,13 @@ inline bool build_workspace_layout(
         !has_mode(input.mode_flags, CoreMode::kHybrid);
     const bool pipeline_dispatch = parallel_dispatch &&
         has_mode(input.mode_flags, CoreMode::kPipeline);
+    const bool early_route_layout = parallel_dispatch &&
+        input.element_kind == ElementKind::kFloat8E4M3 &&
+        !has_mode(input.mode_flags, CoreMode::kCached) &&
+        !has_mode(input.mode_flags, CoreMode::kExpanded) &&
+        input.num_experts <= kDispatchEarlyRoutePlanMaximumExperts &&
+        input.num_topk <= kDispatchRoutePlanMaximumTopk &&
+        input.topology.world_size <= kDispatchRoutePlanMaximumWorldSize;
     layout.dispatch_pipeline_bytes = pipeline_dispatch ?
         sizeof(DispatchPipelineState) : 0;
     const std::uint64_t local_experts = parallel_dispatch ?
@@ -269,6 +281,10 @@ inline bool build_workspace_layout(
           !checked_multiply(
               dispatch_group_tile_entries, sizeof(std::uint64_t),
               &layout.dispatch_group_tile_bytes) ||
+          (early_route_layout &&
+           !checked_multiply(
+               input.num_experts, sizeof(std::uint32_t),
+               &layout.dispatch_group_expert_count_bytes)) ||
           !checked_multiply(
               layout.dispatch_group_tile_count, sizeof(std::uint64_t),
               &layout.dispatch_group_error_bytes))) ||
@@ -337,8 +353,12 @@ inline bool build_workspace_layout(
         !checked_add(scratch_cursor, sizeof(std::uint64_t),
                      &scratch_cursor))
         return false;
+    layout.dispatch_route_source_counts_bytes = early_route_layout ?
+        rank_u64_bytes : 0;
     layout.dispatch_expert_tile_count =
         layout.dispatch_receive_tile_count;
+    layout.dispatch_group_expert_count = early_route_layout ?
+        input.num_experts : 0;
     layout.scratch_local_count_offset = scratch_cursor;
     if (!checked_add(scratch_cursor, sizeof(std::uint64_t),
                      &scratch_cursor))
@@ -398,6 +418,29 @@ inline bool build_workspace_layout(
             layout.dispatch_group_tile_offset = scratch_cursor;
             if (!checked_add(
                     scratch_cursor, layout.dispatch_group_tile_bytes,
+                    &scratch_cursor))
+                return false;
+        }
+        if (layout.dispatch_group_expert_count_bytes != 0) {
+            if (!checked_align(
+                    scratch_cursor, alignof(std::uint32_t), &scratch_cursor))
+                return false;
+            layout.dispatch_group_expert_count_offset = scratch_cursor;
+            if (!checked_add(
+                    scratch_cursor,
+                    layout.dispatch_group_expert_count_bytes,
+                    &scratch_cursor))
+                return false;
+        }
+        if (layout.dispatch_route_source_counts_bytes != 0) {
+            if (!checked_align(
+                    scratch_cursor, alignof(std::uint64_t),
+                    &scratch_cursor))
+                return false;
+            layout.dispatch_route_source_counts_offset = scratch_cursor;
+            if (!checked_add(
+                    scratch_cursor,
+                    layout.dispatch_route_source_counts_bytes,
                     &scratch_cursor))
                 return false;
         }
@@ -525,6 +568,16 @@ inline bool build_workspace_layout(
            !checked_add(
                layout.scratch_offset, layout.dispatch_group_tile_offset,
                &layout.dispatch_group_tile_offset)) ||
+          (layout.dispatch_group_expert_count_bytes != 0 &&
+           !checked_add(
+               layout.scratch_offset,
+               layout.dispatch_group_expert_count_offset,
+               &layout.dispatch_group_expert_count_offset)) ||
+          (layout.dispatch_route_source_counts_bytes != 0 &&
+           !checked_add(
+               layout.scratch_offset,
+               layout.dispatch_route_source_counts_offset,
+               &layout.dispatch_route_source_counts_offset)) ||
           (layout.dispatch_group_error_bytes != 0 &&
            !checked_add(
                layout.scratch_offset, layout.dispatch_group_error_offset,

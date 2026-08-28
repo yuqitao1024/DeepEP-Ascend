@@ -288,6 +288,90 @@ Ineligible shapes use the retained P6 implementation. Invalid selector values
 fail at the host boundary. The selector remains opt-in until correctness,
 same-binary ABBA, and profile gates all pass.
 
+#### P7.0B EP8 result
+
+TaskQueue task `task_20260827_155240_35696777216` completed with exit code
+zero. It used the fixed representative fingerprint
+`d6338cb40be7a4b6d35c4a8c9ee106ea0385751cdd5a20f1ba366baa28324f00`,
+72 data blocks, 30 warmups, and 30 measured samples for each same-binary ABBA
+run. The only ABBA variable was
+`DEEP_EP_ASCEND_DISPATCH_TOKEN_FANOUT=0|1`.
+
+| Run | Selector | Mean | P50 | P95 | Logical bandwidth | Rank mean envelope |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline A | `0` | `29.752022 ms` | `29.804678 ms` | `31.164570 ms` | `261.700 GB/s` | `27.844267-29.368730 ms` |
+| candidate A | `1` | `24.284135 ms` | `25.007016 ms` | `27.022045 ms` | `320.625 GB/s` | `22.805175-23.725172 ms` |
+| candidate B | `1` | `25.971721 ms` | `25.888251 ms` | `26.903730 ms` | `299.791 GB/s` | `24.492869-25.637063 ms` |
+| baseline B | `0` | `29.669349 ms` | `29.568598 ms` | `31.192362 ms` | `262.429 GB/s` | `28.188482-29.296955 ms` |
+
+The two baseline and two candidate run means are:
+
+| Metric | P6 baseline | P7.0B candidate | Change |
+| --- | ---: | ---: | ---: |
+| Mean | `29.710685 ms` | `25.127928 ms` | `-15.425%` |
+| P95 | `31.178466 ms` | `26.962887 ms` | `-13.521%` |
+| Logical bandwidth | `262.064 GB/s` | `310.208 GB/s` | `+18.371%` |
+
+The representative EP8 run contains `65,536` source tokens and `346,603`
+unique destination records. The retained candidate therefore performs:
+
+```text
+source DataCopy operations      = 65,536
+destination DataCopy operations = 346,603
+source vector bytes              = 65,536 * 7,168
+                                 = 469,762,048 bytes
+destination vector bytes         = 346,603 * 7,168
+                                 = 2,484,450,304 bytes
+```
+
+The source-load count is now proportional to input tokens rather than
+destination records. The source-load operation count is `5.29x` smaller than
+the destination-store count for this route matrix. Source contracts and the
+two-rank mixed-route correctness task prove that the input `DataCopy` is
+outside the destination loop; the EP8 work counts prove the loop cardinalities
+for the measured route matrix.
+
+The candidate profile used 10 warmups and 10 measured samples. Its Dispatch
+event mean was `25.874619 ms` and its logical bandwidth was `300.916 GB/s`.
+The independently aggregated stage spans were:
+
+| Stage | Mean span | Minimum | Maximum |
+| --- | ---: | ---: | ---: |
+| D3 record packing | `407,606.5 cycles` | `389,252` | `438,186` |
+| D4 publication | `2,908,067.1 cycles` | `1,283,714` | `6,235,860` |
+| D8 output copy | `1,663,595.9 cycles` | `1,640,485` | `1,685,712` |
+
+D3 is no longer the largest exposed stage. The D4 payload substage is
+`909,729-1,034,134 cycles`, which agrees with the existing representative
+transport-only result of `903,444` cycles for the same seven-put, one-flush
+payload pattern. The additional D4 tail is the production control and global
+barrier protocol. Rank 6 spent `5,008,911 cycles` in `release_barrier`; its
+complete D4 span was `6,235,860 cycles`. Command queues drained to zero, and
+SQ/CQ high-watermarks were both four, so the evidence does not indicate queue
+capacity pressure or a slow HCCS payload link.
+
+P7.0B is retained. P7.0C store-order screening is deferred because its entire
+measured D3 budget is smaller than D8 and far smaller than the D4 tail. The
+next implementation step remains P7.1, but the measured purpose is now
+explicit: publish the route plan early enough that later P7.2/P7.3 scheduling
+can overlap receiver planning and copy work with the D4 service/barrier tail.
+The final barrier is not deleted; changing or hiding it requires separate
+correctness evidence for payload visibility, staging reuse, and generation
+lifecycle.
+
+The raw artifacts are retained on NPU8P under
+`/home/pyptouser/yuqitao/deepep-results/p7-token-fanout-vWazzF/ep8-abba-profile`.
+Key SHA-256 values are:
+
+```text
+baseline-a.json         acd5f655e0d934321e70a17d10ee28e2d46c0620fb93a1b3005e38e07b518fc0
+candidate-a.json        33b14789da5af0002086bf3b77ee744207851b871da8103610bdb4410c6a0de5
+candidate-b.json        a76b556849ddd4e6eeb558b74c842af162b8a46e32bc7e7cc7906b3117e4b38a
+baseline-b.json         b618a79bc7b8b74d55366519eaf37e8bc31779b01c33f2ba165cb2d2f03603a7
+candidate-profile.json  4bea183579c726725e2288caac033ac273b27c8e01d55455da1c483947cdaaa3
+summary.json            d98f65b7dcddd02bb7ad97110dbfb009776f127127360ecc2e1b268043277b4b
+```
+
 ### 4.2 P7.1 early rank and expert plan
 
 P7.1 starts after profiling the retained P7.0 tree, unless P7.0 already reaches
@@ -358,6 +442,75 @@ retained P7.0 producer. Chunk count, commands, source bytes, request-slot high
 watermarks, D3/D4 overlap, and end-to-end time are all reported. A chunk size
 that improves overlap but repeats enough control work to regress the operator
 is rejected.
+
+#### 4.3.1 Persistent VF root cause and revised execution model
+
+The first persistent prototype launched several SIMT VF functions from the
+same runtime chunk loop: begin, scalar packing, completion, release, request
+wait, control, and barrier. EP2 white-box probes consistently observed a
+command queue count of `2`, exactly one remote `put` followed by one `flush`
+for the first chunk. The control generation remained zero and neither the
+pipeline nor transport diagnostic marker for the control batch appeared.
+Changing fences and merging the final control/barrier batch did not change
+that result.
+
+The evidence locates the failure before HCOMM service execution: later VF
+batches were never appended. On this CANN path, `asc_vf_call` expands to an
+asynchronous VF invocation and repeated calls from one running AICore kernel
+cannot be treated as a general runtime task queue. P7.2 therefore adopts the
+following rule:
+
+```text
+one persistent AICore stage -> exactly one persistent VF invocation
+runtime chunk loop          -> doorbells and ordinary AICore functions only
+```
+
+The producer uses two levels of readiness:
+
+```text
+persistent producer VF                     producer AICore blocks
+----------------------                     ----------------------
+pack scalar/scale/top-k/metadata chunk n
+all VF blocks complete scalar stores
+publish scalar_ready(n) -----------------> wait scalar_ready(n)
+                                             hidden load-once fanout
+                          <---------------- publish hidden_done(block, n)
+all VF blocks observe paired hidden_done
+publish payload_ready(n)
+```
+
+Each AICore block writes hidden progress to an independent 64-byte cache line.
+This avoids two cores writing different words in the same cached line and then
+overwriting one another during cache-line writeback. The paired VF block turns
+that per-block progress into a single atomic hidden-completion count; only the
+last contributor publishes the chunk as ready for transport.
+
+The release side uses an exact command-count doorbell:
+
+```text
+persistent release VF                      release AICore
+---------------------                      --------------
+wait payload_ready(n)
+append put(s) + flush request
+publish batch_target = request.command_end -> observe target > consumed
+                                              service::execute()
+                          <---------------- publish consumed_target = target
+wait/validate request
+publish slot completed
+
+append final control + signal + barrier
+publish final batch_target --------------> service::execute()
+                          <---------------- publish final consumed_target
+publish release completion
+```
+
+Both targets are monotonically increasing command counts for one transport
+generation. The release VF cannot append the next batch until AICore has
+acknowledged the current target. This bounds queue growth, preserves request
+ownership, and allows repeated `service::execute()` calls without relying on
+repeated asynchronous VF launches. The host schedule remains event-free: one
+release kernel on the communication stream, one producer kernel on the
+producer stream, then the normal epilogue stages.
 
 ### 4.4 P7.3 arrival-driven consumer tail
 

@@ -32,6 +32,7 @@
 #include "elastic/combine_state.hpp"
 #include "elastic/dispatch_state.hpp"
 #include "elastic/dispatch_pipeline_config.hpp"
+#include "elastic/dispatch_token_fanout.hpp"
 #include "elastic/async_state.hpp"
 #include "elastic/operation_coordinator.hpp"
 #include "elastic/runtime.hpp"
@@ -989,7 +990,7 @@ public:
             raise_transport_status(topology_status, rank_idx_);
         auto resources = std::make_unique<runtime::CannRuntimeResources>();
         const auto status = resources->initialize(
-            config, 2 * elastic::kPublicElasticBufferAlignment);
+            config, elastic::default_elastic_runtime_workspace_bytes());
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         completion_resources_ =
@@ -1774,7 +1775,25 @@ public:
             "DeepEP Ascend backend: "
             "DEEP_EP_ASCEND_DISPATCH_PIPELINE_CHUNK_SLOTS must be a "
             "positive decimal integer");
-        if (pipeline_config.enabled)
+        elastic::DispatchSourcePipelineConfig source_pipeline_config{};
+        const auto source_pipeline_config_status =
+            elastic::select_dispatch_source_pipeline_config(
+                std::getenv(
+                    "DEEP_EP_ASCEND_DISPATCH_PIPELINE_CHUNK_TILES"),
+                device_prefix_config.enabled, cached_mode, do_cpu_sync,
+                do_expand, allow_hybrid_mode_, stream_mode, num_ranks_,
+                num_tokens, &source_pipeline_config);
+        TORCH_CHECK(
+            source_pipeline_config_status !=
+                elastic::DispatchSourcePipelineConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_DISPATCH_PIPELINE_CHUNK_TILES must be a "
+            "positive decimal integer");
+        TORCH_CHECK(
+            !(source_pipeline_config.enabled && pipeline_config.enabled),
+            "DeepEP Ascend backend: dispatch source-tile and slot pipelines "
+            "are mutually exclusive");
+        if (source_pipeline_config.enabled || pipeline_config.enabled)
             mode_flags |= elastic::mode_bit(elastic::CoreMode::kPipeline);
         const auto tiling = build_dispatch_tiling(
             num_tokens, hidden, experts, num_topk, alignment, capacity,
@@ -1783,6 +1802,39 @@ public:
                            elastic::ElementKind::kBFloat16,
             num_scale_factor_packs,
             static_cast<std::uint32_t>(num_sms));
+        elastic::DispatchTokenFanoutConfig token_fanout_config{};
+        const auto token_fanout_config_status =
+            elastic::select_dispatch_token_fanout_config(
+                std::getenv("DEEP_EP_ASCEND_DISPATCH_TOKEN_FANOUT"),
+                !allow_hybrid_mode_ && !cached_mode && !do_expand &&
+                    tiling.data_launch.num_blocks > 1,
+                fp8_dispatch, cached_mode, do_expand, allow_hybrid_mode_,
+                stream_mode, pipeline_config.enabled, num_topk, num_ranks_,
+                tiling.token_layout.hidden_bytes, &token_fanout_config);
+        TORCH_CHECK(
+            token_fanout_config_status !=
+                elastic::DispatchTokenFanoutConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_DISPATCH_TOKEN_FANOUT must be 0 or 1");
+        elastic::DispatchEarlyRoutePlanConfig early_route_plan_config{};
+        const auto early_route_plan_config_status =
+            elastic::select_dispatch_early_route_plan_config(
+                std::getenv(
+                    "DEEP_EP_ASCEND_DISPATCH_EARLY_ROUTE_PLAN"),
+                !allow_hybrid_mode_ && !cached_mode && !do_expand &&
+                    tiling.data_launch.num_blocks > 1,
+                fp8_dispatch, cached_mode, do_expand, allow_hybrid_mode_,
+                stream_mode, pipeline_config.enabled, experts, num_topk,
+                num_ranks_, &early_route_plan_config);
+        TORCH_CHECK(
+            early_route_plan_config_status !=
+                elastic::DispatchEarlyRoutePlanConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_DISPATCH_EARLY_ROUTE_PLAN must be 0 or 1");
+        if (early_route_plan_config.enabled &&
+            tiling.symmetric_window_layout.dispatch_route_plan_slot_bytes >
+                tiling.symmetric_window_layout.dispatch_staging_shard_bytes)
+            early_route_plan_config.enabled = false;
         TORCH_CHECK(tiling.communication_buffer_bytes <=
                         static_cast<std::uint64_t>(num_buffer_bytes_) &&
                         tiling.workspace_bytes <= resources_->workspace_bytes(),
@@ -2296,9 +2348,14 @@ public:
         }
         arguments.timeout_cycles = barrier_timeout_cycles_;
         arguments.pipeline_chunk_slots = pipeline_config.chunk_slots;
+        arguments.pipeline_chunk_tiles = source_pipeline_config.chunk_tiles;
         arguments.consumer_tile_bytes = consumer_tile_config.tile_bytes;
         arguments.parallel_prefix =
             parallel_prefix_config.enabled ? 1U : 0U;
+        arguments.token_fanout =
+            token_fanout_config.enabled ? 1U : 0U;
+        arguments.early_route_plan =
+            early_route_plan_config.enabled ? 1U : 0U;
         runtime::StreamIdentity stream = dispatch_stream;
         if (!use_comm_stream) {
             status = resources_->current_stream(&stream);
@@ -2349,7 +2406,8 @@ public:
                 dispatch_descriptor_snapshot(
                     committed_descriptor, host_route_records));
         }
-        const auto launch_status = pipeline_config.enabled ?
+        const auto launch_status =
+            (source_pipeline_config.enabled || pipeline_config.enabled) ?
             elastic::launch_internal_dispatch_pipeline(
                 arguments, tiling, storage, stream.raw,
                 resources_->comm_stream().raw) :

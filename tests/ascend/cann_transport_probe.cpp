@@ -274,7 +274,7 @@ void check_rank_sized_command_queue() {
         std::uint32_t command_capacity;
     };
     for (const auto fixture : {
-             Fixture{2, 6}, Fixture{4, 16}, Fixture{8, 36}}) {
+             Fixture{2, 11}, Fixture{4, 25}, Fixture{8, 53}}) {
         FakeApi fake;
         fake.rank = fixture.world_size - 1;
         fake.size = fixture.world_size;
@@ -308,14 +308,14 @@ void check_rank_sized_command_queue() {
 
     std::uint32_t capacity = 0;
     CHECK(transport::checked_scale_up_command_capacity(2, &capacity));
-    CHECK(capacity == 6);
+    CHECK(capacity == 11);
     CHECK(transport::checked_scale_up_command_capacity(4, &capacity));
-    CHECK(capacity == 16);
+    CHECK(capacity == 25);
 
-    constexpr int kLargestRepresentableWorldSize = 858993459;
+    constexpr int kLargestRepresentableWorldSize = 613566756;
     CHECK(transport::checked_scale_up_command_capacity(
         kLargestRepresentableWorldSize, &capacity));
-    CHECK(capacity == 4294967291U);
+    CHECK(capacity == 4294967289U);
     capacity = 0x12345678U;
     CHECK(!transport::checked_scale_up_command_capacity(
         kLargestRepresentableWorldSize + 1, &capacity));
@@ -323,7 +323,7 @@ void check_rank_sized_command_queue() {
     CHECK(!transport::checked_scale_up_command_capacity(
         std::numeric_limits<int>::max(), &capacity));
 
-    transport::TransportCommand commands[6]{};
+    transport::TransportCommand commands[11]{};
     transport::TransportServiceState service{};
     transport::DeviceTransportDiagnostic diagnostic{};
     CHECK(transport::checked_scale_up_command_capacity(2, &capacity));
@@ -350,6 +350,25 @@ void check_rank_sized_command_queue() {
             transport::TransportTeam::kScaleUp, 1, 1, 0,
             transport::RemoteAction::signal_set(
                 transport::sync_layout::kDispatchReleaseSignalIndex, 7))));
+    CHECK(transport::command::append(
+        queue, transport::command::make_barrier(
+            transport::kWorldTeamMask, 1000)));
+    CHECK(transport::command::append(
+        queue, transport::command::make_put(
+            transport::TransportTeam::kScaleUp, 1, 1, 0, 0x4000, 0x5000,
+            64, transport::CooperationScope::kParticipant,
+            transport::MemorySegment::kDevice, transport::kDefaultOptions)));
+    CHECK(transport::command::append(
+        queue, transport::command::make_flush(
+            0, transport::CooperationScope::kDevice)));
+    CHECK(transport::command::append(
+        queue, transport::command::make_signal(
+            transport::TransportTeam::kScaleUp, 1, 1, 0,
+            transport::RemoteAction::signal_set(
+                transport::sync_layout::kDispatchRouteReadySignalIndex, 7))));
+    CHECK(transport::command::append(
+        queue, transport::command::make_flush(
+            0, transport::CooperationScope::kDevice)));
     CHECK(transport::command::append(
         queue, transport::command::make_barrier(
             transport::kWorldTeamMask, 1000)));

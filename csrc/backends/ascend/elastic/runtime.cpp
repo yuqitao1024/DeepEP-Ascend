@@ -382,11 +382,13 @@ CoreRuntimeStatus validate_tiling_descriptor(const CoreTiling& tiling) {
     if (pipeline &&
         (tiling.operation != OperationKind::kDispatch ||
          has_mode(tiling.mode_flags, CoreMode::kCached) ||
-         has_mode(tiling.mode_flags, CoreMode::kHybrid) || !cpu_sync ||
+         has_mode(tiling.mode_flags, CoreMode::kHybrid) ||
+         (!cpu_sync && tiling.element_kind != ElementKind::kFloat8E4M3) ||
          async_event || tiling.topology.world_size < 2 ||
          tiling.topology.scale_out_size != 1))
         return {CoreRuntimeStatusCode::kUnsupportedMode, 0,
-                "pipeline dispatch supports uncached CPU-split scale-up only"};
+                "pipeline dispatch supports uncached CPU-split or FP8 "
+                "device-prefix scale-up only"};
 
     constexpr CoreModeFlags known_modes =
         mode_bit(CoreMode::kCached) | mode_bit(CoreMode::kExpanded) |
@@ -604,7 +606,10 @@ CoreRuntimeStatus launch_internal_dispatch_pipeline(
     if (!has_mode(tiling.mode_flags, CoreMode::kPipeline) ||
         producer_stream == nullptr || communication_stream == nullptr ||
         producer_stream == communication_stream ||
-        arguments.pipeline_chunk_slots == 0)
+        (arguments.pipeline_chunk_slots == 0 &&
+         arguments.pipeline_chunk_tiles == 0) ||
+        (arguments.pipeline_chunk_slots != 0 &&
+         arguments.pipeline_chunk_tiles != 0))
         return invalid("invalid pipeline dispatch streams or chunk size");
     return launch_internal_dispatch_impl(
         arguments, tiling, storage, producer_stream, communication_stream);

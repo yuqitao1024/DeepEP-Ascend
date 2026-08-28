@@ -177,8 +177,10 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
 
         expected_cases = {
             "put", "put-value64", "faa64", "signal", "signal-set", "flush",
-            "async-lifecycle", "payload-signal-order", "barrier-repeat", "queue-wrap",
-            "profile-mixed", "phase-boundary", "teardown",
+            "async-lifecycle", "payload-signal-order", "route-signal-order",
+            "route-signal-pre-barrier", "route-signal-post-barrier",
+            "route-put-signal-order", "route-plan-order", "barrier-repeat",
+            "queue-wrap", "profile-mixed", "phase-boundary", "teardown",
         }
         self.assertEqual(set(contract["cases"]), expected_cases)
         self.assertEqual(
@@ -189,6 +191,21 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
         self.assertGreater(contract["timeout_ms"], 0)
         self.assertGreaterEqual(
             contract["cases"]["payload-signal-order"]["iterations"], 1000)
+        self.assertTrue(
+            contract["cases"]["route-plan-order"]
+                    ["synchronize_before_launch"])
+        self.assertTrue(
+            contract["cases"]["route-signal-order"]
+                    ["synchronize_before_launch"])
+        self.assertTrue(
+            contract["cases"]["route-put-signal-order"]
+                    ["synchronize_before_launch"])
+        self.assertTrue(
+            contract["cases"]["route-signal-pre-barrier"]
+                    ["synchronize_before_launch"])
+        self.assertTrue(
+            contract["cases"]["route-signal-post-barrier"]
+                    ["synchronize_before_launch"])
         self.assertTrue(contract["cases"]["queue-wrap"]["requires_sq_wrap"])
         self.assertEqual(
             contract["cases"]["profile-mixed"]["command_metrics"], {
@@ -208,6 +225,76 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
             self.assertEqual(
                 contract["cases"][name]["phases"],
                 ["producer", "service", "consumer"])
+
+    def test_route_plan_order_probe_matches_production_batch(self):
+        """Catches a diagnostic probe that omits part of the P7.1 batch."""
+        source = (SIMT_URMA / "runtime_probe.asc").read_text()
+        header = (SIMT_URMA / "runtime_probe.hpp").read_text()
+
+        self.assertIn("kRoutePlanOrder", header)
+        self.assertIn("kRoutePlanBytes = 1056", header)
+        begin = source.index(
+            "if (runtime_case == RuntimeCase::kRoutePlanOrder)")
+        end = source.index("\n    }", begin)
+        producer = source[begin:end]
+        ordered_markers = (
+            "transport.put(",
+            "kRoutePlanBytes",
+            "transport.flush(CooperationScope::kDevice)",
+            "RemoteAction::signal_set(2, generation)",
+            "transport.flush(CooperationScope::kDevice)",
+            "transport.device_barrier(",
+        )
+        cursor = 0
+        for marker in ordered_markers:
+            cursor = producer.index(marker, cursor) + len(marker)
+
+        consumer_begin = source.index(
+            "runtime_case == RuntimeCase::kRoutePlanOrder", end)
+        consumer_end = source.index("\n    }", consumer_begin)
+        consumer = source[consumer_begin:consumer_end]
+        self.assertIn("transport.wait_signal(", consumer)
+        self.assertIn("signal_route.peer, 2, generation", consumer)
+        self.assertIn("transport.read_signal(", consumer)
+        self.assertIn("signal_route.peer, 2)", consumer)
+        self.assertIn("state->route_destination[word]", consumer)
+        self.assertIn("copy_diagnostic(state, context);", source[consumer_end:])
+
+        signal_only_begin = source.index(
+            "if (runtime_case == RuntimeCase::kRouteSignalOrder)")
+        signal_only_end = source.index("\n    }", signal_only_begin)
+        signal_only = source[signal_only_begin:signal_only_end]
+        self.assertNotIn("transport.put(", signal_only)
+        self.assertIn("RemoteAction::signal_set(2, generation)", signal_only)
+        self.assertEqual(signal_only.count("transport.flush("), 1)
+
+        pre_begin = source.index(
+            "if (runtime_case == RuntimeCase::kRouteSignalPreBarrier)")
+        pre_end = source.index("\n    }", pre_begin)
+        pre = source[pre_begin:pre_end]
+        self.assertLess(pre.index("transport.device_barrier("),
+                        pre.index("RemoteAction::signal_set(2, generation)"))
+
+        post_begin = source.index(
+            "if (runtime_case == RuntimeCase::kRouteSignalPostBarrier)")
+        post_end = source.index("\n    }", post_begin)
+        post = source[post_begin:post_end]
+        self.assertLess(post.index("RemoteAction::signal_set(2, generation)"),
+                        post.index("transport.device_barrier("))
+
+        put_signal_begin = source.index(
+            "if (runtime_case == RuntimeCase::kRoutePutSignalOrder)")
+        put_signal_end = source.index("\n    }", put_signal_begin)
+        put_signal = source[put_signal_begin:put_signal_end]
+        self.assertIn("transport.put(", put_signal)
+        self.assertIn("RemoteAction::signal_set(2, generation)", put_signal)
+        self.assertEqual(put_signal.count("transport.flush("), 1)
+
+        host = (SIMT_URMA / "runtime_probe_main.cpp").read_text()
+        self.assertIn(
+            "runtime_case == probe::RuntimeCase::kRoutePlanOrder",
+            host[host.index("const bool synchronize_ranks"):
+                 host.index("probe::RuntimeState state;")])
 
     def test_local_phase_boundary_launch_disables_profile_pressure(self):
         runtime = (SIMT_URMA / "runtime_probe_main.cpp").read_text()

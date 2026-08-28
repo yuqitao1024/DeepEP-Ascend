@@ -796,6 +796,14 @@ int main() {
             required_core_launch_storage(unsupported_full_pipeline_dispatch))
             .code != CoreRuntimeStatusCode::kUnsupportedMode)
         return 88;
+    auto source_pipeline_dispatch = valid_tiling(
+        OperationKind::kDispatch, ElementKind::kFloat8E4M3, 0, 2,
+        mode_bit(CoreMode::kPipeline));
+    export_transport(&source_pipeline_dispatch);
+    if (!validate_internal_launch(
+            source_pipeline_dispatch,
+            required_core_launch_storage(source_pipeline_dispatch)).ok())
+        return 122;
     auto pipeline_dispatch = valid_tiling(
         OperationKind::kDispatch, ElementKind::kBFloat16, 0, 2,
         mode_bit(CoreMode::kCpuSync) | mode_bit(CoreMode::kPipeline));
@@ -952,6 +960,25 @@ int main() {
              reinterpret_cast<void*>(0x6262)).ok() ||
         !trace_is(kDispatchPipelineLaunch))
         return 120;
+    dispatch.pipeline_chunk_slots = 0;
+    dispatch.pipeline_chunk_tiles = 2;
+    auto source_pipeline_arguments = dispatch;
+    source_pipeline_arguments.scale_factors = bytes;
+    source_pipeline_arguments.recv_scale_factors = bytes;
+    source_pipeline_arguments.scale_factor_token_stride = 2;
+    source_pipeline_arguments.scale_factor_pack_stride = 1;
+    source_pipeline_arguments.recv_scale_factor_token_stride = 2;
+    source_pipeline_arguments.recv_scale_factor_pack_stride = 1;
+    reset_launches();
+    if (!launch_internal_dispatch_pipeline(
+             source_pipeline_arguments, source_pipeline_dispatch,
+             required_core_launch_storage(source_pipeline_dispatch),
+             reinterpret_cast<void*>(0x6161),
+             reinterpret_cast<void*>(0x6262)).ok() ||
+        !trace_is(kDispatchPipelineLaunch))
+        return 123;
+    dispatch.pipeline_chunk_slots = 4;
+    dispatch.pipeline_chunk_tiles = 0;
     reset_launches();
     if (!launch_internal_dispatch_epilogue(
              dispatch, async_cpu_sync_dispatch, storage,

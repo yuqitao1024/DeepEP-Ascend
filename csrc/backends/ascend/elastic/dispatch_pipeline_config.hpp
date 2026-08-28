@@ -118,6 +118,60 @@ struct DispatchPipelineConfig {
     std::uint32_t chunk_count = 0;
 };
 
+enum class DispatchSourcePipelineConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct DispatchSourcePipelineConfig {
+    bool enabled = false;
+    std::uint32_t chunk_tiles = 0;
+    std::uint32_t chunk_count = 0;
+};
+
+inline DispatchSourcePipelineConfigStatus
+select_dispatch_source_pipeline_config(
+    const char* value, bool device_prefix_enabled, bool cached_mode,
+    bool cpu_sync, bool expanded, bool hybrid_mode, bool stream_mode,
+    int world_size, std::uint64_t num_tokens,
+    DispatchSourcePipelineConfig* output) noexcept {
+    if (output == nullptr)
+        return DispatchSourcePipelineConfigStatus::kInvalid;
+    *output = {};
+    if (value == nullptr)
+        return DispatchSourcePipelineConfigStatus::kDisabled;
+    if (*value == '\0')
+        return DispatchSourcePipelineConfigStatus::kInvalid;
+
+    std::uint64_t chunk_tiles = 0;
+    for (const char* cursor = value; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9')
+            return DispatchSourcePipelineConfigStatus::kInvalid;
+        const auto digit = static_cast<std::uint64_t>(*cursor - '0');
+        if (chunk_tiles >
+            (std::numeric_limits<std::uint64_t>::max() - digit) / 10U)
+            return DispatchSourcePipelineConfigStatus::kInvalid;
+        chunk_tiles = chunk_tiles * 10U + digit;
+    }
+    if (chunk_tiles == 0)
+        return DispatchSourcePipelineConfigStatus::kInvalid;
+    if (!device_prefix_enabled || cached_mode || !cpu_sync || expanded ||
+        hybrid_mode || stream_mode || world_size < 2)
+        return DispatchSourcePipelineConfigStatus::kDisabled;
+
+    DispatchSourceChunkPlan plan{};
+    if (!build_dispatch_source_chunk_plan(
+            num_tokens, kDispatchGroupingTokensPerTile, chunk_tiles, &plan) ||
+        plan.chunk_count < 2 ||
+        plan.chunk_count > kMaximumDispatchPipelineChunks)
+        return DispatchSourcePipelineConfigStatus::kDisabled;
+    output->enabled = true;
+    output->chunk_tiles = plan.chunk_tiles;
+    output->chunk_count = plan.chunk_count;
+    return DispatchSourcePipelineConfigStatus::kEnabled;
+}
+
 inline DispatchPipelineConfigStatus select_dispatch_pipeline_config(
     const char* value, bool cached_mode, bool split_dispatch,
     bool stream_mode, bool hybrid_mode, int world_size,

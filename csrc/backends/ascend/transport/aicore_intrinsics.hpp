@@ -51,6 +51,16 @@ __aicore__ inline T load_device(const __gm__ T* address) {
         ld_dev(const_cast<__gm__ T*>(address), 0));
 }
 
+// Control words published by a SIMT VF must bypass the AICore DCache. A
+// cached ld_dev can retain the pre-publication value after another execution
+// context has written the same GM line.
+template <typename T>
+__aicore__ inline T load_published(const __gm__ T* address) {
+    static_assert(kSupportedDeviceScalar<T>);
+    return AscendC::ReadGmByPassDCache<T>(
+        const_cast<__gm__ T*>(address));
+}
+
 template <typename T>
 __aicore__ inline void store_device(__gm__ T* address, T value) {
     static_assert(kSupportedDeviceScalar<T>);

@@ -22,10 +22,12 @@ from tests.ascend.benchmark.runtime import (
     PreparedCase,
     _aggregate_rank_operations,
     _aggregate_stage_profiles,
+    _benchmark_timeout_seconds,
     _build_operation_work_counts,
     _configure_stage_profile_environment,
     _derive_host_envelope_samples,
     _derive_stage_timeline,
+    _early_route_plan_observability,
     _payload_rows,
 )
 from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
@@ -42,7 +44,10 @@ from tests.ascend.benchmark import workloads
 from tests.ascend.benchmark.workloads import classify_ascend_case
 from tests.utils.ep_benchmark_core import build_dispatch_arguments
 from tests.utils.ep_benchmark_manifest import (
+    BenchmarkManifest,
     EPModeCase,
+    RankWorkload,
+    WorkloadSpec,
     case_suite,
     enumerate_ep_mode_cases,
 )
@@ -87,6 +92,21 @@ WORK_COUNT_KEYS = {
 
 def _literal_work_counts(value=1):
     return {key: value for key in WORK_COUNT_KEYS}
+
+
+def test_benchmark_device_timeout_defaults_and_allows_debug_override():
+    assert _benchmark_timeout_seconds({}) == 300
+    assert _benchmark_timeout_seconds({
+        "DEEP_EP_ASCEND_BENCHMARK_TIMEOUT_SECS": "10",
+    }) == 10
+    with pytest.raises(ValueError, match="positive integer"):
+        _benchmark_timeout_seconds({
+            "DEEP_EP_ASCEND_BENCHMARK_TIMEOUT_SECS": "0",
+        })
+    with pytest.raises(ValueError, match="positive integer"):
+        _benchmark_timeout_seconds({
+            "DEEP_EP_ASCEND_BENCHMARK_TIMEOUT_SECS": "invalid",
+        })
 
 
 def test_case_matrix_matches_upstream_order_and_size():
@@ -1050,6 +1070,167 @@ def test_payload_rows_uses_fp8_payload_instead_of_scale_tuple():
 
     assert _payload_rows(bf16) == 8
     assert _payload_rows((fp8_payload, fp8_scales)) == 9
+
+
+def test_early_route_plan_observability_counts_records_and_expert_lanes():
+    manifest = BenchmarkManifest(
+        schema_version=1,
+        generator_version=1,
+        spec=WorkloadSpec(
+            world_size=2,
+            num_tokens=2,
+            hidden=7168,
+            num_topk=4,
+            num_experts=8,
+        ),
+        ranks=(
+            RankWorkload(
+                rank=0,
+                num_tokens=2,
+                topk_idx=((0, 0, 4, -1), (1, 5, 6, 5)),
+                topk_weights=((1.0,) * 4, (1.0,) * 4),
+            ),
+            RankWorkload(
+                rank=1,
+                num_tokens=1,
+                topk_idx=((4, 0, -1, -1),),
+                topk_weights=((1.0,) * 4,),
+            ),
+        ),
+        fingerprint="literal",
+    )
+
+    observed = _early_route_plan_observability(manifest, rank=0, enabled=True)
+
+    assert observed == {
+        "enabled": True,
+        "signal_index": 2,
+        "slot_bytes": 1056,
+        "window_bytes": 2112,
+        "published_rank_counts": [2, 2],
+        "published_expert_counts": [
+            [2, 1, 0, 0],
+            [1, 2, 1, 0],
+        ],
+        "commands": {
+            "remote_put": 1,
+            "flush": 2,
+            "remote_signal": 1,
+        },
+        "kernel_checks": {
+            "route_payload_count_parity": True,
+            "route_payload_generation_parity": True,
+        },
+    }
+
+
+def test_fp8_materialization_pads_partial_scale_group_and_restores_payload_width():
+    pad_calls = []
+
+    class ShapeTensor:
+        def __init__(self, shape, dtype=None):
+            self.shape = tuple(shape)
+            self.dtype = dtype
+
+        def float(self):
+            return ShapeTensor(self.shape, "float32")
+
+        def reshape(self, *shape):
+            resolved = list(shape)
+            if resolved.count(-1) == 1:
+                known = 1
+                for value in resolved:
+                    if value != -1:
+                        known *= value
+                total = 1
+                for value in self.shape:
+                    total *= value
+                resolved[resolved.index(-1)] = total // known
+            return ShapeTensor(resolved, self.dtype)
+
+        def abs(self):
+            return ShapeTensor(self.shape, self.dtype)
+
+        def amax(self, dim):
+            return ShapeTensor(
+                self.shape[:dim] + self.shape[dim + 1:], self.dtype)
+
+        def clamp(self, **_kwargs):
+            return ShapeTensor(self.shape, self.dtype)
+
+        def unsqueeze(self, dim):
+            shape = list(self.shape)
+            shape.insert(dim, 1)
+            return ShapeTensor(shape, self.dtype)
+
+        def to(self, dtype):
+            return ShapeTensor(self.shape, dtype)
+
+        def narrow(self, dim, _start, length):
+            shape = list(self.shape)
+            shape[dim] = length
+            return ShapeTensor(shape, self.dtype)
+
+        def contiguous(self):
+            return self
+
+        def __truediv__(self, _other):
+            return ShapeTensor(self.shape, self.dtype)
+
+    class FakeFunctional:
+        @staticmethod
+        def pad(tensor, padding):
+            pad_calls.append(padding)
+            return ShapeTensor(
+                (tensor.shape[0], tensor.shape[1] + padding[1]), tensor.dtype)
+
+    class FakeTorch:
+        bfloat16 = "bfloat16"
+        float8_e4m3fn = "float8_e4m3fn"
+        int64 = "int64"
+        float32 = "float32"
+        nn = SimpleNamespace(functional=FakeFunctional())
+
+        @staticmethod
+        def randn(shape, dtype, device):
+            assert device == "npu"
+            return ShapeTensor(shape, dtype)
+
+        @staticmethod
+        def tensor(values, dtype, device):
+            assert device == "npu"
+            return ShapeTensor((len(values), len(values[0])), dtype)
+
+    case = EPModeCase(
+        do_handle_copy=True,
+        expert_alignment=128,
+        use_fp8_dispatch=True,
+        num_bias=0,
+        with_previous_event=False,
+        async_with_compute_stream=False,
+        allocate_on_comm_stream=False,
+    )
+    runtime = AscendRuntime.__new__(AscendRuntime)
+    runtime.torch = FakeTorch()
+    runtime.device = "npu"
+    runtime.rank = 0
+    runtime.manifest = SimpleNamespace(
+        spec=SimpleNamespace(hidden=7184, num_topk=2),
+        ranks=(SimpleNamespace(
+            num_tokens=2,
+            topk_idx=((0, 1), (1, -1)),
+            topk_weights=((0.75, 0.25), (1.0, 0.0)),
+        ),),
+    )
+
+    x, topk_idx, topk_weights, bias = runtime._materialize(case)
+
+    assert x[0].shape == (2, 7184)
+    assert x[1].shape == (2, 57)
+    assert topk_idx.shape == (2, 2)
+    assert topk_weights.shape == (2, 2)
+    assert bias is None
+    assert pad_calls == [(0, 112)]
 
 
 def _literal_stage_profile(rank, *, generation=9, operation="dispatch"):

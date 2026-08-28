@@ -362,13 +362,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                     "for (std::uint32_t subgroup = 0",
                     "for (std::uint32_t tile =",
                 ),
-                "direct_dispatch_producer_record_vf": (
+                "direct_dispatch_producer_record_body": (
                     "const std::uint32_t num_tokens_u32",
-                    "for (std::uint32_t tile = grid.first",
+                    "for (std::uint32_t tile = source_tile_begin + grid.first",
                     "for (std::uint32_t logical = grid.first",
                 ),
         }.items():
-            begin = dispatch.index(f"inline void {function_name}")
+            begin = dispatch.index(f"{function_name}(")
             end = dispatch.index("\n}\n", begin)
             function = dispatch[begin:end]
             for marker in markers:
@@ -497,13 +497,424 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("tiling.data_launch.num_blocks == 1", launch)
 
         for function_name in (
-                "direct_dispatch_producer_record_vf",
+                "direct_dispatch_producer_record_body",
                 "direct_dispatch_epilogue_copy_outputs_vf"):
-            begin = source.index(
-                f"__simt_vf__ __launch_bounds__(512) inline void {function_name}")
+            begin = source.index(f"{function_name}(")
             end = source.index("\n}\n", begin)
             function = source[begin:end]
             self.assertIn("direct_data_grid_stride(", function)
+
+    def test_dispatch_source_pipeline_bounds_producer_work_by_chunk(self):
+        """Catches source chunks that rescan tokens outside their tile range."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        for function_name in (
+                "direct_dispatch_producer_record_body",
+                "direct_dispatch_producer_token_fanout_impl"):
+            begin = source.index(f"{function_name}(")
+            end = source.index("\n}\n", begin)
+            function = source[begin:end]
+            self.assertIn("pipeline_source_chunk", function)
+            self.assertIn("source_tile_begin", function)
+            self.assertIn("source_tile_end", function)
+            self.assertIn(
+                "tile = source_tile_begin +", function)
+            self.assertIn("tile < source_tile_end", function)
+            self.assertNotIn(
+                "tile = grid.first;\n             tile < tile_count_u32",
+                function)
+
+        release_begin = source.index(
+            "direct_dispatch_producer_release_body(")
+        release_end = source.index("\n}\n", release_begin)
+        release = source[release_begin:release_end]
+        for marker in (
+                "dispatch_group_tile_offset",
+                "source_tile_begin",
+                "source_tile_end",
+                "tile_offsets[source_tile_begin * world_size +",
+                "tile_offsets[source_tile_end * world_size +"):
+            self.assertIn(marker, release)
+
+    def test_dispatch_source_pipeline_selector_and_launch_contract(self):
+        """Catches routing source-tile chunks through slot-range launch rules."""
+        buffer = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        runtime = (ELASTIC / "runtime.cpp").read_text()
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        for marker in (
+                "DEEP_EP_ASCEND_DISPATCH_PIPELINE_CHUNK_TILES",
+                "select_dispatch_source_pipeline_config(",
+                "arguments.pipeline_chunk_tiles =",
+                "source_pipeline_config.enabled || pipeline_config.enabled"):
+            self.assertIn(marker, buffer)
+        self.assertIn("std::uint32_t pipeline_chunk_tiles = 0;", kernels)
+        self.assertIn("std::uint32_t pipeline_source_chunk = 0;", kernels)
+        self.assertIn("arguments.pipeline_chunk_slots == 0 &&", runtime)
+        self.assertIn("arguments.pipeline_chunk_tiles == 0", runtime)
+        self.assertIn("arguments.pipeline_chunk_slots != 0 &&", runtime)
+        self.assertIn("arguments.pipeline_chunk_tiles != 0", runtime)
+
+        dispatch = (ELASTIC / "dispatch.asc").read_text()
+        launch = dispatch[dispatch.index(
+            'extern "C" int deep_ep_ascend_launch_dispatch_pipeline'):]
+        for marker in (
+                "build_dispatch_source_chunk_plan(",
+                "dispatch_source_chunk_bounds(",
+                "arguments.pipeline_source_chunk = source_pipeline ? 1U : 0U",
+                "direct_dispatch_profile_pipeline(cpu_sync)",
+                "DirectDispatchStage::kProducerReleaseControl",
+                "DirectDispatchStage::kProducerReleaseBarrier"):
+            self.assertIn(marker, launch)
+
+    def test_dispatch_persistent_pipeline_state_contract(self):
+        """Catches stale producer or release doorbells in the persistent path."""
+        layout = (ELASTIC / "layout.hpp").read_text()
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        for marker in (
+                "struct alignas(64) DispatchPipelineBlockProgress",
+                "std::uint32_t scalar_blocks_completed = 0;",
+                "std::uint32_t hidden_blocks_completed = 0;",
+                "std::uint64_t generation = 0;",
+                "std::uint32_t completed_chunk = UINT32_MAX;",
+                "std::uint32_t release_batch_target = 0;",
+                "std::uint32_t release_batch_consumed = 0;"):
+            self.assertIn(marker, layout)
+        for marker in (
+                "dispatch_pipeline_slot_reusable(",
+                "dispatch_pipeline_completion_is_last(",
+                "dispatch_pipeline_slot_ready_for_release(",
+                "dispatch_pipeline_block_progress_ready(",
+                "dispatch_pipeline_release_batch_pending(",
+                "dispatch_pipeline_release_batch_acknowledged("):
+            self.assertIn(marker, kernels)
+        for signature in (
+            "DEEP_EP_ASCEND_KERNEL_CALLEE std::uint32_t\n"
+                "dispatch_simt_pipeline_slot(",
+            "DEEP_EP_ASCEND_KERNEL_CALLEE bool\n"
+                "dispatch_simt_pipeline_completion_is_last(",
+            "DEEP_EP_ASCEND_KERNEL_CALLEE bool\n"
+                "dispatch_simt_pipeline_release_batch_acknowledged(",
+            "DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE std::uint32_t\n"
+                "dispatch_aicore_pipeline_slot(",
+            "DEEP_EP_ASCEND_ELASTIC_AICORE_CALLEE bool\n"
+                "dispatch_aicore_pipeline_release_batch_pending("):
+            self.assertIn(signature, kernels)
+
+    def test_dispatch_persistent_pipeline_waits_fail_with_diagnostics(self):
+        """Catches an unbounded doorbell wait or one-sided worker failure."""
+        layout = (ELASTIC / "layout.hpp").read_text()
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        source = (ELASTIC / "dispatch.asc").read_text()
+        for marker in (
+                "enum class DispatchPipelineDiagnosticStage",
+                "DispatchPipelineDiagnosticStage diagnostic_stage",
+                "std::uint32_t diagnostic_detail = 0;"):
+            self.assertIn(marker, layout)
+        self.assertIn("dispatch_pipeline_wait_timed_out(", kernels)
+
+        producer_name = "direct_dispatch_persistent_producer_vf("
+        producer_begin = source.rfind(
+            "__simt_vf__", 0, source.index(producer_name))
+        producer_end = source.index("\n}\n", producer_begin)
+        producer = source[producer_begin:producer_end]
+        for marker in (
+                "timeout_cycles",
+                "__asc_simt_vf::clock()",
+                "DispatchPipelineWorkerState::kFailed",
+                "DispatchPipelineSlotState::kFailed"):
+            self.assertIn(marker, producer)
+
+        release_name = "direct_dispatch_persistent_release_vf("
+        release_begin = source.rfind(
+            "__simt_vf__", 0, source.index(release_name))
+        release_end = source.index("\n}\n", release_begin)
+        release = source[release_begin:release_end]
+        for marker in (
+                "__asc_simt_vf::clock()",
+                "record_dispatch_protocol_error(",
+                "DispatchPipelineWorkerState::kFailed",
+                "DispatchPipelineSlotState::kFailed"):
+            self.assertIn(marker, release)
+
+        producer_device_name = "direct_dispatch_persistent_producer_device("
+        producer_device_begin = source.rfind(
+            "__aicore__", 0, source.index(producer_device_name))
+        producer_device_end = source.index("\n}\n", producer_device_begin)
+        producer_device = source[producer_device_begin:producer_device_end]
+        self.assertIn("__asc_aicore::clock()", producer_device)
+        self.assertIn("DispatchPipelineSlotState::kFailed", producer_device)
+
+        release_device_name = "direct_dispatch_persistent_release_device("
+        release_device_begin = source.rfind(
+            "__aicore__", 0, source.index(release_device_name))
+        release_device_end = source.index("\n}\n", release_device_begin)
+        release_device = source[release_device_begin:release_device_end]
+        self.assertIn("__asc_aicore::clock()", release_device)
+        self.assertIn("DispatchPipelineWorkerState::kFailed", release_device)
+
+    def test_dispatch_persistent_source_producer_contract(self):
+        """Catches repeated VF launches or incomplete hidden publication."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        self.assertIn("kProducerRecordPipeline", kernels)
+        function = "direct_dispatch_persistent_producer_vf("
+        self.assertIn(function, source)
+        begin = source.rfind("__simt_vf__", 0, source.index(function))
+        end = source.index("\n}\n", begin)
+        producer_vf = source[begin:end]
+        for marker in (
+                "for (std::uint32_t source_chunk = 0;",
+                "direct_dispatch_producer_record_body(",
+                "scalar_blocks_completed",
+                "hidden_blocks_completed",
+                "scalar_progress",
+                "completed_chunk",
+                "generation",
+                "DispatchPipelineSlotState::kReady",
+                "transport::simt::system_fence();"):
+            self.assertIn(marker, producer_vf)
+        self.assertNotIn("asc_atomic_add(", producer_vf)
+        self.assertNotIn(
+            "DispatchPipelineSlotState::kScalarReady", producer_vf)
+
+        kernel_begin = source.index("__global__ __vector__ void dispatch_kernel")
+        kernel_end = source.index(
+            "template <bool ProfileEnabled>\ninline int launch_dispatch_kernel",
+            kernel_begin)
+        kernel = source[kernel_begin:kernel_end]
+        producer_begin = kernel.index(
+            "stage == DirectDispatchStage::kProducerRecordPipeline")
+        release_begin = kernel.index(
+            "stage == DirectDispatchStage::kProducerReleasePipeline",
+            producer_begin)
+        producer = kernel[producer_begin:release_begin]
+        self.assertIn(
+            "direct_dispatch_persistent_producer_device(", producer)
+        helper_begin = source.index(
+            "__aicore__ inline void "
+            "direct_dispatch_persistent_producer_device(")
+        helper_end = source.index("\n}\n", helper_begin)
+        helper = source[helper_begin:helper_end]
+        launch = "asc_vf_call<direct_dispatch_persistent_producer_vf>"
+        self.assertEqual(helper.count(launch), 1)
+        self.assertNotIn("direct_dispatch_persistent_chunk_begin_vf", producer)
+        self.assertNotIn(
+            "direct_dispatch_persistent_chunk_complete_vf", producer)
+        self.assertNotIn(
+            "direct_dispatch_persistent_release_tail_wait_vf", producer)
+        launch_index = helper.index(launch)
+        for marker in (
+                "&pipeline->abi_version",
+                "&pipeline->producer_worker_state",
+                "&pipeline->generation"):
+            self.assertLess(helper.index(marker), launch_index)
+        loop_index = helper.index(
+            "for (std::uint32_t source_chunk = 0;", launch_index)
+        self.assertLess(launch_index, loop_index)
+        self.assertNotIn("asc_vf_call<", helper[loop_index:])
+        for marker in (
+                "DispatchPipelineSlotState::kScalarReady",
+                "scalar_progress",
+                "hidden_progress",
+                "completed_chunk",
+                "DispatchPipelineSlotState::kReady",
+                "transport::aicore::store_device(",
+                "transport::aicore::flush_cacheline("):
+            self.assertIn(marker, helper[loop_index:])
+
+    def test_dispatch_persistent_release_contract(self):
+        """Catches repeated release VF launches or unacknowledged queue batches."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        layout = (ELASTIC / "layout.hpp").read_text()
+        self.assertIn("kProducerReleasePipeline", kernels)
+        self.assertIn("direct_dispatch_persistent_release_vf", source)
+        self.assertIn(
+            "std::uint64_t release_completed_generation = 0;", layout)
+
+        kernel_begin = source.index("__global__ __vector__ void dispatch_kernel")
+        kernel_end = source.index(
+            "template <bool ProfileEnabled>\ninline int launch_dispatch_kernel",
+            kernel_begin)
+        kernel = source[kernel_begin:kernel_end]
+        stage = kernel.index(
+            "stage == DirectDispatchStage::kProducerReleasePipeline")
+        release = kernel[stage:]
+        self.assertIn(
+            "direct_dispatch_persistent_release_device<ProfileEnabled>(",
+            release)
+        helper_begin = source.index(
+            "__aicore__ inline void "
+            "direct_dispatch_persistent_release_device(")
+        helper_end = source.index("\n}\n", helper_begin)
+        helper = source[helper_begin:helper_end]
+        launch = "asc_vf_call<direct_dispatch_persistent_release_vf>"
+        self.assertEqual(helper.count(launch), 1)
+        for marker in (
+                "transport::service::reset(",
+                "release_batch_target",
+                "release_batch_consumed",
+                "dispatch_aicore_pipeline_release_batch_pending(",
+                "transport::service::execute<ProfileEnabled>",
+                "DispatchPipelineWorkerState::kCompleted"):
+            self.assertIn(marker, helper)
+        self.assertLess(
+            helper.index("transport::service::reset("),
+            helper.index(launch))
+        runtime_loop = helper.index("while (true)", helper.index(launch))
+        self.assertNotIn("asc_vf_call<", helper[runtime_loop:])
+
+        vf_begin = source.rfind(
+            "__simt_vf__", 0,
+            source.index("direct_dispatch_persistent_release_vf("))
+        vf_end = source.index("\n}\n", vf_begin)
+        release_vf = source[vf_begin:vf_end]
+        for marker in (
+                "for (std::uint32_t release_chunk = 0;",
+                "direct_dispatch_producer_release_body(",
+                "DirectReleaseSegment::kPayload",
+                "DirectReleaseSegment::kControl",
+                "DirectReleaseSegment::kBarrier",
+                "release_batch_target",
+                "release_batch_consumed",
+                "transport.wait(",
+                "release_completed_generation"):
+            self.assertIn(marker, release_vf)
+
+    def test_dispatch_persistent_pipeline_launch_is_event_free(self):
+        """Catches reintroducing host event or sync gaps into source chunks."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        signature = "inline int launch_persistent_dispatch_source_pipeline("
+        begin = source.index(signature)
+        end = source.index("\n}\n", begin)
+        launch = source[begin:end]
+        for marker in (
+                "DirectDispatchStage::kProducerControl",
+                "DirectDispatchStage::kProducerGroup",
+                "DirectDispatchStage::kProducerPrefix",
+                "DirectDispatchStage::kProducerReleasePipeline",
+                "DirectDispatchStage::kProducerRecordPipeline",
+                "producer_launch.num_blocks =\n"
+                "        tiling.data_launch.num_blocks - 1U"):
+            self.assertIn(marker, launch)
+        for forbidden in (
+                "aclrtCreateEventWithFlag",
+                "aclrtRecordEvent",
+                "aclrtStreamWaitEvent",
+                "aclrtSynchronizeStream",
+                "aclrtDestroyEvent"):
+            self.assertNotIn(forbidden, launch)
+
+    def test_dispatch_persistent_epilogue_uses_producer_stream_completion(self):
+        """Keeps epilogue after producer completion and on release acquire."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_epilogue_acquire_vf")
+        end = source.index("\n}\n", begin)
+        acquire = source[begin:end]
+        for marker in (
+                "dispatch_pipeline_offset",
+                "dispatch_pipeline_bytes",
+                "persistent_source_pipeline",
+                "transport.consumed_generation()"):
+            self.assertIn(marker, acquire)
+        self.assertNotIn(
+            "pipeline->release_completed_generation", acquire)
+        self.assertNotIn("pipeline->reserved2", acquire)
+        self.assertIn(
+            "persistent_source_pipeline != 0 ?", acquire)
+
+        macro_begin = source.index(
+            "#define DEEP_EP_ASCEND_DIRECT_DISPATCH_EPILOGUE")
+        macro_end = source.index("#undef DEEP_EP_ASCEND_DIRECT_DISPATCH_EPILOGUE")
+        macro = source[macro_begin:macro_end]
+        self.assertIn(
+            "tiling.workspace_layout.dispatch_pipeline_offset", macro)
+        self.assertIn(
+            "tiling.workspace_layout.dispatch_pipeline_bytes", macro)
+        self.assertIn("(PERSISTENT_SOURCE_PIPELINE)", macro)
+
+        producer_begin = source.index(
+            "__aicore__ inline void "
+            "direct_dispatch_persistent_producer_device(")
+        producer_end = source.index("\n}\n", producer_begin)
+        producer = source[producer_begin:producer_end]
+        self.assertIn("asc_sync_vec();", producer)
+        self.assertEqual(
+            producer.count(
+                "asc_vf_call<direct_dispatch_persistent_producer_vf>"), 1)
+
+        launch_begin = source.index(
+            "inline int launch_persistent_dispatch_source_pipeline(")
+        launch_end = source.index("\n}\n", launch_begin)
+        launch = source[launch_begin:launch_end]
+        self.assertLess(
+            launch.index("DirectDispatchStage::kProducerRecordPipeline"),
+            launch.index("for (std::uint32_t index = epilogue_begin;"))
+
+    def test_dispatch_persistent_control_acquire_diagnoses_before_wait(self):
+        """Makes a missing remote release observable without a long wait."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_epilogue_acquire_vf")
+        end = source.index("\n}\n", begin)
+        acquire = source[begin:end]
+        loop = acquire[acquire.index(
+            "for (int source_rank = 0;"):]
+        for marker in (
+                "observed_control_generation",
+                "transport.read_signal(",
+                "persistent_control_diagnostic",
+                "record_dispatch_protocol_error(",
+                "release_protocol::observe_release_control("):
+            self.assertIn(marker, loop)
+        self.assertLess(
+            loop.index("persistent_control_diagnostic"),
+            loop.index("release_protocol::observe_release_control("))
+
+    def test_dispatch_pipeline_header_uses_noncacheable_publication(self):
+        """Prevents a dirty header cacheline from overwriting the tail gate."""
+        probe = PROBE.read_text()
+        self.assertIn(
+            "offsetof(DispatchPipelineState, "
+            "release_completed_generation) ==\n              64",
+            probe)
+        self.assertIn(
+            "offsetof(DispatchPipelineState, slots) == 128", probe)
+        source = (ELASTIC / "dispatch.asc").read_text()
+        for forbidden in (
+                "pipeline->abi_version =",
+                "pipeline->struct_size =",
+                "pipeline->generation =",
+                "pipeline->chunk_count =",
+                "pipeline->completed_chunks =",
+                "pipeline->chunk_slots =",
+                "pipeline->terminal_error =",
+                "pipeline->release_completed_generation =",
+                "++pipeline->completed_chunks"):
+            self.assertNotIn(forbidden, source)
+        for field in (
+                "abi_version", "struct_size", "generation", "chunk_count",
+                "completed_chunks", "chunk_slots",
+                "release_completed_generation"):
+            self.assertRegex(
+                source,
+                rf"transport::simt::store_published\(\s*"
+                rf"&pipeline->{field}")
+        self.assertRegex(
+            source,
+            r"reinterpret_cast<__gm__ std::uint32_t\*>\(\s*"
+            r"&pipeline->terminal_error\)")
+
+        external = source[source.index(
+            'extern "C" int deep_ep_ascend_launch_dispatch_pipeline'):]
+        source_branch = external.index("if (source_pipeline)")
+        persistent_call = external.index(
+            "launch_persistent_dispatch_source_pipeline(", source_branch)
+        legacy_events = external.index("aclrtEvent ready[")
+        self.assertLess(source_branch, persistent_call)
+        self.assertLess(persistent_call, legacy_events)
 
     def test_direct_dispatch_receive_validation_is_rank_major_tiled(self):
         """Catches restoring one serial scan per source rank."""
@@ -597,8 +1008,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("dispatch_group_error_offset", prefix)
 
         record_begin = source.index(
-            "__simt_vf__ __launch_bounds__(512) inline void "
-            "direct_dispatch_producer_record_vf")
+            "direct_dispatch_producer_record_body(")
         record_end = source.index("\n}\n", record_begin)
         record = source[record_begin:record_end]
         for marker in (
@@ -653,7 +1063,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
         self.assertIn(
             "block_count * subgroups_per_block", producer)
-        self.assertIn("tile < tile_count_u32", producer)
+        self.assertIn("tile < source_tile_end", producer)
         self.assertIn(
             "tile * static_cast<std::uint32_t>(\n"
             "                    kDispatchGroupingTokensPerTile)", producer)
@@ -681,6 +1091,341 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertLess(
             epilogue.index("HardEvent::MTE2_MTE3"),
             epilogue.index("HardEvent::MTE3_MTE2"))
+
+    def test_dispatch_token_fanout_selector_and_launch_contract(self):
+        """Catches accepting the selector without reaching the AICore path."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        buffer = (
+            ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        dispatch = buffer[
+            buffer.index("    dispatch(const torch::Tensor& x"):
+            buffer.index("    combine(const torch::Tensor& x")
+        ]
+
+        for marker in (
+                '"DEEP_EP_ASCEND_DISPATCH_TOKEN_FANOUT"',
+                "select_dispatch_token_fanout_config(",
+                "DEEP_EP_ASCEND_DISPATCH_TOKEN_FANOUT must be 0 or 1",
+                "arguments.token_fanout =\n"
+                "            token_fanout_config.enabled ? 1U : 0U;"):
+            self.assertIn(marker, dispatch)
+        self.assertIn("std::uint32_t token_fanout = 0;", kernels)
+
+        kernel_begin = source.index(
+            "__global__ __vector__ void dispatch_kernel")
+        kernel_body = source.index("{", kernel_begin)
+        kernel_signature = source[kernel_begin:kernel_body]
+        self.assertIn("std::uint32_t token_fanout", kernel_signature)
+
+        launch_begin = source.index(
+            "template <bool ProfileEnabled>\ninline int "
+            "launch_dispatch_kernel")
+        launch_end = source.index("\n}\n", launch_begin)
+        launcher = source[launch_begin:launch_end]
+        self.assertIn("arguments.token_fanout", launcher)
+
+    def test_dispatch_token_fanout_loads_each_token_before_destination_loop(
+            self):
+        """Catches reloading a token's hidden row for every destination."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        signature = (
+            "__aicore__ inline void "
+            "direct_dispatch_producer_token_fanout_impl")
+        self.assertIn(signature, source)
+        begin = source.index(signature)
+        end = source.index("\n}\n", begin)
+        candidate = source[begin:end]
+
+        self.assertIn(
+            "pipe.InitBuffer(\n"
+            "        payload_buffer, kDispatchTokenFanoutBufferBytes)",
+            candidate)
+        source_copy = (
+            "AscendC::DataCopy(\n"
+            "                    payload_local, input_global, vector_bytes);")
+        destination_loop = (
+            "for (std::uint32_t rank = 0; rank < world_size; ++rank)")
+        destination_copy = (
+            "AscendC::DataCopy(\n"
+            "                        output_global, payload_local, "
+            "vector_bytes);")
+        self.assertEqual(candidate.count(source_copy), 1)
+        self.assertIn(destination_loop, candidate)
+        self.assertLess(
+            candidate.index(source_copy), candidate.index(destination_loop))
+        rank_body = candidate[candidate.index(destination_loop):]
+        self.assertIn(destination_copy, rank_body)
+        self.assertNotIn("input_global.SetGlobalBuffer", rank_body)
+        self.assertNotIn(source_copy, rank_body)
+
+        record_call = source.index(
+            "asc_vf_call<direct_dispatch_producer_record_vf>")
+        release_call = source.index(
+            "asc_vf_call<direct_dispatch_producer_release_vf>", record_call)
+        producer_launch = source[record_call:release_call]
+        self.assertIn("if (token_fanout != 0)", producer_launch)
+        self.assertIn(
+            "direct_dispatch_producer_token_fanout_impl(", producer_launch)
+        self.assertIn("} else {", producer_launch)
+        self.assertIn(
+            "direct_dispatch_producer_vector_payload_impl(", producer_launch)
+
+    def test_dispatch_grouping_builds_rank_and_expert_route_counts_together(
+            self):
+        """Catches restoring the receiver payload rescan as count source."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        group_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_group_vf")
+        group_end = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_prefix_vf", group_begin)
+        group = source[group_begin:group_end]
+        for marker in (
+                "dispatch_group_expert_count_offset",
+                "dispatch_group_expert_count",
+                "expert_counts",
+                "asc_atomic_add(",
+                "&expert_counts[static_cast<std::uint32_t>(expert)]",
+                "1U"):
+            self.assertIn(marker, group)
+        self.assertNotIn("tile_expert_counts", group)
+
+        prefix_begin = group_end
+        prefix_end = source.index("\n}\n", prefix_begin)
+        prefix = source[prefix_begin:prefix_end]
+        for marker in (
+                "dispatch_group_expert_count_offset",
+                "dispatch_staging_offset",
+                "dispatch_staging_shard_bytes",
+                "dispatch_route_plan_slot_bytes",
+                "dispatch_route_plan_expert_capacity",
+                "expert_counts",
+                "route_plan_staging"):
+            self.assertIn(marker, prefix)
+        self.assertNotIn("tile_expert_counts", prefix)
+        self.assertNotIn(
+            "for (std::uint32_t tile = 0; tile < tile_count_u32; ++tile)\n"
+            "                count +=", prefix)
+
+    def test_dispatch_route_plan_storage_uses_actual_local_expert_count(self):
+        """Padded route slots must not change the expert-to-rank mapping."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_prefix_vf")
+        end = source.index("\n}\n", begin)
+        prefix = source[begin:end]
+        self.assertIn(
+            "const std::uint64_t num_local_experts =\n"
+            "        num_experts / world_size;", prefix)
+        self.assertIn(
+            "storage_expert / dispatch_route_plan_expert_capacity", prefix)
+        self.assertIn(
+            "storage_expert % dispatch_route_plan_expert_capacity", prefix)
+        self.assertIn(
+            "destination_rank * num_local_experts + local_expert", prefix)
+        self.assertNotIn(
+            "const std::uint32_t expert = threadIdx.x;", prefix)
+
+    def test_dispatch_grouping_uses_native_atomic_expert_accumulator(self):
+        """Catches restoring the serial per-tile expert-count reduction."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        init_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_expert_count_init_vf")
+        init_end = source.index("\n}\n", init_begin)
+        init = source[init_begin:init_end]
+        self.assertIn("threadIdx.x", init)
+        self.assertIn("index += blockDim.x", init)
+        self.assertIn("expert_counts[index] = 0;", init)
+
+        begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_group_vf")
+        end = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_prefix_vf", begin)
+        group = source[begin:end]
+        self.assertIn("asc_atomic_add(", group)
+        self.assertIn(
+            "&expert_counts[static_cast<std::uint32_t>(expert)]", group)
+        self.assertNotIn("tile_expert_counts", group)
+        self.assertNotIn(
+            "for (std::uint32_t expert = 0;\n"
+            "                 expert < num_experts_u32; ++expert)", group)
+
+        control_stage = source.index(
+            "stage == DirectDispatchStage::kProducerControl")
+        init_call = source.index(
+            "asc_vf_call<direct_dispatch_producer_expert_count_init_vf>",
+            control_stage)
+        group_stage = source.index(
+            "stage == DirectDispatchStage::kProducerGroup", init_call)
+        self.assertLess(init_call, group_stage)
+        init_launch = source[init_call:group_stage]
+        self.assertIn(
+            "tiling.workspace_layout.dispatch_group_expert_count_offset",
+            init_launch)
+        self.assertIn(
+            "tiling.workspace_layout.dispatch_group_expert_count", init_launch)
+
+    def test_dispatch_early_route_plan_publishes_before_payload_packing(self):
+        """Catches coupling receiver prefix back to payload readiness."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        buffer = (
+            ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        dispatch = buffer[
+            buffer.index("    dispatch(const torch::Tensor& x"):
+            buffer.index("    combine(const torch::Tensor& x")
+        ]
+        for marker in (
+                '"DEEP_EP_ASCEND_DISPATCH_EARLY_ROUTE_PLAN"',
+                "select_dispatch_early_route_plan_config(",
+                "DEEP_EP_ASCEND_DISPATCH_EARLY_ROUTE_PLAN must be 0 or 1",
+                "arguments.early_route_plan =\n"
+                "            early_route_plan_config.enabled ? 1U : 0U;"):
+            self.assertIn(marker, dispatch)
+        self.assertIn("std::uint32_t early_route_plan = 0;", kernels)
+
+        publish_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_publish_route_plan_vf")
+        publish_end = source.index("\n}\n", publish_begin)
+        publish = source[publish_begin:publish_end]
+        self.assertIn("transport.put(", publish)
+        self.assertIn(
+            "transport_local_window_base + dispatch_staging_offset",
+            publish)
+        self.assertNotIn(
+            "workspace + dispatch_route_plan_staging_offset", publish)
+        flush_call = "release_protocol::flush_payload(transport)"
+        self.assertEqual(publish.count(flush_call), 2)
+        self.assertIn(
+            "transport::sync_layout::kDispatchRouteReadySignalIndex",
+            publish)
+        self.assertLess(
+            publish.index("transport.put("), publish.index(flush_call))
+        self.assertLess(
+            publish.index(flush_call),
+            publish.index("kDispatchRouteReadySignalIndex"))
+        self.assertLess(
+            publish.index("kDispatchRouteReadySignalIndex"),
+            publish.rindex(flush_call))
+        self.assertIn("std::uint64_t timeout_cycles", publish)
+        self.assertIn("transport.device_barrier(", publish)
+        self.assertIn("transport::kWorldTeamMask", publish)
+        self.assertLess(
+            publish.rindex(flush_call),
+            publish.index("transport.device_barrier("))
+
+        acquire_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_acquire_route_plan_vf")
+        acquire_end = source.index("\n}\n", acquire_begin)
+        acquire = source[acquire_begin:acquire_end]
+        self.assertIn("release_protocol::acquire_release(", acquire)
+        self.assertIn("prefix_per_rank", acquire)
+        self.assertIn("prefix_per_expert", acquire)
+        self.assertIn("unaligned_per_expert", acquire)
+        self.assertNotIn("dispatch_receive_offset", acquire)
+
+        payload_acquire_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_epilogue_acquire_vf")
+        payload_acquire_end = source.index("\n}\n", payload_acquire_begin)
+        payload_acquire = source[payload_acquire_begin:payload_acquire_end]
+        self.assertIn("std::uint32_t early_route_plan", payload_acquire)
+        self.assertIn(
+            "dispatch_simt_handoff_dispatch_route_source_count(",
+            payload_acquire)
+        self.assertIn(
+            "canonical_source_counts[source_rank] = canonical_count;",
+            payload_acquire)
+
+        epilogue_macro_begin = source.index(
+            "#define DEEP_EP_ASCEND_DIRECT_DISPATCH_EPILOGUE")
+        epilogue_macro_end = source.index("\n    } while (0)", epilogue_macro_begin)
+        epilogue_macro = source[epilogue_macro_begin:epilogue_macro_end]
+        self.assertIn(
+            "(EARLY_ROUTE_PLAN) == 0 && \\\n"
+            "            ((STAGE) == DirectDispatchStage::kFull || \\\n"
+            "             (STAGE) == DirectDispatchStage::kEpilogueExpertCount)",
+            epilogue_macro)
+        self.assertIn(
+            "(EARLY_ROUTE_PLAN) == 0 && \\\n"
+            "            ((STAGE) == DirectDispatchStage::kFull || \\\n"
+            "             (STAGE) == DirectDispatchStage::kEpilogueExpertPrefix)",
+            epilogue_macro)
+        self.assertIn(
+            "copy_outputs, stage, early_route_plan, pipeline_source_chunk);",
+            source)
+        self.assertIn(
+            "1U, DirectDispatchStage::kFull, 0U, 0U);", source)
+
+        prefix_stage = source.index(
+            "stage == DirectDispatchStage::kProducerPrefix")
+        publish_call = source.index(
+            "asc_vf_call<direct_dispatch_publish_route_plan_vf>",
+            prefix_stage)
+        service_call = source.index(
+            "transport::service::execute<ProfileEnabled>", publish_call)
+        publish_launch = source[publish_call:service_call]
+        self.assertIn("generation, timeout_cycles,", publish_launch)
+        acquire_call = source.index(
+            "asc_vf_call<direct_dispatch_acquire_route_plan_vf>",
+            service_call)
+        record_stage = source.index(
+            "stage == DirectDispatchStage::kProducerRecord", acquire_call)
+        self.assertLess(publish_call, service_call)
+        self.assertLess(service_call, acquire_call)
+        self.assertLess(acquire_call, record_stage)
+
+    def test_dispatch_early_route_plan_keeps_outgoing_and_incoming_counts_separate(
+            self):
+        """Catches route acquire clobbering counts needed by producer release."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        layout = (ELASTIC / "layout.hpp").read_text()
+        tiling = (ELASTIC / "tiling.hpp").read_text()
+
+        for marker in (
+                "dispatch_route_source_counts_offset",
+                "dispatch_route_source_counts_bytes"):
+            self.assertIn(marker, layout)
+            self.assertIn(marker, tiling)
+
+        acquire_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_acquire_route_plan_vf")
+        acquire_end = source.index("\n}\n", acquire_begin)
+        acquire = source[acquire_begin:acquire_end]
+        self.assertIn("workspace_route_source_counts_offset", acquire)
+        self.assertIn(
+            "workspace + workspace_route_source_counts_offset", acquire)
+        self.assertNotIn(
+            "workspace + workspace_rank_counts_offset", acquire)
+
+        payload_acquire_begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_epilogue_acquire_vf")
+        payload_acquire_end = source.index("\n}\n", payload_acquire_begin)
+        payload_acquire = source[
+            payload_acquire_begin:payload_acquire_end]
+        self.assertIn("workspace_route_source_counts_offset", payload_acquire)
+        self.assertIn(
+            "early_route_plan != 0 ?\n"
+            "            workspace_route_source_counts_offset :\n"
+            "            workspace_rank_counts_offset",
+            payload_acquire)
+
+        release_begin = source.index(
+            "direct_dispatch_producer_release_body(")
+        release_end = source.index("\n}\n", release_begin)
+        release = source[release_begin:release_end]
+        self.assertIn("workspace + workspace_rank_counts_offset", release)
+        self.assertNotIn("workspace_route_source_counts_offset", release)
 
     def test_dispatch_consumer_tile_specializations(self):
         source = (ELASTIC / "dispatch.asc").read_text()
@@ -1595,7 +2340,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
     def test_remote_operator_commands_reuse_checked_team_peer(self):
         release = (ELASTIC / "release_protocol.hpp").read_text()
         for source_name, signal_name, barrier_calls in (
-                ("dispatch.asc", "kDispatchReleaseSignalIndex", 3),
+                ("dispatch.asc", "kDispatchReleaseSignalIndex", 4),
                 ("combine.asc", "kCombineReleaseSignalIndex", 3)):
             source = (ELASTIC / source_name).read_text()
             self.assertIn("checked_device_team_peer_for_world_rank(", source,
@@ -2999,6 +3744,8 @@ int main() {
 
     def test_dispatch_has_fixed_shard_service_boundaries(self):
         source = (ELASTIC / "dispatch.asc").read_text()
+        kernel = source[source.index(
+            "__global__ __vector__ void dispatch_kernel"):]
         ordered_markers = (
             "service::reset",
             "asc_vf_call<dispatch_producer_vf>",
@@ -3006,8 +3753,8 @@ int main() {
             "asc_vf_call<dispatch_epilogue_vf>",
         )
         for marker in ordered_markers:
-            self.assertIn(marker, source)
-        positions = [source.index(marker) for marker in ordered_markers]
+            self.assertIn(marker, kernel)
+        positions = [kernel.index(marker) for marker in ordered_markers]
         self.assertEqual(positions, sorted(positions))
         for marker in (
                 "transport_world_rank", "transport_local_window_base",
@@ -3244,10 +3991,11 @@ int main() {
                 "tiling.workspace_layout.scratch_status_offset"):
             self.assertIn(marker, source)
         self.assertIn("make_dispatch_protocol_failure", source)
-        self.assertIn("failure.backend_status, failure.generation", source)
+        self.assertIn(
+            "failure.backend_status,\n        failure.generation", source)
         failure_build = source.index("make_dispatch_protocol_failure")
         diagnostic_write = source.index(
-            "failure.backend_status, failure.generation")
+            "failure.backend_status,\n        failure.generation")
         self.assertLess(failure_build, diagnostic_write)
         self.assertNotIn("RemoteAction::signal_add", source + release)
         self.assertNotIn("RemoteAction::signal_increment", source + release)
@@ -3274,8 +4022,8 @@ int main() {
     def test_direct_release_batches_all_payloads_before_controls(self):
         """Catches per-peer flushes that serialize independent publications."""
         functions = (
-            ("dispatch.asc", "direct_dispatch_producer_release_vf",
-             "hybrid_dispatch_forward_vf"),
+            ("dispatch.asc", "direct_dispatch_producer_release_body",
+             "#define DEEP_EP_ASCEND_DISPATCH_RELEASE_ARGUMENTS"),
             ("combine.asc", "direct_combine_producer_release_vf",
              "hybrid_combine_return_vf"),
         )
@@ -3323,12 +4071,13 @@ int main() {
         source = (ELASTIC / "dispatch.asc").read_text()
         producer_begin = source.index(
             "__simt_vf__ __launch_bounds__(512) inline void dispatch_producer_vf")
+        producer_end = source.index("\n}\n", producer_begin)
+        producer = source[producer_begin:producer_end]
+        self.assertNotIn("prefix_per_rank[", producer)
+        self.assertIn("local_count_address", producer)
         epilogue_begin = source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_epilogue_acquire_vf")
-        producer = source[producer_begin:epilogue_begin]
-        self.assertNotIn("prefix_per_rank[", producer)
-        self.assertIn("local_count_address", producer)
         epilogue = source[epilogue_begin:]
         self.assertIn(
             "source_counts[0] = transport.load_acquire(local_count_address)",

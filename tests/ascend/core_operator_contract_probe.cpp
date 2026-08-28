@@ -6,11 +6,14 @@
 
 #include "csrc/backends/ascend/elastic/combine_parallel.hpp"
 #include "csrc/backends/ascend/elastic/dispatch_parallel.hpp"
+#include "csrc/backends/ascend/elastic/dispatch_early_route_plan.hpp"
 #include "csrc/backends/ascend/elastic/dispatch_pipeline_config.hpp"
+#include "csrc/backends/ascend/elastic/dispatch_token_fanout.hpp"
 #include "csrc/backends/ascend/elastic/layout.hpp"
 #include "csrc/backends/ascend/elastic/kernels.hpp"
 #include "csrc/backends/ascend/elastic/tiling.hpp"
 #include "csrc/backends/ascend/elastic/topk_grouping.hpp"
+#include "csrc/backends/ascend/transport/sync_layout.hpp"
 
 using namespace deep_ep::ascend::elastic;
 
@@ -24,6 +27,14 @@ static_assert(std::is_standard_layout_v<CoreTiling>);
 static_assert(std::is_trivially_copyable_v<CoreTiling>);
 static_assert(std::is_standard_layout_v<DispatchPipelineState>);
 static_assert(std::is_trivially_copyable_v<DispatchPipelineState>);
+static_assert(offsetof(DispatchPipelineState, release_completed_generation) ==
+              64);
+static_assert(offsetof(DispatchPipelineState, slots) == 128);
+static_assert(offsetof(DispatchPipelineState, scalar_progress) == 384);
+static_assert(offsetof(DispatchPipelineState, hidden_progress) == 4992);
+static_assert(
+    offsetof(DispatchPipelineState, release_completed_generation) / 64 !=
+    offsetof(DispatchPipelineState, generation) / 64);
 
 namespace {
 
@@ -206,6 +217,249 @@ bool topk_grouping_reference_contract() {
 }  // namespace
 
 int main() {
+    static_assert(
+        deep_ep::ascend::transport::sync_layout::
+            kDispatchRouteReadySignalIndex == 2);
+    std::uint64_t canonical_source_count = 99;
+    if (!handoff_dispatch_route_source_count(
+            true, 5, 5, 16, &canonical_source_count) ||
+        canonical_source_count != 5)
+        return 135;
+    canonical_source_count = 99;
+    if (handoff_dispatch_route_source_count(
+            true, 7, 5, 16, &canonical_source_count) ||
+        canonical_source_count != 99 ||
+        handoff_dispatch_route_source_count(
+            true, 17, 17, 16, &canonical_source_count) ||
+        canonical_source_count != 99 ||
+        !handoff_dispatch_route_source_count(
+            false, 7, 5, 16, &canonical_source_count) ||
+        canonical_source_count != 5)
+        return 136;
+    DispatchEarlyRoutePlanConfig early_route_config{};
+    if (select_dispatch_early_route_plan_config(
+            "1", true, true, false, false, false, false, false,
+            256, 8, 8, &early_route_config) !=
+                DispatchEarlyRoutePlanConfigStatus::kEnabled ||
+        !early_route_config.enabled)
+        return 127;
+    for (const char* value : {static_cast<const char*>(nullptr), "0"}) {
+        if (select_dispatch_early_route_plan_config(
+                value, true, true, false, false, false, false, false,
+                256, 8, 8, &early_route_config) !=
+                    DispatchEarlyRoutePlanConfigStatus::kDisabled ||
+            early_route_config.enabled)
+            return 128;
+    }
+    for (const char* value : {"", "2", "true", "01"}) {
+        if (select_dispatch_early_route_plan_config(
+                value, true, true, false, false, false, false, false,
+                256, 8, 8, &early_route_config) !=
+                    DispatchEarlyRoutePlanConfigStatus::kInvalid)
+            return 129;
+    }
+    const DispatchEarlyRoutePlanConfigStatus early_route_disabled_cases[] = {
+        select_dispatch_early_route_plan_config(
+            "1", false, true, false, false, false, false, false,
+            256, 8, 8, &early_route_config),
+        select_dispatch_early_route_plan_config(
+            "1", true, false, false, false, false, false, false,
+            256, 8, 8, &early_route_config),
+        select_dispatch_early_route_plan_config(
+            "1", true, true, true, false, false, false, false,
+            256, 8, 8, &early_route_config),
+        select_dispatch_early_route_plan_config(
+            "1", true, true, false, true, false, false, false,
+            256, 8, 8, &early_route_config),
+        select_dispatch_early_route_plan_config(
+            "1", true, true, false, false, true, false, false,
+            256, 8, 8, &early_route_config),
+        select_dispatch_early_route_plan_config(
+            "1", true, true, false, false, false, true, false,
+            256, 8, 8, &early_route_config),
+        select_dispatch_early_route_plan_config(
+            "1", true, true, false, false, false, false, true,
+            256, 8, 8, &early_route_config),
+        select_dispatch_early_route_plan_config(
+            "1", true, true, false, false, false, false, false,
+            257, 8, 8, &early_route_config),
+        select_dispatch_early_route_plan_config(
+            "1", true, true, false, false, false, false, false,
+            256, 9, 8, &early_route_config),
+        select_dispatch_early_route_plan_config(
+            "1", true, true, false, false, false, false, false,
+            256, 8, 9, &early_route_config),
+        select_dispatch_early_route_plan_config(
+            "1", true, true, false, false, false, false, false,
+            255, 8, 8, &early_route_config),
+    };
+    for (const auto status : early_route_disabled_cases) {
+        if (status != DispatchEarlyRoutePlanConfigStatus::kDisabled ||
+            early_route_config.enabled)
+            return 130;
+    }
+    if (select_dispatch_early_route_plan_config(
+            "1", true, true, false, false, false, false, false,
+            256, 8, 8, nullptr) !=
+                DispatchEarlyRoutePlanConfigStatus::kInvalid)
+        return 131;
+    {
+        constexpr std::int64_t topk[] = {
+            0, 1, 4, -1,
+            0, 0, 5, 7,
+            -1, 3, 3, 3,
+        };
+        std::uint64_t rank_counts[2]{};
+        std::uint64_t expert_counts[8]{};
+        for (std::uint32_t token = 0; token < 3; ++token) {
+            bool selected_ranks[2]{};
+            for (std::uint32_t lane = 0; lane < 4; ++lane) {
+                const auto coordinate = dispatch_route_plan_coordinate(
+                    topk[token * 4 + lane], 8, 2);
+                if (!coordinate.valid)
+                    continue;
+                selected_ranks[coordinate.destination_rank] = true;
+                ++expert_counts[
+                    coordinate.destination_rank * 4 +
+                    coordinate.local_expert];
+            }
+            for (std::uint32_t rank = 0; rank < 2; ++rank)
+                rank_counts[rank] += selected_ranks[rank] ? 1 : 0;
+        }
+        constexpr std::uint64_t expected_rank_counts[] = {3, 2};
+        constexpr std::uint64_t expected_expert_counts[] = {
+            3, 1, 0, 3, 1, 1, 0, 1,
+        };
+        for (std::uint32_t rank = 0; rank < 2; ++rank)
+            if (rank_counts[rank] != expected_rank_counts[rank])
+                return 132;
+        for (std::uint32_t expert = 0; expert < 8; ++expert)
+            if (expert_counts[expert] != expected_expert_counts[expert])
+                return 133;
+        if (dispatch_route_plan_coordinate(-1, 8, 2).valid ||
+            dispatch_route_plan_coordinate(8, 8, 2).valid ||
+            dispatch_route_plan_coordinate(0, 0, 2).valid ||
+            dispatch_route_plan_coordinate(0, 8, 0).valid ||
+            dispatch_route_plan_coordinate(0, 7, 2).valid)
+            return 134;
+    }
+
+    DispatchTokenFanoutConfig token_fanout_config{};
+    if (select_dispatch_token_fanout_config(
+            "1", true, true, false, false, false, false, false,
+            8, 8, 7168, &token_fanout_config) !=
+                DispatchTokenFanoutConfigStatus::kEnabled ||
+        !token_fanout_config.enabled ||
+        token_fanout_config.vector_bytes != 7168)
+        return 118;
+    if (select_dispatch_token_fanout_config(
+            "1", true, true, false, false, false, false, false,
+            8, 8, 7184, &token_fanout_config) !=
+                DispatchTokenFanoutConfigStatus::kEnabled ||
+        !token_fanout_config.enabled ||
+        token_fanout_config.vector_bytes != 7168)
+        return 126;
+    for (const char* value : {static_cast<const char*>(nullptr), "0"}) {
+        if (select_dispatch_token_fanout_config(
+                value, true, true, false, false, false, false, false,
+                8, 8, 7168, &token_fanout_config) !=
+                    DispatchTokenFanoutConfigStatus::kDisabled ||
+            token_fanout_config.enabled ||
+            token_fanout_config.vector_bytes != 0)
+            return 119;
+    }
+    for (const char* value : {"", "2", "true", "01"}) {
+        if (select_dispatch_token_fanout_config(
+                value, true, true, false, false, false, false, false,
+                8, 8, 7168, &token_fanout_config) !=
+                    DispatchTokenFanoutConfigStatus::kInvalid)
+            return 120;
+    }
+    const DispatchTokenFanoutConfigStatus token_fanout_disabled_cases[] = {
+        select_dispatch_token_fanout_config(
+            "1", false, true, false, false, false, false, false,
+            8, 8, 7168, &token_fanout_config),
+        select_dispatch_token_fanout_config(
+            "1", true, false, false, false, false, false, false,
+            8, 8, 7168, &token_fanout_config),
+        select_dispatch_token_fanout_config(
+            "1", true, true, true, false, false, false, false,
+            8, 8, 7168, &token_fanout_config),
+        select_dispatch_token_fanout_config(
+            "1", true, true, false, true, false, false, false,
+            8, 8, 7168, &token_fanout_config),
+        select_dispatch_token_fanout_config(
+            "1", true, true, false, false, true, false, false,
+            8, 8, 7168, &token_fanout_config),
+        select_dispatch_token_fanout_config(
+            "1", true, true, false, false, false, true, false,
+            8, 8, 7168, &token_fanout_config),
+        select_dispatch_token_fanout_config(
+            "1", true, true, false, false, false, false, true,
+            8, 8, 7168, &token_fanout_config),
+        select_dispatch_token_fanout_config(
+            "1", true, true, false, false, false, false, false,
+            9, 8, 7168, &token_fanout_config),
+        select_dispatch_token_fanout_config(
+            "1", true, true, false, false, false, false, false,
+            8, 9, 7168, &token_fanout_config),
+        select_dispatch_token_fanout_config(
+            "1", true, true, false, false, false, false, false,
+            8, 8, 31, &token_fanout_config),
+        select_dispatch_token_fanout_config(
+            "1", true, true, false, false, false, false, false,
+            8, 8, 4096, &token_fanout_config),
+        select_dispatch_token_fanout_config(
+            "1", true, true, false, false, false, false, false,
+            8, 8, 7200, &token_fanout_config),
+    };
+    for (const auto status : token_fanout_disabled_cases) {
+        if (status != DispatchTokenFanoutConfigStatus::kDisabled ||
+            token_fanout_config.enabled ||
+            token_fanout_config.vector_bytes != 0)
+            return 121;
+    }
+    if (select_dispatch_token_fanout_config(
+            "1", true, true, false, false, false, false, false,
+            8, 8, 7168, nullptr) !=
+                DispatchTokenFanoutConfigStatus::kInvalid)
+        return 122;
+
+    const auto common_fanout =
+        build_dispatch_token_fanout_plan(7168, 32, 7168);
+    const auto tailed_fanout =
+        build_dispatch_token_fanout_plan(7184, 32, 7168);
+    const auto oversized_fanout =
+        build_dispatch_token_fanout_plan(7200, 32, 7168);
+    const auto invalid_alignment_fanout =
+        build_dispatch_token_fanout_plan(7168, 48, 7168);
+    if (!common_fanout.valid || common_fanout.vector_bytes != 7168 ||
+        common_fanout.scalar_begin != 7168 ||
+        common_fanout.source_loads_per_token != 1 ||
+        !tailed_fanout.valid || tailed_fanout.vector_bytes != 7168 ||
+        tailed_fanout.scalar_begin != 7168 || oversized_fanout.valid ||
+        invalid_alignment_fanout.valid)
+        return 123;
+    std::uint64_t source_bytes = 0;
+    std::uint64_t destination_bytes = 0;
+    if (!dispatch_token_fanout_work_bytes(
+            8192, 43325, common_fanout,
+            &source_bytes, &destination_bytes) ||
+        source_bytes != 8192ULL * 7168ULL ||
+        destination_bytes != 43325ULL * 7168ULL)
+        return 124;
+    source_bytes = 17;
+    destination_bytes = 19;
+    if (dispatch_token_fanout_work_bytes(
+            std::numeric_limits<std::uint64_t>::max(), 1,
+            common_fanout, &source_bytes, &destination_bytes) ||
+        source_bytes != 0 || destination_bytes != 0 ||
+        dispatch_token_fanout_work_bytes(
+            1, 1, common_fanout, nullptr, &destination_bytes) ||
+        dispatch_token_fanout_work_bytes(
+            1, 1, common_fanout, &source_bytes, nullptr))
+        return 125;
+
     DispatchDevicePrefixConfig device_prefix_config{};
     if (select_dispatch_device_prefix_config(
             "1", false, true, false, false,
@@ -451,6 +705,121 @@ int main() {
     if (build_dispatch_chunk_plan(8192, 0, &chunk_plan) ||
         dispatch_chunk_peer_range(chunk_plan, 4, 5000, nullptr, nullptr))
         return 89;
+    DispatchSourceChunkPlan source_chunk_plan{};
+    if (!build_dispatch_source_chunk_plan(
+            8192, kDispatchGroupingTokensPerTile, 512,
+            &source_chunk_plan) ||
+        source_chunk_plan.token_count != 8192 ||
+        source_chunk_plan.tile_count != 2048 ||
+        source_chunk_plan.chunk_tiles != 512 ||
+        source_chunk_plan.chunk_count != 4)
+        return 166;
+    std::uint32_t expected_token_begin = 0;
+    for (std::uint32_t chunk = 0;
+         chunk < source_chunk_plan.chunk_count; ++chunk) {
+        std::uint32_t tile_begin = 0;
+        std::uint32_t tile_end = 0;
+        std::uint32_t token_begin = 0;
+        std::uint32_t token_end = 0;
+        if (!dispatch_source_chunk_bounds(
+                source_chunk_plan, chunk, &tile_begin, &tile_end,
+                &token_begin, &token_end) ||
+            tile_begin != chunk * 512 ||
+            tile_end != (chunk + 1) * 512 ||
+            token_begin != expected_token_begin ||
+            token_end != (chunk + 1) * 2048)
+            return 167;
+        expected_token_begin = token_end;
+    }
+    DispatchSourceChunkPlan tailed_source_chunk_plan{};
+    if (!build_dispatch_source_chunk_plan(
+            9, kDispatchGroupingTokensPerTile, 2,
+            &tailed_source_chunk_plan) ||
+        tailed_source_chunk_plan.tile_count != 3 ||
+        tailed_source_chunk_plan.chunk_count != 2)
+        return 168;
+    std::uint32_t tail_tile_begin = 0;
+    std::uint32_t tail_tile_end = 0;
+    std::uint32_t tail_token_begin = 0;
+    std::uint32_t tail_token_end = 0;
+    if (!dispatch_source_chunk_bounds(
+            tailed_source_chunk_plan, 1, &tail_tile_begin,
+            &tail_tile_end, &tail_token_begin, &tail_token_end) ||
+        tail_tile_begin != 2 || tail_tile_end != 3 ||
+        tail_token_begin != 8 || tail_token_end != 9)
+        return 169;
+    std::uint64_t source_slot_begin = 0;
+    std::uint64_t source_slot_count = 0;
+    if (!dispatch_source_chunk_peer_range(
+            source_chunk_plan, 0, 0, 11, 18,
+            &source_slot_begin, &source_slot_count) ||
+        source_slot_begin != 0 || source_slot_count != 11 ||
+        !dispatch_source_chunk_peer_range(
+            source_chunk_plan, 3, 13, 0, 18,
+            &source_slot_begin, &source_slot_count) ||
+        source_slot_begin != 13 || source_slot_count != 5 ||
+        dispatch_source_chunk_peer_range(
+            source_chunk_plan, 0, 12, 11, 18,
+            &source_slot_begin, &source_slot_count) ||
+        dispatch_source_chunk_peer_range(
+            source_chunk_plan, 4, 0, 0, 0, nullptr, nullptr))
+        return 170;
+    DispatchSourcePipelineConfig source_pipeline_config{};
+    if (select_dispatch_source_pipeline_config(
+            "512", true, false, true, false, false, false, 2,
+            8192, &source_pipeline_config) !=
+                DispatchSourcePipelineConfigStatus::kEnabled ||
+        !source_pipeline_config.enabled ||
+        source_pipeline_config.chunk_tiles != 512 ||
+        source_pipeline_config.chunk_count != 4)
+        return 171;
+    if (select_dispatch_source_pipeline_config(
+            nullptr, true, false, true, false, false, false, 2,
+            8192, &source_pipeline_config) !=
+                DispatchSourcePipelineConfigStatus::kDisabled ||
+        source_pipeline_config.enabled)
+        return 172;
+    for (const char* invalid_value : {"", "0", "-1", "512x"}) {
+        if (select_dispatch_source_pipeline_config(
+                invalid_value, true, false, true, false, false, false, 2,
+                8192, &source_pipeline_config) !=
+            DispatchSourcePipelineConfigStatus::kInvalid)
+            return 173;
+    }
+    const DispatchSourcePipelineConfigStatus source_pipeline_disabled[] = {
+        select_dispatch_source_pipeline_config(
+            "512", false, false, true, false, false, false, 2,
+            8192, &source_pipeline_config),
+        select_dispatch_source_pipeline_config(
+            "512", true, true, true, false, false, false, 2,
+            8192, &source_pipeline_config),
+        select_dispatch_source_pipeline_config(
+            "512", true, false, false, false, false, false, 2,
+            8192, &source_pipeline_config),
+        select_dispatch_source_pipeline_config(
+            "512", true, false, true, true, false, false, 2,
+            8192, &source_pipeline_config),
+        select_dispatch_source_pipeline_config(
+            "512", true, false, true, false, true, false, 2,
+            8192, &source_pipeline_config),
+        select_dispatch_source_pipeline_config(
+            "512", true, false, true, false, false, true, 2,
+            8192, &source_pipeline_config),
+        select_dispatch_source_pipeline_config(
+            "512", true, false, true, false, false, false, 1,
+            8192, &source_pipeline_config),
+        select_dispatch_source_pipeline_config(
+            "2048", true, false, true, false, false, false, 2,
+            8192, &source_pipeline_config),
+        select_dispatch_source_pipeline_config(
+            "128", true, false, true, false, false, false, 2,
+            8192, &source_pipeline_config),
+    };
+    for (const auto status : source_pipeline_disabled) {
+        if (status != DispatchSourcePipelineConfigStatus::kDisabled ||
+            source_pipeline_config.enabled)
+            return 174;
+    }
     auto pipeline_input = valid_input();
     pipeline_input.mode_flags = mode_bit(CoreMode::kPipeline);
     pipeline_input.data_num_blocks = 72;
@@ -469,6 +838,90 @@ int main() {
     if (&pipeline_state.slots[0].request ==
         &pipeline_state.slots[1].request)
         return 91;
+    constexpr std::uint64_t pipeline_generation = 17;
+    constexpr std::uint32_t pipeline_blocks = 72;
+    if (dispatch_pipeline_producer_must_wait_for_reuse(0) ||
+        dispatch_pipeline_producer_must_wait_for_reuse(1) ||
+        !dispatch_pipeline_producer_must_wait_for_reuse(2) ||
+        !dispatch_pipeline_producer_must_wait_for_reuse(3))
+        return 189;
+    pipeline_state.generation = pipeline_generation;
+    for (std::uint32_t chunk = 0; chunk < 4; ++chunk) {
+        auto& slot = pipeline_state.slots[dispatch_pipeline_slot(chunk)];
+        if (!dispatch_pipeline_slot_reusable(slot, chunk))
+            return 179;
+        slot.state = DispatchPipelineSlotState::kProducing;
+        slot.chunk_index = chunk;
+        slot.published_chunk = chunk;
+        slot.scalar_blocks_completed = 0;
+        slot.hidden_blocks_completed = 0;
+        for (std::uint32_t block = 0; block < pipeline_blocks; ++block) {
+            const bool publish = dispatch_pipeline_completion_is_last(
+                slot.scalar_blocks_completed, pipeline_blocks);
+            ++slot.scalar_blocks_completed;
+            if (publish != (block + 1 == pipeline_blocks))
+                return 180;
+        }
+        slot.state = DispatchPipelineSlotState::kScalarReady;
+        for (std::uint32_t block = 0; block < pipeline_blocks; ++block) {
+            auto& scalar_progress = pipeline_state.scalar_progress[block];
+            auto& hidden_progress = pipeline_state.hidden_progress[block];
+            if (&scalar_progress == &hidden_progress ||
+                reinterpret_cast<std::uintptr_t>(&scalar_progress) % 64 != 0 ||
+                reinterpret_cast<std::uintptr_t>(&hidden_progress) % 64 != 0)
+                return 187;
+            scalar_progress.generation = pipeline_generation;
+            scalar_progress.completed_chunk = chunk;
+            if (!dispatch_pipeline_block_progress_ready(
+                    scalar_progress, pipeline_generation, chunk) ||
+                dispatch_pipeline_block_progress_ready(
+                    scalar_progress, pipeline_generation + 1U, chunk) ||
+                dispatch_pipeline_block_progress_ready(
+                    scalar_progress, pipeline_generation, chunk + 1U))
+                return 188;
+            hidden_progress.generation = pipeline_generation;
+            hidden_progress.completed_chunk = chunk;
+            if (!dispatch_pipeline_block_progress_ready(
+                    hidden_progress, pipeline_generation, chunk))
+                return 184;
+            ++slot.hidden_blocks_completed;
+        }
+        slot.state = DispatchPipelineSlotState::kReady;
+        if (!dispatch_pipeline_slot_ready_for_release(
+                slot, pipeline_generation, pipeline_state.generation,
+                chunk, pipeline_blocks))
+            return 181;
+        slot.state = DispatchPipelineSlotState::kCompleted;
+    }
+    auto& wrapped_slot = pipeline_state.slots[0];
+    wrapped_slot.state = DispatchPipelineSlotState::kInFlight;
+    if (dispatch_pipeline_slot_reusable(wrapped_slot, 4))
+        return 182;
+    wrapped_slot.state = DispatchPipelineSlotState::kCompleted;
+    wrapped_slot.published_chunk = 3;
+    if (dispatch_pipeline_slot_reusable(wrapped_slot, 4))
+        return 183;
+    if (dispatch_pipeline_release_batch_pending(7, 7) ||
+        !dispatch_pipeline_release_batch_pending(8, 7) ||
+        dispatch_pipeline_release_batch_acknowledged(8, 7) ||
+        !dispatch_pipeline_release_batch_acknowledged(8, 8) ||
+        !dispatch_pipeline_release_batch_acknowledged(8, 9))
+        return 185;
+    if (dispatch_pipeline_wait_timed_out(100, 109, 10) ||
+        !dispatch_pipeline_wait_timed_out(100, 110, 10) ||
+        dispatch_pipeline_wait_timed_out(
+            std::numeric_limits<std::uint64_t>::max() - 4, 3, 9) ||
+        !dispatch_pipeline_wait_timed_out(
+            std::numeric_limits<std::uint64_t>::max() - 4, 4, 9) ||
+        dispatch_pipeline_wait_timed_out(100, 200, 0))
+        return 186;
+    pipeline_state.diagnostic_stage =
+        DispatchPipelineDiagnosticStage::kReleaseBatchTargetPublished;
+    pipeline_state.diagnostic_detail = 7;
+    if (pipeline_state.diagnostic_stage !=
+            DispatchPipelineDiagnosticStage::kReleaseBatchTargetPublished ||
+        pipeline_state.diagnostic_detail != 7)
+        return 187;
     if (const int boundary_error = direct_device_index_boundary_contract();
         boundary_error != 0)
         return boundary_error;
@@ -1107,6 +1560,9 @@ int main() {
     representative_input.num_max_tokens_per_rank = 8192;
     representative_input.num_experts = 256;
     representative_input.num_topk = 8;
+    representative_input.element_kind = ElementKind::kFloat8E4M3;
+    representative_input.num_scale_factor_packs = 224;
+    representative_input.scale_factor_pack_bytes = 4;
     representative_input.expert_alignment = 128;
     representative_input.topology.world_size = 8;
     representative_input.topology.scale_up_size = 8;
@@ -1115,6 +1571,11 @@ int main() {
     status = build_core_tiling(representative_input, &tiling);
     if (!status.ok())
         return 68;
+    const auto default_workspace_bytes =
+        default_elastic_runtime_workspace_bytes();
+    if (default_workspace_bytes % kPublicElasticBufferAlignment != 0 ||
+        default_workspace_bytes < tiling.workspace_bytes)
+        return 95;
     const auto& workspace_layout = tiling.workspace_layout;
     const auto workspace_end = workspace_layout.scratch_offset +
         workspace_layout.scratch_bytes;
@@ -1124,12 +1585,36 @@ int main() {
         return offset % alignment == 0 && offset <= workspace_end &&
             bytes <= workspace_end - offset;
     };
+    const auto regions_overlap = [](
+        std::uint64_t lhs_offset, std::uint64_t lhs_bytes,
+        std::uint64_t rhs_offset, std::uint64_t rhs_bytes) {
+        return lhs_offset < rhs_offset + rhs_bytes &&
+               rhs_offset < lhs_offset + lhs_bytes;
+    };
     if (workspace_layout.dispatch_receive_tile_count != 512 ||
         workspace_layout.dispatch_expert_tile_count != 512 ||
+        workspace_layout.dispatch_group_expert_count != 256 ||
+        workspace_layout.dispatch_group_expert_count_bytes !=
+            256ULL * sizeof(std::uint32_t) ||
+        workspace_layout.dispatch_route_source_counts_bytes !=
+            8ULL * sizeof(std::uint64_t) ||
         !region_is_valid(
             workspace_layout.dispatch_receive_tile_error_offset,
             workspace_layout.dispatch_receive_tile_error_bytes,
             alignof(std::uint64_t)) ||
+        !region_is_valid(
+            workspace_layout.dispatch_group_expert_count_offset,
+            workspace_layout.dispatch_group_expert_count_bytes,
+            alignof(std::uint32_t)) ||
+        !region_is_valid(
+            workspace_layout.dispatch_route_source_counts_offset,
+            workspace_layout.dispatch_route_source_counts_bytes,
+            alignof(std::uint64_t)) ||
+        regions_overlap(
+            workspace_layout.scratch_rank_counts_offset,
+            8ULL * sizeof(std::uint64_t),
+            workspace_layout.dispatch_route_source_counts_offset,
+            workspace_layout.dispatch_route_source_counts_bytes) ||
         !region_is_valid(
             workspace_layout.dispatch_expert_tile_count_offset,
             workspace_layout.dispatch_expert_tile_count_bytes,
