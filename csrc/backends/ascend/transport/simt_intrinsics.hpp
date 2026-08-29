@@ -9,6 +9,8 @@
 
 namespace deep_ep::ascend::transport::simt {
 
+inline constexpr std::uint32_t kPollingNopCycles = 55;
+
 template <typename T>
 inline constexpr bool kSupportedDeviceScalar =
     std::is_integral_v<T> && (sizeof(T) == 1 || sizeof(T) == 2 ||
@@ -16,6 +18,11 @@ inline constexpr bool kSupportedDeviceScalar =
 
 DEEP_EP_ASCEND_SIMT_CALLEE void system_fence() {
     asc_threadfence();
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE void poll_nop() {
+    for (std::uint32_t cycle = 0; cycle < kPollingNopCycles; ++cycle)
+        asc_nop();
 }
 
 template <typename T>

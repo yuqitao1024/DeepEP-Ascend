@@ -686,6 +686,7 @@ __aicore__ inline bool drain_channel(
         std::uint64_t retry = 0;
         std::uint32_t word0 = 0;
         do {
+            aicore::poll_nop();
             aicore::sync_event<AscendC::HardEvent::S_MTE2>();
             AscendC::DataCopy(cqe_scratch, cqe_global, std::uint32_t{16});
             aicore::sync_event<AscendC::HardEvent::MTE2_S>();
@@ -1097,6 +1098,7 @@ __aicore__ inline bool execute_barrier(
             std::uint64_t retry = 0;
             std::uint64_t observed = 0;
             while (true) {
+                aicore::poll_nop();
                 aicore::sync_event<AscendC::HardEvent::S_MTE2>();
                 AscendC::DataCopyPad(signal_scratch, signal_global,
                                      copy_params, pad_params);

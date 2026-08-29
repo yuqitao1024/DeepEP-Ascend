@@ -8,6 +8,8 @@
 
 namespace deep_ep::ascend::transport::aicore {
 
+inline constexpr std::uint32_t kPollingNopCycles = 800;
+
 template <typename T>
 inline constexpr bool kSupportedDeviceScalar =
     std::is_integral_v<T> && (sizeof(T) == 1 || sizeof(T) == 2 ||
@@ -15,6 +17,10 @@ inline constexpr bool kSupportedDeviceScalar =
 
 __aicore__ inline void system_fence() {
     pipe_barrier(PIPE_ALL);
+}
+
+__aicore__ inline void poll_nop() {
+    AscendC::Nop<kPollingNopCycles>();
 }
 
 __aicore__ inline void flush_cacheline(__gm__ void* address) {

@@ -496,8 +496,12 @@ DEEP_EP_ASCEND_SIMT_CALLEE void wait_signal(
     const auto limit = timeout_cycles == 0 ?
         std::uint64_t{1000000} : timeout_cycles;
     std::uint64_t retry = 0;
-    while (retry < limit && simt::load_observed(address) < target)
+    while (retry < limit) {
+        simt::poll_nop();
+        if (simt::load_observed(address) >= target)
+            break;
         ++retry;
+    }
     if (retry >= limit) {
         detail::record_error(
             queue, DeviceTransportError::kCompletionTimeout,
@@ -652,6 +656,7 @@ DEEP_EP_ASCEND_SIMT_CALLEE void wait(
         detail::kDefaultRequestRetryLimit : configured_limit;
     std::uint64_t retry = 0;
     while (retry < retry_limit) {
+        simt::poll_nop();
         const auto queue_generation =
             simt::load_observed(&queue->generation);
         const auto consumed_generation =
