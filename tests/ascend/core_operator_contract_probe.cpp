@@ -1433,7 +1433,7 @@ int main() {
         return 82;
     if (direct_dispatch_release_segment(
             DirectDispatchStage::kFull, true) !=
-            DirectReleaseSegment::kAll ||
+        DirectReleaseSegment::kAll ||
         direct_dispatch_release_segment(
             DirectDispatchStage::kProducerRelease, false) !=
             DirectReleaseSegment::kAll ||

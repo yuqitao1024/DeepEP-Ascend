@@ -916,6 +916,38 @@ __aicore__ inline bool post_faa(
 }
 
 template <bool ProfileEnabled = true>
+__aicore__ inline bool post_inline_write64(
+    const DeviceTransportContext& context,
+    __gm__ TransportCommandQueue* queue, std::uint32_t peer_index,
+    std::uint64_t remote_address, std::uint64_t value,
+    std::uint32_t command_index, TransportCommandOpcode opcode,
+    std::uint64_t retry_limit, __gm__ TransportStageProfile* profile,
+    const AscendC::LocalTensor<std::uint32_t>& wqe_scratch) {
+    auto peer = resolve_context(context, peer_index, 0);
+    if (peer.channel == nullptr) {
+        record_error(
+            queue, DeviceTransportError::kInvalidQueue, command_index,
+            opcode, peer_index, 0);
+        return false;
+    }
+    auto* remote = resolve_buffer(
+        peer.channel->remote_buffers, peer.channel->remote_buffer_count,
+        remote_address, sizeof(std::uint64_t));
+    if (remote == nullptr) {
+        record_error(
+            queue, DeviceTransportError::kInvalidAddress, command_index,
+            opcode, peer_index, 0);
+        return false;
+    }
+    const auto request = urma::make_inline_write64(
+        snapshot_sq(peer.sq), snapshot_buffer(remote), 0,
+        remote_address, value);
+    return post_request<ProfileEnabled>(
+        context, queue, peer, request, command_index, opcode, retry_limit,
+        profile, wqe_scratch);
+}
+
+template <bool ProfileEnabled = true>
 __aicore__ inline bool execute_signal(
     const DeviceTransportContext& context,
     __gm__ TransportCommandQueue* queue,
@@ -1064,66 +1096,79 @@ __aicore__ inline bool execute_barrier(
             const auto offset = sync_layout::aicore_barrier_offset(
                 transport_team->member_count, barrier_index,
                 transport_team->self_member);
-            if (!post_faa<ProfileEnabled>(
+            if (!post_inline_write64<ProfileEnabled>(
                     context, queue, peer, memories[peer].address + offset,
-                    transport_team->shadow_sync_memory.address + offset, 1,
-                    command_index, current->opcode, retry_limit, profile,
-                    wqe_scratch))
+                    generation, command_index, current->opcode, retry_limit,
+                    profile, wqe_scratch))
                 return false;
         }
         if (!drain_all<ProfileEnabled>(
                 context, queue, command_index, current->opcode, retry_limit,
                 profile, wqe_scratch))
             return false;
-
-        const auto start_cycles = static_cast<std::uint64_t>(
-            AscendC::GetSystemCycle());
+        // Poll all outstanding peers in one loop.  The previous per-peer
+        // loop accumulated independent arrival delays when an early peer was
+        // slow, even though the later peers had already completed.
+        std::uint64_t pending_peers = 0;
         for (std::uint32_t peer = 0;
              peer < transport_team->member_count; ++peer) {
             if (!command::aicore_barrier_peer_in_team(
                     context.topology, phase_team, static_cast<int>(peer)))
                 continue;
-            const auto offset = sync_layout::aicore_barrier_offset(
-                transport_team->member_count, barrier_index, peer);
-            auto* signal = reinterpret_cast<__gm__ std::uint64_t*>(
-                memories[transport_team->self_member].address + offset);
-            AscendC::GlobalTensor<std::uint64_t> signal_global;
-            signal_global.SetGlobalBuffer(signal);
-            const auto signal_scratch =
-                wqe_scratch[48].ReinterpretCast<std::uint64_t>();
-            const AscendC::DataCopyExtParams copy_params{
-                1, sizeof(std::uint64_t), 0, 0, 0};
-            const AscendC::DataCopyPadExtParams<std::uint64_t> pad_params{
-                false, 0, 0, 0};
-            std::uint64_t retry = 0;
-            std::uint64_t observed = 0;
-            while (true) {
-                aicore::poll_nop();
-                aicore::sync_event<AscendC::HardEvent::S_MTE2>();
-                AscendC::DataCopyPad(signal_scratch, signal_global,
-                                     copy_params, pad_params);
-                aicore::sync_event<AscendC::HardEvent::MTE2_S>();
-                observed = signal_scratch.GetValue(0);
-                if (observed >= generation)
+            if (peer >= 64)
+                return false;
+            pending_peers |= std::uint64_t{1} << peer;
+        }
+        const auto start_cycles = static_cast<std::uint64_t>(
+            AscendC::GetSystemCycle());
+        std::uint64_t retry = 0;
+        while (pending_peers != 0) {
+            aicore::poll_nop();
+            std::uint64_t observed_pending = 0;
+            for (std::uint32_t peer = 0;
+                 peer < transport_team->member_count; ++peer) {
+                if (peer >= 64)
                     break;
-                ++retry;
-                const auto current_cycles = static_cast<std::uint64_t>(
-                    AscendC::GetSystemCycle());
-                if (barrier_poll_timed_out(
-                        start_cycles, current_cycles, current->timeout_cycles,
-                        retry, retry_limit)) {
-                    const int logical_peer =
-                        phase_team == TransportTeam::kScaleOut ?
-                            static_cast<int>(peer) /
-                                context.topology.scale_up_size :
-                            static_cast<int>(peer) %
-                                context.topology.scale_up_size;
-                    record_error(
-                        queue, DeviceTransportError::kCompletionTimeout,
-                        command_index, current->opcode, phase_team,
-                        logical_peer, static_cast<int>(peer), 0);
-                    return false;
+                if ((pending_peers & (std::uint64_t{1} << peer)) == 0)
+                    continue;
+                const auto offset = sync_layout::aicore_barrier_offset(
+                    transport_team->member_count, barrier_index, peer);
+                auto* signal = reinterpret_cast<__gm__ std::uint64_t*>(
+                    memories[transport_team->self_member].address + offset);
+                // Barrier arrivals are direct generation writes to one
+                // sender-owned slot. A cache-bypassing scalar read keeps the
+                // visibility check out of the MTE2/UB round trip.
+                if (aicore::load_published(signal) < generation)
+                    observed_pending |= std::uint64_t{1} << peer;
+            }
+            pending_peers = observed_pending;
+            if (pending_peers == 0)
+                break;
+            ++retry;
+            const auto current_cycles = static_cast<std::uint64_t>(
+                AscendC::GetSystemCycle());
+            if (barrier_poll_timed_out(
+                    start_cycles, current_cycles, current->timeout_cycles,
+                    retry, retry_limit)) {
+                std::uint32_t timeout_peer = 0;
+                for (; timeout_peer < transport_team->member_count &&
+                     timeout_peer < 64;
+                     ++timeout_peer) {
+                    if ((pending_peers &
+                         (std::uint64_t{1} << timeout_peer)) != 0)
+                        break;
                 }
+                const int logical_peer =
+                    phase_team == TransportTeam::kScaleOut ?
+                        static_cast<int>(timeout_peer) /
+                            context.topology.scale_up_size :
+                        static_cast<int>(timeout_peer) %
+                            context.topology.scale_up_size;
+                record_error(
+                    queue, DeviceTransportError::kCompletionTimeout,
+                    command_index, current->opcode, phase_team,
+                    logical_peer, static_cast<int>(timeout_peer), 0);
+                return false;
             }
         }
     }

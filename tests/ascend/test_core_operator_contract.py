@@ -702,6 +702,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn(
             "direct_dispatch_persistent_release_tail_wait_vf", producer)
         launch_index = helper.index(launch)
+        self.assertIn("dim3(tiling.launch.num_threads), x", helper)
+        self.assertIn(
+            "const std::uint32_t producer_blocks =\n"
+            "        tiling.data_launch.num_blocks;", helper)
         for marker in (
                 "&pipeline->abi_version",
                 "&pipeline->producer_worker_state",
@@ -750,16 +754,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         launch = "asc_vf_call<direct_dispatch_persistent_release_vf>"
         self.assertEqual(helper.count(launch), 1)
         for marker in (
-                "transport::service::reset(",
                 "release_batch_target",
                 "release_batch_consumed",
                 "dispatch_aicore_pipeline_release_batch_pending(",
                 "transport::service::execute<ProfileEnabled>",
                 "DispatchPipelineWorkerState::kCompleted"):
             self.assertIn(marker, helper)
-        self.assertLess(
-            helper.index("transport::service::reset("),
-            helper.index(launch))
+        self.assertIn("transport::service::reset(", helper)
         runtime_loop = helper.index("while (true)", helper.index(launch))
         self.assertNotIn("asc_vf_call<", helper[runtime_loop:])
 
@@ -794,7 +795,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "DirectDispatchStage::kProducerReleasePipeline",
                 "DirectDispatchStage::kProducerRecordPipeline",
                 "producer_launch.num_blocks =\n"
-                "        tiling.data_launch.num_blocks - 1U"):
+                "        tiling.data_launch.num_blocks"):
             self.assertIn(marker, launch)
         for forbidden in (
                 "aclrtCreateEventWithFlag",
@@ -1488,6 +1489,77 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn(
             "consumer_copy_plan.scalar_begin", source)
 
+    def test_dispatch_producer_uses_2048_byte_vector_tiles(self):
+        source = (ELASTIC / "dispatch.asc").read_text()
+        self.assertIn(
+            "constexpr std::uint32_t kDispatchProducerVectorTileBytes = 2048;",
+            source,
+        )
+        producer_begin = source.index(
+            "__aicore__ inline void direct_dispatch_producer_vector_payload_impl")
+        producer_end = source.index("\n}\n", producer_begin)
+        producer = source[producer_begin:producer_end]
+        self.assertIn(
+            "payload_buffer, kDispatchProducerVectorTileBytes", producer)
+        self.assertIn(
+            "byte += kDispatchProducerVectorTileBytes", producer)
+        self.assertIn(
+            "kDispatchProducerVectorTileBytes);", producer)
+        self.assertNotIn(
+            "payload_buffer, kDispatchVectorTileBytes", producer)
+
+    def test_dispatch_token_fanout_batches_destination_store_completion(self):
+        source = (ELASTIC / "dispatch.asc").read_text()
+        begin = source.index(
+            "__aicore__ inline void direct_dispatch_producer_token_fanout_impl")
+        end = source.index("\n}\n", begin)
+        fanout = source[begin:end]
+        self.assertEqual(fanout.count("AscendC::SetFlag<\n"
+                                      "                    AscendC::HardEvent::MTE3_MTE2>"), 1)
+        self.assertEqual(fanout.count("AscendC::WaitFlag<\n"
+                                      "                    AscendC::HardEvent::MTE3_MTE2>"), 1)
+        store = fanout.index("AscendC::DataCopy(\n                        output_global")
+        wait = fanout.index("AscendC::WaitFlag<\n"
+                            "                    AscendC::HardEvent::MTE3_MTE2>", store)
+        self.assertLess(store, wait)
+
+    def test_dispatch_producer_preserves_nonfanout_hidden_tail(self):
+        """Keeps the non-2048-byte hidden suffix on the scalar record path."""
+        source = (ELASTIC / "dispatch.asc").read_text()
+        for signature in (
+                "__aicore__ inline void "
+                "direct_dispatch_persistent_producer_device(",
+                "__global__ __vector__ void dispatch_kernel("):
+            begin = source.index(signature)
+            end = source.index("\n}\n", begin)
+            function = source[begin:end]
+            vector_begin = function.index("const std::uint64_t vector_hidden_bytes")
+            vector_expr = function[vector_begin:vector_begin + 420]
+            self.assertIn(
+                "kDispatchProducerVectorTileBytes", vector_expr)
+            self.assertIn(
+                "vector_hidden_bytes", function[vector_begin:])
+
+    def test_dispatch_producer_prefix_parallelizes_large_tile_scans(self):
+        source = (ELASTIC / "dispatch.asc").read_text()
+        begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_prefix_vf")
+        end = source.index("\n}\n", begin)
+        prefix = source[begin:end]
+        for marker in (
+                "const std::uint32_t group_width",
+                "const std::uint32_t chunks_per_rank",
+                "tile_errors[rank * group_width + lane]",
+                "asc_syncthreads();",
+                "tile_counts[index] += chunk_base"):
+            self.assertIn(marker, prefix)
+        self.assertIn("tile_count_u32 >= world_size * group_width", prefix)
+        self.assertIn("destination_counts[rank] = rank_prefix", prefix)
+        branch_index = prefix.index("\n    if (use_parallel_prefix)")
+        first_barrier = prefix.index("asc_syncthreads();")
+        self.assertLess(first_barrier, branch_index)
+
         copy_kernel_begin = source.index(
             "__global__ __vector__ void dispatch_copy_kernel")
         copy_kernel_end = source.index("\n}", copy_kernel_begin)
@@ -1546,6 +1618,103 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         hybrid_body = source.index("{", hybrid_begin)
         hybrid_signature = source[hybrid_begin:hybrid_body]
         self.assertNotIn("hidden_copy_begin", hybrid_signature)
+
+    def test_dispatch_release_split_preserves_service_drain(self):
+        """Keeps split release stages aligned with service draining."""
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        source = (ELASTIC / "dispatch.asc").read_text()
+        begin = kernels.index(
+            "direct_dispatch_release_segment(")
+        end = kernels.index("\n}", begin)
+        segment = kernels[begin:end]
+        self.assertIn(
+            "stage == DirectDispatchStage::kProducerRelease)\n"
+            "        return profile_enabled ? DirectReleaseSegment::kPayload :\n"
+            "                                 DirectReleaseSegment::kAll;",
+            segment,
+        )
+        self.assertIn(
+            "stage == DirectDispatchStage::kProducerReleaseBarrier)\n"
+            "        return DirectReleaseSegment::kBarrier;",
+            segment,
+        )
+        begin = source.index(
+            "DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(")
+        end = source.index("\n}", begin)
+        release = source[begin:end]
+        self.assertIn(
+            "release_segment == DirectReleaseSegment::kControl",
+            release,
+        )
+
+    def test_transport_barrier_polls_gm_counter_without_mte_round_trip(self):
+        """Barrier polling should use the cache-bypassing scalar GM read."""
+        source = (ELASTIC / "../transport/aicore_transport_service.hpp").resolve().read_text()
+        begin = source.index("template <bool ProfileEnabled = true>\n__aicore__ inline bool execute_barrier(")
+        end = source.index("\n}\n\n}  // namespace detail", begin)
+        barrier = source[begin:end]
+        self.assertIn("aicore::load_published(signal)", barrier)
+        self.assertNotIn("AscendC::DataCopyPad(signal_scratch, signal_global", barrier)
+
+    def test_transport_barrier_scans_pending_peers_in_one_poll_loop(self):
+        """Avoid serializing independent peer-arrival delays."""
+        source = (ELASTIC / "../transport/aicore_transport_service.hpp").resolve().read_text()
+        begin = source.index("template <bool ProfileEnabled = true>\n__aicore__ inline bool execute_barrier(")
+        end = source.index("\n}\n\n}  // namespace detail", begin)
+        barrier = source[begin:end]
+        self.assertIn("pending_peers", barrier)
+        self.assertIn("pending_peers |=", barrier)
+        self.assertIn("pending_peers = observed_pending", barrier)
+        self.assertIn("while (pending_peers != 0)", barrier)
+        self.assertNotRegex(
+            barrier,
+            r"for \(std::uint32_t peer = 0;.*?while \(true\)",
+        )
+
+    def test_transport_barrier_uses_idempotent_generation_writes(self):
+        """Each sender owns one slot, so barrier arrival need not FAA."""
+        source = (ELASTIC / "../transport/aicore_transport_service.hpp").resolve().read_text()
+        begin = source.index("template <bool ProfileEnabled = true>\n__aicore__ inline bool execute_barrier(")
+        end = source.index("\n}\n\n}  // namespace detail", begin)
+        barrier = source[begin:end]
+        self.assertNotIn("post_faa<ProfileEnabled>(", barrier)
+        self.assertIn("post_inline_write64<ProfileEnabled>(", barrier)
+        helper_begin = source.index(
+            "template <bool ProfileEnabled = true>\n"
+            "__aicore__ inline bool post_inline_write64(")
+        helper_end = source.index("\n}\n", helper_begin)
+        helper = source[helper_begin:helper_end]
+        self.assertIn("urma::make_inline_write64(", helper)
+        self.assertIn("generation", barrier)
+
+    def test_dispatch_barrier_precedes_epilogue_copy(self):
+        """Keeps control and barrier visibility before epilogue reads."""
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        begin = kernels.index("direct_dispatch_pipeline(")
+        end = kernels.index("\n}\n", begin)
+        pipeline = kernels[begin:end]
+        self.assertNotIn("DirectDispatchStage::kProducerReleaseBarrier", pipeline)
+        self.assertIn("}, cpu_sync ? 10U : 13U};", pipeline)
+        begin = kernels.index("direct_dispatch_profile_pipeline(")
+        end = kernels.index("\n}\n", begin)
+        pipeline = kernels[begin:end]
+        barrier_index = pipeline.index(
+            "DirectDispatchStage::kProducerReleaseBarrier")
+        epilogue_index = pipeline.index(
+            "DirectDispatchStage::kEpilogueAcquire")
+        self.assertLess(barrier_index, epilogue_index)
+        self.assertIn("}, cpu_sync ? 12U : 15U};", pipeline)
+        self.assertIn(
+            "if (stage == DirectDispatchStage::kProducerRelease)\n"
+            "        return profile_enabled ? DirectReleaseSegment::kPayload :\n"
+            "                                 DirectReleaseSegment::kAll;",
+            kernels,
+        )
+        self.assertIn(
+            "stage == DirectDispatchStage::kProducerReleaseControl)\n"
+            "        return DirectReleaseSegment::kControl;",
+            kernels,
+        )
 
     def test_dispatch_parallel_expert_prefix_candidate(self):
         source = (ELASTIC / "dispatch.asc").read_text()
@@ -4056,9 +4225,16 @@ int main() {
             second_peer_loop = release.index(
                 "for (int destination_rank = 0;", flush)
             payload = release.index("transport.put(", first_peer_loop)
-            control = release.index(
+            control_markers = (
                 "release_protocol::publish_control_and_release(",
-                second_peer_loop)
+                "release_protocol::publish_control_slot_and_release(",
+            )
+            control_positions = [
+                release.find(marker, second_peer_loop)
+                for marker in control_markers
+            ]
+            control = min(position for position in control_positions
+                          if position >= 0)
             barrier = release.index("transport.device_barrier(")
             self.assertLess(first_peer_loop, payload)
             self.assertLess(payload, flush)

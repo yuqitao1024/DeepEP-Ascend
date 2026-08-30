@@ -1,6 +1,6 @@
 # EPv2 Ascend P7 Normal Dispatch 2T Optimization
 
-**Status:** Design approved in discussion; written specification awaiting review
+**Status:** P7 implementation in progress; the retained tree is correctness-qualified but remains below the 2T target
 
 ## 1. Goal
 
@@ -382,6 +382,58 @@ baseline-b.json         b618a79bc7b8b74d55366519eaf37e8bc31779b01c33f2ba165cb2d2
 candidate-profile.json  4bea183579c726725e2288caac033ac273b27c8e01d55455da1c483947cdaaa3
 summary.json            d98f65b7dcddd02bb7ad97110dbfb009776f127127360ecc2e1b268043277b4b
 ```
+
+#### Latest P7 qualification checkpoint
+
+The retained P7 tree now also uses a single polling loop for all outstanding
+peer barrier counters.  Each iteration keeps a `pending_peers` bitmask and
+reads only peers that have not reached the current generation.  This removes
+the old serial pattern in which a delayed peer blocked observation of every
+later peer.  The representative eight-rank profile (one warmup, one sample,
+stage profiling enabled) measured:
+
+| Tree | Mean | Logical bandwidth | Result |
+| --- | ---: | ---: | --- |
+| P7 before peer-scan change | `24.312164 ms` | `320.254902 GB/s` | retained baseline |
+| P7 peer-scan candidate | `22.302765 ms` | `349.108724 GB/s` | retained |
+
+The candidate's rank-local `release_barrier` spans were still variable
+(`0.081M` to `5.394M` cycles), so the barrier remains the largest exposed
+owner.  The profile script exits with status 1 after a successful benchmark
+because its optional summary formatter still references a nonexistent
+`operation.status`; acceptance uses the generated `profile.json` and the
+`cases passed` line instead.
+
+Two isolated candidates were rejected.  Enabling `DEEP_EP_ASCEND_DISPATCH_EARLY_ROUTE_PLAN=1`
+added route-plan puts, signals, and a barrier and measured `333.884014 GB/s`,
+below the retained tree.  The source-token pipeline (`chunk_tiles=256`) still
+stalls in its persistent producer/release protocol before writing a profile;
+it is not enabled for Normal Dispatch.  A D8 source-rank lookup experiment
+and a packed 16-byte control-slot put likewise showed no qualified gain (the
+latter was terminated after exceeding the normal runtime), so neither is
+part of the retained implementation.
+
+#### P7 barrier candidate qualification
+
+The retained 4096-byte consumer-tile tree was used as the control. Its
+interleaved eight-rank ABBA result was `21.312 ms / 365.64 GB/s` (four runs,
+`8192 x 7168`, top-k 8, 256 experts, FP8 dispatch, 72 data blocks). Three
+barrier-only candidates were tested against the same case and removed after
+qualification:
+
+| Candidate | Result | Decision | Evidence |
+| --- | ---: | --- | --- |
+| Sequential three-round dissemination marker | `22.134 ms / 351.97 GB/s` ABBA average | reject | An initial implementation left three marker requests outstanding; the established `drain_all` fixed profile correctness, but the corrected ABBA remained below control. |
+| CQ drain after GM counter poll | `22.491 ms / 346.33 GB/s` ABBA average | reject | One isolated sample reached `21.159 ms / 367.98 GB/s`, but the four-run ABBA regressed; the isolated result was noise rather than a qualified gain. |
+| Parallel three-round dissemination marker | `22.090 ms / 352.47 GB/s` single representative sample | reject | The three writes and three source-slot polls completed correctly, but the result was below control and did not justify another ABBA run. |
+
+The dissemination variants were limited to `world_size == 8`, flat single-node
+scale-up and did not alter non-8-rank or scale-out behavior. They are not in
+the retained source. The retained barrier still uses FAA to all peers,
+cache-bypassing `load_published` counter reads, one pending-peer poll loop,
+and the established CQ drain before polling. This preserves the protocol and
+the best measured end-to-end result while leaving the D4 control/barrier tail
+as the next optimization target.
 
 ### 4.2 P7.1 early rank and expert plan
 
