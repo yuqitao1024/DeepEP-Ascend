@@ -284,6 +284,17 @@ The selector enables the candidate only for:
 - no existing destination-slot chunk pipeline; and
 - a valid aligned-body and UB plan.
 
+Pipeline composition has one important distinction. The early-route selector
+receives `pipeline_config.enabled`, which represents only the legacy
+destination-slot pipeline; it remains mutually exclusive with P7.1. The
+source-token selector is independent, so P7.1 can be composed with
+`DEEP_EP_ASCEND_DISPATCH_PIPELINE_CHUNK_TILES`. P7.0 token fan-out is kept out
+of either pipeline until the persistent producer path has separate parity
+evidence: the host passes
+`pipeline_config.enabled || source_pipeline_config.enabled` to the fan-out
+selector. This prevents a source-token chunk from silently selecting the
+untested fan-out body while preserving the intended P7.1 + P7.2 composition.
+
 Ineligible shapes use the retained P6 implementation. Invalid selector values
 fail at the host boundary. The selector remains opt-in until correctness,
 same-binary ABBA, and profile gates all pass.

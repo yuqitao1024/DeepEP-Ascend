@@ -1125,6 +1125,25 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         launcher = source[launch_begin:launch_end]
         self.assertIn("arguments.token_fanout", launcher)
 
+    def test_dispatch_token_fanout_is_disabled_for_either_pipeline(self):
+        """Keeps unvalidated fan-out out of both persistent pipeline paths."""
+        buffer = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        dispatch = buffer[
+            buffer.index("    dispatch(const torch::Tensor& x"):
+            buffer.index("    combine(const torch::Tensor& x")
+        ]
+        fanout_call = dispatch[
+            dispatch.index("select_dispatch_token_fanout_config("):
+            dispatch.index(
+                "TORCH_CHECK(\n            token_fanout_config_status",
+                dispatch.index("select_dispatch_token_fanout_config("))]
+        self.assertIn(
+            "pipeline_config.enabled || source_pipeline_config.enabled",
+            fanout_call)
+        self.assertNotIn(
+            "stream_mode, pipeline_config.enabled, num_topk",
+            fanout_call)
+
     def test_dispatch_token_fanout_loads_each_token_before_destination_loop(
             self):
         """Catches reloading a token's hidden row for every destination."""

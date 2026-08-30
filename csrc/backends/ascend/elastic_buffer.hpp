@@ -1809,7 +1809,9 @@ public:
                 !allow_hybrid_mode_ && !cached_mode && !do_expand &&
                     tiling.data_launch.num_blocks > 1,
                 fp8_dispatch, cached_mode, do_expand, allow_hybrid_mode_,
-                stream_mode, pipeline_config.enabled, num_topk, num_ranks_,
+                stream_mode,
+                pipeline_config.enabled || source_pipeline_config.enabled,
+                num_topk, num_ranks_,
                 tiling.token_layout.hidden_bytes, &token_fanout_config);
         TORCH_CHECK(
             token_fanout_config_status !=
