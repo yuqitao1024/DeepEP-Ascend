@@ -454,11 +454,11 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
         self.assertIn("sync_event<AscendC::HardEvent::MTE2_S>", service)
         self.assertNotIn("word0 = cqe->words[0]", service)
 
-    def test_barrier_signal_polling_uses_mte2(self):
+    def test_barrier_signal_polling_uses_cache_bypassing_scalar_read(self):
         service = (
             TRANSPORT / "aicore_transport_service.hpp").read_text()
-        self.assertIn("DataCopyPad(signal_scratch", service)
-        self.assertIn("observed = signal_scratch.GetValue(0)", service)
+        self.assertIn("aicore::load_published(signal)", service)
+        self.assertNotIn("DataCopyPad(signal_scratch", service)
         self.assertNotIn("if (*signal >= generation)", service)
 
     def test_stage_recording_does_not_reset_from_one_kernel_block(self):

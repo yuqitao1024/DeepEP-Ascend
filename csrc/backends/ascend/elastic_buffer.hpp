@@ -1633,7 +1633,7 @@ public:
                 elastic::DispatchConsumerTileConfigStatus::kInvalid,
             "DeepEP Ascend backend: "
             "DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES must be one of "
-            "512, 1024, 2048, or 4096");
+            "512, 1024, 2048, 4096, or 8192");
         elastic::DispatchParallelPrefixConfig parallel_prefix_config{};
         const auto parallel_prefix_config_status =
             elastic::select_dispatch_parallel_prefix_config(

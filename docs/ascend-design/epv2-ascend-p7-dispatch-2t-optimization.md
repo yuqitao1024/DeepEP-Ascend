@@ -1,6 +1,6 @@
 # EPv2 Ascend P7 Normal Dispatch 2T Optimization
 
-**Status:** P7 implementation in progress; the retained tree is correctness-qualified but remains below the 2T target
+**Status:** P7 retained Normal Dispatch path is correctness-qualified at `358.95 GB/s` on the representative NPU8P run; the `2000 GB/s` stretch target is not yet reached.
 
 ## 1. Goal
 
@@ -436,6 +436,36 @@ and the established CQ drain before polling. This preserves the protocol and
 the best measured end-to-end result while leaving the D4 control/barrier tail
 as the next optimization target.
 
+#### P7 default selector and D8 tile qualification
+
+After the mechanism-level tests, the measured fast path was made the default
+for direct, uncached, non-expanded, CPU-synchronized Dispatch without stream
+overlap or hybrid routing. An unset selector now enables device-side prefix,
+parallel prefix, the token load-once fan-out, and an `8192`-byte consumer tile
+for the eligible FP8 `7168`-byte hidden row. Explicit `0` values still select
+the legacy path, and all selectors remain disabled for cached, expanded,
+stream, pipeline, and hybrid calls.
+
+The following qualification runs use the same eight-rank representative case,
+five warmups, five measured samples, and stage profiling. They are single-tree
+measurements rather than the final 30-sample acceptance run:
+
+| Configuration | Mean | P50 | P95 | Logical bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| prefix + parallel prefix + 4096B tile, fan-out off | `25.7177 ms` | `25.5137 ms` | `27.0639 ms` | `302.75 GB/s` |
+| same path, fan-out on | `22.9231 ms` | `22.5493 ms` | `24.3506 ms` | `339.66 GB/s` |
+| same path, fan-out on + 8192B tile | `21.6913 ms` | `21.5964 ms` | `22.6031 ms` | `358.95 GB/s` |
+
+The last run passed the device correctness check. Its stage profile shows
+`producer_record=0.411M` cycles, `epilogue_copy=0.664M` cycles, and
+`release_barrier=1.182M` cycles. The 8192-byte tile reduces the 7168-byte row
+to one aligned MTE2/MTE3 payload iteration; the scalar suffix remains handled
+by the SIMT epilogue. The release barrier remains the largest protocol-owned
+tail and is not removed by this change.
+
+The raw qualification artifact is retained on NPU8P under
+`/home/pyptouser/yuqitao/deepep-results/p7-tile8192-4213324/tile8192.json`.
+
 ### 4.2 P7.1 early rank and expert plan
 
 P7.1 starts after profiling the retained P7.0 tree, unless P7.0 already reaches
@@ -839,8 +869,10 @@ Ascend references:
   and pipeline layouts.
 - `csrc/backends/ascend/elastic/dispatch_parallel.hpp`: consumer copy and
   expert-prefix plans.
-- `csrc/backends/ascend/elastic/dispatch_pipeline_config.hpp`: current
-  experimental destination-slot chunk selector.
+- `csrc/backends/ascend/elastic/dispatch_pipeline_config.hpp`: eligible-path
+  defaults for device prefix, parallel prefix, and consumer tile selection.
+- `csrc/backends/ascend/elastic/dispatch_token_fanout.hpp`: hidden-row
+  load-once fan-out eligibility and default selector.
 - `csrc/backends/ascend/elastic/release_protocol.hpp`: payload, control,
   generation, signal, and acquire ordering.
 - `csrc/backends/ascend/transport/aicore_transport_service.hpp`: command

@@ -359,7 +359,14 @@ int main() {
         !token_fanout_config.enabled ||
         token_fanout_config.vector_bytes != 7168)
         return 126;
-    for (const char* value : {static_cast<const char*>(nullptr), "0"}) {
+    if (select_dispatch_token_fanout_config(
+            nullptr, true, true, false, false, false, false, false,
+            8, 8, 7168, &token_fanout_config) !=
+                DispatchTokenFanoutConfigStatus::kEnabled ||
+        !token_fanout_config.enabled ||
+        token_fanout_config.vector_bytes != 7168)
+        return 119;
+    for (const char* value : {"0"}) {
         if (select_dispatch_token_fanout_config(
                 value, true, true, false, false, false, false, false,
                 8, 8, 7168, &token_fanout_config) !=
@@ -470,8 +477,8 @@ int main() {
     if (select_dispatch_device_prefix_config(
             nullptr, false, true, false, false,
             &device_prefix_config) !=
-                DispatchDevicePrefixConfigStatus::kDisabled ||
-        device_prefix_config.enabled ||
+                DispatchDevicePrefixConfigStatus::kEnabled ||
+        !device_prefix_config.enabled ||
         select_dispatch_device_prefix_config(
             "0", false, true, false, false,
             &device_prefix_config) !=
@@ -507,8 +514,13 @@ int main() {
                 DispatchConsumerTileConfigStatus::kEnabled ||
         consumer_tile_config.tile_bytes != 1024)
         return 99;
-    for (const auto baseline_value : {static_cast<const char*>(nullptr),
-                                      "512"}) {
+    if (select_dispatch_consumer_tile_config(
+            nullptr, true, false, true, false, false, false,
+            &consumer_tile_config) !=
+                DispatchConsumerTileConfigStatus::kEnabled ||
+        consumer_tile_config.tile_bytes != 8192)
+        return 100;
+    for (const auto baseline_value : {"512"}) {
         if (select_dispatch_consumer_tile_config(
                 baseline_value, true, false, true, false, false, false,
                 &consumer_tile_config) !=
@@ -516,7 +528,7 @@ int main() {
             consumer_tile_config.tile_bytes != 512)
             return 100;
     }
-    for (const auto candidate_value : {"1024", "2048", "4096"}) {
+    for (const auto candidate_value : {"1024", "2048", "4096", "8192"}) {
         if (select_dispatch_consumer_tile_config(
                 candidate_value, true, false, true, false, false, false,
                 &consumer_tile_config) !=
@@ -524,7 +536,7 @@ int main() {
             return 101;
     }
     for (const auto invalid_value :
-         {"", "0", "256", "8192", " 1024", "+1024", "1024x"}) {
+         {"", "0", "256", "16384", " 1024", "+1024", "1024x"}) {
         if (select_dispatch_consumer_tile_config(
                 invalid_value, true, false, true, false, false, false,
                 &consumer_tile_config) !=
@@ -579,8 +591,13 @@ int main() {
                 DispatchParallelPrefixConfigStatus::kEnabled ||
         !parallel_prefix_config.enabled)
         return 105;
-    for (const auto baseline_value : {static_cast<const char*>(nullptr),
-                                      "0"}) {
+    if (select_dispatch_parallel_prefix_config(
+            nullptr, true, false, true, false, false, false,
+            &parallel_prefix_config) !=
+                DispatchParallelPrefixConfigStatus::kEnabled ||
+        !parallel_prefix_config.enabled)
+        return 106;
+    for (const auto baseline_value : {"0"}) {
         if (select_dispatch_parallel_prefix_config(
                 baseline_value, true, false, true, false, false, false,
                 &parallel_prefix_config) !=

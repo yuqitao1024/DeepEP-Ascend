@@ -55,19 +55,28 @@ inline DispatchTokenFanoutConfigStatus select_dispatch_token_fanout_config(
     if (output == nullptr)
         return DispatchTokenFanoutConfigStatus::kInvalid;
     *output = {};
-    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+    const auto plan = build_dispatch_token_fanout_plan(
+        hidden_bytes, kDispatchTokenFanoutAlignmentBytes,
+        kDispatchTokenFanoutBufferBytes);
+    const bool eligible = grouping_enabled && fp8_dispatch && !cached_mode &&
+        !expanded && !hybrid_mode && !stream_mode && !pipeline_enabled &&
+        num_topk != 0 && num_topk <= kDispatchTokenFanoutMaximumTopk &&
+        world_size >= 1 && world_size <= kDispatchTokenFanoutMaximumWorldSize &&
+        plan.valid && plan.vector_bytes == kDispatchTokenFanoutBufferBytes;
+    if (value == nullptr) {
+        if (eligible) {
+            output->vector_bytes = plan.vector_bytes;
+            output->enabled = true;
+        }
+        return eligible ? DispatchTokenFanoutConfigStatus::kEnabled :
+                          DispatchTokenFanoutConfigStatus::kDisabled;
+    }
+    if (value[0] == '0' && value[1] == '\0')
         return DispatchTokenFanoutConfigStatus::kDisabled;
     if (value[0] != '1' || value[1] != '\0')
         return DispatchTokenFanoutConfigStatus::kInvalid;
 
-    const auto plan = build_dispatch_token_fanout_plan(
-        hidden_bytes, kDispatchTokenFanoutAlignmentBytes,
-        kDispatchTokenFanoutBufferBytes);
-    if (!grouping_enabled || !fp8_dispatch || cached_mode || expanded ||
-        hybrid_mode || stream_mode || pipeline_enabled || num_topk == 0 ||
-        num_topk > kDispatchTokenFanoutMaximumTopk || world_size < 1 ||
-        world_size > kDispatchTokenFanoutMaximumWorldSize || !plan.valid ||
-        plan.vector_bytes != kDispatchTokenFanoutBufferBytes)
+    if (!eligible)
         return DispatchTokenFanoutConfigStatus::kDisabled;
 
     output->vector_bytes = plan.vector_bytes;

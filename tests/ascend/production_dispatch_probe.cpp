@@ -1894,6 +1894,12 @@ bool fp8_epilogue_failure_does_not_record_completion_probe() {
 }
 
 int main() {
+    // Keep this protocol probe focused on its explicit legacy-mode contracts;
+    // the selector default is covered by core_operator_contract_probe.
+    setenv("DEEP_EP_ASCEND_DISPATCH_DEVICE_PREFIX", "0", 1);
+    setenv("DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES", "512", 1);
+    setenv("DEEP_EP_ASCEND_DISPATCH_PARALLEL_PREFIX", "0", 1);
+    setenv("DEEP_EP_ASCEND_DISPATCH_TOKEN_FANOUT", "0", 1);
     torch::set_deep_ep_tensor_stream_record_hook(record_tensor_stream);
     int failures = 0;
     const auto check = [&failures](bool passed, const char* name) {

@@ -27,12 +27,19 @@ select_dispatch_parallel_prefix_config(
     if (output == nullptr)
         return DispatchParallelPrefixConfigStatus::kInvalid;
     *output = {};
-    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+    const bool eligible = device_prefix_enabled && !cached_mode && cpu_sync &&
+        !expanded && !hybrid_mode && !stream_mode;
+    if (value == nullptr) {
+        if (eligible)
+            output->enabled = true;
+        return eligible ? DispatchParallelPrefixConfigStatus::kEnabled :
+                          DispatchParallelPrefixConfigStatus::kDisabled;
+    }
+    if (value[0] == '0' && value[1] == '\0')
         return DispatchParallelPrefixConfigStatus::kDisabled;
     if (value[0] != '1' || value[1] != '\0')
         return DispatchParallelPrefixConfigStatus::kInvalid;
-    if (!device_prefix_enabled || cached_mode || !cpu_sync || expanded ||
-        hybrid_mode || stream_mode)
+    if (!eligible)
         return DispatchParallelPrefixConfigStatus::kDisabled;
     output->enabled = true;
     return DispatchParallelPrefixConfigStatus::kEnabled;
@@ -55,8 +62,14 @@ inline DispatchConsumerTileConfigStatus select_dispatch_consumer_tile_config(
     if (output == nullptr)
         return DispatchConsumerTileConfigStatus::kInvalid;
     *output = {};
-    if (value == nullptr)
-        return DispatchConsumerTileConfigStatus::kDisabled;
+    const bool eligible = device_prefix_enabled && !cached_mode && cpu_sync &&
+        !expanded && !hybrid_mode && !stream_mode;
+    if (value == nullptr) {
+        if (!eligible)
+            return DispatchConsumerTileConfigStatus::kDisabled;
+        output->tile_bytes = 8192;
+        return DispatchConsumerTileConfigStatus::kEnabled;
+    }
     if (*value == '\0')
         return DispatchConsumerTileConfigStatus::kInvalid;
 
@@ -71,10 +84,9 @@ inline DispatchConsumerTileConfigStatus select_dispatch_consumer_tile_config(
         tile_bytes = tile_bytes * 10U + digit;
     }
     if (tile_bytes != 512 && tile_bytes != 1024 && tile_bytes != 2048 &&
-        tile_bytes != 4096)
+        tile_bytes != 4096 && tile_bytes != 8192)
         return DispatchConsumerTileConfigStatus::kInvalid;
-    if (tile_bytes == 512 || !device_prefix_enabled || cached_mode ||
-        !cpu_sync || expanded || hybrid_mode || stream_mode)
+    if (tile_bytes == 512 || !eligible)
         return DispatchConsumerTileConfigStatus::kDisabled;
     output->tile_bytes = tile_bytes;
     return DispatchConsumerTileConfigStatus::kEnabled;
@@ -96,11 +108,19 @@ inline DispatchDevicePrefixConfigStatus select_dispatch_device_prefix_config(
     if (output == nullptr)
         return DispatchDevicePrefixConfigStatus::kInvalid;
     *output = {};
-    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+    const bool eligible = !cached_mode && cpu_sync && !hybrid_mode &&
+        !stream_mode;
+    if (value == nullptr) {
+        if (eligible)
+            output->enabled = true;
+        return eligible ? DispatchDevicePrefixConfigStatus::kEnabled :
+                          DispatchDevicePrefixConfigStatus::kDisabled;
+    }
+    if (value[0] == '0' && value[1] == '\0')
         return DispatchDevicePrefixConfigStatus::kDisabled;
     if (value[0] != '1' || value[1] != '\0')
         return DispatchDevicePrefixConfigStatus::kInvalid;
-    if (cached_mode || !cpu_sync || hybrid_mode || stream_mode)
+    if (!eligible)
         return DispatchDevicePrefixConfigStatus::kDisabled;
     output->enabled = true;
     return DispatchDevicePrefixConfigStatus::kEnabled;

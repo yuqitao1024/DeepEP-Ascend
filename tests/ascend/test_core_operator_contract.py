@@ -1479,7 +1479,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "AscendC::DataCopy(", "copy_bytes"):
             self.assertIn(marker, vector_copy)
 
-        for tile_bytes in (512, 1024, 2048, 4096):
+        for tile_bytes in (512, 1024, 2048, 4096, 8192):
             self.assertEqual(
                 source.count(
                     "direct_dispatch_epilogue_vector_payload_impl<"
