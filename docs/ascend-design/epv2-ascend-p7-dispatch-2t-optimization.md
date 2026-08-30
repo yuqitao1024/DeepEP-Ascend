@@ -1,6 +1,6 @@
 # EPv2 Ascend P7 Normal Dispatch 2T Optimization
 
-**Status:** P7 retained Normal Dispatch path is correctness-qualified at `358.95 GB/s` on the representative NPU8P run; the `2000 GB/s` stretch target is not yet reached.
+**Status:** P7 retained Normal Dispatch path is correctness-qualified at `366.61 GB/s` on the 30-sample representative NPU8P run; the `2000 GB/s` stretch target is not yet reached.
 
 ## 1. Goal
 
@@ -465,6 +465,55 @@ tail and is not removed by this change.
 
 The raw qualification artifact is retained on NPU8P under
 `/home/pyptouser/yuqitao/deepep-results/p7-tile8192-4213324/tile8192.json`.
+
+#### 30-sample default-path qualification
+
+The retained default selector was rebuilt from the same source tree and run
+with 30 warmups and 30 measured iterations on the fixed eight-rank case. The
+case passed device correctness and produced no failed operations:
+
+| Metric | 30-sample result |
+| --- | ---: |
+| Mean device time | `21.238019 ms` |
+| P50 device time | `21.041875 ms` |
+| P95 device time | `23.006299 ms` |
+| Maximum device time | `23.428480 ms` |
+| Logical bandwidth | `366.611 GB/s` |
+| Passed cases | `1 / 1` |
+
+The associated stage profile is consistent with the short qualification run:
+
+| Stage | Mean cycles |
+| --- | ---: |
+| D3 producer record | `432,858` |
+| D4 release payload | `956,679` |
+| D4 release control | `272,043` |
+| D4 release barrier | `5,029,035` |
+| D8 output copy | `671,797` |
+
+The final barrier remains the largest individually timed stage. Its wide rank
+spread is a synchronization-tail symptom: the payload put path is already
+complete, but a rank that reaches the barrier early waits for the slowest
+peer's production and control service. The transport-only path remains much
+faster, so this profile does not justify changing HCCS payload settings.
+
+#### Rejected post-qualification candidates
+
+Four single-mechanism candidates were measured against the same binary,
+workload, device allocation, and 30-sample protocol. None is retained:
+
+| Candidate | Mean / logical bandwidth | Decision | Reason |
+| --- | ---: | --- | --- |
+| Cache eight source count/base entries per D8 block | `21.580 ms / 360.795 GB/s` | reject | End-to-end regression; barrier variance increased even though the metadata table is small. |
+| Binary-search source prefix for every D8 record | `21.604 ms / 360.403 GB/s` | reject | D8 did not improve (`681,693` cycles versus `671,797`); added control work outweighed fewer comparisons. |
+| Poll barrier arrivals before draining local FAA CQ | `22.012 ms / 353.726 GB/s` | reject | The proposed overlap is not effective on this service implementation; payload/control timing also regressed. |
+| Flat eight-rank tree gather/broadcast barrier | `21.949 ms / 354.740 GB/s` | reject | Barrier span fell to `4.585M` cycles, but tree dependencies and extra scheduling increased the critical path. |
+
+These results narrow the remaining P7 work. Reducing a local stage or the
+number of barrier FAA operations is insufficient when the production service
+and cross-rank arrival tail remain serialized. Any further P7 change must show
+end-to-end improvement on the fixed case; a faster isolated stage is not a
+retention criterion.
 
 ### 4.2 P7.1 early rank and expert plan
 
