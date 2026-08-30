@@ -916,38 +916,6 @@ __aicore__ inline bool post_faa(
 }
 
 template <bool ProfileEnabled = true>
-__aicore__ inline bool post_inline_write64(
-    const DeviceTransportContext& context,
-    __gm__ TransportCommandQueue* queue, std::uint32_t peer_index,
-    std::uint64_t remote_address, std::uint64_t value,
-    std::uint32_t command_index, TransportCommandOpcode opcode,
-    std::uint64_t retry_limit, __gm__ TransportStageProfile* profile,
-    const AscendC::LocalTensor<std::uint32_t>& wqe_scratch) {
-    auto peer = resolve_context(context, peer_index, 0);
-    if (peer.channel == nullptr) {
-        record_error(
-            queue, DeviceTransportError::kInvalidQueue, command_index,
-            opcode, peer_index, 0);
-        return false;
-    }
-    auto* remote = resolve_buffer(
-        peer.channel->remote_buffers, peer.channel->remote_buffer_count,
-        remote_address, sizeof(std::uint64_t));
-    if (remote == nullptr) {
-        record_error(
-            queue, DeviceTransportError::kInvalidAddress, command_index,
-            opcode, peer_index, 0);
-        return false;
-    }
-    const auto request = urma::make_inline_write64(
-        snapshot_sq(peer.sq), snapshot_buffer(remote), 0,
-        remote_address, value);
-    return post_request<ProfileEnabled>(
-        context, queue, peer, request, command_index, opcode, retry_limit,
-        profile, wqe_scratch);
-}
-
-template <bool ProfileEnabled = true>
 __aicore__ inline bool execute_signal(
     const DeviceTransportContext& context,
     __gm__ TransportCommandQueue* queue,
@@ -1096,10 +1064,11 @@ __aicore__ inline bool execute_barrier(
             const auto offset = sync_layout::aicore_barrier_offset(
                 transport_team->member_count, barrier_index,
                 transport_team->self_member);
-            if (!post_inline_write64<ProfileEnabled>(
+            if (!post_faa<ProfileEnabled>(
                     context, queue, peer, memories[peer].address + offset,
-                    generation, command_index, current->opcode, retry_limit,
-                    profile, wqe_scratch))
+                    transport_team->shadow_sync_memory.address + offset, 1,
+                    command_index, current->opcode, retry_limit, profile,
+                    wqe_scratch))
                 return false;
         }
         if (!drain_all<ProfileEnabled>(
@@ -1135,9 +1104,9 @@ __aicore__ inline bool execute_barrier(
                     transport_team->member_count, barrier_index, peer);
                 auto* signal = reinterpret_cast<__gm__ std::uint64_t*>(
                     memories[transport_team->self_member].address + offset);
-                // Barrier arrivals are direct generation writes to one
-                // sender-owned slot. A cache-bypassing scalar read keeps the
-                // visibility check out of the MTE2/UB round trip.
+                // Barrier counters are remote FAA results in GM. A direct
+                // cache-bypassing scalar read avoids an MTE2/UB round trip on
+                // every poll while retaining the same visibility guarantee.
                 if (aicore::load_published(signal) < generation)
                     observed_pending |= std::uint64_t{1} << peer;
             }

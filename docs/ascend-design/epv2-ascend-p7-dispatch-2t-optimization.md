@@ -426,6 +426,7 @@ qualification:
 | Sequential three-round dissemination marker | `22.134 ms / 351.97 GB/s` ABBA average | reject | An initial implementation left three marker requests outstanding; the established `drain_all` fixed profile correctness, but the corrected ABBA remained below control. |
 | CQ drain after GM counter poll | `22.491 ms / 346.33 GB/s` ABBA average | reject | One isolated sample reached `21.159 ms / 367.98 GB/s`, but the four-run ABBA regressed; the isolated result was noise rather than a qualified gain. |
 | Parallel three-round dissemination marker | `22.090 ms / 352.47 GB/s` single representative sample | reject | The three writes and three source-slot polls completed correctly, but the result was below control and did not justify another ABBA run. |
+| Direct generation inline-write barrier | `33.682 ms / 231.17 GB/s` single representative sample | reject | Replacing each FAA arrival with an idempotent inline 64-bit write passed the eight-rank case but regressed badly. The transport path's FAA operation is faster here despite its apparent extra fetch result, so the source was restored to FAA. |
 
 The dissemination variants were limited to `world_size == 8`, flat single-node
 scale-up and did not alter non-8-rank or scale-out behavior. They are not in

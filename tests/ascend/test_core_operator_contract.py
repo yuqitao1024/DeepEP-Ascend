@@ -1671,22 +1671,6 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             r"for \(std::uint32_t peer = 0;.*?while \(true\)",
         )
 
-    def test_transport_barrier_uses_idempotent_generation_writes(self):
-        """Each sender owns one slot, so barrier arrival need not FAA."""
-        source = (ELASTIC / "../transport/aicore_transport_service.hpp").resolve().read_text()
-        begin = source.index("template <bool ProfileEnabled = true>\n__aicore__ inline bool execute_barrier(")
-        end = source.index("\n}\n\n}  // namespace detail", begin)
-        barrier = source[begin:end]
-        self.assertNotIn("post_faa<ProfileEnabled>(", barrier)
-        self.assertIn("post_inline_write64<ProfileEnabled>(", barrier)
-        helper_begin = source.index(
-            "template <bool ProfileEnabled = true>\n"
-            "__aicore__ inline bool post_inline_write64(")
-        helper_end = source.index("\n}\n", helper_begin)
-        helper = source[helper_begin:helper_end]
-        self.assertIn("urma::make_inline_write64(", helper)
-        self.assertIn("generation", barrier)
-
     def test_dispatch_barrier_precedes_epilogue_copy(self):
         """Keeps control and barrier visibility before epilogue reads."""
         kernels = (ELASTIC / "kernels.hpp").read_text()
