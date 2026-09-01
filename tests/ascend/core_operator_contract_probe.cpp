@@ -31,7 +31,7 @@ static_assert(offsetof(DispatchPipelineState, release_completed_generation) ==
               64);
 static_assert(offsetof(DispatchPipelineState, slots) == 128);
 static_assert(offsetof(DispatchPipelineState, scalar_progress) == 384);
-static_assert(offsetof(DispatchPipelineState, hidden_progress) == 4992);
+static_assert(offsetof(DispatchPipelineState, hidden_progress) == 37248);
 static_assert(
     offsetof(DispatchPipelineState, release_completed_generation) / 64 !=
     offsetof(DispatchPipelineState, generation) / 64);
@@ -857,6 +857,11 @@ int main() {
         return 91;
     constexpr std::uint64_t pipeline_generation = 17;
     constexpr std::uint32_t pipeline_blocks = 72;
+    if (dispatch_persistent_producer_blocks(1) != 1 ||
+        dispatch_persistent_producer_blocks(70) != 70 ||
+        dispatch_persistent_producer_blocks(71) != 71 ||
+        dispatch_persistent_producer_blocks(72) != 71)
+        return 190;
     if (dispatch_pipeline_producer_must_wait_for_reuse(0) ||
         dispatch_pipeline_producer_must_wait_for_reuse(1) ||
         !dispatch_pipeline_producer_must_wait_for_reuse(2) ||
@@ -881,21 +886,29 @@ int main() {
         }
         slot.state = DispatchPipelineSlotState::kScalarReady;
         for (std::uint32_t block = 0; block < pipeline_blocks; ++block) {
-            auto& scalar_progress = pipeline_state.scalar_progress[block];
             auto& hidden_progress = pipeline_state.hidden_progress[block];
-            if (&scalar_progress == &hidden_progress ||
-                reinterpret_cast<std::uintptr_t>(&scalar_progress) % 64 != 0 ||
-                reinterpret_cast<std::uintptr_t>(&hidden_progress) % 64 != 0)
+            if (reinterpret_cast<std::uintptr_t>(&hidden_progress) % 64 != 0)
                 return 187;
-            scalar_progress.generation = pipeline_generation;
-            scalar_progress.completed_chunk = chunk;
-            if (!dispatch_pipeline_block_progress_ready(
-                    scalar_progress, pipeline_generation, chunk) ||
-                dispatch_pipeline_block_progress_ready(
-                    scalar_progress, pipeline_generation + 1U, chunk) ||
-                dispatch_pipeline_block_progress_ready(
-                    scalar_progress, pipeline_generation, chunk + 1U))
-                return 188;
+            for (std::uint32_t published_chunk = 0; published_chunk <= chunk;
+                 ++published_chunk) {
+                auto& scalar_progress =
+                    pipeline_state.scalar_progress[block][published_chunk];
+                if (&scalar_progress == &hidden_progress ||
+                    reinterpret_cast<std::uintptr_t>(&scalar_progress) % 64 != 0)
+                    return 187;
+                scalar_progress.generation = pipeline_generation;
+                scalar_progress.completed_chunk = published_chunk;
+                if (!dispatch_pipeline_block_progress_ready(
+                        scalar_progress, pipeline_generation,
+                        published_chunk) ||
+                    dispatch_pipeline_block_progress_ready(
+                        scalar_progress, pipeline_generation + 1U,
+                        published_chunk) ||
+                    dispatch_pipeline_block_progress_ready(
+                        scalar_progress, pipeline_generation,
+                        published_chunk + 1U))
+                    return 188;
+            }
             hidden_progress.generation = pipeline_generation;
             hidden_progress.completed_chunk = chunk;
             if (!dispatch_pipeline_block_progress_ready(

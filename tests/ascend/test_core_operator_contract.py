@@ -648,8 +648,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "__aicore__", 0, source.index(release_device_name))
         release_device_end = source.index("\n}\n", release_device_begin)
         release_device = source[release_device_begin:release_device_end]
-        self.assertIn("__asc_aicore::clock()", release_device)
-        self.assertIn("DispatchPipelineWorkerState::kFailed", release_device)
+        self.assertIn(
+            "asc_vf_call<direct_dispatch_persistent_release_wait_vf>",
+            release_device)
+        self.assertIn(
+            "asc_vf_call<direct_dispatch_pipeline_wait_vf>", release_device)
 
     def test_dispatch_persistent_source_producer_contract(self):
         """Catches repeated VF launches or incomplete hidden publication."""
@@ -669,9 +672,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "scalar_progress",
                 "completed_chunk",
                 "generation",
-                "DispatchPipelineSlotState::kReady",
                 "transport::simt::system_fence();"):
             self.assertIn(marker, producer_vf)
+        self.assertNotIn(
+            "DispatchPipelineSlotState::kReady", producer_vf)
         self.assertNotIn("asc_atomic_add(", producer_vf)
         self.assertNotIn(
             "DispatchPipelineSlotState::kScalarReady", producer_vf)
@@ -726,7 +730,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertIn(marker, helper[loop_index:])
 
     def test_dispatch_persistent_release_contract(self):
-        """Catches repeated release VF launches or unacknowledged queue batches."""
+        """Keeps release service outside the blocking release VF."""
         source = (ELASTIC / "dispatch.asc").read_text()
         kernels = (ELASTIC / "kernels.hpp").read_text()
         layout = (ELASTIC / "layout.hpp").read_text()
@@ -751,35 +755,41 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "direct_dispatch_persistent_release_device(")
         helper_end = source.index("\n}\n", helper_begin)
         helper = source[helper_begin:helper_end]
-        launch = "asc_vf_call<direct_dispatch_persistent_release_vf>"
-        self.assertEqual(helper.count(launch), 1)
+        self.assertNotIn(
+            "asc_vf_call<direct_dispatch_persistent_release_vf>", helper)
         for marker in (
-                "release_batch_target",
-                "release_batch_consumed",
-                "dispatch_aicore_pipeline_release_batch_pending(",
-                "transport::service::execute<ProfileEnabled>",
-                "DispatchPipelineWorkerState::kCompleted"):
-            self.assertIn(marker, helper)
-        self.assertIn("transport::service::reset(", helper)
-        runtime_loop = helper.index("while (true)", helper.index(launch))
-        self.assertNotIn("asc_vf_call<", helper[runtime_loop:])
-
-        vf_begin = source.rfind(
-            "__simt_vf__", 0,
-            source.index("direct_dispatch_persistent_release_vf("))
-        vf_end = source.index("\n}\n", vf_begin)
-        release_vf = source[vf_begin:vf_end]
-        for marker in (
-                "for (std::uint32_t release_chunk = 0;",
-                "direct_dispatch_producer_release_body(",
+                "asc_vf_call<direct_dispatch_persistent_release_wait_vf>",
+                "direct_dispatch_release_chunk_device<ProfileEnabled>(",
+                "asc_vf_call<direct_dispatch_pipeline_wait_vf>",
+                "asc_vf_call<direct_dispatch_persistent_release_complete_vf>",
                 "DirectReleaseSegment::kPayload",
                 "DirectReleaseSegment::kControl",
-                "DirectReleaseSegment::kBarrier",
-                "release_batch_target",
-                "release_batch_consumed",
-                "transport.wait(",
-                "release_completed_generation"):
-            self.assertIn(marker, release_vf)
+                "DirectReleaseSegment::kBarrier"):
+            self.assertIn(marker, helper)
+        release_chunk_begin = source.index(
+            "__aicore__ inline void direct_dispatch_release_chunk_device(")
+        release_chunk_end = source.index("\n}\n", release_chunk_begin)
+        release_chunk = source[release_chunk_begin:release_chunk_end]
+        self.assertIn(
+            "transport::service::execute<ProfileEnabled>", release_chunk)
+        # ProducerControl owns the per-dispatch reset.  The communication
+        # stream must not reset the shared queue concurrently with producer
+        # route-plan publication.
+        self.assertNotIn("transport::service::reset(", helper)
+        release_wait = helper.index(
+            "asc_vf_call<direct_dispatch_persistent_release_wait_vf>")
+        release_payload = helper.index(
+            "DirectReleaseSegment::kPayload", release_wait)
+        request_wait = helper.index(
+            "asc_vf_call<direct_dispatch_pipeline_wait_vf>", release_payload)
+        self.assertLess(release_wait, release_payload)
+        self.assertLess(release_payload, request_wait)
+        complete_begin = source.index(
+            "direct_dispatch_persistent_release_complete_vf(")
+        complete_end = source.index("\n}\n", complete_begin)
+        complete = source[complete_begin:complete_end]
+        self.assertIn(
+            "DispatchPipelineWorkerState::kCompleted", complete)
 
     def test_dispatch_persistent_pipeline_launch_is_event_free(self):
         """Catches reintroducing host event or sync gaps into source chunks."""
@@ -794,8 +804,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "DirectDispatchStage::kProducerPrefix",
                 "DirectDispatchStage::kProducerReleasePipeline",
                 "DirectDispatchStage::kProducerRecordPipeline",
-                "producer_launch.num_blocks =\n"
-                "        tiling.data_launch.num_blocks"):
+                "dispatch_persistent_producer_blocks(\n"
+                "            tiling.data_launch.num_blocks)",
+                "pipeline_tiling.data_launch.num_blocks = producer_blocks",
+                "arguments, pipeline_tiling, communication_stream",
+                "arguments, pipeline_tiling, producer_stream"):
             self.assertIn(marker, launch)
         for forbidden in (
                 "aclrtCreateEventWithFlag",

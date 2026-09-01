@@ -598,14 +598,17 @@ Changing fences and merging the final control/barrier batch did not change
 that result.
 
 The evidence locates the failure before HCOMM service execution: later VF
-batches were never appended. On this CANN path, `asc_vf_call` expands to an
-asynchronous VF invocation and repeated calls from one running AICore kernel
-cannot be treated as a general runtime task queue. P7.2 therefore adopts the
-following rule:
+batches were never appended. On this CANN path, the enclosing AICore function
+does not execute its manager code until the `asc_vf_call` returns; the VF and
+its caller cannot be used as a producer/consumer pair with a blocking wait in
+the VF. Repeated calls from one running AICore kernel also cannot be treated
+as a general runtime task queue. P7.2 therefore adopts the following rule:
 
 ```text
 one persistent AICore stage -> exactly one persistent VF invocation
-runtime chunk loop          -> doorbells and ordinary AICore functions only
+VF                           -> record every chunk completion, then return
+AICore manager               -> consume completions and publish kReady
+runtime chunk loop           -> doorbells and ordinary AICore functions only
 ```
 
 The producer uses two levels of readiness:
@@ -614,13 +617,32 @@ The producer uses two levels of readiness:
 persistent producer VF                     producer AICore blocks
 ----------------------                     ----------------------
 pack scalar/scale/top-k/metadata chunk n
-all VF blocks complete scalar stores
-publish scalar_ready(n) -----------------> wait scalar_ready(n)
-                                             hidden load-once fanout
-                          <---------------- publish hidden_done(block, n)
-all VF blocks observe paired hidden_done
+publish scalar_progress(block, n)
+pack remaining chunks and return --------------> read scalar_progress(*, n)
+                                                hidden load-once fanout
+                             <------------------ publish hidden_done(block, n)
+all AICore blocks observe paired hidden_done
 publish payload_ready(n)
 ```
+
+The original one-record-per-block state lost chunk 0 when the VF reached
+chunk 1 before the manager could run. The state now reserves one aligned
+record per `(producer_block, source_chunk)` (up to eight chunks), and the VF
+does not wait for `kReady`; this is the minimum change that removes the
+producer self-wait while keeping the two-slot payload ring intact.
+The pipeline state ABI is version `8` after this layout change.
+
+The diagnosis was reproduced on NPU8P with the same two-rank representative
+case and 72 public blocks:
+
+| Configuration | Source pipeline | Result |
+| --- | --- | --- |
+| `CHUNK_TILES=2048` | disabled by the one-chunk gate | one case passed |
+| `CHUNK_TILES=1024` | enabled, two source chunks | no progress until 240 s timeout |
+
+The first run completed all five benchmark operations; the second did not
+produce a report. The fixed layout and no-wait change still require an ASC
+build and the same two-rank run before being retained as a qualified result.
 
 Each AICore block writes hidden progress to an independent 64-byte cache line.
 This avoids two cores writing different words in the same cached line and then
@@ -628,31 +650,39 @@ overwriting one another during cache-line writeback. The paired VF block turns
 that per-block progress into a single atomic hidden-completion count; only the
 last contributor publishes the chunk as ready for transport.
 
-The release side uses an exact command-count doorbell:
+#### 4.3.2 Persistent occupancy guard
+
+The source-token pipeline launches a persistent one-block Release kernel on the
+communication stream before launching the persistent Producer kernel. At the
+maximum 72-AICore configuration, the Producer therefore uses 71 blocks so the
+Release block has a schedulable slot. The public `num_sms=72` setting remains
+valid and unchanged for ordinary Dispatch/Combine data stages; this reduction
+applies only to the P7.2 persistent source pipeline. Release and Producer both
+receive the same reduced `producer_blocks` count, so scalar and hidden progress
+completion conditions cannot wait for a block that was not launched.
+
+The release side uses a continuation sequence rather than waiting for its own
+AICore service from inside a VF:
 
 ```text
-persistent release VF                      release AICore
----------------------                      --------------
-wait payload_ready(n)
-append put(s) + flush request
-publish batch_target = request.command_end -> observe target > consumed
-                                              service::execute()
-                          <---------------- publish consumed_target = target
-wait/validate request
-publish slot completed
+persistent release AICore                  release VF / service
+------------------------                  ---------------------
+wait payload_ready(n) -------------------> wait VF returns
+append put(s) + flush request ------------> payload VF returns
+service::execute() -----------------------> request-complete VF waits
+request-complete VF marks slot completed
 
-append final control + signal + barrier
-publish final batch_target --------------> service::execute()
-                          <---------------- publish final consumed_target
-publish release completion
+append final control + signal + barrier --> control/barrier VF returns
+service::execute()                         (one service call each)
+publish release completion <-------------- completion VF
 ```
 
-Both targets are monotonically increasing command counts for one transport
-generation. The release VF cannot append the next batch until AICore has
-acknowledged the current target. This bounds queue growth, preserves request
-ownership, and allows repeated `service::execute()` calls without relying on
-repeated asynchronous VF launches. The host schedule remains event-free: one
-release kernel on the communication stream, one producer kernel on the
+Each payload chunk owns one request slot. The AICore runs `service::execute()`
+after the payload VF returns, and only then invokes the completion VF, so the
+VF never waits on `release_batch_consumed` or request completion that can only
+be advanced by its caller. Processing one chunk at a time bounds command-queue
+growth and preserves request ownership. The host schedule remains event-free:
+one release kernel on the communication stream, one producer kernel on the
 producer stream, then the normal epilogue stages.
 
 ### 4.4 P7.3 arrival-driven consumer tail

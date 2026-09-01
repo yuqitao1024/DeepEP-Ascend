@@ -188,6 +188,13 @@ inline constexpr bool dispatch_pipeline_wait_timed_out(
         current_cycles - start_cycles >= timeout_cycles;
 }
 
+inline constexpr std::uint32_t dispatch_persistent_producer_blocks(
+    std::uint32_t requested_blocks) noexcept {
+    // Keep one AICore block available for the persistent release service.
+    return requested_blocks >= kAscendMaxDataBlocks ?
+        kAscendMaxDataBlocks - 1U : requested_blocks;
+}
+
 #if defined(DEEP_EP_ASCEND_SIMT_DEVICE)
 DEEP_EP_ASCEND_KERNEL_CALLEE std::uint32_t
 dispatch_simt_pipeline_slot(std::uint32_t chunk_index) noexcept {

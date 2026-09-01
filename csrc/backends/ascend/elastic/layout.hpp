@@ -24,9 +24,10 @@ inline constexpr std::uint64_t kDirectCombineRecordTrailerBytes =
 inline constexpr std::uint64_t kHybridCombineRecordTrailerBytes =
     2 * kAscendElasticAlignment;
 inline constexpr std::uint64_t kDispatchGroupingTokensPerTile = 4;
-inline constexpr std::uint32_t kDispatchPipelineAbiVersion = 7;
+inline constexpr std::uint32_t kDispatchPipelineAbiVersion = 8;
 inline constexpr std::uint32_t kDispatchPipelineSlotCount = 2;
 inline constexpr std::uint32_t kDispatchPipelineMaximumProducerBlocks = 72;
+inline constexpr std::uint32_t kDispatchPipelineMaximumChunks = 8;
 
 enum class CoreMode : std::uint8_t {
     kCached,
@@ -322,14 +323,18 @@ struct alignas(64) DispatchPipelineState {
     std::uint64_t reserved2[3]{};
     DispatchPipelineSlot slots[kDispatchPipelineSlotCount]{};
     DispatchPipelineBlockProgress
-        scalar_progress[kDispatchPipelineMaximumProducerBlocks]{};
+        scalar_progress[kDispatchPipelineMaximumProducerBlocks]
+                      [kDispatchPipelineMaximumChunks]{};
     DispatchPipelineBlockProgress
         hidden_progress[kDispatchPipelineMaximumProducerBlocks]{};
 };
 
 static_assert(sizeof(DispatchPipelineSlot) == 128);
 static_assert(sizeof(DispatchPipelineBlockProgress) == 64);
-static_assert(sizeof(DispatchPipelineState) == 9600);
+static_assert(
+    sizeof(DispatchPipelineState) ==
+    64 * (6 + kDispatchPipelineMaximumProducerBlocks *
+              (kDispatchPipelineMaximumChunks + 1)));
 static_assert(std::is_standard_layout_v<DispatchPipelineState>);
 static_assert(std::is_trivially_copyable_v<DispatchPipelineState>);
 
