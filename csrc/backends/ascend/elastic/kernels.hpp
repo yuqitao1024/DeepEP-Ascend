@@ -171,6 +171,15 @@ inline constexpr bool dispatch_pipeline_block_progress_ready(
         progress.completed_chunk == chunk_index;
 }
 
+// Scalar progress is indexed by source chunk, so generation is its sole
+// publication value.  Keeping the chunk field out of the protocol avoids
+// observing two independently published words from one cache line.
+inline constexpr bool dispatch_pipeline_scalar_progress_ready(
+    std::uint64_t observed_generation,
+    std::uint64_t generation) noexcept {
+    return generation != 0 && observed_generation == generation;
+}
+
 inline constexpr bool dispatch_pipeline_release_batch_pending(
     std::uint32_t batch_target, std::uint32_t batch_consumed) noexcept {
     return batch_target > batch_consumed;

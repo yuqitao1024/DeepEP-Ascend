@@ -670,10 +670,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "scalar_blocks_completed",
                 "hidden_blocks_completed",
                 "scalar_progress",
-                "completed_chunk",
                 "generation",
                 "transport::simt::system_fence();"):
             self.assertIn(marker, producer_vf)
+        self.assertIn(
+            "&progress->generation, generation", producer_vf)
+        self.assertNotIn(
+            "&progress->completed_chunk", producer_vf)
         self.assertNotIn(
             "DispatchPipelineSlotState::kReady", producer_vf)
         self.assertNotIn("asc_atomic_add(", producer_vf)
@@ -698,6 +701,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "direct_dispatch_persistent_producer_device(")
         helper_end = source.index("\n}\n", helper_begin)
         helper = source[helper_begin:helper_end]
+        self.assertIn(
+            "observed_generation == generation", helper)
         launch = "asc_vf_call<direct_dispatch_persistent_producer_vf>"
         self.assertEqual(helper.count(launch), 1)
         self.assertNotIn("direct_dispatch_persistent_chunk_begin_vf", producer)

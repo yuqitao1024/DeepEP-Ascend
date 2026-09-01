@@ -897,16 +897,12 @@ int main() {
                     reinterpret_cast<std::uintptr_t>(&scalar_progress) % 64 != 0)
                     return 187;
                 scalar_progress.generation = pipeline_generation;
-                scalar_progress.completed_chunk = published_chunk;
-                if (!dispatch_pipeline_block_progress_ready(
-                        scalar_progress, pipeline_generation,
-                        published_chunk) ||
-                    dispatch_pipeline_block_progress_ready(
-                        scalar_progress, pipeline_generation + 1U,
-                        published_chunk) ||
-                    dispatch_pipeline_block_progress_ready(
-                        scalar_progress, pipeline_generation,
-                        published_chunk + 1U))
+                scalar_progress.completed_chunk = UINT32_MAX;
+                if (!dispatch_pipeline_scalar_progress_ready(
+                        scalar_progress.generation, pipeline_generation) ||
+                    dispatch_pipeline_scalar_progress_ready(
+                        scalar_progress.generation,
+                        pipeline_generation + 1U))
                     return 188;
             }
             hidden_progress.generation = pipeline_generation;
