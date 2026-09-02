@@ -44,33 +44,6 @@ struct CombineDirectLocalPlacementConfig {
     bool enabled = false;
 };
 
-enum class CombineMetadataCacheConfigStatus : std::uint8_t {
-    kDisabled,
-    kEnabled,
-    kInvalid,
-};
-
-struct CombineMetadataCacheConfig {
-    bool enabled = false;
-};
-
-inline CombineMetadataCacheConfigStatus
-select_combine_metadata_cache_config(
-    const char* value, bool direct, bool hybrid,
-    CombineMetadataCacheConfig* output) noexcept {
-    if (output == nullptr)
-        return CombineMetadataCacheConfigStatus::kInvalid;
-    *output = {};
-    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
-        return CombineMetadataCacheConfigStatus::kDisabled;
-    if (value[0] != '1' || value[1] != '\0')
-        return CombineMetadataCacheConfigStatus::kInvalid;
-    if (!direct || hybrid)
-        return CombineMetadataCacheConfigStatus::kDisabled;
-    output->enabled = true;
-    return CombineMetadataCacheConfigStatus::kEnabled;
-}
-
 inline CombineDirectLocalPlacementConfigStatus
 select_combine_direct_local_placement_config(
     const char* value, bool direct, bool hybrid,
