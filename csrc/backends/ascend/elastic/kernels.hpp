@@ -714,6 +714,7 @@ struct CombineArguments {
     std::uint32_t expanded_vector_reduce = 0;
     std::uint32_t local_copy_datacopy = 0;
     std::uint32_t direct_local_placement = 0;
+    std::uint32_t metadata_cache = 0;
     std::uint32_t vector_reduce_tile_elements = 0;
 };
 
