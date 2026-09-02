@@ -2152,27 +2152,6 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("vector_reduce_tile_elements", kernel)
         self.assertIn("kCombineVectorReduceDefaultTileElements", source)
 
-    def test_combine_metadata_buckets_selector_contract(self):
-        """Keeps rank-bucketed C6 metadata traversal an isolated candidate."""
-        source = (ELASTIC / "combine.asc").read_text()
-        header = (ELASTIC / "kernels.hpp").read_text()
-        host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
-        parallel = (ELASTIC / "combine_parallel.hpp").read_text()
-
-        self.assertIn("metadata_buckets", header)
-        self.assertIn(
-            '"DEEP_EP_ASCEND_COMBINE_METADATA_BUCKETS"', host)
-        self.assertIn("select_combine_metadata_buckets_config(", host)
-        self.assertIn("arguments.metadata_buckets", host)
-        self.assertIn("select_combine_metadata_buckets_config(", parallel)
-        reduce_begin = source.index(
-            "__aicore__ inline void direct_combine_epilogue_vector_reduce")
-        reduce_end = source.index("\n}\n", reduce_begin)
-        vector_reduce = source[reduce_begin:reduce_end]
-        self.assertIn("metadata_buckets", vector_reduce)
-        self.assertIn("first-seen slots in rank order", vector_reduce)
-        self.assertIn("while (position < contributor_count", vector_reduce)
-
     def test_direct_combine_common_shape_specialization_contract(self):
         """Catches losing the K=8/H=7168 AOT path or dynamic fallback."""
         source = (ELASTIC / "combine.asc").read_text()

@@ -2978,18 +2978,6 @@ public:
                 elastic::CombineDirectLocalPlacementConfigStatus::kInvalid,
             "DeepEP Ascend backend: "
             "DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT must be 0 or 1");
-        elastic::CombineMetadataBucketsConfig metadata_buckets_config{};
-        const auto metadata_buckets_config_status =
-            elastic::select_combine_metadata_buckets_config(
-                std::getenv(
-                    "DEEP_EP_ASCEND_COMBINE_METADATA_BUCKETS"),
-                !allow_hybrid_mode_, allow_hybrid_mode_,
-                &metadata_buckets_config);
-        TORCH_CHECK(
-            metadata_buckets_config_status !=
-                elastic::CombineMetadataBucketsConfigStatus::kInvalid,
-            "DeepEP Ascend backend: "
-            "DEEP_EP_ASCEND_COMBINE_METADATA_BUCKETS must be 0 or 1");
         elastic::CombineVectorReduceTileConfig vector_reduce_tile_config{};
         const auto vector_reduce_tile_config_status =
             elastic::select_combine_vector_reduce_tile_config(
@@ -3365,8 +3353,6 @@ public:
         arguments.local_copy_datacopy = local_copy_config.enabled ?
             local_copy_config.tile_bytes : 0U;
         arguments.direct_local_placement = direct_local_config.enabled ?
-            1U : 0U;
-        arguments.metadata_buckets = metadata_buckets_config.enabled ?
             1U : 0U;
         arguments.vector_reduce_tile_elements =
             vector_reduce_tile_config.enabled ?
