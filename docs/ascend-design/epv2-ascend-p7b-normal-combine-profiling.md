@@ -287,3 +287,28 @@ Artifacts are retained on the NPU8P host at
 `/tmp/p7b-3c55a44-profile.json`. TaskQueue task IDs are
 `task_20260902_173000_40669146384` for the baseline/candidate ABBA and
 `task_20260902_220929_247467032012` for the stage profile.
+
+### P7B.4.1: C6 metadata-cache candidate rejected
+
+Commit `c29d002` added an opt-in
+`DEEP_EP_ASCEND_COMBINE_METADATA_CACHE` switch that cached each token's
+top-k indices and receive slots before contributor-rank selection. The
+candidate was tested in the same binary on the same eight-rank case with
+`DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT=1`,
+`DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY=32768`, 10 warmups, and 10
+measured samples. The ABBA order was cache `0 -> 1 -> 1 -> 0`; all four runs
+passed correctness. TaskQueue task: `task_20260902_223539_257650028114`.
+
+| Operation | Cache 0 mean (ms) | Cache 1 mean (ms) | Delta |
+| --- | ---: | ---: | ---: |
+| Normal Dispatch | 22.616 | 21.974 | -2.84% |
+| Expanded Dispatch | 34.880 | 33.811 | -3.06% |
+| Cached Dispatch | 83.156 | 83.609 | +0.54% |
+| **Normal Combine** | **37.701** | **38.452** | **+1.99%** |
+| Reduced Combine | 101.046 | 101.541 | +0.49% |
+
+The candidate was rejected because Normal Combine regressed by `1.99%` and
+Reduced Combine was slightly slower. No stage-profile follow-up was run after
+the negative end-to-end gate. The implementation and selector were reverted
+in `bc9c33a`; C6 remains the next optimization target, with reduction
+data-movement or scheduling changes requiring a fresh profile first.
