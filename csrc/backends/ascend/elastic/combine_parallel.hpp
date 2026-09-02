@@ -44,6 +44,33 @@ struct CombineDirectLocalPlacementConfig {
     bool enabled = false;
 };
 
+enum class CombineMetadataBucketsConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct CombineMetadataBucketsConfig {
+    bool enabled = false;
+};
+
+inline CombineMetadataBucketsConfigStatus
+select_combine_metadata_buckets_config(
+    const char* value, bool direct, bool hybrid,
+    CombineMetadataBucketsConfig* output) noexcept {
+    if (output == nullptr)
+        return CombineMetadataBucketsConfigStatus::kInvalid;
+    *output = {};
+    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+        return CombineMetadataBucketsConfigStatus::kDisabled;
+    if (value[0] != '1' || value[1] != '\0')
+        return CombineMetadataBucketsConfigStatus::kInvalid;
+    if (!direct || hybrid)
+        return CombineMetadataBucketsConfigStatus::kDisabled;
+    output->enabled = true;
+    return CombineMetadataBucketsConfigStatus::kEnabled;
+}
+
 inline CombineDirectLocalPlacementConfigStatus
 select_combine_direct_local_placement_config(
     const char* value, bool direct, bool hybrid,
