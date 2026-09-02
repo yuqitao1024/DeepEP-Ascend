@@ -256,3 +256,34 @@ profiles, all correctness gates pass, rejected candidates are removed, and the
 five-operation report is published. Any bandwidth improvement must come from
 less critical-path work or measured overlap; changing logical-byte accounting,
 weakening synchronization, or hiding a regression does not count.
+
+### P7B.5.1: 8-rank NPU8P acceptance
+
+Commit `3c55a44` was built on the Ascend 950 NPU8P host with system CANN
+9.2.0 and run on devices 0-7 through TaskQueue. The representative case was
+`ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0`, with 8192 tokens per rank,
+hidden 7168, top-k 8, 256 experts, 72 data blocks, 30 warmups, and 30 measured
+samples. Both baseline and candidate completed the correctness preflight.
+
+The baseline used `DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY=32768` with
+direct placement disabled. The candidate enabled
+`DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT=1` in the same built binary.
+
+| Operation | Baseline mean (ms) | Candidate mean (ms) | Delta | Candidate logical GB/s |
+| --- | ---: | ---: | ---: | ---: |
+| Normal Dispatch | 23.737 | 22.714 | -4.31% | 353.46 |
+| Expanded Dispatch | 35.965 | 36.132 | +0.46% | 261.38 |
+| Cached Dispatch | 86.231 | 84.913 | -1.53% | 92.58 |
+| **Normal Combine** | **42.238** | **39.066** | **-7.51%** | **284.91** |
+| Reduced Combine | 105.897 | 103.175 | -2.57% | 106.51 |
+
+Normal Combine P50/P95 moved from `42.340/43.553 ms` to `39.240/40.000 ms`.
+The candidate stage profile reported C3 `1,703` cycles, C4 release payload
+`1,698,266` cycles, C4 release barrier `823,407` cycles, and C6 reduction
+`4,103,255` cycles. The candidate profile case also passed correctness.
+
+Artifacts are retained on the NPU8P host at
+`/tmp/p7b-3c55a44-baseline.json`, `/tmp/p7b-3c55a44-candidate.json`, and
+`/tmp/p7b-3c55a44-profile.json`. TaskQueue task IDs are
+`task_20260902_173000_40669146384` for the baseline/candidate ABBA and
+`task_20260902_220929_247467032012` for the stage profile.
