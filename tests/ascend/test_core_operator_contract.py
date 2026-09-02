@@ -1916,8 +1916,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
 
         self.assertIn("local_copy_datacopy", header)
+        self.assertIn("direct_local_placement", header)
         self.assertIn(
             '"DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY"', host)
+        self.assertIn(
+            '"DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT"', host)
         self.assertIn(
             "select_combine_local_copy_datacopy_config(", host)
         self.assertIn("arguments.local_copy_datacopy =", host)
@@ -1940,6 +1943,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         tail_end = source.index("\n}\n", tail_begin)
         tail = source[tail_begin:tail_end]
         self.assertIn("copy_plan.scalar_begin", tail)
+        self.assertIn("direct_local_placement", source)
+        self.assertIn("combine_receive_offset", local_copy)
 
         kernel = source[source.index(
             "__global__ __vector__ void combine_kernel"):]
@@ -1955,6 +1960,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn(
             "asc_sync_data_barrier(mem_dsb_t::DSB_DDR);", boundary)
         self.assertIn("local_copy_datacopy", boundary)
+        self.assertIn("direct_local_placement == 0", kernel)
         for tile_bytes in (512, 1024, 2048, 4096, 8192, 16384, 32768):
             self.assertIn(
                 f"direct_combine_producer_local_copy_impl<{tile_bytes}>(",

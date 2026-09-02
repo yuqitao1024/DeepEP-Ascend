@@ -181,6 +181,15 @@ retain their existing HCOMM source and destination addresses. If direct local
 placement changes an address exposed to a cached handle or violates reuse
 barriers, reject it rather than changing the ABI.
 
+The implementation candidate is selected with
+`DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT=1` for direct, non-hybrid
+Combine. The producer writes records for its own destination rank directly to
+the corresponding receive shard, while records for every other destination
+continue to use staging. The local-copy stage is skipped only for this
+candidate; the producer fence, local control publication, remote puts, flush,
+generation tags, and world barrier are unchanged. Unset or `0` retains the
+staging copy, and hybrid paths always disable the candidate.
+
 ### P7B.3: C3/C4 overlap (P1)
 
 Pipeline independent local-copy tiles with remote payload publication only

@@ -1309,6 +1309,32 @@ int main() {
             CombineLocalCopyDataCopyConfigStatus::kInvalid)
         return 89;
 
+    CombineDirectLocalPlacementConfig direct_local_config{};
+    if (select_combine_direct_local_placement_config(
+            nullptr, true, false, &direct_local_config) !=
+            CombineDirectLocalPlacementConfigStatus::kDisabled ||
+        direct_local_config.enabled ||
+        select_combine_direct_local_placement_config(
+            "0", true, false, &direct_local_config) !=
+            CombineDirectLocalPlacementConfigStatus::kDisabled ||
+        select_combine_direct_local_placement_config(
+            "1", true, false, &direct_local_config) !=
+            CombineDirectLocalPlacementConfigStatus::kEnabled ||
+        !direct_local_config.enabled ||
+        select_combine_direct_local_placement_config(
+            "2", true, false, &direct_local_config) !=
+            CombineDirectLocalPlacementConfigStatus::kInvalid ||
+        select_combine_direct_local_placement_config(
+            "1", false, false, &direct_local_config) !=
+            CombineDirectLocalPlacementConfigStatus::kDisabled ||
+        select_combine_direct_local_placement_config(
+            "1", true, true, &direct_local_config) !=
+            CombineDirectLocalPlacementConfigStatus::kDisabled ||
+        select_combine_direct_local_placement_config(
+            "1", true, false, nullptr) !=
+            CombineDirectLocalPlacementConfigStatus::kInvalid)
+        return 90;
+
     CombineVectorReduceTileConfig vector_reduce_tile_config{};
     if (select_combine_vector_reduce_tile_config(
             nullptr, true, false, &vector_reduce_tile_config) !=

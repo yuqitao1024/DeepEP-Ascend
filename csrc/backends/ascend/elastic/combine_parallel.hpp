@@ -34,6 +34,33 @@ struct CombineLocalCopyDataCopyConfig {
     std::uint32_t tile_bytes = 0;
 };
 
+enum class CombineDirectLocalPlacementConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct CombineDirectLocalPlacementConfig {
+    bool enabled = false;
+};
+
+inline CombineDirectLocalPlacementConfigStatus
+select_combine_direct_local_placement_config(
+    const char* value, bool direct, bool hybrid,
+    CombineDirectLocalPlacementConfig* output) noexcept {
+    if (output == nullptr)
+        return CombineDirectLocalPlacementConfigStatus::kInvalid;
+    *output = {};
+    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+        return CombineDirectLocalPlacementConfigStatus::kDisabled;
+    if (value[0] != '1' || value[1] != '\0')
+        return CombineDirectLocalPlacementConfigStatus::kInvalid;
+    if (!direct || hybrid)
+        return CombineDirectLocalPlacementConfigStatus::kDisabled;
+    output->enabled = true;
+    return CombineDirectLocalPlacementConfigStatus::kEnabled;
+}
+
 enum class CombineVectorReduceTileConfigStatus : std::uint8_t {
     kDisabled,
     kEnabled,

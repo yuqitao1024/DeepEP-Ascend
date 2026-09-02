@@ -2966,6 +2966,18 @@ public:
             "DeepEP Ascend backend: "
             "DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY must be 0, 1, "
             "512, 1024, 2048, 4096, 8192, 16384, or 32768");
+        elastic::CombineDirectLocalPlacementConfig direct_local_config{};
+        const auto direct_local_config_status =
+            elastic::select_combine_direct_local_placement_config(
+                std::getenv(
+                    "DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT"),
+                !allow_hybrid_mode_, allow_hybrid_mode_,
+                &direct_local_config);
+        TORCH_CHECK(
+            direct_local_config_status !=
+                elastic::CombineDirectLocalPlacementConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT must be 0 or 1");
         elastic::CombineVectorReduceTileConfig vector_reduce_tile_config{};
         const auto vector_reduce_tile_config_status =
             elastic::select_combine_vector_reduce_tile_config(
@@ -3340,6 +3352,8 @@ public:
             expanded_reduce_config.enabled ? 1U : 0U;
         arguments.local_copy_datacopy = local_copy_config.enabled ?
             local_copy_config.tile_bytes : 0U;
+        arguments.direct_local_placement = direct_local_config.enabled ?
+            1U : 0U;
         arguments.vector_reduce_tile_elements =
             vector_reduce_tile_config.enabled ?
                 vector_reduce_tile_config.tile_elements : 0U;
