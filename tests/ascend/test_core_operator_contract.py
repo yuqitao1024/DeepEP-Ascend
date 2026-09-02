@@ -1183,7 +1183,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "AscendC::DataCopy(\n"
             "                    payload_local, input_global, vector_bytes);")
         destination_loop = (
-            "for (std::uint32_t rank = 0; rank < world_size; ++rank)")
+            "for (std::uint32_t index = 0;\n"
+            "                     index < destination_count; ++index)")
         destination_copy = (
             "AscendC::DataCopy(\n"
             "                        output_global, payload_local, "
