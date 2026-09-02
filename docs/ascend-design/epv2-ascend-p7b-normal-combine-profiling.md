@@ -1,0 +1,249 @@
+# EPv2 Ascend P7B Normal Combine Profiling And Optimization
+
+**Status:** tracking document. P7B is the dedicated Normal Combine track and
+is independent of the P7A Normal Dispatch barrier track.
+
+## 1. Objective And Scope
+
+P7B uses stage profiling to reduce the latency of the normal, uncached,
+direct scale-up Combine path. Combine returns expert-produced records to their
+source ranks and assembles the public output tensor. The immediate objective
+is to remove avoidable local-copy and reduction work while preserving exact
+record ordering, top-k metadata, weights, generation safety, and output
+semantics.
+
+The first target is `producer_local_copy` (C3), which dominates the current
+Normal Combine device envelope. The P7B path does not change the public Python
+or C++ API, logical-byte accounting, HCOMM protocol, or Normal Dispatch. The
+source-token pipeline remains disabled.
+
+## 2. Fixed Measurement Contract
+
+All comparisons use the same representative configuration:
+
+```text
+world_size=8
+num_tokens=8192 per rank
+hidden=7168
+top-k=8
+experts=256
+expert_alignment=128
+dispatch=FP8
+combine=BF16
+data_blocks=72
+source pipeline=disabled
+warmups=30
+measured samples=30
+seed=0
+```
+
+For each iteration, the eight-rank operation duration is the slowest rank:
+
+\[
+T_i = \max_{r=0}^{7} T_{i,r}, \qquad
+T_{mean}=\frac{1}{N}\sum_i T_i
+\]
+
+Logical bandwidth uses the existing logical-byte definition divided by
+`T_mean`; it is not an HCCS physical-link counter. A `--profile-stages` run
+adds device instrumentation and is used for attribution only. End-to-end
+comparisons use a non-profiled binary with the same warmup/sample contract.
+
+## 3. Latest Baseline
+
+The latest shared five-operation profile is:
+
+```text
+artifact: /tmp/d3-profile-837c456.json
+remote:   /home/pyptouser/yuqitao/p8-d3-profile-837c456/profile.json
+task:     task_20260902_123138_234621518356
+platform: eight-card Ascend 950 NPU8P
+```
+
+### 3.1 End-to-end operation results
+
+| Operation | Mean (ms) | P50 (ms) | P95 (ms) | Logical bandwidth (GB/s) |
+| --- | ---: | ---: | ---: | ---: |
+| Normal Dispatch | 22.559 | 22.413 | 23.950 | 345.14 |
+| **Normal Combine** | **88.676** | **88.549** | **90.892** | **122.93** |
+| Expanded Dispatch | 35.066 | 34.737 | 36.319 | 263.83 |
+| Cached Dispatch | 84.053 | 83.970 | 85.950 | 92.63 |
+| Reduced Combine | 152.126 | 151.978 | 153.571 | 71.66 |
+
+Normal Combine is the P7B target. The other operations are correctness and
+shared-resource regression gates.
+
+### 3.2 Normal Combine stage envelope
+
+The profile envelope is `76,802,553` cycles. For a multi-block stage, the span
+is the latest block end minus the earliest block start; the report takes the
+maximum span across ranks for each stage.
+
+| Stage | Code phase | Cycles | Envelope share |
+| --- | --- | ---: | ---: |
+| `producer_local_copy` | C3 | 51,385,631 | 66.91% |
+| `release_barrier` | C4 | 9,762,167 | 12.71% |
+| `producer_record` | C2 | 9,579,636 | 12.47% |
+| `epilogue_reduce` | C6 | 4,105,707 | 5.35% |
+
+The largest C3 spans were measured on rank 5 (`51,385,631` cycles), rank 3
+(`51,153,187`), and rank 0 (`50,669,273`). This is a broad workload-dependent
+copy cost, not only a single-rank barrier outlier.
+
+## 4. Combine Data Flow And Stage Meaning
+
+```text
+expert output records
+        |
+        v
+C1 producer control / C2 plan and prefix
+        |
+        v
+C2 producer_record: write return records to per-destination staging shards
+        |
+        v
+C3 producer_local_copy: local staging shard -> local receive shard
+        |
+        +--> C4 release_payload/control/barrier for remote ranks
+        |
+        v
+C5 acquire + validate contributor slots
+        |
+        v
+C6 epilogue_reduce: combine records by source token
+        |
+        v
+C7 weights -> F0 completion -> public output
+```
+
+### 4.1 C3 `producer_local_copy`
+
+`direct_combine_producer_local_copy_vf` handles the local rank's staging
+records. It reads the rank count, computes a byte range
+`count[world_rank] * combine_record_bytes`, and copies the valid aligned body
+from the local staging shard to the local receive shard. The current SIMT body
+assigns scalar-tail bytes by `threadIdx.x`; AICore fallback specializations
+use `DataCopy` tiles and MTE2/MTE3 event pairs.
+
+This copy exists because the producer writes records into a staging layout,
+while the consumer expects a receive-shard layout. It is not the remote HCOMM
+payload transfer and it is not the final mathematical weighted reduction.
+For the representative case, a large number of local records makes the same
+hidden payload traverse GM -> local staging -> local receive before C6 reads
+it again.
+
+### 4.2 C4 release
+
+`direct_combine_producer_release_vf` publishes local count/generation metadata,
+puts remote staging data into the destination rank's receive shard, flushes
+payload, publishes control, and executes the generation barrier. C4 is a
+secondary bottleneck in this profile; P7B does not remove its visibility or
+reuse guarantees while optimizing C3.
+
+### 4.3 C5/C6 consumer path
+
+C5 acquires and validates contributor slots, including top-k/source metadata.
+C6 groups records belonging to an output token and performs the BF16 reduction.
+The profile currently assigns `4,105,707` cycles to C6, so reducing C3 must not
+merely move the same copy cost into the reduction kernel.
+
+## 5. Root-Cause Hypotheses And Priority
+
+The ranking combines measured stage share, expected critical-path impact, and
+the ability to validate one mechanism at a time.
+
+### P7B.0: C3 copy decomposition (P0, measurement)
+
+Split C3 counters into: count/status observation, copy-plan construction,
+aligned vector bytes, scalar tail bytes, per-tile MTE2->MTE3 wait, and final
+completion. Record bytes, tile size, block count, and local-copy span per rank.
+The instrumentation must not change copy order or synchronization.
+
+Required conclusion: determine whether the 66.91% span is dominated by bytes,
+tile/event frequency, block imbalance, or waiting for a producer publication.
+
+### P7B.1: Contiguous tile and block-balance candidate (P0)
+
+Using P7B.0 evidence, select one tile size and work partition. Prefer a
+contiguous aligned body per block, with a separate bounded tail path. Keep the
+existing `simt_combine_local_copy_plan` eligibility checks and avoid reading
+past `count[world_rank] * combine_record_bytes`.
+
+Retain only when C3 maximum-rank span and non-profiled Normal Combine mean both
+improve in same-binary ABBA runs, with no output mismatch or timeout.
+
+### P7B.2: Remove redundant local staging copy (P0, conditional)
+
+Evaluate whether local records can be written directly to the receive-shard
+interval that C5 consumes. This is allowed only when layout, capacity,
+generation, and producer/consumer ordering prove identical. Remote records must
+retain their existing HCOMM source and destination addresses. If direct local
+placement changes an address exposed to a cached handle or violates reuse
+barriers, reject it rather than changing the ABI.
+
+### P7B.3: C3/C4 overlap (P1)
+
+Pipeline independent local-copy tiles with remote payload publication only
+after the corresponding records are visible. Use bounded double buffering or
+tile groups, retain command generation tags, and preserve the final barrier.
+Evidence must show overlapping stage windows, not just reordered launches.
+
+### P7B.4: C6 reduction and metadata locality (P1)
+
+After C3 is reduced, profile C5/C6 by local versus remote records and by output
+token occupancy. Consider coalesced metadata reads and contiguous reduction
+groups. Preserve deterministic contributor order, BF16 accumulation behavior,
+top-k weights, inactive `-1` lanes, and scalar tails.
+
+### P7B.5: Representative acceptance (P0 gate)
+
+After every retained candidate, run the five-operation representative case and
+the final 30/30 Normal Combine profile. Report mean, P50, P95, logical bytes,
+logical bandwidth, C3/C4/C5/C6 spans, rank skew, and regressions in all four
+other operations. No fixed percentage gate is used; correctness and stable
+same-binary movement decide retention.
+
+## 6. Correctness And Safety Gates
+
+- clean host contract suite and Ascend extension build;
+- two-rank and eight-rank Normal Combine correctness;
+- hidden width `7168` and aligned-tail width `7184`;
+- duplicate same-rank contributors, inactive `-1` lanes, and zero-count ranks;
+- all-local, all-remote, asymmetric-count, and near-capacity records;
+- two consecutive generations and repeated buffer reuse;
+- no stale generation, CQ failure, timeout, output mismatch, or data race; and
+- five-operation smoke run after each retained change.
+
+All NPU8P runs use TaskQueue, with no more than one pending/running task for
+this user at a time.
+
+## 7. Implementation Map
+
+- `csrc/backends/ascend/elastic/combine.asc`: C3 local copy, C4 release, C5
+  acquire/validation, C6 reduction and AOT/SIMT launch selection;
+- `csrc/backends/ascend/elastic/kernels.hpp`: `DirectCombineStage`, profile
+  pipeline, and stage-to-profile mapping;
+- `tests/ascend/benchmark/timeline.py`: C-stage semantic names and source
+  function mapping;
+- `tests/ascend/benchmark/runtime.py`: maximum-rank event aggregation and
+  logical bandwidth; and
+- `csrc/backends/ascend/transport/aicore_transport_service.hpp`: C4 command
+  service, CQ drain, generation polling, and barrier accounting.
+
+## 8. Decision Log
+
+| Item | Decision | Reason |
+| --- | --- | --- |
+| Normal Dispatch | separate P7A track | its current dominant stage is D4 barrier, not C3 |
+| C3 direct placement | conditional, P7B.2 | may remove a full GM copy but risks layout/ABI and reuse contracts |
+| Extra HCOMM channels | deferred | C3 dominates before transport saturation is established |
+| C4 barrier redesign | not duplicated from P7A | keep one owner for barrier experiments and avoid mixed attribution |
+| C6 reduction | after C3 | current C6 span is much smaller than C3 |
+
+## 9. Completion Criteria
+
+P7B is complete when the retained Normal Combine path has reproducible C-stage
+profiles, all correctness gates pass, rejected candidates are removed, and the
+five-operation report is published. Any bandwidth improvement must come from
+less critical-path work or measured overlap; changing logical-byte accounting,
+weakening synchronization, or hiding a regression does not count.
