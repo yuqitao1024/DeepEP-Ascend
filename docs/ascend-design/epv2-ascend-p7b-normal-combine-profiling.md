@@ -312,3 +312,27 @@ Reduced Combine was slightly slower. No stage-profile follow-up was run after
 the negative end-to-end gate. The implementation and selector were reverted
 in `bc9c33a`; C6 remains the next optimization target, with reduction
 data-movement or scheduling changes requiring a fresh profile first.
+
+### P7B.4.2: C6 rank-bucket traversal candidate rejected
+
+Commits `91eb509` and `ffdaea9` added the opt-in
+`DEEP_EP_ASCEND_COMBINE_METADATA_BUCKETS` path. It reads each token's top-k
+metadata once and inserts contributors in rank order, preserving the original
+first-seen slot and accumulation ordering. The candidate was tested on the
+same NPU8P eight-rank workload with direct local placement and
+`DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY=32768`; the ABBA order was
+`0 -> 1 -> 1 -> 0`, with 10 warmups and 10 measured samples. All four runs
+passed correctness. TaskQueue task: `task_20260902_231624_2909934315`.
+
+| Operation | Buckets 0 mean (ms) | Buckets 1 mean (ms) | Delta |
+| --- | ---: | ---: | ---: |
+| Normal Dispatch | 22.594 | 23.114 | +2.30% |
+| Expanded Dispatch | 34.656 | 34.647 | -0.03% |
+| Cached Dispatch | 83.849 | 83.849 | +0.00% |
+| **Normal Combine** | **37.889** | **38.143** | **+0.67%** |
+| Reduced Combine | 101.386 | 100.867 | -0.51% |
+
+The Normal Combine gate did not improve and the Reduced Combine change was
+within run-to-run variation. The candidate was therefore reverted in
+`3b9c4d2` and `0fbeb26`; C6 optimization continues with a data-movement
+pipeline candidate rather than metadata traversal.
