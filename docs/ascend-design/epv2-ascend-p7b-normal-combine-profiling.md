@@ -313,7 +313,34 @@ the negative end-to-end gate. The implementation and selector were reverted
 in `bc9c33a`; C6 remains the next optimization target, with reduction
 data-movement or scheduling changes requiring a fresh profile first.
 
-### P7B.4.2: C6 rank-bucket traversal candidate rejected
+### P7B.4.2: C6 vector input double buffering accepted
+
+Commit `1531101` changed the direct vector reduction path to use a two-slot
+VECIN queue. While consuming one contributor tile, the next contributor tile
+is copied from GM into the other slot; contributor ordering, BF16-to-FP32
+accumulation, bias handling, and output conversion are unchanged. The change
+was tested on NPU8P with the representative eight-rank case, direct local
+placement, and `DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY=32768`.
+
+The stage profile reduced C6 `epilogue_reduce` from `4,103,255` to
+`2,144,801 cycles` for Normal Combine and from `4,100,455` to `2,148,412
+cycles` for Reduced Combine. Both the 10-warmup/10-iteration smoke run and
+the formal 30-warmup/30-iteration run passed correctness. Formal results:
+
+| Operation | 3c55a44 candidate (ms) | 1531101 candidate (ms) | Delta |
+| --- | ---: | ---: | ---: |
+| Normal Dispatch | 22.028 | 21.227 | -3.64% |
+| Expanded Dispatch | 35.395 | 33.973 | -4.02% |
+| Cached Dispatch | 84.103 | 83.237 | -1.03% |
+| **Normal Combine** | **38.262** | **34.974** | **-8.59%** |
+| Reduced Combine | 102.347 | 99.103 | -3.17% |
+
+The formal run used TaskQueue task `task_20260903_065134_396515530654` and
+artifact `/home/pyptouser/yuqitao/p7b-1531101-formal.json` on NPU8P. The
+double-buffered C6 path is retained as the default implementation for the
+existing direct vector-reduction specialization.
+
+### P7B.4.3: C6 rank-bucket traversal candidate rejected
 
 Commits `91eb509` and `ffdaea9` added the opt-in
 `DEEP_EP_ASCEND_COMBINE_METADATA_BUCKETS` path. It reads each token's top-k
