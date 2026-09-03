@@ -483,6 +483,56 @@ peers becoming late together points to service serialization. No data-plane
 or management-plane optimization is retained until this distinction is
 measured.
 
+### 7.8 Eight-rank per-peer barrier profile
+
+The v3 per-peer diagnostic ABI was exercised on the fixed eight-rank case in
+TaskQueue task `task_20260903_210945_247814231713`. The run used commit
+`38a25fb`, one explicit case, 30 warmups, and 30 measured iterations, and
+passed all correctness checks. The artifact is
+`/home/pyptouser/yuqitao/deepep-results/d4-peer-diag-8r-explicit-30x.json`.
+It contains eight observing ranks, two barrier phases, and seven world peers
+per rank. Only phase 0 is active for this topology; phase 1 has no records.
+
+The operation-level profile is:
+
+| Operation | Device mean | Issue | CQ drain | First observation | Poll elapsed | Poll iterations |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Normal Dispatch | 22.298 ms | 54,201 cycles | 46,062 | 2,614 | 3,807,060 | 5,983 |
+| Normal Combine | 87.831 ms | 54,047 cycles | 45,086 | 3,062 | 6,936,309 | 7,911 |
+
+The per-peer values below are `ready - first_observation` cycles for Normal
+Dispatch; `-` denotes the self peer. They are one diagnostic snapshot, not an
+end-to-end timing sample.
+
+| observing rank \\ world peer | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | - | 1,813,548 | 273,755 | 475 | 440,578 | 98 | 103 | 93 |
+| 1 | 244 | - | 116 | 120 | 110 | 110 | 110 | 111 |
+| 2 | 337 | 1,456,738 | - | 98 | 91,406 | 104 | 109 | 100 |
+| 3 | 1,901,529 | 3,804,291 | 2,263,460 | - | 2,438,598 | 1,052,249 | 1,858,528 | 1,859,910 |
+| 4 | 280 | 1,301,468 | 96 | 99 | - | 95 | 90 | 90 |
+| 5 | 792,548 | 2,696,260 | 1,154,685 | 117 | 1,322,948 | - | 749,168 | 752,279 |
+| 6 | 573 | 1,897,690 | 355,655 | 104 | 524,189 | 104 | - | 104 |
+| 7 | 713 | 1,901,890 | 359,852 | 110 | 528,203 | 110 | 114 | - |
+
+Normal Combine has the same shape with a larger tail: rank 7 observes world
+peers 1, 3, 4, and 5 at `6,932,687`, `6,590,512`, `6,467,603`, and
+`6,698,919` cycles, while rank 1 observes every peer within 238 cycles. Rank 2
+also waits `5,060,147` cycles for peer 1. This reproduces the Combine symptom
+with the same barrier implementation.
+
+Issue and CQ-drain components stay around 6--10k cycles per peer; the
+multi-million-cycle component begins after first observation. The slow
+observer differs by operation and several peers are late together, so this is
+not evidence of one permanently bad physical link or a payload data-plane
+transfer. It does establish a shared generation/barrier control-path tail.
+Producer arrival skew and serialization in the centralized AICore service
+queue remain indistinguishable with this snapshot because device cycle
+counters are not a cross-rank arrival trace. Therefore no FAA, CQ-drain, or
+generation-ordering change is retained yet; the next probe must isolate
+producer arrival from service scheduling before modifying the communication
+library.
+
 ## 8. Evidence Map
 
 - `csrc/backends/ascend/elastic/dispatch.asc`: producer release and D8 copy;

@@ -49,6 +49,18 @@ Logical bandwidth uses the existing logical-byte definition divided by
 adds device instrumentation and is used for attribution only. End-to-end
 comparisons use a non-profiled binary with the same warmup/sample contract.
 
+The shared v3 barrier profile was also collected for Normal Combine in the
+eight-rank run `task_20260903_210945_247814231713`; the artifact is
+`/home/pyptouser/yuqitao/deepep-results/d4-peer-diag-8r-explicit-30x.json`.
+Only phase 0 is active. Rank 7's `ready - first_observation` tail reaches
+`6,932,687` cycles for world peer 1 and remains above `6.4M` cycles for peers
+3--5, while rank 1 observes all peers within `238` cycles. Normal Dispatch has
+the same rank-dependent pattern. FAA issue and CQ drain remain only about
+`6--10k` cycles per peer, so this evidence supports a shared barrier
+control/arrival issue rather than a Combine-only payload-copy issue. The
+snapshot does not distinguish producer arrival skew from AICore service queue
+serialization; no communication ordering change is justified yet.
+
 ## 3. Latest Baseline
 
 The latest shared five-operation profile is:
