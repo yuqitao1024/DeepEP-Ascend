@@ -1842,7 +1842,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "AscendC::GetBlockIdx()", "AscendC::GetBlockNum()",
                 "AscendC::GlobalTensor<bfloat16_t>", "AscendC::DataCopy",
                 "combine_producer_payload_copy_plan(",
-                "combine_producer_tile_rank_count_offset"):
+                "combine_producer_tile_rank_count_offset",
+                "AscendC::TQue<AscendC::QuePosition::VECIN, 2>",
+                "input_queue, 2", "input_queue.EnQue",
+                "input_queue.DeQue", "input_queue.FreeTensor"):
             self.assertIn(marker, vector_copy)
 
         record_begin = source.index(
