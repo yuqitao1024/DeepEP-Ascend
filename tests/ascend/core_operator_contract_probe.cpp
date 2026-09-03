@@ -1335,6 +1335,32 @@ int main() {
             CombineDirectLocalPlacementConfigStatus::kInvalid)
         return 90;
 
+    CombineReleaseFlushBarrierConfig release_flush_config{};
+    if (select_combine_release_flush_barrier_config(
+            nullptr, true, false, &release_flush_config) !=
+            CombineReleaseFlushBarrierConfigStatus::kDisabled ||
+        release_flush_config.enabled ||
+        select_combine_release_flush_barrier_config(
+            "1", true, false, &release_flush_config) !=
+            CombineReleaseFlushBarrierConfigStatus::kEnabled ||
+        !release_flush_config.enabled ||
+        select_combine_release_flush_barrier_config(
+            "0", true, false, &release_flush_config) !=
+            CombineReleaseFlushBarrierConfigStatus::kDisabled ||
+        select_combine_release_flush_barrier_config(
+            "2", true, false, &release_flush_config) !=
+            CombineReleaseFlushBarrierConfigStatus::kInvalid ||
+        select_combine_release_flush_barrier_config(
+            "1", false, false, &release_flush_config) !=
+            CombineReleaseFlushBarrierConfigStatus::kDisabled ||
+        select_combine_release_flush_barrier_config(
+            "1", true, true, &release_flush_config) !=
+            CombineReleaseFlushBarrierConfigStatus::kDisabled ||
+        select_combine_release_flush_barrier_config(
+            "1", true, false, nullptr) !=
+            CombineReleaseFlushBarrierConfigStatus::kInvalid)
+        return 91;
+
     CombineVectorReduceTileConfig vector_reduce_tile_config{};
     if (select_combine_vector_reduce_tile_config(
             nullptr, true, false, &vector_reduce_tile_config) !=

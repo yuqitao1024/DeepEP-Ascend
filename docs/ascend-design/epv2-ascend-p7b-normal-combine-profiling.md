@@ -431,3 +431,21 @@ A second formal 30-warmup/30-iteration run (`task_20260903_125112_144546914660`)
 also passed the case correctness check and measured `29.490 ms` Normal Combine
 and `31.189 ms` Reduced Combine (`369.65` / `349.52` logical GB/s). This
 recheck confirms the first run is not a one-sample timing artifact.
+
+### P7B.3.1: Deferred final-release flush candidate
+
+The retained 1024-element producer tile moved the Normal Combine critical path
+to `release_barrier`. In the unsplit direct release, the producer previously
+queued payload puts, explicitly drained them with `flush_payload`, then queued
+control publications and the barrier. The barrier service already processes
+commands in order, posts its FAA markers after those earlier WQEs, and drains
+all peer queues before polling generation counters. This makes the explicit
+queue-wide flush a candidate for removal from the final `release_all` path.
+
+The opt-in selector
+`DEEP_EP_ASCEND_COMBINE_RELEASE_FLUSH_BARRIER=1` now defers that flush while
+leaving payload-only and split profiling stages unchanged. The command order,
+control publication, generation tags, final barrier, and CQ drain semantics are
+unchanged; hybrid paths and non-direct Combine disable the selector. Host
+contract coverage is in place. NPU8P correctness and timing evidence are still
+required before considering a default-on change.
