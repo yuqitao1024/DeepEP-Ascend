@@ -460,3 +460,22 @@ disabled, and `13.492 ms` and `8.355 ms` with
 but the short two-rank sample has visible run-to-run variation and is not an
 acceptance result. The eight-rank 30/30 ABBA and stage profile remain required
 before changing the default.
+
+The first eight-rank formal ABBA for commit `b9b8e87` used TaskQueue task
+`task_20260903_161452_254937113274`. All four runs passed correctness. Across
+the two ABBA sides, Normal Combine moved from `29.215 ms` to `28.755 ms`
+(`-1.57%`), Reduced Combine improved `0.77%`, and the other three operations
+stayed within `+/-0.35%`. This is sufficient to keep the candidate as a
+promising opt-in, but not yet to make it the default because the margin is
+small.
+
+The follow-up attribution profile used TaskQueue task
+`task_20260903_162002_263171732326`, with one profiled sample per operation.
+For Normal Combine, the maximum C4 publication span changed from `6,952,599`
+to `5,168,970` cycles, while the operation envelope changed from `17,060,024`
+to `15,257,981` cycles. For Reduced Combine, the corresponding C4 span changed
+from `7,000,585` to `8,636,908` cycles and the envelope from `17,605,669` to
+`19,167,739` cycles. The single-sample profile is therefore directional only:
+it supports the Normal Combine mechanism but exposes a possible Reduced
+Combine sensitivity that must be resolved by a second non-profiled ABBA before
+default-on promotion.
