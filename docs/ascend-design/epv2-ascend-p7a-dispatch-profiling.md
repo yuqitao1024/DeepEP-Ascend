@@ -413,6 +413,24 @@ TaskQueue task `task_20260903_175035_195767814868`. Profile mode stores one
 diagnostic snapshot per operation, so these values are attribution evidence
 and must not be compared directly with unprofiled ABBA operation times.
 
+The implementation was built successfully on NPU8P with CANN 9.2.0 in TaskQueue
+task `task_20260903_201945_119174932319`. A single explicit representative case
+was then run on two ranks with one warmup and one profiled iteration in task
+`task_20260903_202814_154052132579`; correctness passed and the artifact is
+`/home/pyptouser/yuqitao/deepep-results/d4-peer-diag-2r-explicit-1x.json`.
+For Normal Combine, rank 0's peer 1 became ready about `0.33k` cycles after
+its first observation, while rank 1's peer 0 became ready about `5,353,477`
+cycles later. The aggregate Combine poll elapsed value was `5,353,477` cycles
+(`13,960` iterations), with issue `4,774` and CQ drain `7,666` cycles. This
+is the direct per-peer form of the previously observed Normal Combine tail.
+
+Two earlier attempts were intentionally terminated at the hard cap because
+the benchmark command omitted `--cases` and selected the entire supported
+matrix: task `task_20260903_194150_62090525532` (8 ranks, 30/30) reached 30
+minutes with no artifact, and task `task_20260903_201331_99051722089` (2 ranks,
+1/1) was stopped after the same all-case mistake. They are not communication
+timeouts and must not be used as performance evidence.
+
 The per-rank Normal Dispatch release-barrier values were:
 
 | Rank | Issue | CQ drain | First observation | Poll elapsed | Poll iterations | Barrier span |
