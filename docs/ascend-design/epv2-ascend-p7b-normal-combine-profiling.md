@@ -340,6 +340,12 @@ artifact `/home/pyptouser/yuqitao/p7b-1531101-formal.json` on NPU8P. The
 double-buffered C6 path is retained as the default implementation for the
 existing direct vector-reduction specialization.
 
+Commit `2fdffaa` makes the three previously opt-in direct-combine candidates
+default-on when their mode constraints are satisfied: direct local placement,
+32768-byte local `DataCopy`, and expanded vector reduction. Explicit `=0`
+values still select the conservative fallback paths. The 512-element vector
+reduction tile was already default-on.
+
 ### P7B.4.3: C6 rank-bucket traversal candidate rejected
 
 Commits `91eb509` and `ffdaea9` added the opt-in

@@ -51,9 +51,9 @@ select_combine_direct_local_placement_config(
     if (output == nullptr)
         return CombineDirectLocalPlacementConfigStatus::kInvalid;
     *output = {};
-    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+    if (value != nullptr && value[0] == '0' && value[1] == '\0')
         return CombineDirectLocalPlacementConfigStatus::kDisabled;
-    if (value[0] != '1' || value[1] != '\0')
+    if (value != nullptr && (value[0] != '1' || value[1] != '\0'))
         return CombineDirectLocalPlacementConfigStatus::kInvalid;
     if (!direct || hybrid)
         return CombineDirectLocalPlacementConfigStatus::kDisabled;
@@ -111,10 +111,12 @@ select_combine_local_copy_datacopy_config(
     if (output == nullptr)
         return CombineLocalCopyDataCopyConfigStatus::kInvalid;
     *output = {};
-    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+    if (value != nullptr && value[0] == '0' && value[1] == '\0')
         return CombineLocalCopyDataCopyConfigStatus::kDisabled;
-    std::uint32_t tile_bytes = 0;
-    if (value[0] == '1' && value[1] == '\0')
+    std::uint32_t tile_bytes = 32768;
+    if (value == nullptr)
+        tile_bytes = 32768;
+    else if (value[0] == '1' && value[1] == '\0')
         tile_bytes = 32768;
     else if (value[0] == '5' && value[1] == '1' && value[2] == '2' &&
              value[3] == '\0')
@@ -165,9 +167,9 @@ select_combine_expanded_vector_reduce_config(
     if (output == nullptr)
         return CombineExpandedVectorReduceConfigStatus::kInvalid;
     *output = {};
-    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
+    if (value != nullptr && value[0] == '0' && value[1] == '\0')
         return CombineExpandedVectorReduceConfigStatus::kDisabled;
-    if (value[0] != '1' || value[1] != '\0')
+    if (value != nullptr && (value[0] != '1' || value[1] != '\0'))
         return CombineExpandedVectorReduceConfigStatus::kInvalid;
     if (!direct || !expanded || !allow_multiple_reduction || hybrid ||
         num_topk == 0 || num_topk > 32)

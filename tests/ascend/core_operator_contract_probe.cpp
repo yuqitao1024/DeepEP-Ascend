@@ -1188,8 +1188,8 @@ int main() {
     if (select_combine_expanded_vector_reduce_config(
             nullptr, true, true, true, false, 8,
             &expanded_reduce_config) !=
-            CombineExpandedVectorReduceConfigStatus::kDisabled ||
-        expanded_reduce_config.enabled ||
+            CombineExpandedVectorReduceConfigStatus::kEnabled ||
+        !expanded_reduce_config.enabled ||
         select_combine_expanded_vector_reduce_config(
             "0", true, true, true, false, 8,
             &expanded_reduce_config) !=
@@ -1255,8 +1255,8 @@ int main() {
     CombineLocalCopyDataCopyConfig local_copy_config{};
     if (select_combine_local_copy_datacopy_config(
             nullptr, true, false, &local_copy_config) !=
-            CombineLocalCopyDataCopyConfigStatus::kDisabled ||
-        local_copy_config.enabled ||
+            CombineLocalCopyDataCopyConfigStatus::kEnabled ||
+        !local_copy_config.enabled || local_copy_config.tile_bytes != 32768 ||
         select_combine_local_copy_datacopy_config(
             "0", true, false, &local_copy_config) !=
             CombineLocalCopyDataCopyConfigStatus::kDisabled ||
@@ -1312,8 +1312,8 @@ int main() {
     CombineDirectLocalPlacementConfig direct_local_config{};
     if (select_combine_direct_local_placement_config(
             nullptr, true, false, &direct_local_config) !=
-            CombineDirectLocalPlacementConfigStatus::kDisabled ||
-        direct_local_config.enabled ||
+            CombineDirectLocalPlacementConfigStatus::kEnabled ||
+        !direct_local_config.enabled ||
         select_combine_direct_local_placement_config(
             "0", true, false, &direct_local_config) !=
             CombineDirectLocalPlacementConfigStatus::kDisabled ||
