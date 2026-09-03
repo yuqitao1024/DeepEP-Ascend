@@ -449,3 +449,14 @@ control publication, generation tags, final barrier, and CQ drain semantics are
 unchanged; hybrid paths and non-direct Combine disable the selector. Host
 contract coverage is in place. NPU8P correctness and timing evidence are still
 required before considering a default-on change.
+
+The first two-rank NPU8P smoke for commit `b9b8e87` used the
+`specialized-k8-hidden7168` workload to preflight the candidate, then ran a
+serialized `0 -> 1 -> 1 -> 0` timing order on the representative FP8 case with
+five warmups and five measured samples. All four runs passed correctness. The
+Normal Combine device means were `14.191 ms` and `12.568 ms` with the selector
+disabled, and `13.492 ms` and `8.355 ms` with
+`DEEP_EP_ASCEND_COMBINE_RELEASE_FLUSH_BARRIER=1`. The direction is promising,
+but the short two-rank sample has visible run-to-run variation and is not an
+acceptance result. The eight-rank 30/30 ABBA and stage profile remain required
+before changing the default.
