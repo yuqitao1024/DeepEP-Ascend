@@ -1271,6 +1271,15 @@ def _literal_stage_profile(rank, *, generation=9, operation="dispatch"):
             "flush_command_cycles": 9,
             "barrier_command_cycles": 30,
             "barrier_poll_cycles": 20 + rank * 2,
+            "barrier_diagnostics": {
+                "issue_cycles": 11 + rank,
+                "drain_cycles": 12 + rank,
+                "poll_iterations": 13 + rank,
+                "peer_count": 14 + rank,
+                "first_observation_cycles": 15 + rank,
+                "completion_cycles": 16 + rank,
+                "poll_elapsed_cycles": 17 + rank,
+            },
         },
     }
 
@@ -1361,7 +1370,15 @@ def test_stage_profile_rank_aggregation_derives_literal_block_span():
         "barrier_command_cycles": 30,
         "barrier_poll_cycles": 22,
     }
-    assert "barrier_diagnostics" not in aggregated
+    assert aggregated["barrier_diagnostics"] == {
+        "issue_cycles": 12,
+        "drain_cycles": 13,
+        "poll_iterations": 14,
+        "peer_count": 15,
+        "first_observation_cycles": 16,
+        "completion_cycles": 17,
+        "poll_elapsed_cycles": 18,
+    }
     assert aggregated["optimistic_speedup_ceiling"] == pytest.approx(2.5)
     assert aggregated["per_rank"][0]["stages"][0] == {
         "id": 1,
