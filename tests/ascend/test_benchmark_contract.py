@@ -1361,6 +1361,7 @@ def test_stage_profile_rank_aggregation_derives_literal_block_span():
         "barrier_command_cycles": 30,
         "barrier_poll_cycles": 22,
     }
+    assert "barrier_diagnostics" not in aggregated
     assert aggregated["optimistic_speedup_ceiling"] == pytest.approx(2.5)
     assert aggregated["per_rank"][0]["stages"][0] == {
         "id": 1,
@@ -1381,6 +1382,32 @@ def test_stage_profile_rank_aggregation_derives_literal_block_span():
         "start": 90,
         "end": 150,
         "span_cycles": 60,
+    }
+
+
+def test_stage_profile_rank_aggregation_reports_barrier_diagnostics():
+    profiles = [_literal_stage_profile(0), _literal_stage_profile(1)]
+    for rank, profile in enumerate(profiles):
+        profile["service"]["barrier_diagnostics"] = {
+            "issue_cycles": 100 + rank,
+            "drain_cycles": 200 + rank,
+            "poll_iterations": 3 + rank,
+            "peer_count": 7,
+            "first_observation_cycles": 20 + rank,
+            "completion_cycles": 4 + rank,
+            "poll_elapsed_cycles": 500 + rank,
+        }
+
+    aggregated = _aggregate_stage_profiles("dispatch", profiles)
+
+    assert aggregated["barrier_diagnostics"] == {
+        "issue_cycles": 101,
+        "drain_cycles": 201,
+        "poll_iterations": 4,
+        "peer_count": 7,
+        "first_observation_cycles": 21,
+        "completion_cycles": 5,
+        "poll_elapsed_cycles": 501,
     }
 
 

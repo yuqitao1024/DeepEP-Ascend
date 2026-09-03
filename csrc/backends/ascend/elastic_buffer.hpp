@@ -1181,6 +1181,19 @@ public:
         raw_service["barrier_command_cycles"] =
             profile.barrier_command_cycles;
         raw_service["barrier_poll_cycles"] = profile.barrier_poll_cycles;
+        pybind11::dict barrier_diagnostics;
+        barrier_diagnostics["issue_cycles"] = profile.barrier_issue_cycles;
+        barrier_diagnostics["drain_cycles"] = profile.barrier_drain_cycles;
+        barrier_diagnostics["poll_iterations"] =
+            profile.barrier_poll_iterations;
+        barrier_diagnostics["peer_count"] = profile.barrier_peer_count;
+        barrier_diagnostics["first_observation_cycles"] =
+            profile.barrier_first_observation_cycles;
+        barrier_diagnostics["completion_cycles"] =
+            profile.barrier_completion_cycles;
+        barrier_diagnostics["poll_elapsed_cycles"] =
+            profile.barrier_poll_elapsed_cycles;
+        raw_service["barrier_diagnostics"] = barrier_diagnostics;
         result["service"] = raw_service;
         const auto command_metrics_status =
             transport::transport_stage_profile_command_metrics_status(

@@ -55,7 +55,15 @@ struct alignas(64) TransportStageProfile {
     std::uint64_t flush_command_cycles = 0;
     std::uint64_t barrier_command_cycles = 0;
     std::uint64_t barrier_poll_cycles = 0;
-    std::uint64_t reserved[7]{};
+    // Barrier-only attribution counters. These reuse the original reserved
+    // words, so the profile ABI and allocation size remain unchanged.
+    std::uint64_t barrier_issue_cycles = 0;
+    std::uint64_t barrier_drain_cycles = 0;
+    std::uint64_t barrier_poll_iterations = 0;
+    std::uint64_t barrier_peer_count = 0;
+    std::uint64_t barrier_first_observation_cycles = 0;
+    std::uint64_t barrier_completion_cycles = 0;
+    std::uint64_t barrier_poll_elapsed_cycles = 0;
     TransportStageCycles stages[kTransportProfileStageCount]{};
 };
 

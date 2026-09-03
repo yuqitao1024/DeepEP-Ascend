@@ -432,6 +432,19 @@ also passed the case correctness check and measured `29.490 ms` Normal Combine
 and `31.189 ms` Reduced Combine (`369.65` / `349.52` logical GB/s). This
 recheck confirms the first run is not a one-sample timing artifact.
 
+### P7B.3.2: C4 barrier attribution instrumentation
+
+The retained profile path now exports barrier-only counters without changing
+the profile allocation size or ABI. Per profiled release, the service records
+FAA issue cycles and peer count, CQ drain cycles, first poll observation
+latency, poll iterations and elapsed cycles, and completion-store cycles. The
+benchmark aggregator preserves the maximum value across ranks under
+`stage_profile.barrier_diagnostics`. These counters are measurement-only and
+are not enabled on the non-profiled fast path; they are intended to identify
+whether a future C4 candidate should target command construction, CQ drain, or
+generation polling while retaining the explicit payload flush and final
+barrier ordering.
+
 ### P7B.3.1: Deferred final-release flush candidate
 
 The retained 1024-element producer tile moved the Normal Combine critical path

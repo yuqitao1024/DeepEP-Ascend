@@ -366,6 +366,11 @@ def _aggregate_stage_profiles(
         "control_command_cycles", "flush_command_cycles",
         "barrier_command_cycles", "barrier_poll_cycles",
     )
+    barrier_diagnostic_names = (
+        "issue_cycles", "drain_cycles", "poll_iterations", "peer_count",
+        "first_observation_cycles", "completion_cycles",
+        "poll_elapsed_cycles",
+    )
     per_rank = []
     stage_spans: dict[str, int] = {}
     host_timeline_ns: dict[str, int] | None = None
@@ -375,6 +380,8 @@ def _aggregate_stage_profiles(
     device_timeline_cycles = {name: 0 for name in timeline_cycle_names}
     phase_cycles = {name: 0 for name in phase_names}
     service_cycles = {name: 0 for name in service_cycle_names}
+    barrier_diagnostics = {name: 0 for name in barrier_diagnostic_names}
+    barrier_diagnostics_seen = False
     for rank, profile in enumerate(rank_profiles):
         if profile.get("completion_generation") != generation:
             raise ValueError("stage profile completion generation mismatch")
@@ -458,6 +465,18 @@ def _aggregate_stage_profiles(
             if type(value) is not int or value < 0:
                 raise ValueError(f"stage profile service cycles.{name}")
             service_cycles[name] = max(service_cycles[name], value)
+        rank_barrier_diagnostics = rank_service.get("barrier_diagnostics")
+        if rank_barrier_diagnostics is not None:
+            if not isinstance(rank_barrier_diagnostics, dict):
+                raise ValueError("stage profile barrier diagnostics")
+            for name in barrier_diagnostic_names:
+                value = rank_barrier_diagnostics.get(name)
+                if type(value) is not int or value < 0:
+                    raise ValueError(
+                        f"stage profile barrier diagnostics.{name}")
+                barrier_diagnostics[name] = max(
+                    barrier_diagnostics[name], value)
+            barrier_diagnostics_seen = True
         rank_host_timeline = profile.get("host_timeline_ns")
         if rank_host_timeline is not None:
             if not isinstance(rank_host_timeline, dict) or not rank_host_timeline:
@@ -510,6 +529,8 @@ def _aggregate_stage_profiles(
     }
     if host_timeline_ns is not None:
         result["host_timeline_ns"] = host_timeline_ns
+    if barrier_diagnostics_seen:
+        result["barrier_diagnostics"] = barrier_diagnostics
     return result
 
 
