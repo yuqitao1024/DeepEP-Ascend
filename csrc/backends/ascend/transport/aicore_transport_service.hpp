@@ -848,7 +848,9 @@ __aicore__ inline bool drain_all(
     std::uint32_t command_index, TransportCommandOpcode opcode,
     std::uint64_t retry_limit,
     __gm__ TransportStageProfile* profile,
-    const AscendC::LocalTensor<std::uint32_t>& service_scratch) {
+    const AscendC::LocalTensor<std::uint32_t>& service_scratch,
+    TransportTeam barrier_phase_team = TransportTeam::kWorld,
+    std::uint32_t barrier_phase_index = kTransportProfileBarrierPhaseCount) {
     if (context.topology.world_size <= 1)
         return true;
     auto* transport_team = team(context);
@@ -857,11 +859,28 @@ __aicore__ inline bool drain_all(
     for (std::uint32_t peer = 0; peer < transport_team->member_count; ++peer) {
         if (peer == transport_team->self_member)
             continue;
+        const bool in_phase = barrier_phase_index <
+                kTransportProfileBarrierPhaseCount &&
+            command::aicore_barrier_peer_in_team(
+                context.topology, barrier_phase_team, static_cast<int>(peer));
+        auto* peer_profile = profile == nullptr || !in_phase ? nullptr :
+            &profile->barrier_peers[barrier_phase_index][peer];
+        if constexpr (ProfileEnabled) {
+            if (peer_profile != nullptr)
+                peer_profile->drain_start_cycles =
+                    static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+        }
         auto resolved = resolve_context(context, peer, 0);
-        if (!drain_channel<ProfileEnabled>(
+        const bool drained = drain_channel<ProfileEnabled>(
                 context, queue, resolved, command_index, opcode, retry_limit,
                 profile,
-                service_scratch))
+                service_scratch);
+        if constexpr (ProfileEnabled) {
+            if (peer_profile != nullptr)
+                peer_profile->drain_end_cycles =
+                    static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+        }
+        if (!drained)
             return false;
     }
     return true;
@@ -1108,31 +1127,10 @@ __aicore__ inline bool execute_barrier(
         if constexpr (ProfileEnabled)
             drain_start = static_cast<std::uint64_t>(
                 AscendC::GetSystemCycle());
-        for (std::uint32_t peer = 0;
-             peer < transport_team->member_count; ++peer) {
-            if (peer == transport_team->self_member)
-                continue;
-            const bool in_phase = command::aicore_barrier_peer_in_team(
-                context.topology, phase_team, static_cast<int>(peer));
-            auto* peer_profile = profile == nullptr ? nullptr :
-                &profile->barrier_peers[phase_index][peer];
-            if constexpr (ProfileEnabled) {
-                if (in_phase && peer_profile != nullptr)
-                    peer_profile->drain_start_cycles =
-                        static_cast<std::uint64_t>(AscendC::GetSystemCycle());
-            }
-            const auto resolved = resolve_context(context, peer, 0);
-            const bool drained = drain_channel<ProfileEnabled>(
-                context, queue, resolved, command_index, current->opcode,
-                retry_limit, profile, wqe_scratch);
-            if constexpr (ProfileEnabled) {
-                if (in_phase && peer_profile != nullptr)
-                    peer_profile->drain_end_cycles =
-                        static_cast<std::uint64_t>(AscendC::GetSystemCycle());
-            }
-            if (!drained)
-                return false;
-        }
+        if (!drain_all<ProfileEnabled>(
+                context, queue, command_index, current->opcode, retry_limit,
+                profile, wqe_scratch, phase_team, phase_index))
+            return false;
         if constexpr (ProfileEnabled) {
             if (profile != nullptr) {
                 const auto drain_end = static_cast<std::uint64_t>(
