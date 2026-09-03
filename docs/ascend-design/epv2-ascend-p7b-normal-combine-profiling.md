@@ -522,3 +522,16 @@ reproducible under the fixed workload. The deferred-flush implementation was
 therefore reverted in `fab0237`, and the baseline explicit payload flush is
 restored. The profile and ABBA artifacts remain retained as a rejected
 experiment for future barrier-service work.
+
+The instrumentation was rebuilt and exercised on NPU8P in TaskQueue task
+`task_20260903_174935_191461625942` using the representative eight-rank case;
+all five operations passed correctness. The resulting profile artifact is
+`/tmp/p7b-attrib-profile.json`. Normal Combine reported a C4 release-barrier
+span of `6,081,134` cycles, with `51,261` cycles for FAA issue,
+`42,094` cycles for CQ drain, and `5,971,736` cycles in generation polling
+(`8,310` poll iterations). Reduced Combine reported `6,639,956` C4 cycles and
+`6,532,289` polling cycles (`7,982` iterations). First-observation latency was
+only `2,461`/`2,377` cycles and completion-store cost was `1` cycle, so the
+dominant C4 cost is waiting for peer generation counters rather than command
+construction or local completion. This is attribution evidence only; no new
+barrier candidate is retained.
