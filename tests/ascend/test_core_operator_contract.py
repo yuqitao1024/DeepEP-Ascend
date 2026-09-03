@@ -2126,6 +2126,23 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("combine_contributor_count_offset", source)
         self.assertNotIn("combine_contributor_entry_offset", source)
 
+    def test_direct_combine_producer_uses_2048_byte_vector_tiles(self):
+        """Keeps producer payload tiling independent from C6 reduction tiling."""
+        source = (ELASTIC / "combine.asc").read_text()
+        self.assertIn(
+            "kCombineProducerVectorTileElements = 1024;", source)
+        producer_begin = source.index(
+            "__aicore__ inline void direct_combine_producer_vector_payload_impl")
+        producer_end = source.index("\n}\n", producer_begin)
+        producer = source[producer_begin:producer_end]
+        for marker in (
+                "kCombineProducerVectorTileElements * sizeof(bfloat16_t)",
+                "hidden += kCombineProducerVectorTileElements",
+                "output_global, payload_local, kCombineProducerVectorTileElements"):
+            self.assertIn(marker, producer)
+        self.assertNotIn(
+            "payload_buffer, kCombineVectorTileElements", producer)
+
     def test_combine_vector_reduce_tile_selector_contract(self):
         """Catches a fixed 256-element C6 tile with no screening selector."""
         source = (ELASTIC / "combine.asc").read_text()

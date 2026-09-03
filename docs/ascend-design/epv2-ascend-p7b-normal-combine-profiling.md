@@ -385,3 +385,44 @@ The Normal Combine gate did not improve and the Reduced Combine change was
 within run-to-run variation. The candidate was therefore reverted in
 `3b9c4d2` and `0fbeb26`; C6 optimization continues with a data-movement
 pipeline candidate rather than metadata traversal.
+
+### P7B.4.5: C2 producer payload tile accepted
+
+The retained C2 producer path now uses a producer-specific 1024-element
+(`2 KiB`) BF16 tile. The C6 reduction tile remains independently configurable;
+the producer tile is applied to both normal payload copies and expanded
+producer reduction so that the 7168-element representative hidden dimension
+uses seven aligned transfers instead of fourteen. The existing explicit
+MTE2/MTE3 event pair is preserved for every transfer.
+
+The candidate was built with system CANN 9.2.0 on Ascend 950 and passed the
+two-rank preflight (`task_20260903_123514_12951618963`) and the eight-rank
+preflight (`task_20260903_123721_130344931108`). The formal eight-rank run used
+the representative case, 8192 tokens per rank, hidden 7168, top-k 8, 256
+experts, 72 data blocks, 30 warmups, and 30 measured samples. TaskQueue task:
+`task_20260903_123912_132113529816`; artifact:
+`/tmp/p7b-1024tile-formal.json`.
+
+| Operation | 1531101 baseline (ms) | 1024-element tile (ms) | Delta | Candidate logical GB/s |
+| --- | ---: | ---: | ---: | ---: |
+| Normal Dispatch | 21.227 | 21.649 | +1.99% | 359.65 |
+| Expanded Dispatch | 33.973 | 34.198 | +0.66% | 270.53 |
+| Cached Dispatch | 83.237 | 83.479 | +0.29% | 93.27 |
+| **Normal Combine** | **34.974** | **28.616** | **-18.18%** | **380.94** |
+| Reduced Combine | 99.103 | 30.218 | -69.51% | 360.75 |
+
+All five operations and the case correctness preflight passed. The large
+Reduced Combine movement is attributable to the same producer tile removing
+most of the fixed per-tile event overhead. The one-sample eight-rank stage
+profile (`task_20260903_124419_137228024837`) reports the following critical
+segments:
+
+| Operation | Largest stage | Cycles | C2 producer record (cycles) |
+| --- | --- | ---: | ---: |
+| Normal Combine | `release_barrier` | 7,863,877 | 3,057,646 |
+| Reduced Combine | `release_barrier` | 8,500,936 | 3,483,057 |
+
+Thus C2 is no longer the largest end-to-end segment, and C3 local staging is
+negligible (`2,364` / `2,176` cycles in the same profile). Further work should
+target release-barrier/network overlap rather than increasing the producer
+tile again.
