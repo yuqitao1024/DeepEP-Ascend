@@ -479,3 +479,21 @@ from `7,000,585` to `8,636,908` cycles and the envelope from `17,605,669` to
 it supports the Normal Combine mechanism but exposes a possible Reduced
 Combine sensitivity that must be resolved by a second non-profiled ABBA before
 default-on promotion.
+
+A second eight-rank 30/30 ABBA recheck used TaskQueue task
+`task_20260903_164636_35858208364` and the same built binary. All four runs
+passed correctness. The two-side means were:
+
+| Operation | Baseline mean (ms) | Candidate mean (ms) | Delta | P50 delta | P95 delta |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **Normal Combine** | **29.407** | **28.391** | **-3.45%** | **-3.12%** | **-2.21%** |
+| Reduced Combine | 31.561 | 30.098 | -4.64% | -3.86% | -5.78% |
+
+The second recheck strengthens the Normal Combine signal and does not show a
+Reduced Combine regression. One shared-operation baseline sample was an
+obvious measurement outlier (`baseline-b` Normal Dispatch `11.733 ms`, versus
+`21.861 ms` for `baseline-a`), so the cross-operation Dispatch aggregate from
+this task is not used as an acceptance gate. A clean all-five-operation repeat
+is still required before promoting `DEEP_EP_ASCEND_COMBINE_RELEASE_FLUSH_BARRIER`
+to default-on; the selector remains opt-in and the baseline protocol remains
+the safe default.
