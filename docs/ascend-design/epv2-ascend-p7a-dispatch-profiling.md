@@ -360,6 +360,50 @@ grew from `480,152` to `491,080` bytes), consistent with a code-generation or
 resource-layout cost outweighing the saved address arithmetic. The retained
 poll loop therefore keeps the original offset evaluation order.
 
+### 7.4 Rejected deferred payload flush
+
+To test payload/barrier overlap, the normal final `release_all` path was
+changed so payload puts, control publication, and barrier markers were queued
+before the service drained completions. Chunked releases and the profiled
+payload-only stage retained their existing flush. The candidate built cleanly
+and passed the fixed two-rank FP8 correctness case
+(`task_20260903_144232_359127823471`). The eight-rank five-warmup,
+five-sample run also passed all five operation records
+(`task_20260903_150024_28175731347`), but Normal Dispatch regressed:
+
+| Tree | Normal Dispatch mean | P50 | P95 | Logical bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline | `19.924784 ms` | `19.612476 ms` | `21.406521 ms` | `390.774 GB/s` |
+| Deferred flush | `22.120521 ms` | `22.132566 ms` | `22.820036 ms` | `351.985 GB/s` |
+
+The `11.0%` mean regression and `6.6%` P95 regression show that the single
+AICore service queue did not overlap payload progress with barrier processing;
+it merely moved payload/control completion work into the barrier tail. The
+candidate was reverted and no change to generation, signal, CQ, or visibility
+ordering was retained.
+
+### 7.5 Control-before-flush screening
+
+A narrower follow-up kept the payload CQ drain before the barrier, but moved
+remote control publication ahead of that drain. A serialized 2-rank ABBA
+screening (`task_20260903_155647_20293331037`) showed a promising but noisy
+signal: the two baseline samples averaged `12.139516 ms`, while the two
+candidate samples averaged `10.883337 ms` (`10.35%` faster). Because this is
+only two samples per tree and the rank-level variance is material, the change
+is not accepted from this result alone. The candidate remains uncommitted and
+requires the fixed eight-rank workload before any retention decision.
+
+### 7.5 Control-before-flush eight-rank follow-up
+
+A narrower follow-up kept the payload CQ drain before the barrier, but moved
+remote control publication ahead of that drain. The earlier 2-rank ABBA screen
+was promising but noisy. The fixed eight-rank follow-up
+(`task_20260903_161008_24723424169`) passed all five operation records but
+rejected the candidate on end-to-end timing: Normal Dispatch was
+`22.017331 ms` (`353.635 GB/s`), versus the retained baseline
+`19.924784 ms` (`390.774 GB/s`), a `10.5%` regression. The candidate was
+removed; no control, signal, CQ, or generation ordering change is retained.
+
 ## 8. Evidence Map
 
 - `csrc/backends/ascend/elastic/dispatch.asc`: producer release and D8 copy;
