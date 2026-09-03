@@ -535,3 +535,21 @@ only `2,461`/`2,377` cycles and completion-store cost was `1` cycle, so the
 dominant C4 cost is waiting for peer generation counters rather than command
 construction or local completion. This is attribution evidence only; no new
 barrier candidate is retained.
+
+### P7B.3.3: Rank-tail interpretation
+
+The same profile was checked by rank to distinguish return-data imbalance from
+barrier arrival skew. Normal Combine return payloads were tightly grouped at
+`543.1`--`548.4 MB` per rank, and C4 payload publication stayed within
+`1.60`--`1.69M` cycles. In contrast, C4 generation-poll time ranged from
+`0.11M` cycles on rank 3 to `6.08M` cycles on rank 2; ranks 5 and 7 were also
+above `5.7M` cycles. Reduced Combine showed the same pattern, with rank 5 at
+`6.53M` and rank 7 at `6.39M` polling cycles while rank 3 was at `0.17M`.
+
+This is a clear rank-level tail, but the evidence points to cross-rank arrival
+and generation waiting rather than a rank carrying substantially more return
+data. The payload-size spread is about `1%`, while the polling spread is over
+`50x`. Dispatch shows a similar shape and is being investigated on the P7A
+track; P7B therefore records the finding without adding another barrier
+candidate. A future peer-granular trace would need to identify the latest
+payload/control publication and generation observation per destination rank.
