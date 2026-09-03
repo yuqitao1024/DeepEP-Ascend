@@ -426,3 +426,8 @@ Thus C2 is no longer the largest end-to-end segment, and C3 local staging is
 negligible (`2,364` / `2,176` cycles in the same profile). Further work should
 target release-barrier/network overlap rather than increasing the producer
 tile again.
+
+A second formal 30-warmup/30-iteration run (`task_20260903_125112_144546914660`)
+also passed the case correctness check and measured `29.490 ms` Normal Combine
+and `31.189 ms` Reduced Combine (`369.65` / `349.52` logical GB/s). This
+recheck confirms the first run is not a one-sample timing artifact.
