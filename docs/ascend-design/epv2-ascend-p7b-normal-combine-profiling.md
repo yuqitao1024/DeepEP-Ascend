@@ -497,3 +497,15 @@ this task is not used as an acceptance gate. A clean all-five-operation repeat
 is still required before promoting `DEEP_EP_ASCEND_COMBINE_RELEASE_FLUSH_BARRIER`
 to default-on; the selector remains opt-in and the baseline protocol remains
 the safe default.
+
+A third balanced recheck used TaskQueue task `task_20260903_165512_38415076589`
+with order `1 -> 0 -> 0 -> 1`. All four runs again passed correctness, but the
+Normal Combine result moved in the opposite direction: baseline mean `27.880
+ms` versus candidate `28.725 ms` (`+3.03%`), with P50/P95 deltas of `+2.07%`
+and `+0.92%`. Reduced Combine was `-1.56%`, but this does not rescue the
+Normal Combine target. Across the three balanced ABBA rechecks, Normal
+Combine deltas were `-1.57%`, `-3.45%`, and `+3.03%`; the mechanism is not
+reproducible under the fixed workload. The deferred-flush implementation was
+therefore reverted in `fab0237`, and the baseline explicit payload flush is
+restored. The profile and ABBA artifacts remain retained as a rejected
+experiment for future barrier-service work.
