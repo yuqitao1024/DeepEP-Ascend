@@ -346,7 +346,7 @@ default-on when their mode constraints are satisfied: direct local placement,
 values still select the conservative fallback paths. The 512-element vector
 reduction tile was already default-on.
 
-### P7B.4.3: C2 producer payload double buffering
+### P7B.4.3: C2 producer payload double buffering candidate rejected
 
 Commit `1b787b3` pipelines the normal Combine producer's aligned BF16 payload
 copies with a two-slot VECIN queue. The next 256-element GM-to-local tile is
@@ -355,8 +355,12 @@ addresses, tile order, scalar-tail handling, and the producer/consumer fence
 remain unchanged. The host contract suite passes (`160 passed`, `48 subtests`).
 
 An 8-rank NPU8P acceptance task using the representative 30-warmup/30-iteration
-workload was submitted as `task_20260903_105806_388244429157`; its result and
-stage profile are pending queue scheduling.
+workload was submitted as `task_20260903_111039_41193855060`. Compilation
+succeeded, but correctness preflight failed before timing: rank 6/7 reported
+`58,453,456 / 58,670,080` mismatched elements (`99.6%`). The task exited with
+code 1, so no performance or stage-profile result is attributable to this
+candidate. The implementation was reverted; the original explicit MTE2/MTE3
+event synchronization remains required.
 
 ### P7B.4.4: C6 rank-bucket traversal candidate rejected
 
