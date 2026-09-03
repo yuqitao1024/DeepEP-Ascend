@@ -2978,17 +2978,6 @@ public:
                 elastic::CombineDirectLocalPlacementConfigStatus::kInvalid,
             "DeepEP Ascend backend: "
             "DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT must be 0 or 1");
-        elastic::CombineReleaseFlushBarrierConfig release_flush_config{};
-        const auto release_flush_config_status =
-            elastic::select_combine_release_flush_barrier_config(
-                std::getenv(
-                    "DEEP_EP_ASCEND_COMBINE_RELEASE_FLUSH_BARRIER"),
-                !allow_hybrid_mode_, allow_hybrid_mode_, &release_flush_config);
-        TORCH_CHECK(
-            release_flush_config_status !=
-                elastic::CombineReleaseFlushBarrierConfigStatus::kInvalid,
-            "DeepEP Ascend backend: "
-            "DEEP_EP_ASCEND_COMBINE_RELEASE_FLUSH_BARRIER must be 0 or 1");
         elastic::CombineVectorReduceTileConfig vector_reduce_tile_config{};
         const auto vector_reduce_tile_config_status =
             elastic::select_combine_vector_reduce_tile_config(
@@ -3364,8 +3353,6 @@ public:
         arguments.local_copy_datacopy = local_copy_config.enabled ?
             local_copy_config.tile_bytes : 0U;
         arguments.direct_local_placement = direct_local_config.enabled ?
-            1U : 0U;
-        arguments.release_flush_barrier = release_flush_config.enabled ?
             1U : 0U;
         arguments.vector_reduce_tile_elements =
             vector_reduce_tile_config.enabled ?

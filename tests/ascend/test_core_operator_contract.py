@@ -1922,8 +1922,6 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn(
             '"DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT"', host)
         self.assertIn(
-            '"DEEP_EP_ASCEND_COMBINE_RELEASE_FLUSH_BARRIER"', host)
-        self.assertIn(
             "select_combine_local_copy_datacopy_config(", host)
         self.assertIn("arguments.local_copy_datacopy =", host)
 
@@ -1963,26 +1961,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "asc_sync_data_barrier(mem_dsb_t::DSB_DDR);", boundary)
         self.assertIn("local_copy_datacopy", boundary)
         self.assertIn("direct_local_placement == 0", kernel)
-        self.assertIn("release_flush_barrier", kernel)
         for tile_bytes in (512, 1024, 2048, 4096, 8192, 16384, 32768):
             self.assertIn(
                 f"direct_combine_producer_local_copy_impl<{tile_bytes}>(",
                 boundary)
         self.assertIn(
             "kCombineLocalCopyDefaultTileBytes = 32768", source)
-
-    def test_combine_release_flush_barrier_is_explicit_and_narrow(self):
-        source = (ELASTIC / "combine.asc").read_text()
-        parallel = (ELASTIC / "combine_parallel.hpp").read_text()
-        self.assertIn("select_combine_release_flush_barrier_config(", parallel)
-        release_begin = source.index(
-            "__simt_vf__ __launch_bounds__(512) inline void "
-            "direct_combine_producer_release_vf")
-        release_end = source.index("\n}\n", release_begin)
-        release = source[release_begin:release_end]
-        self.assertIn("release_flush_barrier", release)
-        self.assertIn("if (!(release_all && release_flush_barrier != 0))", release)
-        self.assertIn("release_protocol::flush_payload(transport);", release)
 
     def test_direct_combine_validation_builds_slots_in_parallel(self):
         """Catches restoring the serial receive-record slot-map pass."""

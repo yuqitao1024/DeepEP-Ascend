@@ -44,16 +44,6 @@ struct CombineDirectLocalPlacementConfig {
     bool enabled = false;
 };
 
-enum class CombineReleaseFlushBarrierConfigStatus : std::uint8_t {
-    kDisabled,
-    kEnabled,
-    kInvalid,
-};
-
-struct CombineReleaseFlushBarrierConfig {
-    bool enabled = false;
-};
-
 inline CombineDirectLocalPlacementConfigStatus
 select_combine_direct_local_placement_config(
     const char* value, bool direct, bool hybrid,
@@ -69,23 +59,6 @@ select_combine_direct_local_placement_config(
         return CombineDirectLocalPlacementConfigStatus::kDisabled;
     output->enabled = true;
     return CombineDirectLocalPlacementConfigStatus::kEnabled;
-}
-
-inline CombineReleaseFlushBarrierConfigStatus
-select_combine_release_flush_barrier_config(
-    const char* value, bool direct, bool hybrid,
-    CombineReleaseFlushBarrierConfig* output) noexcept {
-    if (output == nullptr)
-        return CombineReleaseFlushBarrierConfigStatus::kInvalid;
-    *output = {};
-    if (value == nullptr || (value[0] == '0' && value[1] == '\0'))
-        return CombineReleaseFlushBarrierConfigStatus::kDisabled;
-    if (value[0] != '1' || value[1] != '\0')
-        return CombineReleaseFlushBarrierConfigStatus::kInvalid;
-    if (!direct || hybrid)
-        return CombineReleaseFlushBarrierConfigStatus::kDisabled;
-    output->enabled = true;
-    return CombineReleaseFlushBarrierConfigStatus::kEnabled;
 }
 
 enum class CombineVectorReduceTileConfigStatus : std::uint8_t {
