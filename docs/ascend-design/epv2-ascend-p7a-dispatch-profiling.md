@@ -16,6 +16,33 @@ P7A does not reopen rejected P7 barrier designs, does not enable the
 source-token pipeline, and does not change the logical-byte formula or public
 output contract.
 
+### Rejected P7A.0 decomposition candidate
+
+The barrier decomposition probe from `bb2d59e` was removed after qualification.
+It added FAA/CQ/poll telemetry and moved invariant peer-mask and offset work out
+of the hot loops. The two-rank build and correctness run passed all `144/144`
+cases, but the fixed eight-rank workload did not produce a benchmark profile and
+hit the TaskQueue timeout during the first case. Restoring only the peer scan or
+only the offset evaluation order did not recover the eight-rank run. This rules
+out both changes as isolated causes and indicates that the added profile fields
+or the resulting AICore service compilation shape changed multi-rank barrier
+progress. The complete candidate and its follow-up probes are therefore not
+retained; future barrier work must start from the current baseline and change
+one execution detail at a time.
+
+### Rejected P7A.3 source-range hint
+
+The Vector epilogue copy was changed to carry its current source-rank range
+across monotonically increasing compact records, avoiding repeated GM reads of
+the rank prefix table in the common case. The change preserved output and
+protocol semantics, built cleanly, passed the host operator contracts, and
+passed the fixed two-rank five-operation benchmark
+(`task_20260903_154614_196126929443`). However, Normal Dispatch regressed from
+`9.667822 ms` to `11.708268 ms` (`21.1%`), while Expanded Dispatch regressed
+from `17.968080 ms` to `21.139809 ms` (`17.6%`). The extra loop-carried state
+changed the Vector kernel cost more than the saved prefix-table loads, so the
+candidate was removed without an eight-rank run.
+
 ## 2. Fixed Measurement Contract
 
 All comparisons use the same binary configuration and workload:
@@ -193,6 +220,125 @@ user may exist at a time.
 | Extra HCCS channels | deferred | transport-only evidence is already much faster than production Dispatch |
 | P7-rejected barrier designs | do not repeat | no new evidence; prior candidates regressed or failed protocol gates |
 | Normal Combine optimization | separate track | `producer_local_copy` dominates Combine but does not explain Dispatch barrier skew |
+| Immediate first generation poll | rejected | NPU8P 30/30 regressed Normal Dispatch by 7.8%; the fixed poll cadence remains in the retained tree |
+
+### 7.1 Immediate first generation poll experiment
+
+The candidate moved the first generation-counter read ahead of the fixed
+`poll_nop`, while retaining the existing FAA submission, CQ drain, generation
+comparison, timeout, and completion protocol. The code was evaluated only in
+the uncommitted `d4-optimize` worktree and then reverted after qualification.
+
+Both runs used the same NPU8P device pair (`0,1`), CANN 9.2.0, world size 2,
+the fixed FP8 representative case (`8192 x 7168`, top-k 8, 256 experts), and
+30 warmups plus 30 measured iterations. Each run passed the selected case and
+all five operation records were valid.
+
+| Tree | TaskQueue task | Normal Dispatch mean | P50 | P95 | Logical bandwidth |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Baseline | `task_20260903_061543_38428091754` | `12.139629 ms` | `12.097425 ms` | `13.037351 ms` | `60.452955 GB/s` |
+| Candidate | `task_20260903_061254_383508617461` | `13.089253 ms` | `13.104343 ms` | `13.834845 ms` | `56.067095 GB/s` |
+
+The candidate was therefore `7.82%` slower on the end-to-end operation and
+was removed. The result supports keeping the established `poll_nop` before
+each generation observation; reducing the apparent first-iteration wait does
+not reduce the service critical path on this implementation.
+
+The requested eight-rank screening was then run with the same workload on
+devices `0-7` and with output redirected to the user's home filesystem (the
+shared `/tmp` filesystem was full during the first attempt). Both five-warmup,
+five-sample runs passed all five operation records:
+
+| Tree | TaskQueue task | Normal Dispatch mean | P50 | P95 | Logical bandwidth |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Baseline | `task_20260903_062705_38773525491` | `19.924784 ms` | `19.612476 ms` | `21.406521 ms` | `390.774 GB/s` |
+| Candidate | `task_20260903_063058_389576629596` | `22.407781 ms` | `21.961489 ms` | `23.645286 ms` | `347.473 GB/s` |
+
+The eight-rank candidate is `12.46%` slower than its control, so the rejection
+is not an artifact of the earlier two-rank screening. No eight-rank performance
+claim is made for this candidate, and the retained implementation remains
+unchanged.
+
+### 7.2 D4 barrier diagnostics experiment
+
+The D4 barrier profile experiment added lightweight diagnostics in the
+existing stage-profile ABI space. With `--profile-stages` enabled, each rank
+reported local issue and CQ-drain spans, poll elapsed cycles and iteration
+count, participating peer count, first-observation latency, and completion
+publication span. The counters were sampled in local registers and written
+once per barrier phase, so they did not add a global-memory update to each
+poll. The legacy `barrier_poll_cycles` field and validation semantics remained
+unchanged; the values were exposed under `service.barrier_diagnostics`.
+
+The first 2-rank smoke with the instrumentation passed all five operations
+(`task_20260903_123334_126590311352`). For Normal Dispatch it reported
+approximately `2.3k` issue cycles, `4.5k` drain cycles, `1.4k` poll elapsed
+cycles, and one peer. This was diagnostic instrumentation only and was not
+included in unprofiled performance comparisons.
+
+### 7.3 Rejected poll address linearization
+
+The eight-rank profile showed that the poll tail dominates the barrier span,
+so a narrow candidate replaced the per-peer `aicore_barrier_offset()` call in
+the hot loop with one phase row base plus a linear peer offset. FAA issue,
+CQ drain, peer order, `poll_nop`, generation checks, and timeout behavior were
+unchanged. The candidate passed all five operations in the profile run
+(`task_20260903_132500_199815527764`), but its unprofiled eight-rank `5/5`
+result regressed Normal Dispatch:
+
+| Tree | TaskQueue task | Normal Dispatch mean | P50 | P95 | Logical bandwidth |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Baseline | `task_20260903_062705_38773525491` | `19.924784 ms` | `19.612476 ms` | `21.406521 ms` | `390.774 GB/s` |
+| Row-base candidate | `task_20260903_132929_20220996027` | `21.749820 ms` | `21.528963 ms` | `22.994246 ms` | `357.984 GB/s` |
+
+The candidate was removed. Its AICore objects were also larger
+(`barrier.asc.o` grew from `480,152` to `491,080` bytes), consistent with a
+code-generation or resource-layout cost outweighing the saved address
+arithmetic. The retained poll loop therefore keeps the original offset
+evaluation order.
+
+### 7.4 Rejected deferred payload flush
+
+To test payload/barrier overlap, the normal final `release_all` path was
+changed so payload puts, control publication, and barrier markers were queued
+before the service drained completions. Chunked releases and the profiled
+payload-only stage retained their existing flush. The candidate built cleanly
+and passed the fixed two-rank FP8 correctness case
+(`task_20260903_144232_359127823471`). The eight-rank five-warmup,
+five-sample run also passed all five operation records
+(`task_20260903_150024_28175731347`), but Normal Dispatch regressed:
+
+| Tree | Normal Dispatch mean | P50 | P95 | Logical bandwidth |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline | `19.924784 ms` | `19.612476 ms` | `21.406521 ms` | `390.774 GB/s` |
+| Deferred flush | `22.120521 ms` | `22.132566 ms` | `22.820036 ms` | `351.985 GB/s` |
+
+The `11.0%` mean regression and `6.6%` P95 regression show that the single
+AICore service queue did not overlap payload progress with barrier processing;
+it merely moved payload/control completion work into the barrier tail. The
+candidate was reverted and no change to generation, signal, CQ, or visibility
+ordering was retained.
+
+### 7.5 Control-before-flush screening
+
+A narrower follow-up kept the payload CQ drain before the barrier, but moved
+remote control publication ahead of that drain. A serialized 2-rank ABBA
+screening (`task_20260903_155647_20293331037`) showed a promising but noisy
+signal: the two baseline samples averaged `12.139516 ms`, while the two
+candidate samples averaged `10.883337 ms` (`10.35%` faster). Because this is
+only two samples per tree and the rank-level variance is material, the change
+was not accepted from this result alone.
+
+### 7.6 Control-before-flush eight-rank follow-up
+
+A narrower follow-up kept the payload CQ drain before the barrier, but moved
+remote control publication ahead of that drain. The earlier 2-rank ABBA screen
+was promising but noisy. The fixed eight-rank follow-up
+(`task_20260903_161008_24723424169`) passed all five operation records but
+rejected the candidate on end-to-end timing: Normal Dispatch was
+`22.017331 ms` (`353.635 GB/s`), versus the retained baseline
+`19.924784 ms` (`390.774 GB/s`), a `10.5%` regression. The candidate was
+removed; no control, signal, CQ, or generation ordering change is retained.
 
 ## 8. Evidence Map
 
@@ -213,3 +359,31 @@ stage profile, all correctness gates pass, no rejected candidate remains in the
 tree, and the final five-operation representative report is reproducible. The
 `2000 logical GB/s` target is a performance goal, not a reason to weaken
 generation safety, visibility ordering, timeout behavior, or output semantics.
+
+## 10. Rejected Candidate: Barrier Poll Row-Base Hoist
+
+The candidate hoisted the invariant barrier signal-row base address out of the
+polling loop in `execute_barrier`, leaving FAA submission, CQ drain, peer scan,
+generation checks, timeout behavior, and protocol ordering unchanged. Host
+contract tests passed (`170 passed, 48 subtests passed`).
+
+The two-rank smoke result looked favorable, but the representative eight-rank
+run is authoritative. TaskQueue tasks
+`task_20260903_172051_77202918706`,
+`task_20260903_172326_82450820530`,
+`task_20260903_172450_83546827469`, and
+`task_20260903_172558_84495317230` ran independent 30-warmup/30-sample
+benchmarks in the order baseline A, candidate A, candidate B, baseline B. All
+four runs passed the representative case correctness gate:
+
+| Run | Result artifact | Dispatch mean (ms) | Dispatch P50 (ms) | Dispatch P95 (ms) | Expanded Dispatch mean (ms) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| baseline A | `p7a-pollbase-ep8-abba/baseline-a.json` | 21.412 | 21.282 | 23.263 | 34.146 |
+| candidate A | `p7a-pollbase-ep8-abba/candidate-a.json` | 21.864 | 22.095 | 23.364 | 34.284 |
+| candidate B | `p7a-pollbase-ep8-abba/candidate-b.json` | 22.957 | 23.070 | 24.623 | 34.723 |
+| baseline B | `p7a-pollbase-ep8-abba/baseline-b.json` | 20.392 | 20.578 | 22.128 | 33.795 |
+
+Pair means are 20.902 ms for baseline and 22.410 ms for the candidate, a
+`+7.218%` Normal Dispatch regression. Expanded Dispatch also regressed by
+`+1.568%` on pair means. The source change was reverted and is not eligible
+for retention based on the two-rank signal.
