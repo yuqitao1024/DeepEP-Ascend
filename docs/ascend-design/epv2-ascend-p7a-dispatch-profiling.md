@@ -340,6 +340,26 @@ rejected the candidate on end-to-end timing: Normal Dispatch was
 `19.924784 ms` (`390.774 GB/s`), a `10.5%` regression. The candidate was
 removed; no control, signal, CQ, or generation ordering change is retained.
 
+### 7.3 Rejected poll address linearization
+
+The eight-rank profile showed that the poll tail dominates the barrier span,
+so a narrow candidate replaced the per-peer `aicore_barrier_offset()` call in
+the hot loop with one phase row base plus a linear peer offset. FAA issue,
+CQ drain, peer order, `poll_nop`, generation checks, and timeout behavior were
+unchanged. The candidate passed all five operations in the profile run
+(`task_20260903_132500_199815527764`), but its unprofiled eight-rank `5/5`
+result regressed Normal Dispatch:
+
+| Tree | TaskQueue task | Normal Dispatch mean | P50 | P95 | Logical bandwidth |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Baseline | `task_20260903_062705_38773525491` | `19.924784 ms` | `19.612476 ms` | `21.406521 ms` | `390.774 GB/s` |
+| Row-base candidate | `task_20260903_132929_20220996027` | `21.749820 ms` | `21.528963 ms` | `22.994246 ms` | `357.984 GB/s` |
+
+The candidate was removed. Its AICore objects were also larger (`barrier.asc.o`
+grew from `480,152` to `491,080` bytes), consistent with a code-generation or
+resource-layout cost outweighing the saved address arithmetic. The retained
+poll loop therefore keeps the original offset evaluation order.
+
 ## 8. Evidence Map
 
 - `csrc/backends/ascend/elastic/dispatch.asc`: producer release and D8 copy;
