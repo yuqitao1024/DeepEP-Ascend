@@ -37,7 +37,7 @@ static_assert(kTransportProfileMaxBlocks == 72);
 static_assert(sizeof(TransportStageBlockCycles) == 64);
 static_assert(alignof(TransportStageBlockCycles) == 64);
 static_assert(offsetof(TransportStageProfile, command_bytes) == 64);
-static_assert(kTransportStageProfileAbiVersion == 2);
+static_assert(kTransportStageProfileAbiVersion == 3);
 static_assert(kTransportStageProfileHeaderCacheLineCount == 3);
 static_assert(kDefaultOptions == 0);
 static_assert((kAggregateRequests & kDefaultOptions) == 0);

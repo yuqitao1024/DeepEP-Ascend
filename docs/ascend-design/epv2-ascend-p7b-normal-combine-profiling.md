@@ -90,6 +90,14 @@ The largest C3 spans were measured on rank 5 (`51,385,631` cycles), rank 3
 (`51,153,187`), and rank 0 (`50,669,273`). This is a broad workload-dependent
 copy cost, not only a single-rank barrier outlier.
 
+The release barrier in Normal Combine exhibits the same rank-skewed polling
+shape seen in Normal Dispatch. It is not currently the largest Combine stage
+because `producer_local_copy` dominates the end-to-end envelope, but the
+shared barrier behavior makes Combine a useful cross-operation check for
+transport/service-control regressions. Per-peer barrier timings are recorded
+by the P7A D4 diagnostic profile and should be read alongside the C3 copy
+decomposition rather than attributed to the local-copy data path.
+
 ## 4. Combine Data Flow And Stage Meaning
 
 ```text

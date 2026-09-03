@@ -1047,11 +1047,14 @@ __aicore__ inline bool execute_barrier(
     auto* memories = reinterpret_cast<__gm__ cann_abi::Memory*>(
         transport_team->remote_sync_memories);
     const auto generation = state->barrier_generation + 1;
+    std::uint32_t phase_index = 0;
     for (const auto phase_team : {
              TransportTeam::kScaleOut, TransportTeam::kScaleUp}) {
         if (!command::aicore_barrier_team_enabled(
                 context.topology, current->options, phase_team))
             continue;
+        if (phase_index >= kTransportProfileBarrierPhaseCount)
+            return false;
         const std::uint32_t barrier_index =
             phase_team == TransportTeam::kScaleOut ?
                 sync_layout::kScaleOutBarrierIndex :
@@ -1067,14 +1070,30 @@ __aicore__ inline bool execute_barrier(
                     context.topology, phase_team, static_cast<int>(peer)))
                 continue;
             ++peer_count;
+            auto* peer_profile = profile == nullptr ? nullptr :
+                &profile->barrier_peers[phase_index][peer];
+            if constexpr (ProfileEnabled) {
+                if (peer_profile != nullptr) {
+                    peer_profile->world_peer = peer;
+                    peer_profile->valid = 1;
+                    peer_profile->issue_start_cycles =
+                        static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+                }
+            }
             const auto offset = sync_layout::aicore_barrier_offset(
                 transport_team->member_count, barrier_index,
                 transport_team->self_member);
-            if (!post_faa<ProfileEnabled>(
+            const bool posted = post_faa<ProfileEnabled>(
                     context, queue, peer, memories[peer].address + offset,
                     transport_team->shadow_sync_memory.address + offset, 1,
                     command_index, current->opcode, retry_limit, profile,
-                    wqe_scratch))
+                    wqe_scratch);
+            if constexpr (ProfileEnabled) {
+                if (peer_profile != nullptr)
+                    peer_profile->issue_end_cycles =
+                        static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+            }
+            if (!posted)
                 return false;
         }
         if constexpr (ProfileEnabled) {
@@ -1089,10 +1108,31 @@ __aicore__ inline bool execute_barrier(
         if constexpr (ProfileEnabled)
             drain_start = static_cast<std::uint64_t>(
                 AscendC::GetSystemCycle());
-        if (!drain_all<ProfileEnabled>(
-                context, queue, command_index, current->opcode, retry_limit,
-                profile, wqe_scratch))
-            return false;
+        for (std::uint32_t peer = 0;
+             peer < transport_team->member_count; ++peer) {
+            if (peer == transport_team->self_member)
+                continue;
+            const bool in_phase = command::aicore_barrier_peer_in_team(
+                context.topology, phase_team, static_cast<int>(peer));
+            auto* peer_profile = profile == nullptr ? nullptr :
+                &profile->barrier_peers[phase_index][peer];
+            if constexpr (ProfileEnabled) {
+                if (in_phase && peer_profile != nullptr)
+                    peer_profile->drain_start_cycles =
+                        static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+            }
+            const auto resolved = resolve_context(context, peer, 0);
+            const bool drained = drain_channel<ProfileEnabled>(
+                context, queue, resolved, command_index, current->opcode,
+                retry_limit, profile, wqe_scratch);
+            if constexpr (ProfileEnabled) {
+                if (in_phase && peer_profile != nullptr)
+                    peer_profile->drain_end_cycles =
+                        static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+            }
+            if (!drained)
+                return false;
+        }
         if constexpr (ProfileEnabled) {
             if (profile != nullptr) {
                 const auto drain_end = static_cast<std::uint64_t>(
@@ -1109,35 +1149,51 @@ __aicore__ inline bool execute_barrier(
             if (!command::aicore_barrier_peer_in_team(
                     context.topology, phase_team, static_cast<int>(peer)))
                 continue;
-            if (peer >= 64)
-                return false;
             pending_peers |= std::uint64_t{1} << peer;
         }
         const auto start_cycles = static_cast<std::uint64_t>(
             AscendC::GetSystemCycle());
         std::uint64_t first_observation = 0;
         std::uint64_t retry = 0;
+        std::uint32_t pending_clear_order = 0;
         while (pending_peers != 0) {
             aicore::poll_nop();
             std::uint64_t observed_pending = 0;
             for (std::uint32_t peer = 0;
                  peer < transport_team->member_count; ++peer) {
-                if (peer >= 64)
-                    break;
                 if ((pending_peers & (std::uint64_t{1} << peer)) == 0)
                     continue;
                 const auto offset = sync_layout::aicore_barrier_offset(
                     transport_team->member_count, barrier_index, peer);
                 auto* signal = reinterpret_cast<__gm__ std::uint64_t*>(
                     memories[transport_team->self_member].address + offset);
+                const auto observation_cycles = static_cast<std::uint64_t>(
+                    AscendC::GetSystemCycle());
                 if (first_observation == 0)
-                    first_observation = static_cast<std::uint64_t>(
-                        AscendC::GetSystemCycle());
+                    first_observation = observation_cycles;
+                auto* peer_profile = profile == nullptr ? nullptr :
+                    &profile->barrier_peers[phase_index][peer];
+                if constexpr (ProfileEnabled) {
+                    if (peer_profile != nullptr &&
+                        peer_profile->first_observation_cycles == 0)
+                        peer_profile->first_observation_cycles =
+                            observation_cycles;
+                }
                 // Barrier counters are remote FAA results in GM. A direct
                 // cache-bypassing scalar read avoids an MTE2/UB round trip on
                 // every poll while retaining the same visibility guarantee.
                 if (aicore::load_published(signal) < generation)
                     observed_pending |= std::uint64_t{1} << peer;
+                else if constexpr (ProfileEnabled) {
+                    if (peer_profile != nullptr &&
+                        peer_profile->ready_cycles == 0) {
+                        peer_profile->ready_cycles =
+                            static_cast<std::uint64_t>(
+                                AscendC::GetSystemCycle());
+                        peer_profile->pending_clear_order =
+                            ++pending_clear_order;
+                    }
+                }
             }
             pending_peers = observed_pending;
             if (pending_peers == 0)
@@ -1181,6 +1237,7 @@ __aicore__ inline bool execute_barrier(
                         first_observation - start_cycles;
             }
         }
+        ++phase_index;
     }
     if constexpr (ProfileEnabled) {
         if (profile != nullptr) {
@@ -1246,6 +1303,13 @@ __aicore__ inline void complete_profile(
         return;
     profile->completion_generation = generation;
     aicore::system_fence();
+    for (std::uint32_t phase = 0;
+         phase < kTransportProfileBarrierPhaseCount; ++phase)
+        for (std::uint32_t peer = 0;
+             peer < kTransportProfileMaxBarrierPeers; ++peer)
+            if (profile->barrier_peers[phase][peer].valid != 0)
+                aicore::flush_cacheline(
+                    &profile->barrier_peers[phase][peer]);
     aicore::flush_stage_profile_header(profile);
 }
 

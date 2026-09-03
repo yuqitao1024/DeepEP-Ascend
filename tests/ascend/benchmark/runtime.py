@@ -382,6 +382,8 @@ def _aggregate_stage_profiles(
     service_cycles = {name: 0 for name in service_cycle_names}
     barrier_diagnostics = {name: 0 for name in barrier_diagnostic_names}
     barrier_diagnostics_seen = False
+    barrier_peer_diagnostics = []
+    barrier_peer_diagnostics_seen = False
     for rank, profile in enumerate(rank_profiles):
         if profile.get("completion_generation") != generation:
             raise ValueError("stage profile completion generation mismatch")
@@ -477,6 +479,36 @@ def _aggregate_stage_profiles(
                 barrier_diagnostics[name] = max(
                     barrier_diagnostics[name], value)
             barrier_diagnostics_seen = True
+        rank_peer_diagnostics = rank_service.get("barrier_peer_diagnostics")
+        if rank_peer_diagnostics is not None:
+            if (not isinstance(rank_peer_diagnostics, list) or
+                    len(rank_peer_diagnostics) != 2):
+                raise ValueError("stage profile barrier peer diagnostics")
+            normalized_phases = []
+            for phase, phase_peers in enumerate(rank_peer_diagnostics):
+                if not isinstance(phase_peers, list):
+                    raise ValueError(
+                        "stage profile barrier peer phase diagnostics")
+                normalized_peers = []
+                for peer_record in phase_peers:
+                    if not isinstance(peer_record, dict):
+                        raise ValueError(
+                            "stage profile barrier peer record")
+                    required = (
+                        "world_peer", "issue_start_cycles", "issue_end_cycles",
+                        "drain_start_cycles", "drain_end_cycles",
+                        "first_observation_cycles", "ready_cycles",
+                        "pending_clear_order",
+                    )
+                    if any(type(peer_record.get(name)) is not int or
+                           peer_record[name] < 0 for name in required):
+                        raise ValueError(
+                            "stage profile barrier peer record fields")
+                    normalized_peers.append(dict(peer_record, rank=rank,
+                                                 phase=phase))
+                normalized_phases.append(normalized_peers)
+            barrier_peer_diagnostics.append(normalized_phases)
+            barrier_peer_diagnostics_seen = True
         rank_host_timeline = profile.get("host_timeline_ns")
         if rank_host_timeline is not None:
             if not isinstance(rank_host_timeline, dict) or not rank_host_timeline:
@@ -531,6 +563,8 @@ def _aggregate_stage_profiles(
         result["host_timeline_ns"] = host_timeline_ns
     if barrier_diagnostics_seen:
         result["barrier_diagnostics"] = barrier_diagnostics
+    if barrier_peer_diagnostics_seen:
+        result["barrier_peer_diagnostics"] = barrier_peer_diagnostics
     return result
 
 

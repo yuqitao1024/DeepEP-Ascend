@@ -404,6 +404,67 @@ rejected the candidate on end-to-end timing: Normal Dispatch was
 `19.924784 ms` (`390.774 GB/s`), a `10.5%` regression. The candidate was
 removed; no control, signal, CQ, or generation ordering change is retained.
 
+### 7.6 Eight-rank barrier decomposition evidence
+
+The next diagnostic run used the retained D4 tree with `--profile-stages`, 30
+warmups, and 30 measured iterations on devices `0-7`. The artifact is
+`/home/pyptouser/yuqitao/deepep-results/d4-barrier-diag-8r-30x.json` from
+TaskQueue task `task_20260903_175035_195767814868`. Profile mode stores one
+diagnostic snapshot per operation, so these values are attribution evidence
+and must not be compared directly with unprofiled ABBA operation times.
+
+The per-rank Normal Dispatch release-barrier values were:
+
+| Rank | Issue | CQ drain | First observation | Poll elapsed | Poll iterations | Barrier span |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 53,386 | 42,898 | 1,860 | 5,606,381 | 8,110 | 5,718,635 |
+| 1 | 50,897 | 42,324 | 2,145 | 855,901 | 2,052 | 965,510 |
+| 2 | 49,932 | 41,527 | 2,137 | 4,062,049 | 6,973 | 4,169,764 |
+| 3 | 52,659 | 42,381 | 1,919 | 3,387 | 0 | 114,672 |
+| 4 | 48,670 | 40,873 | 2,115 | 2,358,974 | 4,828 | 2,464,123 |
+| 5 | 49,583 | 41,554 | 2,087 | 850,487 | 2,070 | 957,075 |
+| 6 | 50,018 | 41,334 | 2,184 | 2,069,659 | 4,281 | 2,176,809 |
+| 7 | 49,475 | 40,607 | 1,887 | 2,564,248 | 5,005 | 2,670,077 |
+
+The rank maxima/means were `50,578`/`41,687` issue and drain cycles,
+`2,042` first-observation cycles, `2,296,386` poll-elapsed cycles, `4,165`
+poll iterations, and `2,404,583` barrier-span cycles. The profile stage
+maximum was `release_barrier` (`5,718,635` cycles), ahead of
+`release_payload` (`1,040,737`) and `release_control` (`274,514`). Thus the
+tail is almost entirely generation-counter polling; FAA issue, CQ completion,
+and first observation are comparatively small. The slow rank rotates across
+runs, so this is not evidence of one permanently bad card.
+
+Normal Combine shows the same release-barrier shape when profiled, although
+its current end-to-end envelope is still dominated by `producer_local_copy`.
+This makes a shared transport/service-control cause more plausible than an
+operation-specific payload-copy cause. The evidence is not sufficient to
+exclude producer arrival skew: a peer can be late because its SIMT producer
+or AICore service has not published its generation yet. The retained
+implementation therefore records per-phase, per-peer FAA issue, CQ drain,
+first-observation, ready, and pending-bit clear order in the profile ABI for
+the next run.
+
+### 7.7 CUDA comparison and ownership hypothesis
+
+The DeepEP CUDA implementation performs the barrier in GPU execution: after
+TMA store commit/wait and the required grid synchronization, a notify warp
+polls the GIN signal table directly. Dispatch uses a final barrier with store
+flush and start synchronization, while scale-up and scale-out barriers can be
+assigned to separate SMs in hybrid mode. There is no equivalent centralized
+AICore service queue between the producer and the peer signal poll.
+
+The Ascend path is currently closer to `SIMT producer -> DeviceTransportFacade
+command queue -> AICore service -> FAA/CQ drain -> GM generation poll`.
+Consequently, a serialized AICore service/control path is a credible source
+of the long tail, especially if control commands from multiple producers wait
+behind one service queue. The per-peer timestamps are intended to separate
+the cases: a late issue points to producer/service scheduling, a fast issue
+with late ready points to FAA visibility or control-plane progress, and all
+peers becoming late together points to service serialization. No data-plane
+or management-plane optimization is retained until this distinction is
+measured.
+
 ## 8. Evidence Map
 
 - `csrc/backends/ascend/elastic/dispatch.asc`: producer release and D8 copy;

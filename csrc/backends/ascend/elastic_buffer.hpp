@@ -1194,6 +1194,31 @@ public:
         barrier_diagnostics["poll_elapsed_cycles"] =
             profile.barrier_poll_elapsed_cycles;
         raw_service["barrier_diagnostics"] = barrier_diagnostics;
+        pybind11::list barrier_peer_diagnostics;
+        for (std::uint32_t phase = 0;
+             phase < transport::kTransportProfileBarrierPhaseCount; ++phase) {
+            pybind11::list phase_peers;
+            for (std::uint32_t peer = 0;
+                 peer < transport::kTransportProfileMaxBarrierPeers; ++peer) {
+                const auto& timing = profile.barrier_peers[phase][peer];
+                if (timing.valid == 0)
+                    continue;
+                pybind11::dict peer_record;
+                peer_record["world_peer"] = timing.world_peer;
+                peer_record["issue_start_cycles"] = timing.issue_start_cycles;
+                peer_record["issue_end_cycles"] = timing.issue_end_cycles;
+                peer_record["drain_start_cycles"] = timing.drain_start_cycles;
+                peer_record["drain_end_cycles"] = timing.drain_end_cycles;
+                peer_record["first_observation_cycles"] =
+                    timing.first_observation_cycles;
+                peer_record["ready_cycles"] = timing.ready_cycles;
+                peer_record["pending_clear_order"] =
+                    timing.pending_clear_order;
+                phase_peers.append(peer_record);
+            }
+            barrier_peer_diagnostics.append(phase_peers);
+        }
+        raw_service["barrier_peer_diagnostics"] = barrier_peer_diagnostics;
         result["service"] = raw_service;
         const auto command_metrics_status =
             transport::transport_stage_profile_command_metrics_status(

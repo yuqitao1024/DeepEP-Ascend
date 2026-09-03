@@ -8,9 +8,11 @@
 
 namespace deep_ep::ascend::transport {
 
-inline constexpr std::uint32_t kTransportStageProfileAbiVersion = 2;
+inline constexpr std::uint32_t kTransportStageProfileAbiVersion = 3;
 inline constexpr std::uint32_t kTransportProfileStageCount = 16;
 inline constexpr std::uint32_t kTransportProfileMaxBlocks = 72;
+inline constexpr std::uint32_t kTransportProfileBarrierPhaseCount = 2;
+inline constexpr std::uint32_t kTransportProfileMaxBarrierPeers = 64;
 inline constexpr std::size_t kTransportStageProfileCacheLineBytes = 64;
 inline constexpr std::uint32_t kTransportStageProfileReleaseAblation = 1U;
 
@@ -30,6 +32,21 @@ struct TransportStageCycles {
     std::uint32_t block_count = 0;
     std::uint32_t reserved = 0;
     TransportStageBlockCycles blocks[kTransportProfileMaxBlocks]{};
+};
+
+// Per-peer barrier timestamps are absolute device cycles. A zero valid flag
+// means that the peer was not part of the phase (or the phase failed early).
+struct alignas(64) TransportBarrierPeerCycles {
+    std::uint64_t issue_start_cycles = 0;
+    std::uint64_t issue_end_cycles = 0;
+    std::uint64_t drain_start_cycles = 0;
+    std::uint64_t drain_end_cycles = 0;
+    std::uint64_t first_observation_cycles = 0;
+    std::uint64_t ready_cycles = 0;
+    std::uint32_t world_peer = 0;
+    std::uint32_t valid = 0;
+    std::uint32_t pending_clear_order = 0;
+    std::uint32_t reserved = 0;
 };
 
 struct alignas(64) TransportStageProfile {
@@ -65,6 +82,8 @@ struct alignas(64) TransportStageProfile {
     std::uint64_t barrier_completion_cycles = 0;
     std::uint64_t barrier_poll_elapsed_cycles = 0;
     TransportStageCycles stages[kTransportProfileStageCount]{};
+    TransportBarrierPeerCycles barrier_peers[
+        kTransportProfileBarrierPhaseCount][kTransportProfileMaxBarrierPeers]{};
 };
 
 struct TransportQueueDepthSnapshot {
@@ -470,6 +489,8 @@ static_assert(kTransportStageProfileHeaderBytes ==
 static_assert(kTransportStageProfileHeaderCacheLineCount == 3);
 static_assert(std::is_trivially_copyable_v<TransportStageBlockCycles>);
 static_assert(std::is_trivially_copyable_v<TransportStageCycles>);
+static_assert(sizeof(TransportBarrierPeerCycles) == 64);
+static_assert(std::is_trivially_copyable_v<TransportBarrierPeerCycles>);
 static_assert(std::is_trivially_copyable_v<TransportStageProfile>);
 static_assert(std::is_trivially_copyable_v<TransportQueueDepthSnapshot>);
 
