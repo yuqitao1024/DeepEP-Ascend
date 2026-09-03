@@ -346,7 +346,19 @@ default-on when their mode constraints are satisfied: direct local placement,
 values still select the conservative fallback paths. The 512-element vector
 reduction tile was already default-on.
 
-### P7B.4.3: C6 rank-bucket traversal candidate rejected
+### P7B.4.3: C2 producer payload double buffering
+
+Commit `1b787b3` pipelines the normal Combine producer's aligned BF16 payload
+copies with a two-slot VECIN queue. The next 256-element GM-to-local tile is
+issued before the preceding local-to-record tile is written back, while record
+addresses, tile order, scalar-tail handling, and the producer/consumer fence
+remain unchanged. The host contract suite passes (`160 passed`, `48 subtests`).
+
+An 8-rank NPU8P acceptance task using the representative 30-warmup/30-iteration
+workload was submitted as `task_20260903_105806_388244429157`; its result and
+stage profile are pending queue scheduling.
+
+### P7B.4.4: C6 rank-bucket traversal candidate rejected
 
 Commits `91eb509` and `ffdaea9` added the opt-in
 `DEEP_EP_ASCEND_COMBINE_METADATA_BUCKETS` path. It reads each token's top-k
