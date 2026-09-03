@@ -98,6 +98,14 @@ transport/service-control regressions. Per-peer barrier timings are recorded
 by the P7A D4 diagnostic profile and should be read alongside the C3 copy
 decomposition rather than attributed to the local-copy data path.
 
+The explicit two-rank smoke (`task_20260903_202814_154052132579`) confirms
+the distinction: one rank's peer became ready immediately, while the other
+was delayed by `5,353,477` cycles after first observation. The profile's
+Combine barrier issue and CQ-drain costs were only `4,774` and `7,666` cycles,
+so the delay is in generation readiness/polling, not payload issue or CQ
+completion. The full eight-rank per-peer run remains queued behind other
+users' device allocations and has not produced a new artifact yet.
+
 ## 4. Combine Data Flow And Stage Meaning
 
 ```text
