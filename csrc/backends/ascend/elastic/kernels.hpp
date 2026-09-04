@@ -4,6 +4,10 @@
 
 #include "tiling.hpp"
 
+#ifndef DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY
+#define DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY 0
+#endif
+
 namespace deep_ep::ascend::elastic {
 
 struct HybridRouteRecord;

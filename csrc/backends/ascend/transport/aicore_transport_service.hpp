@@ -170,8 +170,8 @@ inline bool execute(
 inline std::uint64_t signal_offset(
     std::uint32_t member_count, std::uint32_t signal_index,
     std::uint32_t source_member) {
-    return sync_layout::signal_offset(
-        member_count, signal_index, source_member);
+    return (static_cast<std::uint64_t>(signal_index) * member_count +
+            source_member) * sizeof(std::uint64_t);
 }
 
 inline std::uint64_t fetch_result_offset(std::uint32_t peer) {
@@ -1095,6 +1095,7 @@ __aicore__ inline bool execute_barrier(
                 if (peer_profile != nullptr) {
                     peer_profile->world_peer = peer;
                     peer_profile->valid = 1;
+                    peer_profile->release_signal_flags = 0;
                     peer_profile->issue_start_cycles =
                         static_cast<std::uint64_t>(AscendC::GetSystemCycle());
                 }
@@ -1177,6 +1178,30 @@ __aicore__ inline bool execute_barrier(
                         peer_profile->first_observation_cycles =
                             observation_cycles;
                 }
+                const auto signal_offset =
+                    (static_cast<std::uint64_t>(
+                         sync_layout::kDispatchReleaseSignalIndex) *
+                         transport_team->member_count + peer) *
+                    sizeof(std::uint64_t);
+                const auto combine_signal_offset =
+                    (static_cast<std::uint64_t>(
+                         sync_layout::kCombineReleaseSignalIndex) *
+                         transport_team->member_count + peer) *
+                    sizeof(std::uint64_t);
+                const auto local_sync = memories[
+                    transport_team->self_member].address;
+                const bool release_signal_ready =
+                    aicore::load_published(reinterpret_cast<
+                        __gm__ const std::uint64_t*>(
+                            local_sync + signal_offset)) >= generation ||
+                    aicore::load_published(reinterpret_cast<
+                        __gm__ const std::uint64_t*>(
+                            local_sync + combine_signal_offset)) >= generation;
+                if constexpr (ProfileEnabled) {
+                    if (peer_profile != nullptr && release_signal_ready)
+                        peer_profile->release_signal_flags |=
+                            kTransportBarrierPeerReleaseSignalReadyAtFirstObservation;
+                }
                 // Barrier counters are remote FAA results in GM. A direct
                 // cache-bypassing scalar read avoids an MTE2/UB round trip on
                 // every poll while retaining the same visibility guarantee.
@@ -1190,6 +1215,9 @@ __aicore__ inline bool execute_barrier(
                                 AscendC::GetSystemCycle());
                         peer_profile->pending_clear_order =
                             ++pending_clear_order;
+                        if (release_signal_ready)
+                            peer_profile->release_signal_flags |=
+                                kTransportBarrierPeerReleaseSignalReadyAtBarrierReady;
                     }
                 }
             }

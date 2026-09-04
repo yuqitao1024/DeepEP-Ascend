@@ -4269,7 +4269,11 @@ int main() {
             self.assertLess(control, barrier)
             self.assertEqual(
                 release.count("release_protocol::flush_payload(transport);"),
-                1)
+                2)
+            terminal_flush = release.index(
+                "release_protocol::flush_payload(transport);", control)
+            self.assertLess(control, terminal_flush)
+            self.assertLess(terminal_flush, barrier)
 
         combine = (ELASTIC / "combine.asc").read_text()
         fallback = combine[

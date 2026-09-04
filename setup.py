@@ -12,6 +12,27 @@ def get_ascend_testing_mode(environ=os.environ):
     return '1' if environ.get('DEEP_EP_ASCEND_TESTING') == '1' else '0'
 
 
+def get_ascend_release_signal_only(environ=os.environ):
+    value = environ.get('DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY', '1')
+    if value not in ('0', '1'):
+        raise ValueError(
+            'DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY must be 0 or 1')
+    return value
+
+
+def get_torch_npu_root():
+    torch_npu_module = sys.modules.get('torch_npu')
+    if torch_npu_module is not None and getattr(torch_npu_module, '__file__', None):
+        return Path(torch_npu_module.__file__).resolve().parent
+    try:
+        torch_npu_spec = importlib.util.find_spec('torch_npu')
+    except (ValueError, ImportError):
+        torch_npu_spec = None
+    if torch_npu_spec is None or torch_npu_spec.origin is None:
+        raise RuntimeError('Ascend builds require torch_npu')
+    return Path(torch_npu_spec.origin).resolve().parent
+
+
 if __name__ == '__main__':
     build_platform = get_build_platform()
 
@@ -119,7 +140,6 @@ class CMakeExtension(setuptools.Extension):
 class CMakeBuild(build_ext):
     def build_extension(self, extension):
         import torch
-        import torch_npu
         try:
             import pybind11
         except ModuleNotFoundError as error:
@@ -128,17 +148,19 @@ class CMakeBuild(build_ext):
                 '`python -m pip install pybind11`.') from error
 
         extension_path = Path(self.get_ext_fullpath(extension.name)).resolve()
-        torch_npu_root = Path(torch_npu.__file__).resolve().parent
+        torch_npu_root = get_torch_npu_root()
         pybind11_dir = Path(pybind11.get_cmake_dir()).resolve()
         output_directory = extension_path.parent
         build_directory = Path(self.build_temp) / extension.name
         build_directory.mkdir(parents=True, exist_ok=True)
         ascend_testing = get_ascend_testing_mode()
+        release_signal_only = get_ascend_release_signal_only()
 
         configure = [
             'cmake', extension.cmake_source_dir,
             '-DDEEP_EP_PLATFORM=ascend',
             f'-DDEEP_EP_ASCEND_TESTING={ascend_testing}',
+            f'-DDEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY={release_signal_only}',
             f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={output_directory}',
             f'-DPYTHON_EXECUTABLE={sys.executable}',
             f'-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}',

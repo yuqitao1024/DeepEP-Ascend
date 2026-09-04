@@ -1214,6 +1214,8 @@ public:
                 peer_record["ready_cycles"] = timing.ready_cycles;
                 peer_record["pending_clear_order"] =
                     timing.pending_clear_order;
+                peer_record["release_signal_flags"] =
+                    timing.release_signal_flags;
                 phase_peers.append(peer_record);
             }
             barrier_peer_diagnostics.append(phase_peers);
@@ -1223,7 +1225,13 @@ public:
         const auto command_metrics_status =
             transport::transport_stage_profile_command_metrics_status(
                 profile, true);
-        if (command_metrics_status !=
+        if (command_metrics_status ==
+                transport::TransportStageProfileCommandMetricsStatus::
+                    kCompletedServiceHasOutstandingRequests) {
+            result["diagnostic_reason"] =
+                transport::transport_stage_profile_command_metrics_reason(
+                    command_metrics_status);
+        } else if (command_metrics_status !=
                 transport::TransportStageProfileCommandMetricsStatus::kValid) {
             unavailable(
                 transport::transport_stage_profile_command_metrics_reason(

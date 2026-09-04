@@ -990,6 +990,114 @@ def test_stage_profile_capture_runs_outside_event_timing():
                for record in records)
 
 
+def test_stage_profile_capture_tolerates_completed_service_outstanding_requests():
+    events = []
+    inside_timing = {"value": False}
+
+    class Buffer:
+        def barrier(self, **_kwargs):
+            events.append("barrier")
+
+        def reset_stage_profile(self):
+            assert not inside_timing["value"]
+            events.append("reset")
+
+        def get_stage_profile(self):
+            assert not inside_timing["value"]
+            events.append("read")
+            return {
+                "available": False,
+                "reason": "completed_service_has_outstanding_requests",
+                "command_metrics": {
+                    "command_count": 29,
+                    "put_command_count": 7,
+                    "payload_bytes": 42,
+                    "sq_depth": 3,
+                    "cq_depth": 3,
+                    "sq_high_watermark": 3,
+                    "cq_high_watermark": 3,
+                },
+                "service": {
+                    "start": 10,
+                    "end": 20,
+                    "wait_cycles": 3,
+                    "payload_command_cycles": 1,
+                    "control_command_cycles": 1,
+                    "flush_command_cycles": 1,
+                    "barrier_command_cycles": 1,
+                    "barrier_poll_cycles": 1,
+                    "barrier_diagnostics": {
+                        "issue_cycles": 0,
+                        "drain_cycles": 0,
+                        "poll_iterations": 0,
+                        "peer_count": 0,
+                        "first_observation_cycles": 0,
+                        "completion_cycles": 0,
+                        "poll_elapsed_cycles": 0,
+                    },
+                    "barrier_peer_diagnostics": [[], []],
+                },
+            }
+
+    def launch():
+        events.append(
+            "timed-launch" if inside_timing["value"] else "profile-launch")
+
+    def measure(operation):
+        inside_timing["value"] = True
+        try:
+            operation()
+        finally:
+            inside_timing["value"] = False
+        return SimpleNamespace(device_seconds=1.0, wall_seconds=1.0)
+
+    operation_ids = (
+        "dispatch", "expanded_dispatch", "cached_dispatch", "combine",
+        "reduced_combine",
+    )
+    prepared = PreparedCase(
+        case=SimpleNamespace(case_id="profiled"),
+        x=None,
+        topk_idx=None,
+        topk_weights=None,
+        bias=None,
+        launches={operation_id: launch for operation_id in operation_ids},
+        prepare_launches={},
+        traffic={operation_id: {} for operation_id in operation_ids},
+        work_counts={
+            operation_id: _literal_work_counts()
+            for operation_id in operation_ids
+        },
+    )
+    runtime = AscendRuntime.__new__(AscendRuntime)
+    runtime.buffer = Buffer()
+    runtime.args = SimpleNamespace(
+        warmups=0, iterations=1, profile_stages=True)
+    runtime._prepare_case = lambda _case: prepared
+    runtime.synchronized_step = lambda operation, _label: operation()
+    runtime.timer = SimpleNamespace(measure=measure)
+    runtime.torch = SimpleNamespace(
+        npu=SimpleNamespace(synchronize=lambda: events.append("synchronize")))
+
+    records = runtime.run_case(prepared.case)
+
+    assert all(
+        record["stage_profile"]["available"] is True for record in records)
+    assert all(
+        record["stage_profile"]["reason"] ==
+        "diagnostic_profile_with_outstanding_requests"
+        for record in records)
+    assert all(
+        record["stage_profile"]["diagnostic_reason"] ==
+        "completed_service_has_outstanding_requests"
+        for record in records)
+    assert events.count("timed-launch") == len(operation_ids)
+    assert events.count("profile-launch") == len(operation_ids)
+    assert events.count("reset") == len(operation_ids)
+    assert events.count("read") == len(operation_ids)
+    assert events.count("synchronize") == len(operation_ids)
+
+
 def test_work_counts_and_logical_components_use_rank_max_and_byte_sum():
     ranks = []
     for rank in range(2):

@@ -1346,6 +1346,19 @@ class AscendRuntime:
                     capture_profile,
                     f"{case.case_id}: {operation_id}: stage profile",
                 )
+                if (
+                    isinstance(record.get("stage_profile"), dict)
+                    and record["stage_profile"].get("available") is False
+                    and record["stage_profile"].get("reason")
+                    == "completed_service_has_outstanding_requests"
+                ):
+                    record["stage_profile"]["diagnostic_reason"] = (
+                        record["stage_profile"]["reason"]
+                    )
+                    record["stage_profile"]["available"] = True
+                    record["stage_profile"]["reason"] = (
+                        "diagnostic_profile_with_outstanding_requests"
+                    )
             records.append(record)
         return records
 

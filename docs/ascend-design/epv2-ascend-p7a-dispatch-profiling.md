@@ -533,6 +533,93 @@ generation-ordering change is retained yet; the next probe must isolate
 producer arrival from service scheduling before modifying the communication
 library.
 
+### 7.9 Release-signal readiness cross-check
+
+The follow-up signal-flags smoke used the same fixed eight-rank topology and
+one explicit representative case, with one warmup and one measured iteration.
+TaskQueue task `task_20260903_215923_258149918648` passed build, correctness,
+and profile checks; the artifact is
+`/home/pyptouser/yuqitao/deepep-results/d4-peer-diag-8r-signalflags-smoke.json`.
+All 560 recorded peer-phase entries (eight ranks, seven remote peers, five
+profiled operations, and two profile phases) reported `release_signal_flags=3`.
+Bit 0 means the Dispatch or Combine release signal was already at the target
+generation at the first barrier poll; bit 1 means it was still ready when the
+barrier counter became ready.
+
+This cross-check strengthens the attribution: for the observed generations,
+the release signal and its control publication were visible before the
+multi-million-cycle barrier-counter tail. The signal result is diagnostic only
+and does not prove that every producer arrived at the same instant, so it does
+not by itself justify removing the generation barrier. A repeated multi-
+iteration profile and a two-generation buffer-reuse correctness run are still
+required before testing a barrier-elision candidate.
+
+### 7.10 Signal-only release-barrier candidate
+
+The source now exposes the diagnostic CMake option
+`DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY` (default `ON` for Ascend builds). When
+disabled, the retained tree re-enables the final direct Dispatch/Combine
+producer-release barrier. When enabled, only the
+final direct Dispatch/Combine producer-release barrier is skipped. Payload and
+control puts, their CQ drains, release-signal publication, the preceding
+route-plan barrier, and the service completion check remain unchanged. This
+keeps the experiment focused on the suspected duplicate FAA/generation path
+instead of changing the data-transfer or route-publication protocol.
+The same switch can be passed through the extension build as
+`DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY=0 python setup.py build_ext --inplace`
+to restore the barrier for comparison.
+
+The option is enabled in the retained Ascend build after passing the 8-rank
+A/B comparison, consecutive-generation and buffer-reuse checks, and the
+five-operation correctness matrix. The build-time switch remains available to
+restore the barrier for controlled comparisons.
+
+### 7.11 Post-fix eight-rank stage profile
+
+The signal-only binary was rebuilt with the compile-time definition verified
+as `DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY=1`, then profiled on NPU8P with only
+`ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0`, five warmups, five measured
+iterations, and 72 data blocks. Task `task_20260904_150723_119905128621`
+passed and wrote `d4-release-signal-only-profile-8r-v3.json`. An earlier v2
+artifact from task `task_20260904_145621_112733215607` is invalid as post-fix
+evidence because that binary had no release-signal-only compile definition.
+
+Normal Dispatch measured `19.848 ms` mean device time (`20.823 ms` maximum).
+D3 `producer_record` was `0.175M` cycles at the rank maximum, while the D4
+`release_barrier` stage collapsed from the earlier multi-million-cycle tail to
+only `8.5K` cycles. `release_payload` and `release_control` were `0.486M` and
+`0.272M` cycles. All ranks reported the expected diagnostic reason
+`completed_service_has_outstanding_requests`, because signal-only completion
+does not require the service queue to be fully drained before capture.
+
+| Rank | Device envelope | D3 record | D4 barrier stage |
+| ---: | ---: | ---: | ---: |
+| 0 | 5,164,737 | 162,687 | 8,445 |
+| 1 | 3,434,056 | 162,018 | 8,517 |
+| 2 | 2,783,392 | 164,352 | 8,213 |
+| 3 | 2,798,282 | 164,592 | 8,484 |
+| 4 | 2,595,895 | 172,515 | 8,123 |
+| 5 | 5,871,984 | 159,138 | 8,281 |
+| 6 | 2,509,514 | 175,321 | 8,232 |
+| 7 | 2,566,539 | 171,557 | 8,138 |
+
+The signal-only experiment removes D4 from the visible producer timeline, but
+it is not a complete fix: all ranks exit the service with three outstanding SQ
+and CQ requests, so the wait is transferred into consumer acquire and the
+following generation can reset management state before transport completion.
+
+A follow-up terminal-flush candidate drains the ordered count/generation/signal
+WQEs after all peers have been submitted, without restoring the FAA barrier.
+Task `task_20260904_154001_1721798688` passed the profiled representative case
+with zero SQ/CQ depth on every rank.  A 30-warmup/30-sample run in task
+`task_20260904_154752_176897311521` measured `18.743 ms / 415.41 GB/s`, versus
+the signal-only run's `21.946 ms / 354.78 GB/s`.  This fixes the false
+generation-completion semantic and materially improves Dispatch, but does not
+remove the rank tail: rank-mean spread was `1.069 ms`, essentially unchanged
+from signal-only's `1.019 ms`.  The remaining investigation is therefore the
+single service queue's per-peer submission/progress fairness, not another
+barrier-elision change.
+
 ## 8. Evidence Map
 
 - `csrc/backends/ascend/elastic/dispatch.asc`: producer release and D8 copy;

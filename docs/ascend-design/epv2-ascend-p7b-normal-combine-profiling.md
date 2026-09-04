@@ -118,6 +118,21 @@ so the delay is in generation readiness/polling, not payload issue or CQ
 completion. The full eight-rank per-peer run remains queued behind other
 users' device allocations and has not produced a new artifact yet.
 
+The subsequent eight-rank signal-flags smoke
+(`task_20260903_215923_258149918648`) reported `release_signal_flags=3` for
+all 560 peer-phase records across the profiled operations. This confirms that
+the release signal was visible at the first barrier poll and remained visible
+when the barrier counter completed; it is consistent with the shared
+generation/barrier control-path attribution documented in the P7A track. The
+run was one warmup plus one measured iteration, so it is not a replacement for
+the required repeated-generation validation.
+
+The corresponding retained default is controlled by the CMake option
+`DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY`. It skips only the final direct Combine
+release barrier while retaining payload/control flushes, release signals, and
+service completion. The repeated-generation and buffer-reuse gates described
+in the P7A Dispatch track passed before the default was retained.
+
 ## 4. Combine Data Flow And Stage Meaning
 
 ```text
@@ -253,6 +268,42 @@ same-binary movement decide retention.
 
 All NPU8P runs use TaskQueue, with no more than one pending/running task for
 this user at a time.
+
+### 6.1 Post-fix eight-rank stage profile
+
+Task `task_20260904_150723_119905128621` profiled the compile-time-verified
+signal-only binary with the one representative case, five warmups, five
+measured iterations, and 72 data blocks. The artifact is
+`d4-release-signal-only-profile-8r-v3.json`; the similarly named v2 artifact
+used a binary without the compile definition and is not post-fix evidence.
+
+Normal Combine measured `49.080 ms` mean device time (`50.580 ms` maximum).
+C4 `release_barrier` collapsed to `7.7K` cycles on every rank, so the shared
+final-barrier tail is removed. C3 `producer_local_copy` remains the largest
+stage at `21.614M` cycles, followed by `epilogue_acquire` at `10.971M` cycles.
+
+| Rank | Device envelope | C3 local copy | C4 barrier stage |
+| ---: | ---: | ---: | ---: |
+| 0 | 34,387,732 | 21,613,649 | 7,639 |
+| 1 | 29,845,698 | 20,174,023 | 7,682 |
+| 2 | 33,429,290 | 20,846,132 | 7,625 |
+| 3 | 31,220,002 | 21,333,846 | 7,563 |
+| 4 | 32,216,850 | 20,960,617 | 7,474 |
+| 5 | 34,620,344 | 20,301,163 | 7,526 |
+| 6 | 29,962,033 | 18,213,901 | 7,449 |
+| 7 | 34,520,573 | 13,834,801 | 7,426 |
+
+This signal-only result is diagnostic rather than a complete fix: every rank
+still has three outstanding SQ/CQ requests when the service publishes its
+consumed generation.  The follow-up terminal-flush candidate completes those
+ordered release WQEs without restoring the FAA barrier.  All ranks then report
+zero SQ/CQ depth.  On the matching 8192-token/topk-8 workload, the 30-sample
+run improved Normal Combine from `89.604 ms / 121.66 GB/s` to
+`87.867 ms / 124.07 GB/s`; rank-mean spread remained essentially unchanged
+(`0.218 ms` versus `0.215 ms`).  Terminal flush therefore fixes management
+state correctness but does not explain the rank tail.  C3 local-copy balance
+and the centralized service queue's per-peer progress fairness remain separate
+targets.
 
 ## 7. Implementation Map
 

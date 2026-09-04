@@ -13,6 +13,10 @@ inline constexpr std::uint32_t kTransportProfileStageCount = 16;
 inline constexpr std::uint32_t kTransportProfileMaxBlocks = 72;
 inline constexpr std::uint32_t kTransportProfileBarrierPhaseCount = 2;
 inline constexpr std::uint32_t kTransportProfileMaxBarrierPeers = 64;
+inline constexpr std::uint32_t
+    kTransportBarrierPeerReleaseSignalReadyAtFirstObservation = 1U << 0;
+inline constexpr std::uint32_t
+    kTransportBarrierPeerReleaseSignalReadyAtBarrierReady = 1U << 1;
 inline constexpr std::size_t kTransportStageProfileCacheLineBytes = 64;
 inline constexpr std::uint32_t kTransportStageProfileReleaseAblation = 1U;
 
@@ -46,7 +50,8 @@ struct alignas(64) TransportBarrierPeerCycles {
     std::uint32_t world_peer = 0;
     std::uint32_t valid = 0;
     std::uint32_t pending_clear_order = 0;
-    std::uint32_t reserved = 0;
+    // Bit 0 is sampled at the first barrier poll; bit 1 at barrier readiness.
+    std::uint32_t release_signal_flags = 0;
 };
 
 struct alignas(64) TransportStageProfile {
