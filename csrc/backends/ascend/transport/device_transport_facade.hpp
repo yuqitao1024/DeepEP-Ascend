@@ -38,6 +38,22 @@ public:
                     source, bytes, scope, segment, options, remote_action);
     }
 
+    DEEP_EP_ASCEND_SIMT_CALLEE void put_on_channel(
+        device::DeviceChannel channel, TransportTeam team,
+        int destination_rank, DeviceAddress destination,
+        DeviceAddress source, std::size_t bytes, CooperationScope scope,
+        MemorySegment segment, DeviceOptions options,
+        const RemoteAction& remote_action) const {
+        device::put(
+            context_, channel, team, destination_rank, destination, source,
+            bytes, scope, segment, options, remote_action);
+    }
+
+    DEEP_EP_ASCEND_SIMT_CALLEE std::uint32_t channel_count(
+        TransportTeam team, int rank) const {
+        return device::channel_count(context_, team, rank);
+    }
+
     DEEP_EP_ASCEND_SIMT_CALLEE void get(
         TransportTeam team, int source_rank, DeviceAddress source,
         DeviceAddress destination, std::size_t bytes, CooperationScope scope,

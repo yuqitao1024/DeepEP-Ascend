@@ -38,6 +38,7 @@
 #include "elastic/runtime.hpp"
 #include "runtime/cann_runtime.hpp"
 #include "runtime/host_timeline.hpp"
+#include "transport/channel_config.hpp"
 #include "transport/topology_config.hpp"
 
 namespace deep_ep::ascend {
@@ -981,6 +982,10 @@ public:
         transport::TransportConfig config{
             rank_idx, num_ranks, comm_handle, cpu_comm.empty(), num_buffer_bytes,
             num_cpu_buffer_bytes, allow_hybrid_mode, sl_idx, 1};
+        const auto channel_status =
+            transport::configure_transport_channels_from_environment(&config);
+        if (!channel_status.ok())
+            raise_transport_status(channel_status, rank_idx_);
         config.stage_profile_enabled =
             environment_is("DEEP_EP_ASCEND_PROFILE_STAGES", "1");
         stage_profile_enabled_ = config.stage_profile_enabled;

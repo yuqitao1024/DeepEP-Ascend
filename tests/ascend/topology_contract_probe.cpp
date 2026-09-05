@@ -1,5 +1,6 @@
 #include <cstdlib>
 
+#include "csrc/backends/ascend/transport/channel_config.hpp"
 #include "csrc/backends/ascend/transport/topology_config.hpp"
 #include "csrc/backends/ascend/elastic/runtime.hpp"
 
@@ -201,5 +202,20 @@ int main() {
     unsetenv("DEEP_EP_ASCEND_SCALE_UP_SIZE");
     unsetenv("DEEP_EP_ASCEND_LOGICAL_SIMULATION");
     unsetenv("DEEP_EP_ASCEND_TOPOLOGY_EPOCH");
+
+    unsetenv("DEEP_EP_ASCEND_CHANNELS");
+    config.requested_channels = 0;
+    CHECK(configure_transport_channels_from_environment(&config).ok());
+    CHECK(config.requested_channels == 1);
+    setenv("DEEP_EP_ASCEND_CHANNELS", "4", 1);
+    CHECK(configure_transport_channels_from_environment(&config).ok());
+    CHECK(config.requested_channels == 4);
+    setenv("DEEP_EP_ASCEND_CHANNELS", "0", 1);
+    CHECK(!configure_transport_channels_from_environment(&config).ok());
+    setenv("DEEP_EP_ASCEND_CHANNELS", "5", 1);
+    CHECK(!configure_transport_channels_from_environment(&config).ok());
+    setenv("DEEP_EP_ASCEND_CHANNELS", "2x", 1);
+    CHECK(!configure_transport_channels_from_environment(&config).ok());
+    unsetenv("DEEP_EP_ASCEND_CHANNELS");
     return 0;
 }

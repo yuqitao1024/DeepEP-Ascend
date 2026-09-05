@@ -199,10 +199,11 @@ public:
         if (window_ == 0)
             return TransportStatus::invalid(
                 "acquire_channels", "register a window first");
-        if (count != 1 || scope != CooperationScope::kParticipant)
+        if (!valid_transport_channel_count(count) ||
+            scope != CooperationScope::kParticipant)
             return TransportStatus::invalid(
                 "acquire_channels",
-                "Phase 2D requires one participant-scope channel");
+                "requires 1-4 participant-scope channels");
         if (config_.requested_channels != 0 &&
             count != config_.requested_channels)
             return TransportStatus::invalid(
@@ -592,9 +593,9 @@ TransportStatus validate_config(const TransportConfig& config) {
         return TransportStatus::invalid(
             "make_cann_transport",
             "cpu_buffer_bytes must be zero because mapped CPU memory is unsupported");
-    if (config.requested_channels != 1)
+    if (!valid_transport_channel_count(config.requested_channels))
         return TransportStatus::invalid(
-            "make_cann_transport", "exactly one channel is required");
+            "make_cann_transport", "requested_channels must be in [1, 4]");
     TransportTopology topology;
     auto topology_status = build_configured_transport_topology(
         config, &topology);
@@ -604,7 +605,8 @@ TransportStatus validate_config(const TransportConfig& config) {
     }
     std::uint32_t command_capacity = 0;
     if (!checked_scale_up_command_capacity(
-            config.world_size, &command_capacity))
+            config.world_size, config.requested_channels,
+            &command_capacity))
         return TransportStatus::invalid(
             "make_cann_transport",
             "rank count exceeds transport command capacity");
@@ -680,7 +682,8 @@ TransportCreateResult make_cann_transport(
 
     std::uint32_t command_capacity = 0;
     if (!checked_scale_up_command_capacity(
-            config.world_size, &command_capacity))
+            config.world_size, config.requested_channels,
+            &command_capacity))
         return {
             TransportStatus::invalid(
                 "make_cann_transport",

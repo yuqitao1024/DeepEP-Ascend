@@ -23,6 +23,11 @@ DEEP_EP_ASCEND_SIMT_CALLEE bool is_peer_directly_accessible(
     return rank == detail::local_rank(context, team);
 }
 
+DEEP_EP_ASCEND_SIMT_CALLEE std::uint32_t channel_count(
+    const DeviceTransportContext&, TransportTeam, int) {
+    return 1;
+}
+
 DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t get_symmetric_offset(
     const DeviceTransportContext& context, DeviceAddress local_address) {
     if (local_address == kNullDeviceAddress || context.local_window_base == 0)

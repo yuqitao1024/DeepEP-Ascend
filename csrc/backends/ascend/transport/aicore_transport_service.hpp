@@ -256,7 +256,8 @@ __aicore__ inline DeviceTransportError validate_command(
         return DeviceTransportError::kInvalidQueue;
     if (current->opcode == TransportCommandOpcode::kNone)
         return DeviceTransportError::kUnsupportedOperation;
-    if (current->channel != 0)
+    if (current->opcode != TransportCommandOpcode::kPut &&
+        current->channel != 0)
         return DeviceTransportError::kInvalidChannel;
 
     if (current->opcode == TransportCommandOpcode::kPut ||
@@ -493,6 +494,7 @@ struct ResolvedPeer {
     __gm__ cann_abi::SqContext* sq = nullptr;
     __gm__ cann_abi::CqContext* cq = nullptr;
     std::uint32_t world_peer = 0;
+    std::uint32_t channel_index = 0;
 };
 
 __aicore__ inline DeviceTransportError channel_error(
@@ -546,6 +548,7 @@ __aicore__ inline ResolvedPeer resolve_context(
     result.cq = reinterpret_cast<__gm__ cann_abi::CqContext*>(
         result.channel->cq_contexts) + cann_abi::kDefaultQueueIndex;
     result.world_peer = peer;
+    result.channel_index = channel_index;
     return result;
 }
 
@@ -626,14 +629,25 @@ __aicore__ inline DeviceTransportError preflight_command_channels(
         return DeviceTransportError::kInvalidQueue;
 
     if (collective) {
+        if (transport_team->channel_counts == 0)
+            return DeviceTransportError::kInvalidQueue;
+        auto* counts = reinterpret_cast<__gm__ std::uint32_t*>(
+            transport_team->channel_counts);
         for (std::uint32_t peer = 0; peer < transport_team->member_count;
              ++peer) {
             if (peer == transport_team->self_member)
                 continue;
-            const auto error = channel_error(context, peer, current->channel);
-            if (error != DeviceTransportError::kNone) {
+            if (counts[peer] == 0) {
                 failed_world_peer = static_cast<int>(peer);
-                return error;
+                return DeviceTransportError::kInvalidChannel;
+            }
+            for (std::uint32_t channel = 0; channel < counts[peer];
+                 ++channel) {
+                const auto error = channel_error(context, peer, channel);
+                if (error != DeviceTransportError::kNone) {
+                    failed_world_peer = static_cast<int>(peer);
+                    return error;
+                }
             }
         }
         return DeviceTransportError::kNone;
@@ -663,7 +677,7 @@ __aicore__ inline bool drain_channel(
         peer.cq->entry_bytes != sizeof(cann_abi::UrmaCqe)) {
         record_error(
             queue, DeviceTransportError::kInvalidQueue, command_index,
-            opcode, static_cast<int>(peer.world_peer), 0);
+            opcode, static_cast<int>(peer.world_peer), peer.channel_index);
         return false;
     }
     std::uint64_t wait_start = 0;
@@ -855,11 +869,15 @@ __aicore__ inline bool drain_all(
     if (context.topology.world_size <= 1)
         return true;
     auto* transport_team = team(context);
-    if (transport_team == nullptr)
+    if (transport_team == nullptr || transport_team->channel_counts == 0)
         return false;
+    auto* counts = reinterpret_cast<__gm__ std::uint32_t*>(
+        transport_team->channel_counts);
     for (std::uint32_t peer = 0; peer < transport_team->member_count; ++peer) {
         if (peer == transport_team->self_member)
             continue;
+        if (counts[peer] == 0)
+            return false;
         const bool in_phase = barrier_phase_index <
                 kTransportProfileBarrierPhaseCount &&
             command::aicore_barrier_peer_in_team(
@@ -871,11 +889,16 @@ __aicore__ inline bool drain_all(
                 peer_profile->drain_start_cycles =
                     static_cast<std::uint64_t>(AscendC::GetSystemCycle());
         }
-        auto resolved = resolve_context(context, peer, 0);
-        const bool drained = drain_channel<ProfileEnabled>(
+        bool drained = true;
+        for (std::uint32_t channel = 0; channel < counts[peer]; ++channel) {
+            auto resolved = resolve_context(context, peer, channel);
+            drained = drain_channel<ProfileEnabled>(
                 context, queue, resolved, command_index, opcode, retry_limit,
                 profile,
                 service_scratch);
+            if (!drained)
+                break;
+        }
         if constexpr (ProfileEnabled) {
             if (peer_profile != nullptr)
                 peer_profile->drain_end_cycles =

@@ -375,6 +375,8 @@ struct TransportConfig {
     bool stage_profile_enabled = false;
 };
 
+inline constexpr int kMaxTransportChannels = 4;
+
 inline TransportStatus build_configured_transport_topology(
     const TransportConfig& config, TransportTopology* topology) {
     const int scale_up_size =

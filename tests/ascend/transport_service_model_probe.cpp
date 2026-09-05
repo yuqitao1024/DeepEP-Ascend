@@ -233,7 +233,13 @@ void check_protocol_validation_precedes_dispatch() {
         transport::CooperationScope::kParticipant,
         transport::MemorySegment::kDevice, transport::kDefaultOptions);
     remote.channel = 1;
-    check_rejected(remote, transport::DeviceTransportError::kInvalidChannel);
+    auto multi_channel_state = service::model::make_state(2, 0, 8);
+    transport::DeviceTransportDiagnostic multi_channel_diagnostic{};
+    CHECK(service::model::execute(
+        &remote, 1, multi_channel_state, multi_channel_diagnostic));
+    CHECK(multi_channel_state.executed_count == 1);
+    CHECK(multi_channel_diagnostic.error ==
+          transport::DeviceTransportError::kNone);
     remote.channel = 0;
     remote.options = transport::kAggregateRequests;
     check_rejected(remote, transport::DeviceTransportError::kInvalidProtocol);
@@ -282,6 +288,12 @@ struct ReleaseProtocolModel {
     std::uint64_t store_values[2]{};
     int store_events[2]{};
     int store_count = 0;
+    std::uint32_t available_channels = 1;
+    std::uint32_t striped_channels[4]{};
+    transport::DeviceAddress striped_destinations[4]{};
+    transport::DeviceAddress striped_sources[4]{};
+    std::size_t striped_bytes[4]{};
+    std::uint32_t striped_count = 0;
 
     void system_fence() {
         staging_fenced = true;
@@ -294,6 +306,28 @@ struct ReleaseProtocolModel {
         transport::CooperationScope, transport::MemorySegment,
         transport::DeviceOptions, const transport::RemoteAction&) {
         put_observed_staging_fence = staging_fenced;
+    }
+
+    std::uint32_t channel_count(transport::TransportTeam, int) const {
+        return available_channels;
+    }
+
+    void put_on_channel(
+        std::uint32_t channel, transport::TransportTeam, int,
+        transport::DeviceAddress destination,
+        transport::DeviceAddress source, std::size_t bytes,
+        transport::CooperationScope scope, transport::MemorySegment segment,
+        transport::DeviceOptions options, const transport::RemoteAction& action) {
+        CHECK(striped_count < 4);
+        CHECK(scope == transport::CooperationScope::kParticipant);
+        CHECK(segment == transport::MemorySegment::kDevice);
+        CHECK(options == transport::kDefaultOptions);
+        CHECK(action.kind == transport::RemoteActionKind::kNone);
+        striped_channels[striped_count] = channel;
+        striped_destinations[striped_count] = destination;
+        striped_sources[striped_count] = source;
+        striped_bytes[striped_count] = bytes;
+        ++striped_count;
     }
 
     void flush(transport::CooperationScope scope) {
@@ -588,6 +622,22 @@ void check_release_acquire_and_selected_barrier_sequence() {
     release_protocol::put_staged_payload(
         protocol, rail, 0x2000, 0x3000, 64);
     CHECK(protocol.put_observed_staging_fence);
+    protocol.available_channels = 3;
+    release_protocol::put_staged_records_striped(
+        protocol, rail, 0x4000, 0x5000, 8, 16);
+    CHECK(protocol.striped_count == 3);
+    CHECK(protocol.striped_channels[0] == 0);
+    CHECK(protocol.striped_channels[1] == 1);
+    CHECK(protocol.striped_channels[2] == 2);
+    CHECK(protocol.striped_destinations[0] == 0x4000);
+    CHECK(protocol.striped_destinations[1] == 0x4030);
+    CHECK(protocol.striped_destinations[2] == 0x4060);
+    CHECK(protocol.striped_sources[0] == 0x5000);
+    CHECK(protocol.striped_sources[1] == 0x5030);
+    CHECK(protocol.striped_sources[2] == 0x5060);
+    CHECK(protocol.striped_bytes[0] == 48);
+    CHECK(protocol.striped_bytes[1] == 48);
+    CHECK(protocol.striped_bytes[2] == 32);
     release_protocol::flush_payload(protocol);
     release_protocol::publish_control_and_release(
         protocol, rail, 0x1000, 3, 0x1008, 7,

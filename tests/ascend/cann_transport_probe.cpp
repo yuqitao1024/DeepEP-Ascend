@@ -59,6 +59,7 @@ struct FakeApi {
     void* profile_device_pointer = nullptr;
     std::uint64_t allocation_bytes[8]{};
     std::uint32_t allocation_count = 0;
+    std::uint32_t expected_channel_count = 1;
 
     bool fail_now() {
         return fail_event >= 0 && event_calls++ == fail_event;
@@ -136,7 +137,7 @@ struct FakeApi {
         void* data, std::int64_t, std::uintptr_t, std::uint32_t count) {
         auto& fake = self(data);
         fake.record(Event::kCreateChannels);
-        CHECK(count == 1);
+        CHECK(count == fake.expected_channel_count);
         if (fake.fail_now()) return 75;
         return 0;
     }
@@ -306,27 +307,46 @@ void check_rank_sized_command_queue() {
         CHECK(created.transport->destroy().ok());
     }
 
+    {
+        FakeApi fake;
+        fake.expected_channel_count = 4;
+        auto config = valid_config();
+        config.requested_channels = 4;
+        auto created = transport::make_cann_transport(config, fake.api());
+        CHECK(created.status.ok());
+        alignas(64) std::uint8_t window[4096]{};
+        CHECK(created.transport->register_symmetric_window(
+            window, sizeof(window)).ok());
+        CHECK(created.transport->acquire_channels(
+            4, transport::CooperationScope::kParticipant).ok());
+        CHECK(fake.allocation_bytes[0] ==
+              14 * sizeof(transport::TransportCommand));
+        CHECK(created.transport->destroy().ok());
+    }
+
     std::uint32_t capacity = 0;
-    CHECK(transport::checked_scale_up_command_capacity(2, &capacity));
+    CHECK(transport::checked_scale_up_command_capacity(2, 1, &capacity));
     CHECK(capacity == 11);
-    CHECK(transport::checked_scale_up_command_capacity(4, &capacity));
+    CHECK(transport::checked_scale_up_command_capacity(4, 1, &capacity));
     CHECK(capacity == 25);
+    CHECK(transport::checked_scale_up_command_capacity(2, 4, &capacity));
+    CHECK(capacity == 14);
 
     constexpr int kLargestRepresentableWorldSize = 613566756;
     CHECK(transport::checked_scale_up_command_capacity(
-        kLargestRepresentableWorldSize, &capacity));
+        kLargestRepresentableWorldSize, 1, &capacity));
     CHECK(capacity == 4294967289U);
     capacity = 0x12345678U;
     CHECK(!transport::checked_scale_up_command_capacity(
-        kLargestRepresentableWorldSize + 1, &capacity));
+        kLargestRepresentableWorldSize + 1, 1, &capacity));
     CHECK(capacity == 0x12345678U);
     CHECK(!transport::checked_scale_up_command_capacity(
-        std::numeric_limits<int>::max(), &capacity));
+        std::numeric_limits<int>::max(), 1, &capacity));
 
     transport::TransportCommand commands[11]{};
     transport::TransportServiceState service{};
     transport::DeviceTransportDiagnostic diagnostic{};
-    CHECK(transport::checked_scale_up_command_capacity(2, &capacity));
+    CHECK(transport::checked_scale_up_command_capacity(2, 1, &capacity));
     auto queue = transport::command::make_queue(
         commands, capacity, &service, &diagnostic);
     CHECK(transport::command::append(

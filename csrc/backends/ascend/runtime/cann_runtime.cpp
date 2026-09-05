@@ -152,9 +152,11 @@ TransportStatus CannRuntimeResources::initialize_impl(
         config.communicator_handle == 0 || config.device_buffer_bytes <= 0 ||
         !config.cpu_communicator_empty ||
         (config.cpu_buffer_bytes != 0 && !mapped_cpu_memory_supported()) ||
-        config.requested_channels != 1 || workspace_bytes == 0 ||
+        !transport::valid_transport_channel_count(
+            config.requested_channels) || workspace_bytes == 0 ||
         !transport::checked_scale_up_command_capacity(
-            config.world_size, &command_capacity))
+            config.world_size, config.requested_channels,
+            &command_capacity))
         return TransportStatus::invalid(
             "initialize_runtime", "invalid scale-up production configuration");
 
@@ -219,7 +221,8 @@ TransportStatus CannRuntimeResources::initialize_impl(
         return status;
     }
     status = transport_->acquire_channels(
-        1, transport::CooperationScope::kParticipant);
+        config.requested_channels,
+        transport::CooperationScope::kParticipant);
     if (!status.ok()) {
         (void)destroy();
         return status;

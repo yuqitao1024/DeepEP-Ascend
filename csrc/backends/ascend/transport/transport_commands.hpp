@@ -295,7 +295,8 @@ inline constexpr DeviceTransportError validate_for_dispatch(
     const TransportTopology& topology) {
     if (transport_command.opcode == TransportCommandOpcode::kNone)
         return DeviceTransportError::kUnsupportedOperation;
-    if (transport_command.channel != 0)
+    if (transport_command.opcode != TransportCommandOpcode::kPut &&
+        transport_command.channel != 0)
         return DeviceTransportError::kInvalidChannel;
 
     if (is_remote_operation(transport_command.opcode)) {

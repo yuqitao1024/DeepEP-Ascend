@@ -34,6 +34,44 @@ DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void put_staged_payload(
 }
 
 template <typename Transport>
+DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void put_staged_records_striped(
+    Transport& facade, const transport::TeamPeer& route,
+    transport::DeviceAddress destination, transport::DeviceAddress source,
+    std::uint64_t record_count, std::uint64_t record_bytes) {
+    facade.system_fence();
+    if (record_count == 0 || record_bytes == 0)
+        return;
+
+    const std::uint32_t available_channels =
+        facade.channel_count(route.team, route.peer);
+    const std::uint32_t channel_count = available_channels >
+            static_cast<std::uint32_t>(transport::kMaxTransportChannels) ?
+        static_cast<std::uint32_t>(transport::kMaxTransportChannels) :
+        available_channels;
+    if (channel_count == 0)
+        return;
+    const std::uint64_t records_per_channel =
+        record_count / channel_count;
+    const std::uint64_t remainder = record_count % channel_count;
+    for (std::uint32_t channel = 0; channel < channel_count; ++channel) {
+        const std::uint64_t channel_records = records_per_channel +
+            (channel < remainder ? 1 : 0);
+        if (channel_records == 0)
+            continue;
+        const std::uint64_t record_begin =
+            static_cast<std::uint64_t>(channel) * records_per_channel +
+            (channel < remainder ? channel : remainder);
+        const std::uint64_t byte_offset = record_begin * record_bytes;
+        facade.put_on_channel(
+            channel, route.team, route.peer, destination + byte_offset,
+            source + byte_offset, channel_records * record_bytes,
+            transport::CooperationScope::kParticipant,
+            transport::MemorySegment::kDevice, transport::kDefaultOptions,
+            transport::RemoteAction::none());
+    }
+}
+
+template <typename Transport>
 DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void flush_payload(
     Transport& facade) {
     facade.flush(transport::CooperationScope::kDevice);

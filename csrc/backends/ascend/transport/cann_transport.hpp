@@ -3,26 +3,29 @@
 #include <cstdint>
 #include <limits>
 
+#include "channel_config.hpp"
 #include "host_transport.hpp"
 
 namespace deep_ep::ascend::transport {
 
 constexpr bool checked_scale_up_command_capacity(
-    int world_size, std::uint32_t* capacity) noexcept {
-    if (capacity == nullptr || world_size <= 0)
+    int world_size, int channel_count, std::uint32_t* capacity) noexcept {
+    if (capacity == nullptr || world_size <= 0 ||
+        !valid_transport_channel_count(channel_count))
         return false;
     const auto peers = static_cast<std::uint64_t>(world_size - 1);
     // ProducerControl leaves the normal payload/control release batch in the
     // queue.  Early route publication adds one put and one signal per peer,
     // plus its two drains and post-publication barrier.
-    constexpr std::uint64_t kCommandsPerPeer = 7;
+    const std::uint64_t commands_per_peer =
+        6 + static_cast<std::uint64_t>(channel_count);
     constexpr std::uint64_t kFixedCommands = 4;
     if (peers >
         (std::numeric_limits<std::uint32_t>::max() - kFixedCommands) /
-            kCommandsPerPeer)
+            commands_per_peer)
         return false;
     *capacity = static_cast<std::uint32_t>(
-        peers * kCommandsPerPeer + kFixedCommands);
+        peers * commands_per_peer + kFixedCommands);
     return true;
 }
 

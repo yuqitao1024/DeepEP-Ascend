@@ -2559,8 +2559,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             source = (ELASTIC / source_name).read_text()
             self.assertIn("checked_device_team_peer_for_world_rank(", source,
                           source_name)
-            self.assertIn("route.team", source, source_name)
-            self.assertIn("route.peer", source, source_name)
+            self.assertIn("route.team", source + release, source_name)
+            self.assertIn("route.peer", source + release, source_name)
             self.assertIn(
                 "release_protocol::publish_control_and_release(",
                 source, source_name)
@@ -4250,7 +4250,15 @@ int main() {
             flush = release.index("release_protocol::flush_payload(transport);")
             second_peer_loop = release.index(
                 "for (int destination_rank = 0;", flush)
-            payload = release.index("transport.put(", first_peer_loop)
+            payload_positions = [
+                release.find(marker, first_peer_loop)
+                for marker in (
+                    "transport.put(",
+                    "release_protocol::put_staged_records_striped(",
+                )
+            ]
+            payload = min(position for position in payload_positions
+                          if position >= 0)
             control_markers = (
                 "release_protocol::publish_control_and_release(",
                 "release_protocol::publish_control_slot_and_release(",

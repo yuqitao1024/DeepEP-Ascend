@@ -189,7 +189,7 @@ release-entry barrier 诊断给出了最强的“等待搬移”证据：
 | 普通 host launch skew | 基本排除 | host 对齐到约 `0--20 us` 或约 `36 us` 后，数毫秒 device tail 仍在 |
 | barrier 回 CPU 后重新提交造成 skew | 已排除 | barrier 与 operation 在同一 device stream 串联后没有改善 |
 | 单 service worker 的 per-peer control 串行 | 已验证多版并行方案 | 能去掉三角形偏置，但多 AICore launch/竞争使端到端回退 |
-| **每 peer 只有一个 channel/QP/SQ** | **尚未验证** | 当前始终 `requested_channels == 1`、`channel_index == 0`；此前多 AICore 实验不是多 channel |
+| **每 peer 只有一个 channel/QP/SQ** | **实现完成，待实机验证** | `DEEP_EP_ASCEND_CHANNELS=2/3/4` 可创建多 channel；Normal Dispatch/Combine 已按完整记录切片，NPU2 编译通过，尚无 8-rank 功能/性能数据 |
 | barrier exit 在不同卡上释放时间不一致 | 待验证 | device-chained barrier 无收益使其仍有嫌疑，但还缺 D0 入口 arrival 数据 |
 | NPU runtime/device scheduler 让 kernel 真正启动时间不同 | 当前主要怀疑 | Dispatch D0→release 本地工作稳定，晚到差异更像发生在获得执行机会之前 |
 | producer 上游计算负载不均 | Dispatch 基本排除，Combine 部分确认 | Dispatch D0→release 约 `0.69--0.73M cycles`；Combine 旧 local copy 有 44--51M 差异 |
@@ -201,7 +201,8 @@ release-entry barrier 诊断给出了最强的“等待搬移”证据：
 当前实现有两层“单”：
 
 1. 一个 command queue 和一个 AICore service worker，按命令顺序构造 WQE；
-2. runtime 强制 `requested_channels == 1`，所有命令使用 `channel_index == 0`。
+2. 基线默认 `requested_channels == 1`；当前实验实现可通过
+   `DEEP_EP_ASCEND_CHANNELS=2/3/4` 创建每 peer 多个 channel/QP/SQ。
 
 但 team 内不同 peer 的 channel 0 会解析到不同 peer 的 SQ/CQ context。因此此前的
 per-peer 多 AICore 实验已经并行操作过“不同 peer 的 channel 0”，却**没有**创建
@@ -215,9 +216,9 @@ per-peer 多 AICore 实验已经并行操作过“不同 peer 的 channel 0”�
 | payload + control 全部多 AICore 并行 | `26.25 ms / 296.6 GB/s` | `141.15 ms / 77.2 GB/s` | 底层发送资源严重争用 |
 | 同 kernel：payload 单 walker，control 多 worker | 10 次 `21.60 ms / 360.4 GB/s`，spread `1.25 ms` | `89.04 ms / 122.4 GB/s` | 扩展到 8 blocks 的调度成本抵消收益 |
 
-所以“多 AICore 并行当前 peer SQ”已经被否决；“真实多 channel”仍未验证。后者需要修改
-CANN channel 创建、设备上下文、命令分片、独占 ownership、flush/barrier 汇合和
-generation completion，不能用一个并行 `for` 代表。
+所以“多 AICore 并行当前 peer SQ”已经被否决。真实多 channel 的代码路径现已补齐 CANN
+channel 创建、SIMT 命令 channel 编码、按完整 token/record 分片、flush/barrier 全 channel
+汇合和 generation completion 语义；但 NPU8P 不可达，尚未完成实机功能和性能验证。
 
 同时应设置合理预期：当前 service 总周期约 1--2M，而观测尾部可达 5--10M cycles。
 即使多 channel 把本地 service 理想压到 0，也不能单独解释全部长尾。它可能是吞吐优化，
@@ -292,14 +293,21 @@ pre-op barrier entry
 
 ### P1：真实多 channel A/B
 
-该实验尚未做，必须与已失败的“多 AICore 单 channel”分开：
+代码实现已完成，必须与已失败的“多 AICore 单 channel”分开理解：
 
-1. 放宽 host/runtime 的 `requested_channels == 1` 限制，先试每 peer 2 channel；
-2. 每个 channel/SQ 只允许一个 producer owner，禁止多个 block 共享 SQ head/tail；
-3. payload 按连续 chunk stripe 到 channel，control 与其 payload 保持同 channel 有序；
-4. generation completion 必须等待所有 channel 的 SQ/CQ 清零；
-5. profile 分 channel 的 submit、CQ wait、HWM 和字节数；
-6. 做 `1 channel -> 2 channel -> 4 channel` 同二进制 ABBA。
+1. host/runtime 接受每 peer 1--4 channel，默认 1，通过
+   `DEEP_EP_ASCEND_CHANNELS` 显式开启；
+2. 单个 SIMT producer 顺序编码命令，每个 channel/SQ 仍只有一个 owner；
+3. Normal Dispatch 按完整 token、Normal Combine 按完整 record 连续均分到 channel；
+4. count/generation/signal 固定走 channel 0，但必须等 collective flush drain 所有 channel
+   的 SQ/CQ 后才发布；
+5. terminal completion 同样 drain 所有 channel 后才发布 `consumed_generation`；
+6. command queue capacity 已按 channel 数扩容；
+7. host contract 为 `370 passed, 6 skipped, 67 subtests passed`；NPU2 上 production
+   `dispatch.asc`、`combine.asc` 和 runtime object 已由 CANN 9.2/Bisheng 编译通过。
+
+仍待 NPU8P 恢复后完成：多 channel 创建/注册的两 rank 冒烟、1/2/4 channel 正确性、分
+channel submit/CQ wait/HWM/字节数观测，以及同二进制 ABBA 性能对照。
 
 验收不是“service cycle 下降”，而是 Normal Dispatch/Combine 的最慢 rank、P95 和逻辑带宽
 同时改善，且没有 queue ownership、次序、可见性或 reset 复用错误。
@@ -367,8 +375,9 @@ pre-op barrier entry
 2. 当前剩余 rank tail 不是某个 rank 的 SQ/CQ drain 明显更慢，也不是单独 signal WQE 晚到。
 3. 单 service 的固定 peer 顺序会塑造三角形 rank 分布，但改变顺序或多 AICore 并行没有
    缩短全局最晚 producer；后者在当前硬件/实现上还造成 launch 和发送资源竞争。
-4. **真实多 channel 仍未验证**，但按现有 service 与 tail 的量级，它更可能是局部吞吐优化，
-   不能预先认定为全部 5--10M cycle 长尾的根因。
+4. **真实多 channel 已实现并通过 host 与 NPU2 编译验证，但仍未完成 NPU8P 实机验证**。
+   按现有 service 与 tail 的量级，它更可能是局部吞吐优化，不能预先认定为全部
+   5--10M cycle 长尾的根因。
 5. Dispatch 当前最强怀疑是 barrier exit、runtime/stream 或 device scheduler 导致不同 NPU
    真正开始 producer 的时间不齐；D0 entry gate 是恢复 NPU8P 后的第一优先级实验。
 6. Combine 除同类 arrival skew 外，还必须在 rebase 后基于 main 的 direct-local placement

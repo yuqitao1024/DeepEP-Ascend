@@ -204,12 +204,6 @@ DEEP_EP_ASCEND_SIMT_CALLEE bool translate_peer(
     const DeviceTransportContext& context, __gm__ TransportCommandQueue* queue,
     TransportTeam team, int peer, DeviceChannel channel,
     TransportCommandOpcode opcode, int* world_peer) {
-    if (channel != 0) {
-        record_error(
-            queue, DeviceTransportError::kInvalidChannel, opcode, team, peer,
-            -1, channel);
-        return false;
-    }
     if (!checked_world_peer(
             context.topology, team, peer, world_peer)) {
         record_error(
@@ -273,6 +267,27 @@ DEEP_EP_ASCEND_SIMT_CALLEE __gm__ TransportCommandQueue* prepare(
 DEEP_EP_ASCEND_SIMT_CALLEE bool is_peer_directly_accessible(
     const DeviceTransportContext& context, TransportTeam team, int rank) {
     return rank == detail::local_rank(context, team);
+}
+
+DEEP_EP_ASCEND_SIMT_CALLEE std::uint32_t channel_count(
+    const DeviceTransportContext& context, TransportTeam team, int rank) {
+    int world_peer = -1;
+    if (context.channel_table == 0 ||
+        !detail::checked_world_peer(
+            context.topology, team, rank, &world_peer))
+        return 0;
+    auto* transport_team = reinterpret_cast<__gm__ cann_abi::Team*>(
+        context.channel_table);
+    const auto member_count = simt::load_observed(
+        &transport_team->member_count);
+    const auto counts_address = simt::load_observed(
+        &transport_team->channel_counts);
+    if (world_peer < 0 ||
+        static_cast<std::uint32_t>(world_peer) >= member_count ||
+        counts_address == 0)
+        return 0;
+    auto* counts = reinterpret_cast<__gm__ std::uint32_t*>(counts_address);
+    return simt::load_observed(counts + world_peer);
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t get_symmetric_offset(
