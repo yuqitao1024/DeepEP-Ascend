@@ -20,6 +20,9 @@ rank 长尾问题，包括：
 “acquire wait 变短”或“rank 曲线更整齐”不等于整体性能提升。所有修复最终都必须以
 8 rank 的最大完成时间、Normal Dispatch / Combine 均值与 P95、正确性和完整完成语义为准。
 
+多 channel 的通信库调研、资源模型、自适应策略和验收要求单独定义在
+[EPv2 Ascend Normal Dispatch / Combine 多 Channel 设计规范](epv2-ascend-multi-channel-design-spec-zh.md)。
+
 ## 2. 代表性环境和口径
 
 主要证据来自以下固定 workload：
@@ -197,6 +200,17 @@ release-entry barrier 诊断给出了最强的“等待搬移”证据：
 | persistent/fused device launch | 待验证的结构方案 | 若 D0 已有 arrival skew，可避免每轮跨进程 host/device launch 重新失步 |
 
 ### 5.2 单 queue / 单 channel 必须如何表述
+
+通信库调研确认：HCCL/HCOMM 正式支持每 remote rank 多个独立 channel，CANN 9.2 的
+All-to-AllV 实现也包含 `ShouldUseMultiChannelForAlltoAll()`、`channelsPerRank_` 和
+send/recv 分片；因此对大块 All-to-All payload 验证多 channel 是正确方向。但共享同一
+Jetty 的逻辑多 channel 被官方明确限制为串行使用，不是并发带宽方案。HCCL 的多 QP
+策略还会在每 QP 数据量不足时减少 QP 数，说明生产策略应按每 peer payload bytes
+自适应，而不是所有消息固定使用 4 channel。
+
+当前实现属于独立 team channel 路径，不使用 shared-queue 配置；它完成了固定 1--4
+channel 的资源创建和 record 切片，但尚未实现按字节阈值选择 active channel。完整约束和
+待验证矩阵见多 Channel 设计规范。
 
 当前实现有两层“单”：
 
