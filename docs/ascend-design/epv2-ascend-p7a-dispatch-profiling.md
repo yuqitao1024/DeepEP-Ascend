@@ -616,9 +616,40 @@ with zero SQ/CQ depth on every rank.  A 30-warmup/30-sample run in task
 the signal-only run's `21.946 ms / 354.78 GB/s`.  This fixes the false
 generation-completion semantic and materially improves Dispatch, but does not
 remove the rank tail: rank-mean spread was `1.069 ms`, essentially unchanged
-from signal-only's `1.019 ms`.  The remaining investigation is therefore the
-single service queue's per-peer submission/progress fairness, not another
-barrier-elision change.
+from signal-only's `1.019 ms`.  The follow-up attribution below distinguishes
+producer arrival skew from service-queue progress.
+
+### 7.12 Release-entry attribution and completion ownership
+
+A release-entry device barrier was tested as a diagnostic only and removed
+after measurement.  With the barrier, Normal Dispatch `epilogue_acquire`
+collapsed from `0.077--5.456M` cycles to `0.077--0.078M`, while the same tail
+moved into `release_payload` (`1.085--5.237M`).  Normal Combine moved from
+`0.074--10.731M` acquire cycles to `1.946--10.111M` release-payload cycles.
+The transport CQ wait remained narrow: about `0.85M` cycles for Dispatch and
+`1.70M` for Combine.  The non-profiled A/B also rejected the barrier as an
+optimization: Dispatch changed from `21.292 ms / 365.67 GB/s` to
+`21.975 ms / 354.32 GB/s`, and Combine changed from `87.503 ms` to
+`89.571 ms`.
+
+This establishes that the multi-million-cycle per-rank difference is arrival
+wait exposed at the consumer, not rank-dependent SQ/CQ progress.  Fixed peer
+publication order changes which destination observes the wait, but rotating,
+phase-batching, and release-entry synchronization do not shorten the slowest
+rank.  Combine additionally has real upstream imbalance in
+`producer_local_copy` (about `44.2--51.3M` cycles in the measured snapshot).
+Consequently, no cosmetic barrier or peer-order change is retained; further
+performance work must reduce the upstream critical path or overlap it with
+communication.
+
+The management-plane completion contract is enforced independently.  Appending
+a command first invalidates the previously published generation.  The AICore
+service publishes `consumed_generation` only after all current descriptors are
+consumed, the terminal SQ/CQ drain succeeds, and the diagnostic remains clean.
+`reset()` rejects an active, partially consumed, or unpublished non-empty
+generation, and all kernel entry points stop when reset is rejected.  The
+eight-rank profile after this change reports matching queue/completion
+generations and zero SQ/CQ depth on every rank for all five operations.
 
 ## 8. Evidence Map
 

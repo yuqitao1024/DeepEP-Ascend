@@ -162,7 +162,8 @@ inline bool execute(
         ++state.executed_count;
         state.consumed_count = index + 1;
     }
-    return true;
+    return drain(
+        state, diagnostic, count, TransportCommandOpcode::kFlush);
 }
 
 }  // namespace model
@@ -1418,14 +1419,26 @@ __aicore__ inline void record_stage_end(
     }
 }
 
-__aicore__ inline void reset(
+__aicore__ inline bool reset(
     const DeviceTransportContext& context, std::uint64_t generation) {
     auto* staged = detail::staged_context(context);
     auto* queue = detail::command_queue(context);
     if (!detail::valid_registered_queue(staged, queue))
-        return;
+        return false;
     auto* state = detail::service_state(queue);
     auto* output = detail::diagnostic(queue);
+    aicore::flush_cacheline(queue);
+    aicore::flush_cacheline(state);
+    const bool empty = queue->count == 0 && state->consumed_count == 0;
+    const bool completed =
+        state->consumed_generation == queue->generation &&
+        state->consumed_count == queue->count;
+    if (state->active != 0 || (!empty && !completed)) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidQueue,
+            state->consumed_count, TransportCommandOpcode::kNone, 0, 0);
+        return false;
+    }
     state->consumed_count = 0;
     state->active = 0;
     state->consumed_generation = 0;
@@ -1453,6 +1466,7 @@ __aicore__ inline void reset(
     aicore::flush_cacheline(state);
     aicore::flush_cacheline(output);
     aicore::flush_cacheline(queue);
+    return true;
 }
 
 template <bool ProfileEnabled = true>
@@ -1462,6 +1476,7 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
     if (!detail::valid_registered_queue(staged, queue))
         return;
     auto* state = detail::service_state(queue);
+    auto* output = detail::diagnostic(queue);
     AscendC::TPipe pipe;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> scratch_buffer;
     if (!pipe.InitBuffer(scratch_buffer, detail::kServiceScratchBytes)) {
@@ -1488,6 +1503,8 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
     auto* commands = reinterpret_cast<__gm__ TransportCommand*>(
         queue->commands);
     const std::uint32_t count = queue->count;
+    bool execution_success = true;
+    bool terminally_drained = command_begin == count;
     __gm__ TransportStageProfile* profile = nullptr;
     if constexpr (ProfileEnabled)
         profile = detail::profile_buffer<ProfileEnabled>(context);
@@ -1656,12 +1673,26 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
                 success = false;
             }
         }
-        if (!success)
+        if (!success) {
+            execution_success = false;
             break;
+        }
+        terminally_drained =
+            current->opcode == TransportCommandOpcode::kFlush ||
+            current->opcode == TransportCommandOpcode::kBarrier;
         state->consumed_count = index + 1;
     }
+    if (execution_success && !terminally_drained) {
+        execution_success = detail::drain_all<ProfileEnabled>(
+            context, queue, count, TransportCommandOpcode::kFlush,
+            retry_limit, profile, wqe_scratch);
+    }
+    aicore::flush_cacheline(output);
+    const bool completed =
+        execution_success && state->consumed_count == count &&
+        output->error == DeviceTransportError::kNone;
     state->active = 0;
-    state->consumed_generation = queue->generation;
+    state->consumed_generation = completed ? queue->generation : 0;
     if constexpr (ProfileEnabled) {
         if (profile != nullptr) {
             profile->service_end_cycles =

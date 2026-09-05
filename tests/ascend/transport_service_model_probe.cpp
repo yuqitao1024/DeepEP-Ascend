@@ -144,6 +144,30 @@ void check_completion_timeout_is_finite() {
     CHECK(diagnostic.command_index == 1);
 }
 
+void check_terminal_completion_precedes_success() {
+    auto command = transport::command::make_put_value64(
+        transport::TransportTeam::kWorld, 1, 1, 0, 0x1000, 9,
+        transport::kDefaultOptions);
+
+    auto state = service::model::make_state(2, 0, 3);
+    transport::DeviceTransportDiagnostic diagnostic{};
+    CHECK(service::model::execute(&command, 1, state, diagnostic));
+    CHECK(state.consumed_count == 1);
+    CHECK(state.outstanding == 0);
+    CHECK(state.completed == state.submitted);
+
+    state = service::model::make_state(2, 0, 3);
+    state.completions_enabled = false;
+    diagnostic = {};
+    CHECK(!service::model::execute(&command, 1, state, diagnostic));
+    CHECK(state.consumed_count == 1);
+    CHECK(state.outstanding == 1);
+    CHECK(diagnostic.error ==
+          transport::DeviceTransportError::kCompletionTimeout);
+    CHECK(diagnostic.command_index == 1);
+    CHECK(diagnostic.opcode == transport::TransportCommandOpcode::kFlush);
+}
+
 void check_barrier_failure_preserves_failed_world_peer() {
     auto barrier = transport::command::make_barrier(1, 64);
     auto state = service::model::make_state(4, 0, 3);
@@ -594,6 +618,7 @@ int main() {
     check_incremental_append_does_not_replay();
     check_validation_stops_before_later_commands();
     check_completion_timeout_is_finite();
+    check_terminal_completion_precedes_success();
     check_barrier_failure_preserves_failed_world_peer();
     check_service_uses_translated_world_peer();
     check_protocol_validation_precedes_dispatch();

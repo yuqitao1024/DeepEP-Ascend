@@ -315,12 +315,14 @@ void check_queue_model() {
     CHECK(queue.count == 0);
     CHECK(diagnostic.error == transport::DeviceTransportError::kNone);
 
+    service.consumed_generation = queue.generation;
     CHECK(transport::command::append(
         queue, transport::command::make_put(
             transport::TransportTeam::kWorld, 1, 1, 0, 0x1000, 0x2000, 64,
             transport::CooperationScope::kParticipant,
             transport::MemorySegment::kDevice,
             transport::kDefaultOptions)));
+    CHECK(service.consumed_generation == 0);
     CHECK(transport::command::append(
         queue, transport::command::make_flush(
             0, transport::CooperationScope::kParticipant)));
@@ -348,6 +350,21 @@ void check_queue_model() {
     CHECK(diagnostic.error ==
           transport::DeviceTransportError::kCommandOverflow);
 
+    const auto queue_before_rejected_reset = queue;
+    const auto service_before_rejected_reset = service;
+    const auto diagnostic_before_rejected_reset = diagnostic;
+    CHECK(!transport::command::checked_reset(
+        staged, queue, service, diagnostic, 8));
+    CHECK(std::memcmp(
+        &queue, &queue_before_rejected_reset, sizeof(queue)) == 0);
+    CHECK(std::memcmp(
+        &service, &service_before_rejected_reset, sizeof(service)) == 0);
+    CHECK(std::memcmp(
+        &diagnostic, &diagnostic_before_rejected_reset,
+        sizeof(diagnostic)) == 0);
+    service.consumed_count = queue.count;
+    service.consumed_generation = queue.generation;
+    diagnostic = {};
     CHECK(transport::command::checked_reset(
         staged, queue, service, diagnostic, 8));
     CHECK(queue.count == 0);
@@ -373,6 +390,27 @@ void check_checked_queue_reset() {
         staged.command_queue, queue.commands, queue.service_state,
         queue.diagnostic, queue.capacity);
 
+    const auto active_queue = queue;
+    const auto active_service = service;
+    const auto active_diagnostic = diagnostic;
+    CHECK(!transport::command::checked_reset(
+        staged, queue, service, diagnostic, 7));
+    CHECK(std::memcmp(&queue, &active_queue, sizeof(queue)) == 0);
+    CHECK(std::memcmp(&service, &active_service, sizeof(service)) == 0);
+    CHECK(std::memcmp(
+        &diagnostic, &active_diagnostic, sizeof(diagnostic)) == 0);
+
+    service.active = 0;
+    service.consumed_generation = 0;
+    CHECK(!transport::command::checked_reset(
+        staged, queue, service, diagnostic, 7));
+    service.consumed_generation = 6;
+    service.consumed_count = 1;
+    CHECK(!transport::command::checked_reset(
+        staged, queue, service, diagnostic, 7));
+
+    service.consumed_count = queue.count;
+    diagnostic = {};
     CHECK(transport::command::checked_reset(
         staged, queue, service, diagnostic, 7));
     CHECK(queue.count == 0);

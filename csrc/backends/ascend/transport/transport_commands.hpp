@@ -523,6 +523,13 @@ inline bool checked_reset(
         !valid_diagnostic_header(diagnostic.abi_version))
         return false;
 
+    const bool empty = queue.count == 0 && service.consumed_count == 0;
+    const bool completed =
+        service.consumed_generation == queue.generation &&
+        service.consumed_count == queue.count;
+    if (service.active != 0 || (!empty && !completed))
+        return false;
+
     queue.count = 0;
     queue.generation = generation;
     service.consumed_count = 0;
@@ -538,6 +545,8 @@ inline bool append(
     auto* diagnostic = reinterpret_cast<DeviceTransportDiagnostic*>(
         queue.diagnostic);
     auto* commands = reinterpret_cast<TransportCommand*>(queue.commands);
+    auto* service = reinterpret_cast<TransportServiceState*>(
+        queue.service_state);
     if (commands == nullptr || queue.count >= queue.capacity) {
         if (diagnostic != nullptr) {
             record_first_error(
@@ -550,6 +559,8 @@ inline bool append(
         }
         return false;
     }
+    if (service != nullptr)
+        service->consumed_generation = 0;
     commands[queue.count] = transport_command;
     ++queue.count;
     return true;

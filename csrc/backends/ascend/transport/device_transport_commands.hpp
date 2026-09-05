@@ -244,6 +244,10 @@ DEEP_EP_ASCEND_SIMT_CALLEE bool append(
          word < sizeof(TransportCommand) / sizeof(std::uint64_t); ++word)
         simt::store_published(&target_words[word], source_words[word]);
 
+    auto* state = service_state(queue);
+    if (state != nullptr)
+        simt::store_published(
+            &state->consumed_generation, std::uint64_t{0});
     simt::system_fence();
     simt::store_published(&queue->count, count + 1);
     simt::system_fence();
