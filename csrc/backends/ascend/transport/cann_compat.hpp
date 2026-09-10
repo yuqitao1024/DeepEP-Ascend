@@ -83,13 +83,27 @@ struct Channel {
     std::uint8_t reserved[160];
 };
 
+struct WindowNetwork {
+    std::uint64_t remote_addresses;
+    std::uint64_t window_bytes;
+    std::uint64_t world_team_offsets;
+    std::uint32_t layer_count;
+    std::uint32_t reserved[8];
+};
+
+struct WindowLocal {
+    std::uint64_t base;
+    std::uint64_t stride;
+    std::uint64_t user_bytes;
+    std::uint32_t reserved[8];
+};
+
 struct Window {
     AbiHeader header;
-    std::uint32_t memory_count;
-    std::uint32_t reserved0;
-    std::uint64_t memories;
-    std::uint64_t world_team;
-    std::uint32_t reserved1[8];
+    WindowNetwork network;
+    WindowLocal local;
+    std::uint64_t legacy_window;
+    std::uint32_t reserved[8];
 };
 
 struct Team {
@@ -146,7 +160,9 @@ static_assert(sizeof(RegisteredBuffer) == 64);
 static_assert(sizeof(SqContext) == 128);
 static_assert(sizeof(CqContext) == 128);
 static_assert(sizeof(Channel) == 256);
-static_assert(sizeof(Window) == 72);
+static_assert(sizeof(WindowNetwork) == 64);
+static_assert(sizeof(WindowLocal) == 56);
+static_assert(sizeof(Window) == 176);
 static_assert(sizeof(Team) == 200);
 static_assert(sizeof(UrmaSqe) == 48);
 static_assert(sizeof(UrmaSge) == 16);

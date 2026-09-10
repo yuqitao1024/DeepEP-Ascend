@@ -44,7 +44,7 @@ TransportStatus backend_failure(
 bool valid_api(const CannHostApi& api) {
     return api.get_rank != nullptr && api.get_size != nullptr &&
         api.create_world_team != nullptr && api.register_window != nullptr &&
-        api.create_channels != nullptr && api.allocate_device != nullptr &&
+        api.allocate_device != nullptr &&
         api.zero_device != nullptr && api.copy_to_device != nullptr &&
         api.copy_from_device != nullptr && api.free_device != nullptr &&
         api.deregister_window != nullptr && api.destroy_team != nullptr;
@@ -55,7 +55,7 @@ public:
     CannHostTransport(
         TransportConfig config, CannHostApi api, std::uint32_t rank,
         std::uint32_t world_size, std::uint32_t command_capacity,
-        std::uintptr_t team)
+        std::uintptr_t team = 0)
         : config_(std::move(config)), api_(api), rank_(rank),
           world_size_(world_size), command_capacity_(command_capacity),
           team_(team) {}
@@ -151,7 +151,7 @@ public:
 
         std::uintptr_t window = 0;
         const int result = api_.register_window(
-            api_.user_data, config_.communicator_handle, team_, base,
+            api_.user_data, config_.communicator_handle, base,
             static_cast<std::uint64_t>(bytes), &window);
         if (result != 0)
             return backend_failure("register_symmetric_window", result);
@@ -171,8 +171,15 @@ public:
     TransportStatus unregister_symmetric_window() override {
         if (window_ == 0)
             return TransportStatus::success();
+        if (team_ != 0) {
+            const int team_result = api_.destroy_team(api_.user_data, team_);
+            if (team_result != 0)
+                return backend_failure("destroy_team", team_result);
+            team_ = 0;
+            channels_created_ = false;
+        }
         const int result = api_.deregister_window(
-            api_.user_data, team_, window_);
+            api_.user_data, window_);
         if (result != 0)
             return backend_failure("unregister_symmetric_window", result);
         window_ = 0;
@@ -212,11 +219,20 @@ public:
         if (channels_active_)
             return TransportStatus::success();
         if (!channels_created_) {
-            const int result = api_.create_channels(
-                api_.user_data, config_.communicator_handle, team_,
-                static_cast<std::uint32_t>(count));
+            std::vector<std::uint32_t> rank_ids(world_size_);
+            for (std::uint32_t index = 0; index < world_size_; ++index)
+                rank_ids[index] = index;
+            const int result = api_.create_world_team(
+                api_.user_data, config_.communicator_handle, rank_, world_size_,
+                rank_ids.data(), sync_layout::kWorldTeamSignalCount,
+                sync_layout::kWorldTeamBarrierCount,
+                static_cast<std::uint32_t>(count), &team_);
             if (result != 0)
                 return backend_failure("acquire_channels", result);
+            if (team_ == 0)
+                return TransportStatus::runtime_failure(
+                    "acquire_channels", 0,
+                    "CANN returned a null team handle");
             channels_created_ = true;
         }
         auto status = initialize_resources();
@@ -249,6 +265,8 @@ public:
         context->local_window_base = local_window_base_;
         context->peer_address_table = window_;
         context->channel_table = team_;
+        context->channel_count = static_cast<std::uint32_t>(
+            config_.requested_channels);
         context->backend_context = pointer_value(staged_);
         return TransportStatus::success();
     }
@@ -309,9 +327,19 @@ public:
         TransportStatus first_error = TransportStatus::success();
         release_backend_resources(first_error);
 
-        if (window_ != 0) {
+        if (team_ != 0) {
+            const int result = api_.destroy_team(api_.user_data, team_);
+            if (result != 0) {
+                if (first_error.ok())
+                    first_error = backend_failure("destroy_team", result);
+            } else {
+                team_ = 0;
+                channels_created_ = false;
+            }
+        }
+        if (team_ == 0 && window_ != 0) {
             const int result = api_.deregister_window(
-                api_.user_data, team_, window_);
+                api_.user_data, window_);
             if (result != 0) {
                 if (first_error.ok())
                     first_error = backend_failure(
@@ -320,15 +348,6 @@ public:
                 window_ = 0;
                 local_window_base_ = 0;
                 window_bytes_ = 0;
-            }
-        }
-        if (window_ == 0 && team_ != 0) {
-            const int result = api_.destroy_team(api_.user_data, team_);
-            if (result != 0) {
-                if (first_error.ok())
-                    first_error = backend_failure("destroy_team", result);
-            } else {
-                team_ = 0;
             }
         }
         destroyed_ = window_ == 0 && team_ == 0;
@@ -447,10 +466,6 @@ HcommTeamHandle team_handle(std::uintptr_t handle) {
     return reinterpret_cast<HcommTeamHandle>(handle);
 }
 
-HcommWindowHandle window_handle(std::uintptr_t handle) {
-    return reinterpret_cast<HcommWindowHandle>(handle);
-}
-
 int cann_get_rank(void*, std::int64_t comm, std::uint32_t* rank) {
     return HcclGetRankId(comm_handle(comm), rank);
 }
@@ -462,7 +477,8 @@ int cann_get_size(void*, std::int64_t comm, std::uint32_t* size) {
 int cann_create_world_team(
     void*, std::int64_t comm, std::uint32_t rank, std::uint32_t size,
     const std::uint32_t* rank_ids, std::uint32_t signal_count,
-    std::uint32_t barrier_count, std::uintptr_t* team) {
+    std::uint32_t barrier_count, std::uint32_t channel_count,
+    std::uintptr_t* team) {
     HcclTeamCreateDesc desc;
     auto result = HcclTeamCreateDescInit(&desc);
     if (result != HCCL_SUCCESS)
@@ -470,39 +486,31 @@ int cann_create_world_team(
     desc.rankIds = rank_ids;
     desc.rankNum = size;
     desc.selfRankId = rank;
+    desc.netLayer = 0;
+    // HCOMM's team transport for Ascend 950 is the UBC_CTP protocol.
+    // UBC_TP (value 5) is retained for compatibility but is not selected
+    // by HCCL team creation and returns HCCL_E_NOT_FOUND here.
     desc.protocol = COMM_PROTOCOL_UBC_CTP;
     desc.requirement.signalCount = signal_count;
     desc.requirement.counterCount = 0;
     desc.requirement.barrierCount = barrier_count;
+    desc.engine = COMM_ENGINE_AIV;
+    desc.notifyNum = 0;
+    desc.channelCnt = channel_count;
     HcommTeamHandle handle = nullptr;
-    result = HcclWorldTeamCreate(comm_handle(comm), &desc, &handle);
+    result = HcclTeamCreate(comm_handle(comm), &desc, &handle);
     *team = reinterpret_cast<std::uintptr_t>(handle);
     return result;
 }
 
 int cann_register_window(
-    void*, std::int64_t comm, std::uintptr_t team, void* base,
+    void*, std::int64_t comm, void* base,
     std::uint64_t bytes, std::uintptr_t* window) {
-    CommMem memory{COMM_MEM_TYPE_DEVICE, base, bytes};
-    HcommWindowHandle handle = nullptr;
-    const auto result = HcclTeamWindowRegister(
-        comm_handle(comm), team_handle(team), &memory, &handle, 0);
+    HcclCommSymWindow handle = nullptr;
+    const auto result = HcclCommSymWinRegister(
+        comm_handle(comm), base, bytes, &handle, 1);
     *window = reinterpret_cast<std::uintptr_t>(handle);
     return result;
-}
-
-int cann_create_channels(
-    void*, std::int64_t comm, std::uintptr_t team, std::uint32_t count) {
-    HcclTeamCreateChannelsDesc desc;
-    auto result = HcclTeamCreateChannelsDescInit(&desc);
-    if (result != HCCL_SUCCESS)
-        return result;
-    desc.engine = COMM_ENGINE_AIV;
-    desc.notifyNum = 0;
-    desc.protocol = COMM_PROTOCOL_UBC_CTP;
-    desc.channelCnt = count;
-    return HcclTeamChannelsCreate(
-        comm_handle(comm), team_handle(team), &desc);
 }
 
 int cann_allocate(void*, std::uint64_t bytes, void** pointer) {
@@ -535,9 +543,9 @@ int cann_free(void*, void* pointer) {
 }
 
 int cann_deregister_window(
-    void*, std::uintptr_t team, std::uintptr_t window) {
-    return HcclTeamWindowDeregister(
-        team_handle(team), window_handle(window));
+    void*, std::uintptr_t window) {
+    return HcclCommSymWinDeregister(
+        reinterpret_cast<HcclCommSymWindow>(window));
 }
 
 int cann_destroy_team(void*, std::uintptr_t team) {
@@ -555,7 +563,6 @@ CannHostApi default_api() {
         cann_get_size,
         cann_create_world_team,
         cann_register_window,
-        cann_create_channels,
         cann_allocate,
         cann_zero,
         cann_copy,
@@ -690,24 +697,8 @@ TransportCreateResult make_cann_transport(
                 "rank count exceeds transport command capacity"),
             nullptr};
 
-    std::vector<std::uint32_t> rank_ids(world_size);
-    for (std::uint32_t index = 0; index < world_size; ++index)
-        rank_ids[index] = index;
-    std::uintptr_t team = 0;
-    result = api.create_world_team(
-        api.user_data, config.communicator_handle, rank, world_size,
-        rank_ids.data(), sync_layout::kWorldTeamSignalCount,
-        sync_layout::kWorldTeamBarrierCount, &team);
-    if (result != 0)
-        return {backend_failure("create_world_team", result), nullptr};
-    if (team == 0)
-        return {
-            TransportStatus::runtime_failure(
-                "create_world_team", 0, "CANN returned a null team handle"),
-            nullptr};
-
     auto transport = std::make_unique<CannHostTransport>(
-        config, api, rank, world_size, command_capacity, team);
+        config, api, rank, world_size, command_capacity);
     return {TransportStatus::success(), std::move(transport)};
 }
 

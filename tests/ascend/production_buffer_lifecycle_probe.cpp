@@ -232,23 +232,18 @@ int get_size(void*, std::int64_t, std::uint32_t* size) {
 
 int create_team(
     void* data, std::int64_t, std::uint32_t, std::uint32_t,
-    const std::uint32_t*, std::uint32_t, std::uint32_t,
+    const std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t,
     std::uintptr_t* team) {
     *team = reinterpret_cast<std::uintptr_t>(data) ^ 0x1111U;
     return 0;
 }
 
 int register_window(
-    void* data, std::int64_t, std::uintptr_t, void* base, std::uint64_t,
+    void* data, std::int64_t, void* base, std::uint64_t,
     std::uintptr_t* window) {
     auto& trace = self(data);
     trace.registered_window = base;
     *window = reinterpret_cast<std::uintptr_t>(data) ^ 0x2222U;
-    return 0;
-}
-
-int create_channels(
-    void*, std::int64_t, std::uintptr_t, std::uint32_t) {
     return 0;
 }
 
@@ -287,7 +282,7 @@ int host_free(void* data, void* pointer) {
     return 0;
 }
 
-int deregister_window(void* data, std::uintptr_t, std::uintptr_t) {
+int deregister_window(void* data, std::uintptr_t) {
     ++self(data).deregister_calls;
     return 0;
 }
@@ -299,7 +294,7 @@ int destroy_team(void* data, std::uintptr_t) {
 
 transport::CannHostApi host_api(Trace& trace) {
     return {&trace, get_rank, get_size, create_team, register_window,
-            create_channels, host_allocate, host_zero, host_copy_to_device,
+            host_allocate, host_zero, host_copy_to_device,
             host_copy_from_device, host_free, deregister_window, destroy_team};
 }
 

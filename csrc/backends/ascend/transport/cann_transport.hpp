@@ -37,12 +37,9 @@ struct CannHostApi {
     int (*create_world_team)(
         void*, std::int64_t, std::uint32_t, std::uint32_t,
         const std::uint32_t*, std::uint32_t, std::uint32_t,
-        std::uintptr_t*) = nullptr;
+        std::uint32_t, std::uintptr_t*) = nullptr;
     int (*register_window)(
-        void*, std::int64_t, std::uintptr_t, void*, std::uint64_t,
-        std::uintptr_t*) = nullptr;
-    int (*create_channels)(
-        void*, std::int64_t, std::uintptr_t, std::uint32_t) = nullptr;
+        void*, std::int64_t, void*, std::uint64_t, std::uintptr_t*) = nullptr;
 
     int (*allocate_device)(void*, std::uint64_t, void**) = nullptr;
     int (*zero_device)(void*, void*, std::uint64_t) = nullptr;
@@ -51,7 +48,7 @@ struct CannHostApi {
     int (*free_device)(void*, void*) = nullptr;
 
     int (*deregister_window)(
-        void*, std::uintptr_t, std::uintptr_t) = nullptr;
+        void*, std::uintptr_t) = nullptr;
     int (*destroy_team)(void*, std::uintptr_t) = nullptr;
     int (*host_barrier)(void*, std::int64_t) = nullptr;
 };

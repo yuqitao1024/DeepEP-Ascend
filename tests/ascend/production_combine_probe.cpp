@@ -165,10 +165,10 @@ int size_(void*, std::int64_t, std::uint32_t* size) {
 }
 int team(void*, std::int64_t, std::uint32_t, std::uint32_t,
          const std::uint32_t*, std::uint32_t, std::uint32_t,
+         std::uint32_t,
          std::uintptr_t* value) { *value = 2; return 0; }
-int window(void*, std::int64_t, std::uintptr_t, void*, std::uint64_t,
+int window(void*, std::int64_t, void*, std::uint64_t,
            std::uintptr_t* value) { *value = 3; return 0; }
-int channels(void*, std::int64_t, std::uintptr_t, std::uint32_t) { return 0; }
 int ha(void*, std::uint64_t bytes, void** pointer) {
     constexpr std::uint64_t alignment = 64;
     const auto aligned_bytes =
@@ -191,7 +191,6 @@ int dh(void*, void* destination, const void* source, std::uint64_t bytes) {
     return d2h(nullptr, destination, source, bytes);
 }
 int hf(void*, void* pointer) { return free_(nullptr, pointer); }
-int noop2(void*, std::uintptr_t, std::uintptr_t) { return 0; }
 int noop1(void*, std::uintptr_t) { return 0; }
 
 std::unique_ptr<runtime::CannRuntimeResources> resources(
@@ -205,8 +204,8 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
         nullptr, current_device, stream, pool_stream, create_event, record_event,
         query_event, wait_event, synchronize_event, destroy_event};
     transport::CannHostApi host_api{
-        nullptr, rank_, size_, team, window, channels, ha, hz, hd, dh, hf,
-        noop2, noop1};
+        nullptr, rank_, size_, team, window, ha, hz, hd, dh, hf, noop1,
+        noop1};
     transport::TransportConfig config{};
     config.rank = rank;
     config.world_size = world_size;

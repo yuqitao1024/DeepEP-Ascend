@@ -107,7 +107,8 @@ struct FakeApi {
     static int create_team(
         void* data, std::int64_t, std::uint32_t rank, std::uint32_t size,
         const std::uint32_t* rank_ids, std::uint32_t signal_count,
-        std::uint32_t barrier_count, std::uintptr_t* team) {
+        std::uint32_t barrier_count, std::uint32_t channel_count,
+        std::uintptr_t* team) {
         auto& fake = self(data);
         fake.record(Event::kCreateTeam);
         CHECK(rank == fake.rank);
@@ -118,27 +119,19 @@ struct FakeApi {
         CHECK(signal_count == 0);
         CHECK(barrier_count ==
               transport::sync_layout::kWorldTeamBarrierCount);
+        CHECK(channel_count == fake.expected_channel_count);
         if (fake.fail_now()) return 73;
         *team = 0x200000;
         return 0;
     }
 
     static int register_window(
-        void* data, std::int64_t, std::uintptr_t, void*, std::uint64_t,
+        void* data, std::int64_t, void*, std::uint64_t,
         std::uintptr_t* window) {
         auto& fake = self(data);
         fake.record(Event::kRegisterWindow);
         if (fake.fail_now()) return 74;
         *window = 0x300000;
-        return 0;
-    }
-
-    static int create_channels(
-        void* data, std::int64_t, std::uintptr_t, std::uint32_t count) {
-        auto& fake = self(data);
-        fake.record(Event::kCreateChannels);
-        CHECK(count == fake.expected_channel_count);
-        if (fake.fail_now()) return 75;
         return 0;
     }
 
@@ -230,7 +223,7 @@ struct FakeApi {
     }
 
     static int deregister_window(
-        void* data, std::uintptr_t, std::uintptr_t) {
+        void* data, std::uintptr_t) {
         auto& fake = self(data);
         fake.record(Event::kDeregisterWindow);
         if (fake.deregister_failures_remaining > 0) {
@@ -253,7 +246,7 @@ struct FakeApi {
     transport::CannHostApi api() {
         return {
             this, get_rank, get_size, create_team, register_window,
-            create_channels, allocate, zero, copy, copy_from_device, free,
+            allocate, zero, copy, copy_from_device, free,
             deregister_window, destroy_team,
         };
     }
@@ -519,9 +512,8 @@ void check_success_and_reverse_cleanup() {
           transport::DeviceTransportError::kCompletionTimeout);
     CHECK(diagnostic.generation == 17);
     CHECK(fake.count(Event::kCopyFromDevice) == 1);
-    CHECK(fake.first(Event::kCreateTeam) < fake.first(Event::kRegisterWindow));
-    CHECK(fake.first(Event::kRegisterWindow) < fake.first(Event::kCreateChannels));
-    CHECK(fake.first(Event::kCreateChannels) < fake.first(Event::kAllocate));
+    CHECK(fake.first(Event::kRegisterWindow) < fake.first(Event::kCreateTeam));
+    CHECK(fake.first(Event::kCreateTeam) < fake.first(Event::kAllocate));
     CHECK(fake.staged_copy_count == 1);
     CHECK(fake.staged.fetch_results == 0);
     CHECK(fake.staged.fetch_result_bytes == 0);
@@ -557,8 +549,8 @@ void check_success_and_reverse_cleanup() {
     CHECK(created.transport->destroy().ok());
     CHECK(fake.event_count == after_first_destroy);
     CHECK(fake.count(Event::kFree) == 6);
-    CHECK(fake.events[fake.event_count - 2] == Event::kDeregisterWindow);
-    CHECK(fake.events[fake.event_count - 1] == Event::kDestroyTeam);
+    CHECK(fake.events[fake.event_count - 2] == Event::kDestroyTeam);
+    CHECK(fake.events[fake.event_count - 1] == Event::kDeregisterWindow);
 }
 
 void check_partial_failure_cleans_up() {
@@ -587,7 +579,6 @@ void check_partial_failure_cleans_up() {
         const auto allocations = static_cast<std::uint32_t>(
             (fake.next_pointer - 0x100000) / 0x1000);
         CHECK(fake.count(Event::kFree) == allocations);
-        CHECK(fake.events[fake.event_count - 1] == Event::kDestroyTeam);
     }
 }
 
@@ -612,7 +603,7 @@ void check_deregister_failure_is_retryable() {
     CHECK(!first.ok());
     CHECK(first.operation == "unregister_symmetric_window");
     CHECK(fake.count(Event::kDeregisterWindow) == 1);
-    CHECK(fake.count(Event::kDestroyTeam) == 0);
+    CHECK(fake.count(Event::kDestroyTeam) == 1);
 
     CHECK(active->destroy().ok());
     CHECK(fake.count(Event::kDeregisterWindow) == 2);
@@ -627,7 +618,7 @@ void check_team_destroy_failure_is_retryable() {
     const auto first = active->destroy();
     CHECK(!first.ok());
     CHECK(first.operation == "destroy_team");
-    CHECK(fake.count(Event::kDeregisterWindow) == 1);
+    CHECK(fake.count(Event::kDeregisterWindow) == 0);
     CHECK(fake.count(Event::kDestroyTeam) == 1);
 
     CHECK(active->destroy().ok());

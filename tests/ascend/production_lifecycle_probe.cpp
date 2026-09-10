@@ -196,7 +196,7 @@ int get_size(void* data, std::int64_t, std::uint32_t* size) {
 
 int create_team(
     void* data, std::int64_t, std::uint32_t, std::uint32_t,
-    const std::uint32_t*, std::uint32_t, std::uint32_t,
+    const std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t,
     std::uintptr_t* team) {
     auto& trace = self(data);
     trace.events.emplace_back("create_team");
@@ -206,7 +206,7 @@ int create_team(
 }
 
 int register_window(
-    void* data, std::int64_t, std::uintptr_t, void* base,
+    void* data, std::int64_t, void* base,
     std::uint64_t bytes, std::uintptr_t* window) {
     auto& trace = self(data);
     trace.events.emplace_back("register_window");
@@ -216,14 +216,6 @@ int register_window(
     if (trace.host_fail()) return 74;
     *window = 0x300000;
     return 0;
-}
-
-int create_channels(
-    void* data, std::int64_t, std::uintptr_t, std::uint32_t count) {
-    auto& trace = self(data);
-    trace.events.emplace_back("create_channels");
-    CHECK(count == 1);
-    return trace.host_fail() ? 75 : 0;
 }
 
 int host_allocate(void* data, std::uint64_t, void** pointer) {
@@ -258,7 +250,7 @@ int host_free(void* data, void*) {
     return 0;
 }
 
-int deregister_window(void* data, std::uintptr_t, std::uintptr_t) {
+int deregister_window(void* data, std::uintptr_t) {
     auto& trace = self(data);
     trace.events.emplace_back("deregister_window");
     if (trace.deregister_failures_remaining > 0) {
@@ -280,7 +272,7 @@ int destroy_team(void* data, std::uintptr_t) {
 
 transport::CannHostApi host_api(Trace& trace) {
     return {&trace, get_rank, get_size, create_team, register_window,
-            create_channels, host_allocate, host_zero, copy_to_device,
+            host_allocate, host_zero, copy_to_device,
             copy_from_device, host_free, deregister_window, destroy_team};
 }
 
@@ -359,9 +351,8 @@ void check_success_and_idempotent_cleanup() {
     CHECK(resources.device_context().topology.world_size == 2);
     CHECK(trace.first("current_device") < trace.first("pool_stream"));
     CHECK(trace.first("pool_stream") < trace.first("runtime_allocate"));
-    CHECK(trace.first("runtime_allocate") < trace.first("create_team"));
-    CHECK(trace.first("create_team") < trace.first("register_window"));
-    CHECK(trace.first("register_window") < trace.first("create_channels"));
+    CHECK(trace.first("runtime_allocate") < trace.first("register_window"));
+    CHECK(trace.first("register_window") < trace.first("create_team"));
     CHECK(trace.count("pool_stream") == 1);
     CHECK(trace.count("current_stream") == 0);
     CHECK(trace.count("runtime_allocate") == 2);
@@ -383,7 +374,7 @@ void check_success_and_idempotent_cleanup() {
     CHECK(resources.destroy().ok());
     CHECK(trace.events.size() == after_destroy);
     CHECK(trace.count("runtime_free") == 2);
-    CHECK(trace.first("deregister_window") < trace.first("destroy_team"));
+    CHECK(trace.first("destroy_team") < trace.first("deregister_window"));
     CHECK(trace.events.back() == "runtime_free");
     CHECK(trace.destroy_event_calls == 0);
 }
@@ -524,7 +515,7 @@ void check_deregister_failure_preserves_outer_window() {
     CHECK(resources.comm_stream().raw == reinterpret_cast<void*>(0x7171));
     CHECK(trace.count("runtime_free") == 1);
     CHECK(trace.count("deregister_window") == 1);
-    CHECK(trace.count("destroy_team") == 0);
+    CHECK(trace.count("destroy_team") == 1);
 
     CHECK(resources.destroy().ok());
     CHECK(resources.window_base() == nullptr);
@@ -548,7 +539,7 @@ void check_team_destroy_failure_preserves_outer_window() {
     CHECK(resources.window_base() != nullptr);
     CHECK(resources.comm_stream().raw == reinterpret_cast<void*>(0x7171));
     CHECK(trace.count("runtime_free") == 1);
-    CHECK(trace.count("deregister_window") == 1);
+    CHECK(trace.count("deregister_window") == 0);
     CHECK(trace.count("destroy_team") == 1);
 
     CHECK(resources.destroy().ok());

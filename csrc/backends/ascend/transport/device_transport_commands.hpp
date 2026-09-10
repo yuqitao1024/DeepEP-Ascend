@@ -280,14 +280,13 @@ DEEP_EP_ASCEND_SIMT_CALLEE std::uint32_t channel_count(
         context.channel_table);
     const auto member_count = simt::load_observed(
         &transport_team->member_count);
-    const auto counts_address = simt::load_observed(
-        &transport_team->channel_counts);
     if (world_peer < 0 ||
         static_cast<std::uint32_t>(world_peer) >= member_count ||
-        counts_address == 0)
+        static_cast<std::uint32_t>(world_peer) ==
+            simt::load_observed(&transport_team->self_member) ||
+        simt::load_observed(&transport_team->channel_counts) == 0)
         return 0;
-    auto* counts = reinterpret_cast<__gm__ std::uint32_t*>(counts_address);
-    return simt::load_observed(counts + world_peer);
+    return context.channel_count;
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t get_symmetric_offset(

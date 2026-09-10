@@ -106,14 +106,15 @@ void dump_transport_descriptors(
         stderr,
         "URMA-DESC team members=%u self=%u signals=%u counters=%u "
         "barriers=%u sync_bytes=%llu remote_sync_count=%u "
-        "shadow=[0x%llx,+%llu] window_count=%u\n",
+        "shadow=[0x%llx,+%llu] window_bytes=%llu layers=%u\n",
         team.member_count, team.self_member, team.signal_count,
         team.counter_count, team.barrier_count,
         static_cast<unsigned long long>(team.sync_memory_bytes),
         team.remote_sync_memory_count,
         static_cast<unsigned long long>(team.shadow_sync_memory.address),
         static_cast<unsigned long long>(team.shadow_sync_memory.bytes),
-        window.memory_count);
+        static_cast<unsigned long long>(window.network.window_bytes),
+        window.network.layer_count);
 
     transport::cann_abi::Memory memories[64]{};
     if (team.remote_sync_memory_count <= 64 &&
@@ -130,31 +131,17 @@ void dump_transport_descriptors(
                 static_cast<unsigned long long>(memories[index].bytes));
         }
     }
-    if (window.memory_count <= 64 && window.memories != 0 &&
-        copy_from_device(
-            memories, reinterpret_cast<const void*>(window.memories),
-            window.memory_count * sizeof(memories[0]),
-            "copy debug window memories", error, sizeof(error))) {
-        for (std::uint32_t index = 0; index < window.memory_count; ++index) {
-            std::fprintf(
-                stderr, "URMA-DESC window[%u]=[0x%llx,+%llu]\n", index,
-                static_cast<unsigned long long>(memories[index].address),
-                static_cast<unsigned long long>(memories[index].bytes));
-        }
-    }
-
-    std::uint32_t counts[64]{};
+    std::uint32_t offsets[64]{};
     if (team.member_count > 64 || team.channel_counts == 0 ||
         !copy_from_device(
-            counts, reinterpret_cast<const void*>(team.channel_counts),
-            team.member_count * sizeof(counts[0]), "copy debug channel counts",
+            offsets, reinterpret_cast<const void*>(team.channel_counts),
+            team.member_count * sizeof(offsets[0]), "copy debug channel offsets",
             error, sizeof(error)))
         return;
-    std::uint32_t channel_index = 0;
-    for (std::uint32_t member = 0; member < peer; ++member)
-        channel_index += counts[member];
+    const std::uint32_t channel_index = offsets[peer];
     transport::cann_abi::Channel channel{};
-    if (peer >= team.member_count || counts[peer] == 0 || team.channels == 0 ||
+    if (peer >= team.member_count || peer == team.self_member ||
+        context.channel_count == 0 || team.channels == 0 ||
         !copy_from_device(
             &channel,
             reinterpret_cast<const void*>(
@@ -241,20 +228,18 @@ std::uint32_t inspect_sq_depth(
         write_error(error, error_capacity, "invalid team channel table");
         return 0;
     }
-    std::uint32_t counts[64]{};
+    std::uint32_t offsets[64]{};
     if (team.member_count > 64 ||
         !copy_from_device(
-            counts, reinterpret_cast<const void*>(team.channel_counts),
-            team.member_count * sizeof(std::uint32_t), "copy channel counts",
+            offsets, reinterpret_cast<const void*>(team.channel_counts),
+            team.member_count * sizeof(std::uint32_t), "copy channel offsets",
             error, error_capacity))
         return 0;
-    if (counts[peer] == 0) {
+    if (peer == team.self_member || context.channel_count == 0) {
         write_error(error, error_capacity, "peer has no channel");
         return 0;
     }
-    std::uint32_t channel_index = 0;
-    for (std::uint32_t member = 0; member < peer; ++member)
-        channel_index += counts[member];
+    const std::uint32_t channel_index = offsets[peer];
     transport::cann_abi::Channel channel{};
     const auto channel_address = team.channels +
         static_cast<std::uint64_t>(channel_index) * sizeof(channel);
@@ -287,20 +272,18 @@ std::uint32_t inspect_cq_depth(
         write_error(error, error_capacity, "invalid team channel table");
         return 0;
     }
-    std::uint32_t counts[64]{};
+    std::uint32_t offsets[64]{};
     if (team.member_count > 64 ||
         !copy_from_device(
-            counts, reinterpret_cast<const void*>(team.channel_counts),
-            team.member_count * sizeof(std::uint32_t), "copy channel counts",
+            offsets, reinterpret_cast<const void*>(team.channel_counts),
+            team.member_count * sizeof(std::uint32_t), "copy channel offsets",
             error, error_capacity))
         return 0;
-    if (counts[peer] == 0) {
+    if (peer == team.self_member || context.channel_count == 0) {
         write_error(error, error_capacity, "peer has no channel");
         return 0;
     }
-    std::uint32_t channel_index = 0;
-    for (std::uint32_t member = 0; member < peer; ++member)
-        channel_index += counts[member];
+    const std::uint32_t channel_index = offsets[peer];
     transport::cann_abi::Channel channel{};
     const auto channel_address = team.channels +
         static_cast<std::uint64_t>(channel_index) * sizeof(channel);

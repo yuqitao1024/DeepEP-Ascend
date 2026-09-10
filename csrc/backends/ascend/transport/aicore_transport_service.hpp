@@ -460,17 +460,18 @@ __aicore__ inline __gm__ cann_abi::Window* window(
 }
 
 __aicore__ inline __gm__ cann_abi::Channel* resolve_peer(
+    const DeviceTransportContext& context,
     __gm__ cann_abi::Team* transport_team, std::uint32_t peer,
     std::uint32_t channel) {
     if (transport_team == nullptr || peer >= transport_team->member_count ||
-        transport_team->channel_counts == 0)
+        peer == transport_team->self_member ||
+        transport_team->channel_counts == 0 ||
+        channel >= context.channel_count)
         return nullptr;
-    auto* counts = reinterpret_cast<__gm__ std::uint32_t*>(
+    auto* offsets = reinterpret_cast<__gm__ std::uint32_t*>(
         transport_team->channel_counts);
-    std::uint64_t index = channel;
-    for (std::uint32_t member = 0; member < peer; ++member)
-        index += counts[member];
-    if (channel >= counts[peer] || transport_team->channels == 0)
+    const std::uint64_t index = offsets[peer] + channel;
+    if (transport_team->channels == 0)
         return nullptr;
     return reinterpret_cast<__gm__ cann_abi::Channel*>(
         transport_team->channels) + index;
@@ -500,7 +501,8 @@ struct ResolvedPeer {
 __aicore__ inline DeviceTransportError channel_error(
     const DeviceTransportContext& context, std::uint32_t peer,
     std::uint32_t channel_index) {
-    auto* resolved_channel = resolve_peer(team(context), peer, channel_index);
+    auto* resolved_channel = resolve_peer(
+        context, team(context), peer, channel_index);
     if (resolved_channel == nullptr)
         return DeviceTransportError::kInvalidChannel;
     if (resolved_channel->protocol !=
@@ -542,7 +544,8 @@ __aicore__ inline ResolvedPeer resolve_context(
     if (channel_error(context, peer, channel_index) !=
         DeviceTransportError::kNone)
         return result;
-    result.channel = resolve_peer(team(context), peer, channel_index);
+    result.channel = resolve_peer(
+        context, team(context), peer, channel_index);
     result.sq = reinterpret_cast<__gm__ cann_abi::SqContext*>(
         result.channel->sq_contexts) + cann_abi::kDefaultQueueIndex;
     result.cq = reinterpret_cast<__gm__ cann_abi::CqContext*>(
@@ -563,13 +566,12 @@ __aicore__ inline void update_queue_profile(
     auto* transport_team = team(context);
     if (transport_team == nullptr || transport_team->channel_counts == 0)
         return;
-    auto* counts = reinterpret_cast<__gm__ std::uint32_t*>(
-        transport_team->channel_counts);
     TransportQueueDepthSnapshot aggregate{};
     for (std::uint32_t peer = 0; peer < transport_team->member_count; ++peer) {
         if (peer == transport_team->self_member)
             continue;
-        for (std::uint32_t channel = 0; channel < counts[peer]; ++channel) {
+        for (std::uint32_t channel = 0; channel < context.channel_count;
+             ++channel) {
             const auto resolved = resolve_context(context, peer, channel);
             if (resolved.sq == nullptr || resolved.cq == nullptr ||
                 resolved.sq->head == 0 || resolved.sq->tail == 0 ||
@@ -631,17 +633,15 @@ __aicore__ inline DeviceTransportError preflight_command_channels(
     if (collective) {
         if (transport_team->channel_counts == 0)
             return DeviceTransportError::kInvalidQueue;
-        auto* counts = reinterpret_cast<__gm__ std::uint32_t*>(
-            transport_team->channel_counts);
         for (std::uint32_t peer = 0; peer < transport_team->member_count;
              ++peer) {
             if (peer == transport_team->self_member)
                 continue;
-            if (counts[peer] == 0) {
+            if (context.channel_count == 0) {
                 failed_world_peer = static_cast<int>(peer);
                 return DeviceTransportError::kInvalidChannel;
             }
-            for (std::uint32_t channel = 0; channel < counts[peer];
+            for (std::uint32_t channel = 0; channel < context.channel_count;
                  ++channel) {
                 const auto error = channel_error(context, peer, channel);
                 if (error != DeviceTransportError::kNone) {
@@ -842,18 +842,30 @@ __aicore__ inline bool resolve_remote_target(
     auto* transport_window = window(context);
     auto* transport_team = team(context);
     if (transport_window == nullptr || transport_team == nullptr ||
-        transport_window->memories == 0 ||
+        transport_window->network.remote_addresses == 0 ||
+        transport_window->network.world_team_offsets == 0 ||
+        transport_team->world_team_ids == 0 ||
         peer >= transport_team->member_count ||
+        transport_team->network_layer >=
+            transport_window->network.layer_count ||
         logical_address < context.local_window_base)
         return false;
-    auto* memories = reinterpret_cast<__gm__ cann_abi::Memory*>(
-        transport_window->memories);
+    auto* addresses = reinterpret_cast<__gm__ std::uint64_t*>(
+        transport_window->network.remote_addresses);
+    auto* layer_offsets = reinterpret_cast<__gm__ std::uint32_t*>(
+        transport_window->network.world_team_offsets);
+    auto* world_team_ids = reinterpret_cast<__gm__ std::uint32_t*>(
+        transport_team->world_team_ids);
     const auto offset = logical_address - context.local_window_base;
-    const auto local_size = memories[transport_team->self_member].bytes;
-    if (bytes > local_size || offset > local_size - bytes ||
-        bytes > memories[peer].bytes || offset > memories[peer].bytes - bytes)
+    const auto window_bytes = transport_window->network.window_bytes;
+    if (bytes > window_bytes || offset > window_bytes - bytes)
         return false;
-    remote_address = memories[peer].address + offset;
+    const auto slot = layer_offsets[transport_team->network_layer] +
+        world_team_ids[peer];
+    const auto remote_base = addresses[slot];
+    if (remote_base == 0)
+        return false;
+    remote_address = remote_base + offset;
     return true;
 }
 
@@ -871,12 +883,10 @@ __aicore__ inline bool drain_all(
     auto* transport_team = team(context);
     if (transport_team == nullptr || transport_team->channel_counts == 0)
         return false;
-    auto* counts = reinterpret_cast<__gm__ std::uint32_t*>(
-        transport_team->channel_counts);
     for (std::uint32_t peer = 0; peer < transport_team->member_count; ++peer) {
         if (peer == transport_team->self_member)
             continue;
-        if (counts[peer] == 0)
+        if (context.channel_count == 0)
             return false;
         const bool in_phase = barrier_phase_index <
                 kTransportProfileBarrierPhaseCount &&
@@ -890,7 +900,8 @@ __aicore__ inline bool drain_all(
                     static_cast<std::uint64_t>(AscendC::GetSystemCycle());
         }
         bool drained = true;
-        for (std::uint32_t channel = 0; channel < counts[peer]; ++channel) {
+        for (std::uint32_t channel = 0; channel < context.channel_count;
+             ++channel) {
             auto resolved = resolve_context(context, peer, channel);
             drained = drain_channel<ProfileEnabled>(
                 context, queue, resolved, command_index, opcode, retry_limit,

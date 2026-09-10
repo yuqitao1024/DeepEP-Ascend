@@ -206,15 +206,15 @@ int size_(void*, std::int64_t, std::uint32_t* v) {
     *v = static_cast<std::uint32_t>(trace.world_size);
     return 0;
 }
-int team(void*, std::int64_t, std::uint32_t, std::uint32_t, const std::uint32_t*, std::uint32_t, std::uint32_t, std::uintptr_t* v) { *v = 2; return 0; }
-int window(void*, std::int64_t, std::uintptr_t, void*, std::uint64_t, std::uintptr_t* v) { *v = 3; return 0; }
-int channels(void*, std::int64_t, std::uintptr_t, std::uint32_t) { return 0; }
+int team(void*, std::int64_t, std::uint32_t, std::uint32_t,
+         const std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t,
+         std::uintptr_t* v) { *v = 2; return 0; }
+int window(void*, std::int64_t, void*, std::uint64_t, std::uintptr_t* v) { *v = 3; return 0; }
 int ha(void*, std::uint64_t n, void** p) { return alloc(nullptr,n,p); }
 int hz(void*, void* p, std::uint64_t n) { return zero(nullptr,p,n); }
 int hd(void*, void* d, const void* s, std::uint64_t n) { return h2d(nullptr,d,s,n); }
 int dh(void*, void* d, const void* s, std::uint64_t n) { return d2h(nullptr,d,s,n); }
 int hf(void*, void* p) { return free_(nullptr,p); }
-int noop2(void*, std::uintptr_t, std::uintptr_t) { return 0; }
 int noop1(void*, std::uintptr_t) { return 0; }
 
 std::unique_ptr<runtime::CannRuntimeResources> resources(
@@ -225,7 +225,8 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
     runtime::StreamEventApi s{
         nullptr, current_device, stream, pool_stream, create_event, record_event,
         query_event, wait_event, synchronize_event, destroy_event};
-    transport::CannHostApi h{nullptr,rank_,size_,team,window,channels,ha,hz,hd,dh,hf,noop2,noop1};
+    transport::CannHostApi h{
+        nullptr, rank_, size_, team, window, ha, hz, hd, dh, hf, noop1, noop1};
     transport::TransportConfig c{}; c.rank=0; c.world_size=world_size; c.communicator_handle=1;
     c.device_buffer_bytes=2*1024*1024; c.requested_channels=1;
     if (hybrid) {

@@ -139,9 +139,20 @@ void check_channel() {
 void check_team_and_window() {
     ::HcommWindow package_window{};
     CHECK_OFFSET(cann_abi::Window, header, package_window, header);
-    CHECK_OFFSET(cann_abi::Window, memory_count, package_window, memsNum);
-    CHECK_OFFSET(cann_abi::Window, memories, package_window, mems);
-    CHECK_OFFSET(cann_abi::Window, world_team, package_window, worldTeam);
+    CHECK_OFFSET(cann_abi::Window, network.remote_addresses, package_window,
+                 netWin.baseRemoteMemAddr);
+    CHECK_OFFSET(cann_abi::Window, network.window_bytes, package_window,
+                 netWin.windowSize);
+    CHECK_OFFSET(cann_abi::Window, network.world_team_offsets, package_window,
+                 netWin.worldTeamAccumulateId);
+    CHECK_OFFSET(cann_abi::Window, network.layer_count, package_window,
+                 netWin.netLayerNum);
+    CHECK_OFFSET(cann_abi::Window, local.base, package_window, lsaWin.baseVa);
+    CHECK_OFFSET(cann_abi::Window, local.stride, package_window, lsaWin.stride);
+    CHECK_OFFSET(cann_abi::Window, local.user_bytes, package_window,
+                 lsaWin.userSize);
+    CHECK_OFFSET(cann_abi::Window, legacy_window, package_window,
+                 legacySymWindow);
 
     ::HcommTeam package_team{};
     CHECK_OFFSET(cann_abi::Team, header, package_team, header);
@@ -150,7 +161,7 @@ void check_team_and_window() {
     CHECK_OFFSET(cann_abi::Team, self_member, package_team, selfMemberId);
     CHECK_OFFSET(cann_abi::Team, channels, package_team, channelsBaseAddr);
     CHECK_OFFSET(cann_abi::Team, channel_counts, package_team,
-                 channelNumPerMember);
+                 channelCntAccumulatePerMember);
     CHECK_OFFSET(cann_abi::Team, network_layer, package_team, netLayer);
     CHECK_OFFSET(cann_abi::Team, world_team_ids, package_team, worldTeamIds);
     CHECK_OFFSET(cann_abi::Team, remote_sync_memories, package_team,

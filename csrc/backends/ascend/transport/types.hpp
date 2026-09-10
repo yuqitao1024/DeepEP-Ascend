@@ -389,7 +389,7 @@ inline TransportStatus build_configured_transport_topology(
         config.topology_kind, config.topology_epoch, topology);
 }
 
-inline constexpr std::uint32_t kDeviceTransportAbiVersion = 2;
+inline constexpr std::uint32_t kDeviceTransportAbiVersion = 3;
 inline constexpr std::uint32_t kDeviceRequestAbiVersion = 1;
 
 enum class DeviceRequestState : std::uint32_t {
@@ -421,6 +421,8 @@ struct DeviceTransportContext {
     std::uintptr_t local_window_base = 0;
     std::uintptr_t peer_address_table = 0;
     std::uintptr_t channel_table = 0;
+    std::uint32_t channel_count = 0;
+    std::uint32_t reserved = 0;
     std::uintptr_t backend_context = 0;
 };
 
