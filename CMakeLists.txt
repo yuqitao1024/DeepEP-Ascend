@@ -94,8 +94,61 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
     pybind11_add_module(_C SHARED NO_EXTRAS
         csrc/python_api.cpp
         csrc/backends/ascend/elastic/barrier.asc
+        csrc/backends/ascend/elastic/barrier_producer.asc
         csrc/backends/ascend/elastic/dispatch.asc
+        csrc/backends/ascend/elastic/dispatch_producer.asc
+        csrc/backends/ascend/elastic/direct_dispatch_producer_control.asc
+        csrc/backends/ascend/elastic/direct_dispatch_producer_plan.asc
+        csrc/backends/ascend/elastic/direct_dispatch_producer_expert_count_init.asc
+        csrc/backends/ascend/elastic/direct_dispatch_publish_route_plan.asc
+        csrc/backends/ascend/elastic/direct_dispatch_acquire_route_plan.asc
+        csrc/backends/ascend/elastic/direct_dispatch_reduce_errors.asc
+        csrc/backends/ascend/elastic/direct_dispatch_producer_record.asc
+        csrc/backends/ascend/elastic/direct_dispatch_persistent_chunk_begin.asc
+        csrc/backends/ascend/elastic/direct_dispatch_persistent_chunk_complete.asc
+        csrc/backends/ascend/elastic/direct_dispatch_persistent_release_wait.asc
+        csrc/backends/ascend/elastic/direct_dispatch_persistent_release_complete.asc
+        csrc/backends/ascend/elastic/direct_dispatch_persistent_release_tail_wait.asc
+        csrc/backends/ascend/elastic/direct_dispatch_persistent_producer.asc
+        csrc/backends/ascend/elastic/direct_dispatch_producer_release.asc
+        csrc/backends/ascend/elastic/direct_dispatch_persistent_release.asc
+        csrc/backends/ascend/elastic/direct_dispatch_pipeline_wait.asc
+        csrc/backends/ascend/elastic/hybrid_dispatch_forward.asc
+        csrc/backends/ascend/elastic/hybrid_dispatch_prepare_epilogue.asc
+        csrc/backends/ascend/elastic/hybrid_dispatch_record_routes.asc
+        csrc/backends/ascend/elastic/direct_dispatch_epilogue_acquire.asc
+        csrc/backends/ascend/elastic/direct_dispatch_epilogue_validate_records.asc
+        csrc/backends/ascend/elastic/direct_dispatch_epilogue_count_experts.asc
+        csrc/backends/ascend/elastic/direct_dispatch_epilogue_prefix.asc
+        csrc/backends/ascend/elastic/direct_dispatch_epilogue_parallel_prefix.asc
+        csrc/backends/ascend/elastic/direct_dispatch_epilogue_metadata.asc
+        csrc/backends/ascend/elastic/direct_dispatch_epilogue_assign_destinations.asc
+        csrc/backends/ascend/elastic/direct_dispatch_epilogue_clear_padding.asc
+        csrc/backends/ascend/elastic/direct_dispatch_epilogue_copy_outputs.asc
+        csrc/backends/ascend/elastic/dispatch_epilogue.asc
+        csrc/backends/ascend/elastic/dispatch_producer_group.asc
+        csrc/backends/ascend/elastic/dispatch_producer_prefix.asc
+        csrc/backends/ascend/elastic/dispatch_epilogue_complete.asc
         csrc/backends/ascend/elastic/combine.asc
+        csrc/backends/ascend/elastic/combine_producer.asc
+        csrc/backends/ascend/elastic/direct_combine_producer_control.asc
+        csrc/backends/ascend/elastic/direct_combine_producer_plan.asc
+        csrc/backends/ascend/elastic/direct_combine_producer_plan_prefix.asc
+        csrc/backends/ascend/elastic/direct_combine_producer_record.asc
+        csrc/backends/ascend/elastic/direct_combine_producer_local_copy.asc
+        csrc/backends/ascend/elastic/direct_combine_producer_release.asc
+        csrc/backends/ascend/elastic/hybrid_combine_return.asc
+        csrc/backends/ascend/elastic/hybrid_combine_prepare_epilogue.asc
+        csrc/backends/ascend/elastic/combine_epilogue.asc
+        csrc/backends/ascend/elastic/direct_combine_epilogue_acquire.asc
+        csrc/backends/ascend/elastic/direct_combine_epilogue_clear_index.asc
+        csrc/backends/ascend/elastic/direct_combine_epilogue_validate.asc
+        csrc/backends/ascend/elastic/direct_combine_epilogue_reduce_errors.asc
+        csrc/backends/ascend/elastic/direct_combine_epilogue_prepare_vector_slots.asc
+        csrc/backends/ascend/elastic/combine_epilogue_complete.asc
+        csrc/backends/ascend/elastic/combine_epilogue_reduce.asc
+        csrc/backends/ascend/elastic/combine_epilogue_weights.asc
+        csrc/backends/ascend/elastic/combine_epilogue_vector_tail.asc
         csrc/backends/ascend/elastic/async_state.cpp
         csrc/backends/ascend/elastic/runtime.cpp
         csrc/backends/ascend/runtime/mapped_memory.cpp
