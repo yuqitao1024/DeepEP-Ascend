@@ -12,7 +12,7 @@ from tests.ascend.benchmark.workloads import classify_ascend_case
 from tests.utils.ep_benchmark_manifest import enumerate_ep_mode_cases
 
 
-ASCEND_MAX_DATA_BLOCKS = 72
+ASCEND_MAX_DATA_BLOCKS = 56
 
 
 def _data_blocks(value: str) -> int:
@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--warmups", type=int, default=30)
     parser.add_argument("--iterations", type=int, default=30)
-    parser.add_argument("--num-sms", type=_data_blocks, default=72)
+    parser.add_argument("--num-sms", type=_data_blocks, default=56)
     parser.add_argument("--cases")
     parser.add_argument("--skip-check", action="store_true")
     parser.add_argument("--profile-stages", action="store_true")

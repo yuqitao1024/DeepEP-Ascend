@@ -486,7 +486,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 self.assertIn(marker, function)
 
     def test_direct_dispatch_launcher_consumes_stage_pipeline(self):
-        """Catches accepting 72 blocks without launching split data stages."""
+        """Catches accepting 56 blocks without launching split data stages."""
         source = (ELASTIC / "dispatch.asc").read_text()
         launch = source[source.index(
             'extern "C" int deep_ep_ascend_launch_dispatch'):]
@@ -1069,11 +1069,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         producer = source[producer_begin:producer_end]
         for marker in (
                 "AscendC::GetBlockIdx()", "AscendC::GetBlockNum()",
-                "AscendC::DataCopy", "dispatch_group_owner_offset",
+                "dispatch_copy_gm_to_ub", "dispatch_copy_ub_to_gm",
+                "dispatch_group_owner_offset",
                 "dispatch_group_tile_count", "launch_num_threads",
                 "subgroups_per_block", "kTopkSubgroupWidth",
                 "kDispatchGroupingTokensPerTile", "destination_slots",
-                "AscendC::TBuf", "EVENT_ID0"):
+                "dispatch_ub_payload", "EVENT_ID0"):
             self.assertIn(marker, producer)
         self.assertIn(
             "launch_num_threads / kTopkSubgroupWidth", producer)
@@ -1101,8 +1102,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         epilogue = source[epilogue_begin:epilogue_end]
         for marker in (
                 "AscendC::GetBlockIdx()", "AscendC::GetBlockNum()",
-                "AscendC::DataCopy", "source_metadata", "expanded",
-                "AscendC::TBuf", "EVENT_ID0"):
+                "dispatch_copy_gm_to_ub", "dispatch_copy_ub_to_gm",
+                "source_metadata", "expanded", "dispatch_ub_payload",
+                "EVENT_ID0"):
             self.assertIn(marker, epilogue)
         self.assertNotIn("input_queue", epilogue)
         self.assertIn("HardEvent::MTE2_MTE3", epilogue)
@@ -1175,27 +1177,22 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         end = source.index("\n}\n", begin)
         candidate = source[begin:end]
 
-        self.assertIn(
-            "pipe.InitBuffer(\n"
-            "        payload_buffer, kDispatchTokenFanoutBufferBytes)",
-            candidate)
         source_copy = (
-            "AscendC::DataCopy(\n"
-            "                    payload_local, input_global, vector_bytes);")
+            "dispatch_copy_gm_to_ub(\n"
+            "                    payload_ub,")
         destination_loop = (
             "for (std::uint32_t index = 0;\n"
             "                     index < destination_count; ++index)")
         destination_copy = (
-            "AscendC::DataCopy(\n"
-            "                        output_global, payload_local, "
-            "vector_bytes);")
+            "dispatch_copy_ub_to_gm(\n"
+            "                        record + token_hidden_offset, payload_ub,")
         self.assertEqual(candidate.count(source_copy), 1)
         self.assertIn(destination_loop, candidate)
         self.assertLess(
             candidate.index(source_copy), candidate.index(destination_loop))
         rank_body = candidate[candidate.index(destination_loop):]
         self.assertIn(destination_copy, rank_body)
-        self.assertNotIn("input_global.SetGlobalBuffer", rank_body)
+        self.assertNotIn("dispatch_copy_gm_to_ub", rank_body)
         self.assertNotIn(source_copy, rank_body)
 
         record_call = source.index(
@@ -1493,9 +1490,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         vector_copy = source[vector_begin:vector_end]
         for marker in (
                 "dispatch_consumer_copy_plan(",
-                "pipe.InitBuffer(payload_buffer, TileBytes)",
+                "dispatch_ub_payload()",
                 "const std::uint32_t copy_bytes",
-                "AscendC::DataCopy(", "copy_bytes"):
+                "dispatch_copy_gm_to_ub(",
+                "dispatch_copy_ub_to_gm(", "copy_bytes"):
             self.assertIn(marker, vector_copy)
 
         for tile_bytes in (512, 1024, 2048, 4096, 8192):
@@ -1518,14 +1516,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "__aicore__ inline void direct_dispatch_producer_vector_payload_impl")
         producer_end = source.index("\n}\n", producer_begin)
         producer = source[producer_begin:producer_end]
-        self.assertIn(
-            "payload_buffer, kDispatchProducerVectorTileBytes", producer)
+        self.assertIn("dispatch_ub_payload()", producer)
         self.assertIn(
             "byte += kDispatchProducerVectorTileBytes", producer)
         self.assertIn(
             "kDispatchProducerVectorTileBytes);", producer)
-        self.assertNotIn(
-            "payload_buffer, kDispatchVectorTileBytes", producer)
+        self.assertNotIn("payload_buffer", producer)
 
     def test_dispatch_token_fanout_batches_destination_store_completion(self):
         source = (ELASTIC / "dispatch.asc").read_text()
@@ -1537,10 +1533,27 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                                       "                    AscendC::HardEvent::MTE3_MTE2>"), 1)
         self.assertEqual(fanout.count("AscendC::WaitFlag<\n"
                                       "                    AscendC::HardEvent::MTE3_MTE2>"), 1)
-        store = fanout.index("AscendC::DataCopy(\n                        output_global")
+        store = fanout.index("dispatch_copy_ub_to_gm(\n"
+                             "                        record + token_hidden_offset")
         wait = fanout.index("AscendC::WaitFlag<\n"
                             "                    AscendC::HardEvent::MTE3_MTE2>", store)
         self.assertLess(store, wait)
+
+    def test_dispatch_manages_dynamic_ub_without_tpipe(self):
+        source = (ELASTIC / "dispatch.asc").read_text()
+        self.assertIn(
+            "constexpr std::uint32_t kDispatchUbPayloadOffset = 0;", source)
+        self.assertIn("[0, dynamic_ub_bytes) payload scratch", source)
+        self.assertIn("[0, consumer_ub_bytes) consumer payload scratch", source)
+        self.assertIn("copy_gm_to_ubuf_align_v2(", source)
+        self.assertIn("copy_ubuf_to_gm_align_v2(", source)
+        self.assertIn("dispatch_dynamic_ub_bytes(arguments)", source)
+        self.assertIn("launch.num_blocks, dynamic_ub_bytes,", source)
+        self.assertIn("tiling.launch.num_blocks, dynamic_ub_bytes,", source)
+        for forbidden in (
+                "AscendC::TPipe", "AscendC::TBuf", "AscendC::LocalTensor",
+                "AscendC::DataCopy("):
+            self.assertNotIn(forbidden, source)
 
     def test_dispatch_producer_preserves_nonfanout_hidden_tail(self):
         """Keeps the non-2048-byte hidden suffix on the scalar record path."""

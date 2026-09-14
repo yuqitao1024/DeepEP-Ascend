@@ -1500,12 +1500,12 @@ def _scenario_ascend_dispatch():
     assert len(dispatch_args) == 29
     assert dispatch_args[2] is topk_idx
     assert dispatch_args[3] is topk_weights
-    assert dispatch_args[18:20] == (72, 0)
+    assert dispatch_args[18:20] == (56, 0)
     assert dispatch_args[20:24] == (None, None, False, False)
     assert dispatch_args[25] is True
     assert recv_topk_weights is topk_weights
     assert isinstance(handle, deep_ep.EPHandle)
-    assert handle.num_sms == 72
+    assert handle.num_sms == 56
     assert handle.topk_idx is not topk_idx
     assert handle.token_metadata_at_forward is not None
     assert event.event is None
@@ -1737,7 +1737,7 @@ def _scenario_ascend_dispatch():
         else:
             raise AssertionError(f"Ascend dispatch accepted invalid {name}")
 
-    for num_sms in (1, 72):
+    for num_sms in (1, 56):
         buffer.dispatch(
             x, topk_idx=topk_idx, num_experts=2,
             num_max_tokens_per_rank=1, num_sms=num_sms)
@@ -1752,7 +1752,7 @@ def _scenario_ascend_dispatch():
     assert no_weights_args[0] is x
     assert no_weights_args[2] is no_weights_idx
     assert no_weights_args[3] is None
-    assert no_weights_args[18:20] == (72, 0)
+    assert no_weights_args[18:20] == (56, 0)
     assert no_weights_args[24] is False
     assert recv_x is x
     assert recv_topk_idx is no_weights_idx
@@ -2101,9 +2101,9 @@ def _scenario_ascend_dispatch_optimized():
         raise AssertionError("valid explicit Ascend counts changed before runtime")
     buffer.dispatch(
         x, topk_idx=topk_idx, num_experts=2,
-        num_max_tokens_per_rank=1, num_sms=72, num_qps=0)
-    if runtime.dispatch_calls[-1][18:20] != (72, 0):
-        raise AssertionError("72-block Ascend dispatch changed before runtime")
+        num_max_tokens_per_rank=1, num_sms=56, num_qps=0)
+    if runtime.dispatch_calls[-1][18:20] != (56, 0):
+        raise AssertionError("56-block Ascend dispatch changed before runtime")
     buffer.destroy()
 
 
@@ -2242,7 +2242,7 @@ def _scenario_ascend_combine():
     rank_prefix = _FakeTensor("npu", (2,))
     descriptor = _FakeTensor("npu", (120,))
     handle = deep_ep.EPHandle(
-        False, 2, 4, 4, 72, topk_idx, 2, 2, [], rank_prefix,
+        False, 2, 4, 4, 56, topk_idx, 2, 2, [], rank_prefix,
         _FakeTensor("npu", (1,)), _FakeTensor("npu", (1,)),
         recv_src_metadata, _FakeTensor("npu", (1, 2)), descriptor, None)
     buffer._ascend_handle_generation = 1
@@ -2257,7 +2257,7 @@ def _scenario_ascend_combine():
     assert event.event is None
     assert runtime.combine_calls[-1] == (
         x, topk_weights, bias_0, bias_1, recv_src_metadata, topk_idx,
-        rank_prefix, descriptor, None, 2, 4, 72, 0,
+        rank_prefix, descriptor, None, 2, 4, 56, 0,
         None, None, False, False, False)
 
     def expect_owner_rejection(call):
@@ -2329,7 +2329,7 @@ def _scenario_ascend_combine():
     buffer.combine(x, handle)
     assert runtime.combine_calls[-1][2:4] == (None, None)
 
-    for num_sms in (1, 72):
+    for num_sms in (1, 56):
         buffer.combine(x, handle, num_sms=num_sms)
         assert runtime.combine_calls[-1][11:13] == (num_sms, 0)
 
@@ -2400,11 +2400,11 @@ def _scenario_ascend_combine():
 
     buffer.allow_hybrid_mode = True
     try:
-        buffer.combine(x, handle, num_sms=72)
+        buffer.combine(x, handle, num_sms=56)
     except RuntimeError as error:
         assert "invalid_launch_configuration" in str(error), error
     else:
-        raise AssertionError("Ascend hybrid combine accepted 72 blocks")
+        raise AssertionError("Ascend hybrid combine accepted 56 blocks")
     try:
         buffer.combine(
             x, handle, num_sms=1, async_with_compute_stream=True)

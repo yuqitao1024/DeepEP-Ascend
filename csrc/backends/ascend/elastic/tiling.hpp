@@ -48,7 +48,8 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-inline constexpr std::uint32_t kAscendMaxDataBlocks = 72;
+// One logical data block per physical AIV core on the target device.
+inline constexpr std::uint32_t kAscendMaxDataBlocks = 56;
 inline constexpr std::uint32_t kCoreTilingAbiVersion = 21;
 inline constexpr std::uint64_t kDirectDeviceIndexLimit = 0x7fffffffULL;
 

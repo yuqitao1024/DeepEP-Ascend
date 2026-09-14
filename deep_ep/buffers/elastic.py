@@ -34,7 +34,7 @@ from ..utils.envs import (
 
 
 _ASCEND_DEVICE_TRANSPORT_CAPABILITIES = 0x775
-_ASCEND_MAX_DATA_BLOCKS = 72
+_ASCEND_MAX_DATA_BLOCKS = 56
 
 
 class EPHandle:
@@ -1688,7 +1688,7 @@ class ElasticBuffer:
                      num_sms != 1)):
                 raise RuntimeError(
                     'DeepEP Ascend backend: combine requires num_sms in '
-                    '[1, 72] for direct scale-up, num_sms=1 for hybrid or '
+                    '[1, 56] for direct scale-up, num_sms=1 for hybrid or '
                     'scale-out, and num_qps=0')
             if previous_event_before_epilogue is not None:
                 raise RuntimeError(

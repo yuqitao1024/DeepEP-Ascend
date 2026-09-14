@@ -13,7 +13,7 @@ The deterministic case enumeration is defined in
 ## Ascend data-block profiles
 
 Ascend direct EP uses 72 AI Vector data blocks by default. Pass
-`--num-sms 1` for the compatibility baseline; values outside `[1, 72]` are
+`--num-sms 1` for the compatibility baseline; values outside `[1, 56]` are
 rejected before the device runtime is imported. This setting does not change
 case IDs, workload routing, logical-byte formulas, or the workload fingerprint.
 The selected value is recorded as `device.num_sms` in `benchmark.json`.
@@ -28,13 +28,13 @@ torchrun --standalone --nproc-per-node=2 \
   tests/ascend/benchmark/bench_ep.py \
   --num-tokens 16 --hidden 128 --num-topk 2 --num-experts 8 \
   --cases "$CASE" --num-sms 1 --warmups 1 --iterations 3 \
-  --dump-manifest /tmp/ascend-72aiv-workload.json \
+  --dump-manifest /tmp/ascend-56aiv-workload.json \
   --output /tmp/ascend-1block.json
 
 torchrun --standalone --nproc-per-node=2 \
   tests/ascend/benchmark/bench_ep.py \
-  --workload-manifest /tmp/ascend-72aiv-workload.json \
-  --cases "$CASE" --num-sms 72 --warmups 1 --iterations 3 \
+  --workload-manifest /tmp/ascend-56aiv-workload.json \
+  --cases "$CASE" --num-sms 56 --warmups 1 --iterations 3 \
   --output /tmp/ascend-72block.json
 ```
 
@@ -291,7 +291,7 @@ DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace
 
 Keep the environment exports and build/run command in the same TaskQueue
 shell. The benchmark initializes HCCL, maps `LOCAL_RANK` to the local NPU,
-uses `allow_hybrid_mode=False`, defaults to `num_sms=72`, keeps `num_qps=0`,
+uses `allow_hybrid_mode=False`, defaults to `num_sms=56`, keeps `num_qps=0`,
 and destroys the buffer before the process group. Here `num_qps=0` means the
 CUDA QP tuning argument is unused; HCOMM still owns the Ascend communication
 resources.
@@ -323,7 +323,7 @@ DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace &&
 python -m torch.distributed.run --standalone --nproc-per-node=2 \
   tests/ascend/benchmark/bench_ep.py \
   --num-tokens 16 --hidden 128 --num-topk 2 --num-experts 4 \
-  --num-sms 72 --warmups 1 --iterations 1 \
+  --num-sms 56 --warmups 1 --iterations 1 \
   --output /tmp/ascend-ep2-performance-smoke.json
 '
 ```

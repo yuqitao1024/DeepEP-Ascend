@@ -42,6 +42,26 @@ target_include_directories(deep_ep_ascend_aicore_service_probe PRIVATE
     $ENV{ASCEND_HOME_PATH}/x86_64-linux/asc/include)
 
 if(DEEP_EP_BUILD_URMA_RUNTIME)
+    add_library(deep_ep_ascend_symwin_local_store_probe SHARED
+        symwin_local_store_probe.asc)
+
+    set_target_properties(deep_ep_ascend_symwin_local_store_probe PROPERTIES
+        LINKER_LANGUAGE ASC
+        PREFIX "")
+
+    target_compile_options(deep_ep_ascend_symwin_local_store_probe PRIVATE
+        $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${CMAKE_ASC_ARCHITECTURES}>)
+
+    target_include_directories(deep_ep_ascend_symwin_local_store_probe PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/../../..
+        $ENV{ASCEND_HOME_PATH}/include
+        $ENV{ASCEND_HOME_PATH}/x86_64-linux/asc/include)
+
+    target_link_directories(deep_ep_ascend_symwin_local_store_probe PRIVATE
+        $ENV{ASCEND_HOME_PATH}/x86_64-linux/lib64)
+    target_link_libraries(deep_ep_ascend_symwin_local_store_probe PRIVATE
+        hcomm ascendcl c_sec)
+
     add_library(deep_ep_ascend_urma_runner SHARED
         runtime_probe.asc
         runtime_probe_main.cpp

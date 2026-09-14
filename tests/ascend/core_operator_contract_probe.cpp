@@ -839,7 +839,7 @@ int main() {
     }
     auto pipeline_input = valid_input();
     pipeline_input.mode_flags = mode_bit(CoreMode::kPipeline);
-    pipeline_input.data_num_blocks = 72;
+    pipeline_input.data_num_blocks = 56;
     CoreTiling pipeline_tiling{};
     if (!build_core_tiling(pipeline_input, &pipeline_tiling).ok() ||
         pipeline_tiling.workspace_layout.dispatch_pipeline_bytes !=
@@ -856,11 +856,11 @@ int main() {
         &pipeline_state.slots[1].request)
         return 91;
     constexpr std::uint64_t pipeline_generation = 17;
-    constexpr std::uint32_t pipeline_blocks = 72;
+    constexpr std::uint32_t pipeline_blocks = 56;
     if (dispatch_persistent_producer_blocks(1) != 1 ||
-        dispatch_persistent_producer_blocks(70) != 70 ||
-        dispatch_persistent_producer_blocks(71) != 71 ||
-        dispatch_persistent_producer_blocks(72) != 71)
+        dispatch_persistent_producer_blocks(54) != 54 ||
+        dispatch_persistent_producer_blocks(55) != 55 ||
+        dispatch_persistent_producer_blocks(56) != 55)
         return 190;
     if (dispatch_pipeline_producer_must_wait_for_reuse(0) ||
         dispatch_pipeline_producer_must_wait_for_reuse(1) ||
@@ -1411,7 +1411,7 @@ int main() {
         tiling.data_launch.dynamic_ub_bytes != 0)
         return 35;
 
-    input.data_num_blocks = 72;
+    input.data_num_blocks = 56;
     status = build_core_tiling(input, &tiling);
     if (!status.ok())
         return 42;
@@ -1441,7 +1441,7 @@ int main() {
         const bool data_stage =
             index == 1 || index == 3 || index == 6 || index == 8 ||
             index == 10 || index == 11;
-        if (launch.num_blocks != (data_stage ? 72U : 1U) ||
+        if (launch.num_blocks != (data_stage ? 56U : 1U) ||
             launch.num_threads != 512 || launch.dynamic_ub_bytes != 0)
             return 45;
     }
@@ -1553,7 +1553,7 @@ int main() {
         const bool data_stage =
             index == 1 || index == 3 || index == 6 || index == 8 ||
             index == 9;
-        if (launch.num_blocks != (data_stage ? 72U : 1U) ||
+        if (launch.num_blocks != (data_stage ? 56U : 1U) ||
             launch.num_threads != 512 || launch.dynamic_ub_bytes != 0)
             return 51;
     }
@@ -1710,7 +1710,7 @@ int main() {
 #if !defined(DEEP_EP_ASCEND_SIMT_DEVICE)
     for (const std::uint64_t item_count : {
              0ULL, 1ULL, 511ULL, 512ULL, 513ULL, 36871ULL}) {
-        for (const std::uint32_t blocks : {1U, 72U}) {
+        for (const std::uint32_t blocks : {1U, 56U}) {
             std::uint64_t visits[36871]{};
             for (std::uint32_t block = 0; block < blocks; ++block) {
                 for (std::uint32_t thread = 0; thread < 512; ++thread) {
@@ -1728,11 +1728,11 @@ int main() {
     }
     {
         std::uint64_t visits[512]{};
-        bool active_blocks[72]{};
-        for (std::uint32_t block = 0; block < 72; ++block) {
+        bool active_blocks[56]{};
+        for (std::uint32_t block = 0; block < 56; ++block) {
             for (std::uint32_t thread = 0; thread < 512; ++thread) {
                 const auto work = direct_block_distributed_grid_stride(
-                    block, thread, 72, 512);
+                    block, thread, 56, 512);
                 for (std::uint64_t tile = work.first;
                      tile < 512; tile += work.stride) {
                     ++visits[tile];
@@ -1747,13 +1747,13 @@ int main() {
             if (!active)
                 return 76;
         const auto second_thread = direct_block_distributed_grid_stride(
-            0, 1, 72, 512);
-        if (second_thread.first != 72 || second_thread.stride != 36864)
+            0, 1, 56, 512);
+        if (second_thread.first != 56 || second_thread.stride != 28672)
             return 77;
     }
     for (const std::uint64_t item_count : {
              0ULL, 1ULL, 15ULL, 16ULL, 17ULL, 511ULL, 512ULL, 513ULL}) {
-        for (const std::uint32_t blocks : {1U, 72U}) {
+        for (const std::uint32_t blocks : {1U, 56U}) {
             std::uint32_t visits[513][32]{};
             for (std::uint32_t block = 0; block < blocks; ++block) {
                 for (std::uint32_t thread = 0; thread < 512; ++thread) {
@@ -1778,17 +1778,17 @@ int main() {
              OperationKind::kDispatch, OperationKind::kCombine}) {
         input = valid_input();
         input.operation = operation;
-        input.data_num_blocks = 72;
+        input.data_num_blocks = 56;
         status = build_core_tiling(input, &tiling);
         if (!status.ok() || tiling.control_launch.num_blocks != 1 ||
-            tiling.data_launch.num_blocks != 72)
+            tiling.data_launch.num_blocks != 56)
             return 36;
 
         input.data_num_blocks = 0;
         if (build_core_tiling(input, &tiling).code !=
             TilingStatusCode::kInvalidArgument)
             return 37;
-        input.data_num_blocks = 73;
+        input.data_num_blocks = 57;
         if (build_core_tiling(input, &tiling).code !=
             TilingStatusCode::kInvalidArgument)
             return 38;
@@ -1796,7 +1796,7 @@ int main() {
 
     input = valid_input();
     input.operation = OperationKind::kBarrier;
-    input.data_num_blocks = 72;
+    input.data_num_blocks = 56;
     if (build_core_tiling(input, &tiling).code !=
         TilingStatusCode::kInvalidArgument)
         return 39;
@@ -2083,7 +2083,7 @@ int main() {
     input.topology.scale_out_size = 2;
     input.topology.kind =
         deep_ep::ascend::transport::TransportTopologyKind::kLogicalSimulation;
-    input.data_num_blocks = 72;
+    input.data_num_blocks = 56;
     if (build_core_tiling(input, &tiling).code !=
         TilingStatusCode::kInvalidArgument)
         return 40;

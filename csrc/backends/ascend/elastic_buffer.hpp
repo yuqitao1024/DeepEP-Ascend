@@ -1711,7 +1711,7 @@ public:
                         (!allow_hybrid_mode_ || num_sms == 1) &&
                         num_qps == 0,
                     "DeepEP Ascend backend: dispatch requires num_sms in "
-                    "[1, 72] for direct scale-up, num_sms=1 for hybrid, "
+                    "[1, 56] for direct scale-up, num_sms=1 for hybrid, "
                     "and num_qps=0");
         TORCH_CHECK(!do_zero_padding || do_expand,
                     "DeepEP Ascend backend: dispatch zero padding requires expansion");
@@ -2926,7 +2926,7 @@ public:
                             elastic::kAscendMaxDataBlocks) &&
                         (!allow_hybrid_mode_ || num_sms == 1),
                     "DeepEP Ascend backend: combine requires num_sms in "
-                    "[1, 72] for direct scale-up and num_sms=1 for hybrid");
+                    "[1, 56] for direct scale-up and num_sms=1 for hybrid");
         TORCH_CHECK(num_qps == 0,
                     "DeepEP Ascend backend: combine requires num_qps=0");
         TORCH_CHECK(num_experts > 0 && num_experts % num_ranks_ == 0 &&

@@ -276,7 +276,7 @@ echo "可读报告: ${DEEPEP_RESULT_DIR}/benchmark.md"</code></pre>
   --standalone \
   --nproc-per-node=8 \
   tests/ascend/benchmark/bench_ep.py \
-  --num-sms 72 \
+  --num-sms 56 \
   --num-tokens 8192 \
   --hidden 7168 \
   --num-topk 8 \
@@ -337,7 +337,7 @@ echo "可读报告: ${DEEPEP_RESULT_DIR}/benchmark.md"</code></pre>
     <ul>
       <li><a href="../../../tests/benchmark/run_ep.py"><code>tests/benchmark/run_ep.py</code></a>：Ascend 8-rank representative 的统一入口。</li>
       <li><a href="../../../tests/benchmark/profiles.py"><code>tests/benchmark/profiles.py</code></a>：固定 workload、case 和 30+30 计时。</li>
-      <li><a href="../../../tests/ascend/benchmark/bench_ep.py"><code>tests/ascend/benchmark/bench_ep.py</code></a>：Ascend 参数、case inventory 和 72-block 限制。</li>
+      <li><a href="../../../tests/ascend/benchmark/bench_ep.py"><code>tests/ascend/benchmark/bench_ep.py</code></a>：Ascend 参数、case inventory 和 56-block 限制。</li>
       <li><a href="../../../tests/ascend/benchmark/runtime.py"><code>tests/ascend/benchmark/runtime.py</code></a>：HCCL 初始化、LOCAL_RANK 绑定和 benchmark 执行。</li>
       <li><a href="../../../tests/ascend/benchmark/README.md"><code>tests/ascend/benchmark/README.md</code></a>：验证过的 CANN/HCOMM 环境和报告要求。</li>
       <li><a href="../reference/ascend-hcomm-simt-communication-overlap.html">Ascend HCOMM 与 SIMT 通信专题</a>：为什么 Ascend extension 依赖固定 HCOMM ABI。</li>

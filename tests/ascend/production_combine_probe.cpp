@@ -1209,7 +1209,7 @@ bool tensor_and_flag_validation() {
             std::nullopt, std::nullopt, channel); }, "channel") ||
         !error_contains([&] { (void)call(*target, inputs, std::nullopt,
             std::nullopt, std::nullopt, std::nullopt, 73); },
-            "num_sms in [1, 72]") ||
+            "num_sms in [1, 56]") ||
         !error_contains([&] { (void)call(*target, inputs, std::nullopt,
             std::nullopt, std::nullopt, std::nullopt, 1, 1); }, "num_qps=0"))
         return false;

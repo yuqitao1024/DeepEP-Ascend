@@ -38,7 +38,7 @@ from tests.utils.ep_benchmark_manifest import (
 
 
 BF16_TOLERANCE = 1 / 128
-NUM_SMS = 72
+NUM_SMS = 56
 NUM_QPS = 0
 WORK_COUNT_KEYS = frozenset({
     "input_tokens",

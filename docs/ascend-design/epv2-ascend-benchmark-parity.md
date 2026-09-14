@@ -98,7 +98,7 @@ fields preserve all upstream event/stream inputs.
 | Cross-host scale-out | Supported | Unsupported | Outside comparable profile |
 | Automatic SM/QP tuning | Supported | Unsupported | Record CUDA auto and Ascend fixed `72/0` |
 
-Ascend uses `num_sms=72` and `num_qps=0`. The zero QP value means the CUDA QP
+Ascend uses `num_sms=56` and `num_qps=0`. The zero QP value means the CUDA QP
 argument is unused; Ascend communication still uses HCOMM/URMA resources.
 
 FP8 expanded and cached-expanded dispatch set
@@ -542,7 +542,7 @@ The Ascend adapter launches `tests/ascend/benchmark/bench_ep.py` through the
 current interpreter's `torch.distributed.run` module with `--standalone` and
 `--nproc-per-node=8`. Before importing runtime libraries or reserving benchmark
 output, it requires the Ascend inventory to contain 144 supported rows. It
-uses `num_sms=72`, `num_qps=0`, and single-host pure-scale-up behavior.
+uses `num_sms=56`, `num_qps=0`, and single-host pure-scale-up behavior.
 
 Both adapters use argument arrays rather than interpolated shell commands,
 inherit the prepared environment, and stream combined stdout/stderr to the
