@@ -858,7 +858,10 @@ __aicore__ inline bool resolve_remote_target(
         transport_team->world_team_ids);
     const auto offset = logical_address - context.local_window_base;
     const auto window_bytes = transport_window->network.window_bytes;
-    if (bytes > window_bytes || offset > window_bytes - bytes)
+    // CANN 9.2 leaves network.window_bytes unset for exported windows.
+    // The registered remote buffer table below remains authoritative.
+    if (window_bytes != 0 &&
+        (bytes > window_bytes || offset > window_bytes - bytes))
         return false;
     const auto slot = layer_offsets[transport_team->network_layer] +
         world_team_ids[peer];
