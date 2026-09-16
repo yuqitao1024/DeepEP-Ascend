@@ -48,8 +48,15 @@ DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void put_staged_records_striped(
             static_cast<std::uint32_t>(transport::kMaxTransportChannels) ?
         static_cast<std::uint32_t>(transport::kMaxTransportChannels) :
         available_channels;
-    if (channel_count == 0)
+    if (channel_count == 0) {
+        facade.put(
+            route.team, route.peer, destination, source,
+            record_count * record_bytes,
+            transport::CooperationScope::kParticipant,
+            transport::MemorySegment::kDevice, transport::kDefaultOptions,
+            transport::RemoteAction::none());
         return;
+    }
     const std::uint64_t records_per_channel =
         record_count / channel_count;
     const std::uint64_t remainder = record_count % channel_count;

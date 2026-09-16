@@ -687,7 +687,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_record_body(
             std::int32_t rank_cursor = 0;
             if (!cached && lane < world_size)
                 rank_cursor = static_cast<std::int32_t>(
-                    tile_offsets[tile * world_size + lane]);
+                    transport::simt::load_observed(
+                        &tile_offsets[tile * world_size + lane]));
             const std::uint32_t token_begin =
                 tile * static_cast<std::uint32_t>(
                     kDispatchGroupingTokensPerTile);
