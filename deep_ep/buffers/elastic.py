@@ -374,6 +374,7 @@ class ElasticBuffer:
         self.group = group
         self.rank_idx = group.rank()
         self.num_ranks = group.size()
+        self._ascend_symmetric_root_info = None
         self.allow_hybrid_mode = allow_hybrid_mode
         self.allow_multiple_reduction = allow_multiple_reduction
         self.prefer_overlap_with_compute = prefer_overlap_with_compute
@@ -438,6 +439,24 @@ class ElasticBuffer:
                 comm_handle,
                 num_max_tokens_per_rank, hidden, num_topk, use_fp8_dispatch,
                 allow_hybrid_mode, allow_multiple_reduction)
+        if not is_cuda():
+            if not isinstance(num_bytes, int) or num_bytes <= 0:
+                root_info = None
+            else:
+                root_info = _C.get_hccl_root_info()
+            if root_info is not None:
+                payload = [root_info if self.rank_idx == 0 else None]
+                try:
+                    global_src = dist.get_global_rank(self.group, 0)
+                except (AttributeError, RuntimeError, ValueError):
+                    global_src = 0
+                dist.broadcast_object_list(
+                    payload, src=global_src, group=self.group)
+                root_info = payload[0]
+                if not isinstance(root_info, (bytes, bytearray)):
+                    raise RuntimeError(
+                        "failed to exchange symmetric HCCL root info")
+                self._ascend_symmetric_root_info = bytes(root_info)
         if not is_cuda():
             construction_error = None
             if not isinstance(num_bytes, int) or num_bytes <= 0:
@@ -520,8 +539,11 @@ class ElasticBuffer:
         if not is_cuda():
             synchronize()
         self.runtime = _C.ElasticBuffer(group.rank(), group.size(),
-                                        comm_handle, cpu_comm,
+                                        comm_handle if is_cuda() else
+                                        self._ascend_symmetric_root_info,
+                                        cpu_comm,
                                         num_bytes, num_cpu_bytes,
+                                        num_bytes,
                                         allow_hybrid_mode,
                                         allow_multiple_reduction,
                                         prefer_overlap_with_compute,
@@ -878,6 +900,7 @@ class ElasticBuffer:
                 raise
             self.runtime = None  # Cannot use anymore
             self.comm_handle = None
+            self._ascend_symmetric_root_info = None
             if is_cuda():
                 self.nccl_comm_handle = None
 

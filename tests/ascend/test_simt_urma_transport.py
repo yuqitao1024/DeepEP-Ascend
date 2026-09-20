@@ -299,8 +299,7 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
     def test_local_phase_boundary_launch_disables_profile_pressure(self):
         runtime = (SIMT_URMA / "runtime_probe_main.cpp").read_text()
         self.assertIn(
-            "probe::RuntimeCase::kPhaseBoundary, 0, 1,\n"
-            "            1, false, stream);",
+            "probe::RuntimeCase::kPhaseBoundary, 0, 1, 1, false, stream)",
             runtime)
 
     def test_profile_final_launch_stream_orders_rank_boundary(self):
@@ -472,7 +471,7 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
         self.assertIn("profile->generation = generation", record_stage_start)
         self.assertIn("profile->operation = operation", record_stage_start)
 
-    def test_cann_92_device_abi_matches_package_layouts(self):
+    def test_cann_93_device_abi_matches_package_layouts(self):
         ascend_home = os.environ.get("ASCEND_HOME_PATH")
         if not ascend_home:
             self.skipTest("ASCEND_HOME_PATH is not configured")

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 
 #include <pybind11/pybind11.h>
 
@@ -21,10 +22,29 @@ void register_event(pybind11::module_& m) {
 template <typename ElasticBuffer, bool ReleaseGilOnDestroy = false>
 pybind11::class_<ElasticBuffer> register_common_apis(pybind11::module_& m) {
     pybind11::class_<ElasticBuffer> cls(m, "ElasticBuffer");
-    cls.def(pybind11::init<int, int, int64_t,
-                          typename ElasticBuffer::cpu_comm_t,
-                          int64_t, int64_t,
-                          bool, bool, bool, int, int, int, int, bool>());
+    if constexpr (std::is_constructible_v<
+                      ElasticBuffer, const int&, const int&, const int64_t&,
+                      const typename ElasticBuffer::cpu_comm_t&,
+                      const int64_t&, const int64_t&, const bool&,
+                      const bool&, const bool&, const int&, const int&,
+                      const int&, const int&, const bool&>) {
+        cls.def(pybind11::init<int, int, int64_t,
+                              typename ElasticBuffer::cpu_comm_t,
+                              int64_t, int64_t,
+                              bool, bool, bool, int, int, int, int, bool>());
+    }
+    if constexpr (std::is_constructible_v<
+                      ElasticBuffer, const int&, const int&,
+                      const pybind11::bytes&,
+                      const typename ElasticBuffer::cpu_comm_t&,
+                      const int64_t&, const int64_t&, const int64_t&, const bool&,
+                      const bool&, const bool&, const int&, const int&,
+                      const int&, const int&, const bool&>) {
+        cls.def(pybind11::init<int, int, pybind11::bytes,
+                              typename ElasticBuffer::cpu_comm_t,
+                              int64_t, int64_t, int64_t,
+                              bool, bool, bool, int, int, int, int, bool>());
+    }
     if constexpr (ReleaseGilOnDestroy) {
         cls.def("destroy", [](ElasticBuffer& buffer) {
             pybind11::gil_scoped_release release;

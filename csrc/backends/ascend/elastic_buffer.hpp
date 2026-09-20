@@ -37,6 +37,7 @@
 #include "elastic/operation_coordinator.hpp"
 #include "elastic/runtime.hpp"
 #include "runtime/cann_runtime.hpp"
+#include "runtime/hccl_communicator.hpp"
 #include "runtime/host_timeline.hpp"
 #include "transport/channel_config.hpp"
 #include "transport/topology_config.hpp"
@@ -647,6 +648,7 @@ class ElasticBuffer {
     bool allow_multiple_reduction_;
     mutable std::mutex lifecycle_mutex_;
     runtime::CannRuntimeResources* resources_ = nullptr;
+    std::unique_ptr<runtime::HcclCommunicator> symmetric_communicator_;
     std::shared_ptr<ElasticAsyncCompletionResources> completion_resources_;
     std::shared_ptr<elastic::AsyncBufferState> async_state_;
     std::uint64_t barrier_timeout_cycles_ = 0;
@@ -928,6 +930,7 @@ class ElasticBuffer {
             transport::TransportCapability::kStageProfile);
         async_state_ = std::make_shared<elastic::AsyncBufferState>(
             completion_resources_, completion_timeout_ms);
+        symmetric_communicator_.reset();
     }
 #endif
 
@@ -938,9 +941,11 @@ public:
 #endif
 
     ElasticBuffer(const int& rank_idx, const int& num_ranks,
-                  const int64_t& comm_handle, const cpu_comm_t& cpu_comm,
+                  const pybind11::bytes& root_info,
+                  const cpu_comm_t& cpu_comm,
                   const int64_t& num_buffer_bytes,
                   const int64_t& num_cpu_buffer_bytes,
+                  const int64_t& symmetric_communicator_bytes,
                   const bool& allow_hybrid_mode,
                   const bool& allow_multiple_reduction, const bool&,
                   const int& sl_idx, const int& num_allocated_qps,
@@ -953,8 +958,17 @@ public:
                     "DeepEP Ascend backend: world_size must be at least two");
         TORCH_CHECK(rank_idx >= 0 && rank_idx < num_ranks,
                     "DeepEP Ascend backend: rank must be in [0, world_size)");
-        TORCH_CHECK(comm_handle != 0,
-                    "DeepEP Ascend backend: communicator_handle must be nonzero");
+        const std::string root_info_value = static_cast<std::string>(root_info);
+        TORCH_CHECK(root_info_value.size() == runtime::kHcclRootInfoBytes,
+                    "DeepEP Ascend backend: invalid symmetric HCCL root info "
+                    "size ", root_info_value.size());
+        runtime::HcclRootInfoBuffer root_info_bytes{};
+        std::memcpy(root_info_bytes.data(), root_info_value.data(),
+                    root_info_bytes.size());
+        symmetric_communicator_ = runtime::create_hccl_communicator(
+            root_info_bytes, rank_idx, num_ranks,
+            static_cast<std::uint64_t>(symmetric_communicator_bytes));
+        const auto comm_handle = symmetric_communicator_->handle;
         TORCH_CHECK(cpu_comm.empty(),
                     "DeepEP Ascend backend: cpu communicator must be empty");
         TORCH_CHECK(num_cpu_buffer_bytes == 0,
@@ -1078,6 +1092,8 @@ public:
         TORCH_CHECK(!async_state_->finalization_in_progress(),
                     "DeepEP Ascend backend: destroy is busy on this buffer");
         const auto status = async_state_->destroy();
+        if (symmetric_communicator_ != nullptr)
+            symmetric_communicator_.reset();
         if (completion_resources_ == nullptr ||
             completion_resources_->runtime() == nullptr) {
             resources_ = nullptr;

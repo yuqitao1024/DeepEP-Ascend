@@ -1,19 +1,18 @@
-#include "runtime_probe.hpp"
-
 #include <algorithm>
-#include <cstdlib>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
 
 #include "acl/acl.h"
-#include "hccl/hccl_comm.h"
-
 #include "csrc/backends/ascend/transport/cann_compat.hpp"
 #include "csrc/backends/ascend/transport/cann_transport.hpp"
 #include "csrc/backends/ascend/transport/topology_config.hpp"
+#include "hccl/hccl_comm.h"
+#include "hcomm/hcomm_res.h"
+#include "runtime_probe.hpp"
 
 namespace transport = deep_ep::ascend::transport;
 namespace probe = deep_ep::ascend::transport::runtime_probe;
@@ -31,14 +30,10 @@ void write_error(char* output, std::size_t capacity, const char* format, ...) {
     va_end(arguments);
 }
 
-bool check_acl(
-    aclError result, const char* operation, char* error,
-    std::size_t error_capacity) {
+bool check_acl(aclError result, const char* operation, char* error, std::size_t error_capacity) {
     if (result == ACL_SUCCESS)
         return true;
-    write_error(
-        error, error_capacity, "%s failed with ACL status %d", operation,
-        static_cast<int>(result));
+    write_error(error, error_capacity, "%s failed with ACL status %d", operation, static_cast<int>(result));
     return false;
 }
 
@@ -59,10 +54,8 @@ bool parse_case(const char* name, probe::RuntimeCase* runtime_case) {
         {"async-lifecycle", probe::RuntimeCase::kAsyncLifecycle},
         {"payload-signal-order", probe::RuntimeCase::kPayloadSignalOrder},
         {"route-signal-order", probe::RuntimeCase::kRouteSignalOrder},
-        {"route-signal-pre-barrier",
-         probe::RuntimeCase::kRouteSignalPreBarrier},
-        {"route-signal-post-barrier",
-         probe::RuntimeCase::kRouteSignalPostBarrier},
+        {"route-signal-pre-barrier", probe::RuntimeCase::kRouteSignalPreBarrier},
+        {"route-signal-post-barrier", probe::RuntimeCase::kRouteSignalPostBarrier},
         {"route-put-signal-order", probe::RuntimeCase::kRoutePutSignalOrder},
         {"route-plan-order", probe::RuntimeCase::kRoutePlanOrder},
         {"barrier-repeat", probe::RuntimeCase::kBarrierRepeat},
@@ -80,237 +73,233 @@ bool parse_case(const char* name, probe::RuntimeCase* runtime_case) {
 }
 
 bool copy_from_device(
-    void* destination, const void* source, std::size_t bytes,
-    const char* operation, char* error, std::size_t error_capacity) {
-    return check_acl(
-        aclrtMemcpy(destination, bytes, source, bytes,
-                    ACL_MEMCPY_DEVICE_TO_HOST),
-        operation, error, error_capacity);
+    void* destination, const void* source, std::size_t bytes, const char* operation, char* error, std::size_t error_capacity) {
+    return check_acl(aclrtMemcpy(destination, bytes, source, bytes, ACL_MEMCPY_DEVICE_TO_HOST), operation, error, error_capacity);
 }
 
-void dump_transport_descriptors(
-    const transport::DeviceTransportContext& context, std::uint32_t peer) {
-    char error[256]{};
-    transport::cann_abi::Team team{};
-    transport::cann_abi::Window window{};
+constexpr std::uint32_t kMaxProbeMembers = 64;
+constexpr std::uint32_t kProbeChannelIndex = 0;
+
+bool load_first_channel(const transport::DeviceTransportContext& context,
+                        std::uint32_t peer,
+                        transport::cann_abi::Channel* channel,
+                        char* error,
+                        std::size_t error_capacity) {
+    transport::DeviceChannelTable table{};
     if (!copy_from_device(
-            &team, reinterpret_cast<const void*>(context.channel_table),
-            sizeof(team), "copy debug team", error, sizeof(error)) ||
-        !copy_from_device(
-            &window, reinterpret_cast<const void*>(context.peer_address_table),
-            sizeof(window), "copy debug window", error, sizeof(error))) {
+            &table, reinterpret_cast<const void*>(context.channel_table), sizeof(table), "copy channel table", error, error_capacity))
+        return false;
+    if (peer >= table.member_count || peer == table.self_member || context.channel_count == 0 || table.channel_count == 0 ||
+        table.channels == 0 || table.member_count > kMaxProbeMembers || table.member_count * table.channel_count > kMaxProbeMembers) {
+        write_error(error, error_capacity, "invalid 9.3 channel table");
+        return false;
+    }
+
+    std::uint64_t handles[kMaxProbeMembers]{};
+    if (!copy_from_device(handles,
+                          reinterpret_cast<const void*>(table.channels),
+                          table.member_count * table.channel_count * sizeof(handles[0]),
+                          "copy channel handles",
+                          error,
+                          error_capacity))
+        return false;
+    const auto handle = handles[peer * table.channel_count + kProbeChannelIndex];
+    return copy_from_device(channel, reinterpret_cast<const void*>(handle), sizeof(*channel), "copy channel", error, error_capacity);
+}
+
+bool load_first_channel_and_sq(const transport::DeviceTransportContext& context,
+                               std::uint32_t peer,
+                               transport::cann_abi::Channel* channel,
+                               transport::cann_abi::SqContext* sq,
+                               char* error,
+                               std::size_t error_capacity) {
+    if (!load_first_channel(context, peer, channel, error, error_capacity) || channel->sq_contexts == 0 || channel->sq_count == 0) {
+        if (error != nullptr && error[0] == '\0')
+            write_error(error, error_capacity, "invalid SQ table");
+        return false;
+    }
+    return copy_from_device(sq, reinterpret_cast<const void*>(channel->sq_contexts), sizeof(*sq), "copy SQ context", error, error_capacity);
+}
+
+bool load_first_channel_and_cq(const transport::DeviceTransportContext& context,
+                               std::uint32_t peer,
+                               transport::cann_abi::Channel* channel,
+                               transport::cann_abi::CqContext* cq,
+                               char* error,
+                               std::size_t error_capacity) {
+    if (!load_first_channel(context, peer, channel, error, error_capacity) || channel->cq_contexts == 0 || channel->cq_count == 0) {
+        if (error != nullptr && error[0] == '\0')
+            write_error(error, error_capacity, "invalid CQ table");
+        return false;
+    }
+    return copy_from_device(cq, reinterpret_cast<const void*>(channel->cq_contexts), sizeof(*cq), "copy CQ context", error, error_capacity);
+}
+
+void dump_transport_descriptors(const transport::DeviceTransportContext& context, std::uint32_t peer) {
+    char error[256]{};
+    transport::DeviceChannelTable table{};
+    if (!copy_from_device(&table,
+                          reinterpret_cast<const void*>(context.channel_table),
+                          sizeof(table),
+                          "copy debug channel table",
+                          error,
+                          sizeof(error))) {
         std::fprintf(stderr, "URMA-DESC error=%s\n", error);
         return;
     }
-    std::fprintf(
-        stderr,
-        "URMA-DESC team members=%u self=%u signals=%u counters=%u "
-        "barriers=%u sync_bytes=%llu remote_sync_count=%u "
-        "shadow=[0x%llx,+%llu] window_bytes=%llu layers=%u\n",
-        team.member_count, team.self_member, team.signal_count,
-        team.counter_count, team.barrier_count,
-        static_cast<unsigned long long>(team.sync_memory_bytes),
-        team.remote_sync_memory_count,
-        static_cast<unsigned long long>(team.shadow_sync_memory.address),
-        static_cast<unsigned long long>(team.shadow_sync_memory.bytes),
-        static_cast<unsigned long long>(window.network.window_bytes),
-        window.network.layer_count);
+    std::fprintf(stderr,
+                 "URMA-DESC table members=%u self=%u channels=%u "
+                 "window_bytes=%llu sync_bytes=%llu local_sync=0x%llx "
+                 "remote_bases=0x%llx remote_sync_bases=0x%llx\n",
+                 table.member_count,
+                 table.self_member,
+                 table.channel_count,
+                 static_cast<unsigned long long>(table.window_bytes),
+                 static_cast<unsigned long long>(table.sync_bytes),
+                 static_cast<unsigned long long>(table.local_sync_base),
+                 static_cast<unsigned long long>(table.remote_bases),
+                 static_cast<unsigned long long>(table.remote_sync_bases));
 
-    transport::cann_abi::Memory memories[64]{};
-    if (team.remote_sync_memory_count <= 64 &&
-        team.remote_sync_memories != 0 &&
-        copy_from_device(
-            memories, reinterpret_cast<const void*>(team.remote_sync_memories),
-            team.remote_sync_memory_count * sizeof(memories[0]),
-            "copy debug sync memories", error, sizeof(error))) {
-        for (std::uint32_t index = 0;
-             index < team.remote_sync_memory_count; ++index) {
-            std::fprintf(
-                stderr, "URMA-DESC sync[%u]=[0x%llx,+%llu]\n", index,
-                static_cast<unsigned long long>(memories[index].address),
-                static_cast<unsigned long long>(memories[index].bytes));
-        }
+    std::uint64_t remote_bases[kMaxProbeMembers]{};
+    std::uint64_t remote_sync_bases[kMaxProbeMembers]{};
+    std::uint64_t channel_handles[kMaxProbeMembers]{};
+    if (table.member_count > kMaxProbeMembers || table.remote_bases == 0 ||
+        !copy_from_device(remote_bases,
+                          reinterpret_cast<const void*>(table.remote_bases),
+                          table.member_count * sizeof(remote_bases[0]),
+                          "copy debug remote bases",
+                          error,
+                          sizeof(error)) ||
+        table.remote_sync_bases == 0 ||
+        !copy_from_device(remote_sync_bases,
+                          reinterpret_cast<const void*>(table.remote_sync_bases),
+                          table.member_count * sizeof(remote_sync_bases[0]),
+                          "copy debug remote sync bases",
+                          error,
+                          sizeof(error))) {
+        std::fprintf(stderr, "URMA-DESC debug memory-table error=%s\n", error);
+        return;
     }
-    std::uint32_t offsets[64]{};
-    if (team.member_count > 64 || team.channel_counts == 0 ||
-        !copy_from_device(
-            offsets, reinterpret_cast<const void*>(team.channel_counts),
-            team.member_count * sizeof(offsets[0]), "copy debug channel offsets",
-            error, sizeof(error)))
+    for (std::uint32_t index = 0; index < table.member_count; ++index) {
+        std::fprintf(stderr,
+                     "URMA-DESC peer[%u] base=0x%llx sync=0x%llx\n",
+                     index,
+                     static_cast<unsigned long long>(remote_bases[index]),
+                     static_cast<unsigned long long>(remote_sync_bases[index]));
+    }
+
+    if (peer >= table.member_count || peer == table.self_member || context.channel_count == 0 || table.channel_count == 0 ||
+        table.channels == 0 || table.member_count * table.channel_count > kMaxProbeMembers ||
+        !copy_from_device(channel_handles,
+                          reinterpret_cast<const void*>(table.channels),
+                          table.member_count * table.channel_count * sizeof(channel_handles[0]),
+                          "copy debug channel handles",
+                          error,
+                          sizeof(error)))
         return;
-    const std::uint32_t channel_index = offsets[peer];
+    const auto handle = channel_handles[peer * table.channel_count + kProbeChannelIndex];
     transport::cann_abi::Channel channel{};
-    if (peer >= team.member_count || peer == team.self_member ||
-        context.channel_count == 0 || team.channels == 0 ||
-        !copy_from_device(
-            &channel,
-            reinterpret_cast<const void*>(
-                team.channels + static_cast<std::uint64_t>(channel_index) *
-                    sizeof(channel)),
-            sizeof(channel), "copy debug channel", error, sizeof(error)))
+    if (!copy_from_device(&channel, reinterpret_cast<const void*>(handle), sizeof(channel), "copy debug channel", error, sizeof(error)))
         return;
-    std::fprintf(
-        stderr,
-        "URMA-DESC channel peer=%u local_buffers=%u remote_buffers=%u\n",
-        peer, channel.local_buffer_count, channel.remote_buffer_count);
-    if (channel.sq_count != 0 && channel.cq_count != 0 &&
-        channel.sq_contexts != 0 && channel.cq_contexts != 0) {
+    std::fprintf(stderr,
+                 "URMA-DESC channel peer=%u local_buffers=%u remote_buffers=%u\n",
+                 peer,
+                 channel.local_buffer_count,
+                 channel.remote_buffer_count);
+    if (channel.sq_count != 0 && channel.cq_count != 0 && channel.sq_contexts != 0 && channel.cq_contexts != 0) {
         transport::cann_abi::SqContext sq{};
         transport::cann_abi::CqContext cq{};
         if (copy_from_device(
-                &sq, reinterpret_cast<const void*>(channel.sq_contexts),
-                sizeof(sq), "copy debug SQ context", error, sizeof(error)) &&
+                &sq, reinterpret_cast<const void*>(channel.sq_contexts), sizeof(sq), "copy debug SQ context", error, sizeof(error)) &&
             copy_from_device(
-                &cq, reinterpret_cast<const void*>(channel.cq_contexts),
-                sizeof(cq), "copy debug CQ context", error, sizeof(error))) {
-            std::fprintf(
-                stderr,
-                "URMA-DESC sq base=0x%llx head_ptr=0x%llx "
-                "tail_ptr=0x%llx db=0x%llx entry=%u depth=%u\n",
-                static_cast<unsigned long long>(sq.base),
-                static_cast<unsigned long long>(sq.head),
-                static_cast<unsigned long long>(sq.tail),
-                static_cast<unsigned long long>(sq.doorbell), sq.entry_bytes,
-                sq.depth);
-            std::fprintf(
-                stderr,
-                "URMA-DESC cq base=0x%llx tail_ptr=0x%llx db=0x%llx "
-                "entry=%u depth=%u\n",
-                static_cast<unsigned long long>(cq.base),
-                static_cast<unsigned long long>(cq.tail),
-                static_cast<unsigned long long>(cq.doorbell), cq.entry_bytes,
-                cq.depth);
+                &cq, reinterpret_cast<const void*>(channel.cq_contexts), sizeof(cq), "copy debug CQ context", error, sizeof(error))) {
+            std::fprintf(stderr,
+                         "URMA-DESC sq base=0x%llx head_ptr=0x%llx "
+                         "tail_ptr=0x%llx db=0x%llx entry=%u depth=%u\n",
+                         static_cast<unsigned long long>(sq.base),
+                         static_cast<unsigned long long>(sq.head),
+                         static_cast<unsigned long long>(sq.tail),
+                         static_cast<unsigned long long>(sq.doorbell),
+                         sq.entry_bytes,
+                         sq.depth);
+            std::fprintf(stderr,
+                         "URMA-DESC cq base=0x%llx tail_ptr=0x%llx db=0x%llx "
+                         "entry=%u depth=%u\n",
+                         static_cast<unsigned long long>(cq.base),
+                         static_cast<unsigned long long>(cq.tail),
+                         static_cast<unsigned long long>(cq.doorbell),
+                         cq.entry_bytes,
+                         cq.depth);
         }
     }
     transport::cann_abi::RegisteredBuffer buffers[64]{};
     if (channel.local_buffer_count <= 64 && channel.local_buffers != 0 &&
-        copy_from_device(
-            buffers, reinterpret_cast<const void*>(channel.local_buffers),
-            channel.local_buffer_count * sizeof(buffers[0]),
-            "copy debug local buffers", error, sizeof(error))) {
-        for (std::uint32_t index = 0; index < channel.local_buffer_count;
-             ++index) {
-            std::fprintf(
-                stderr,
-                "URMA-DESC local[%u]=[0x%llx,+%llu] token=%u value=%u\n",
-                index, static_cast<unsigned long long>(buffers[index].address),
-                static_cast<unsigned long long>(buffers[index].bytes),
-                buffers[index].token_id, buffers[index].token_value);
+        copy_from_device(buffers,
+                         reinterpret_cast<const void*>(channel.local_buffers),
+                         channel.local_buffer_count * sizeof(buffers[0]),
+                         "copy debug local buffers",
+                         error,
+                         sizeof(error))) {
+        for (std::uint32_t index = 0; index < channel.local_buffer_count; ++index) {
+            std::fprintf(stderr,
+                         "URMA-DESC local[%u]=[0x%llx,+%llu] token=%u value=%u\n",
+                         index,
+                         static_cast<unsigned long long>(buffers[index].address),
+                         static_cast<unsigned long long>(buffers[index].bytes),
+                         buffers[index].token_id,
+                         buffers[index].token_value);
         }
     }
     if (channel.remote_buffer_count <= 64 && channel.remote_buffers != 0 &&
-        copy_from_device(
-            buffers, reinterpret_cast<const void*>(channel.remote_buffers),
-            channel.remote_buffer_count * sizeof(buffers[0]),
-            "copy debug remote buffers", error, sizeof(error))) {
-        for (std::uint32_t index = 0; index < channel.remote_buffer_count;
-             ++index) {
-            std::fprintf(
-                stderr,
-                "URMA-DESC remote[%u]=[0x%llx,+%llu] token=%u value=%u\n",
-                index, static_cast<unsigned long long>(buffers[index].address),
-                static_cast<unsigned long long>(buffers[index].bytes),
-                buffers[index].token_id, buffers[index].token_value);
+        copy_from_device(buffers,
+                         reinterpret_cast<const void*>(channel.remote_buffers),
+                         channel.remote_buffer_count * sizeof(buffers[0]),
+                         "copy debug remote buffers",
+                         error,
+                         sizeof(error))) {
+        for (std::uint32_t index = 0; index < channel.remote_buffer_count; ++index) {
+            std::fprintf(stderr,
+                         "URMA-DESC remote[%u]=[0x%llx,+%llu] token=%u value=%u\n",
+                         index,
+                         static_cast<unsigned long long>(buffers[index].address),
+                         static_cast<unsigned long long>(buffers[index].bytes),
+                         buffers[index].token_id,
+                         buffers[index].token_value);
         }
     }
 }
 
-std::uint32_t inspect_sq_depth(
-    const transport::DeviceTransportContext& context, std::uint32_t peer,
-    char* error, std::size_t error_capacity) {
-    transport::cann_abi::Team team{};
-    if (!copy_from_device(
-            &team, reinterpret_cast<const void*>(context.channel_table),
-            sizeof(team), "copy team", error, error_capacity))
-        return 0;
-    if (peer >= team.member_count || team.channel_counts == 0 ||
-        team.channels == 0) {
-        write_error(error, error_capacity, "invalid team channel table");
-        return 0;
-    }
-    std::uint32_t offsets[64]{};
-    if (team.member_count > 64 ||
-        !copy_from_device(
-            offsets, reinterpret_cast<const void*>(team.channel_counts),
-            team.member_count * sizeof(std::uint32_t), "copy channel offsets",
-            error, error_capacity))
-        return 0;
-    if (peer == team.self_member || context.channel_count == 0) {
-        write_error(error, error_capacity, "peer has no channel");
-        return 0;
-    }
-    const std::uint32_t channel_index = offsets[peer];
+std::uint32_t inspect_sq_depth(const transport::DeviceTransportContext& context,
+                               std::uint32_t peer,
+                               char* error,
+                               std::size_t error_capacity) {
     transport::cann_abi::Channel channel{};
-    const auto channel_address = team.channels +
-        static_cast<std::uint64_t>(channel_index) * sizeof(channel);
-    if (!copy_from_device(
-            &channel, reinterpret_cast<const void*>(channel_address),
-            sizeof(channel), "copy channel", error, error_capacity) ||
-        channel.sq_contexts == 0 || channel.sq_count == 0) {
-        if (error != nullptr && error[0] == '\0')
-            write_error(error, error_capacity, "invalid SQ table");
-        return 0;
-    }
     transport::cann_abi::SqContext sq{};
-    if (!copy_from_device(
-            &sq, reinterpret_cast<const void*>(channel.sq_contexts),
-            sizeof(sq), "copy SQ context", error, error_capacity))
+    if (!load_first_channel_and_sq(context, peer, &channel, &sq, error, error_capacity))
         return 0;
     return sq.depth;
 }
 
-std::uint32_t inspect_cq_depth(
-    const transport::DeviceTransportContext& context, std::uint32_t peer,
-    char* error, std::size_t error_capacity) {
-    transport::cann_abi::Team team{};
-    if (!copy_from_device(
-            &team, reinterpret_cast<const void*>(context.channel_table),
-            sizeof(team), "copy team", error, error_capacity))
-        return 0;
-    if (peer >= team.member_count || team.channel_counts == 0 ||
-        team.channels == 0) {
-        write_error(error, error_capacity, "invalid team channel table");
-        return 0;
-    }
-    std::uint32_t offsets[64]{};
-    if (team.member_count > 64 ||
-        !copy_from_device(
-            offsets, reinterpret_cast<const void*>(team.channel_counts),
-            team.member_count * sizeof(std::uint32_t), "copy channel offsets",
-            error, error_capacity))
-        return 0;
-    if (peer == team.self_member || context.channel_count == 0) {
-        write_error(error, error_capacity, "peer has no channel");
-        return 0;
-    }
-    const std::uint32_t channel_index = offsets[peer];
+std::uint32_t inspect_cq_depth(const transport::DeviceTransportContext& context,
+                               std::uint32_t peer,
+                               char* error,
+                               std::size_t error_capacity) {
     transport::cann_abi::Channel channel{};
-    const auto channel_address = team.channels +
-        static_cast<std::uint64_t>(channel_index) * sizeof(channel);
-    if (!copy_from_device(
-            &channel, reinterpret_cast<const void*>(channel_address),
-            sizeof(channel), "copy channel", error, error_capacity) ||
-        channel.cq_contexts == 0 || channel.cq_count == 0) {
-        if (error != nullptr && error[0] == '\0')
-            write_error(error, error_capacity, "invalid CQ table");
-        return 0;
-    }
     transport::cann_abi::CqContext cq{};
-    if (!copy_from_device(
-            &cq, reinterpret_cast<const void*>(channel.cq_contexts),
-            sizeof(cq), "copy CQ context", error, error_capacity))
+    if (!load_first_channel_and_cq(context, peer, &channel, &cq, error, error_capacity))
         return 0;
     return cq.depth;
 }
 
-std::uint32_t inspect_command_capacity(
-    const transport::DeviceTransportContext& context, char* error,
-    std::size_t error_capacity) {
+std::uint32_t inspect_command_capacity(const transport::DeviceTransportContext& context, char* error, std::size_t error_capacity) {
     transport::StagedTransportContext staged{};
     if (context.backend_context == 0 ||
-        !copy_from_device(
-            &staged, reinterpret_cast<const void*>(context.backend_context),
-            sizeof(staged), "copy staged context", error, error_capacity) ||
+        !copy_from_device(&staged,
+                          reinterpret_cast<const void*>(context.backend_context),
+                          sizeof(staged),
+                          "copy staged context",
+                          error,
+                          error_capacity) ||
         staged.command_queue == 0) {
         if (error != nullptr && error[0] == '\0')
             write_error(error, error_capacity, "invalid command queue");
@@ -318,35 +307,24 @@ std::uint32_t inspect_command_capacity(
     }
     transport::TransportCommandQueue queue{};
     if (!copy_from_device(
-            &queue, reinterpret_cast<const void*>(staged.command_queue),
-            sizeof(queue), "copy command queue", error, error_capacity))
+            &queue, reinterpret_cast<const void*>(staged.command_queue), sizeof(queue), "copy command queue", error, error_capacity))
         return 0;
     return queue.capacity;
 }
 
 class RuntimeResources {
 public:
-    ~RuntimeResources() {
-        (void)shutdown(nullptr, 0);
-    }
+    ~RuntimeResources() { (void)shutdown(nullptr, 0); }
 
     bool initialize(
-        std::int64_t communicator_handle, std::uint32_t rank,
-        std::uint32_t world_size, char* error,
-        std::size_t error_capacity) {
+        std::int64_t communicator_handle, std::uint32_t rank, std::uint32_t world_size, char* error, std::size_t error_capacity) {
         communicator_handle_ = communicator_handle;
         rank_ = rank;
         world_size_ = world_size;
         if (!check_acl(
-                aclrtMalloc(
-                    &window_, kWindowBytes, ACL_MEM_MALLOC_HUGE_FIRST),
-                "allocate window", error, error_capacity) ||
-            !check_acl(
-                aclrtMemset(window_, kWindowBytes, 0, kWindowBytes),
-                "zero window", error, error_capacity) ||
-            !check_acl(
-                aclrtCreateStream(&stream_), "create stream", error,
-                error_capacity))
+                HcommMemAlloc(&window_, static_cast<std::size_t>(kWindowBytes)), "allocate symmetric window", error, error_capacity) ||
+            !check_acl(aclrtMemset(window_, kWindowBytes, 0, kWindowBytes), "zero window", error, error_capacity) ||
+            !check_acl(aclrtCreateStream(&stream_), "create stream", error, error_capacity))
             return false;
 
         transport::TransportConfig config;
@@ -356,36 +334,35 @@ public:
         config.device_buffer_bytes = kWindowBytes;
         config.requested_channels = 1;
         config.stage_profile_enabled = true;
-        auto topology_status =
-            transport::configure_transport_topology_from_environment(&config);
+        auto topology_status = transport::configure_transport_topology_from_environment(&config);
         if (!topology_status.ok()) {
-            write_error(
-                error, error_capacity, "%s failed: backend=%d %s",
-                topology_status.operation.c_str(), topology_status.backend_code,
-                topology_status.message.c_str());
+            write_error(error,
+                        error_capacity,
+                        "%s failed: backend=%d %s",
+                        topology_status.operation.c_str(),
+                        topology_status.backend_code,
+                        topology_status.message.c_str());
             return false;
         }
         auto created = transport::make_cann_transport(config);
         if (!created.status.ok()) {
-            write_error(
-                error, error_capacity, "%s failed: backend=%d %s",
-                created.status.operation.c_str(), created.status.backend_code,
-                created.status.message.c_str());
+            write_error(error,
+                        error_capacity,
+                        "%s failed: backend=%d %s",
+                        created.status.operation.c_str(),
+                        created.status.backend_code,
+                        created.status.message.c_str());
             return false;
         }
         transport_ = std::move(created.transport);
-        auto status = transport_->register_symmetric_window(
-            window_, kWindowBytes);
+        auto status = transport_->register_symmetric_window(window_, kWindowBytes);
         if (status.ok())
-            status = transport_->acquire_channels(
-                1, transport::CooperationScope::kParticipant);
+            status = transport_->acquire_channels(1, transport::CooperationScope::kParticipant);
         if (status.ok())
             status = transport_->export_device_context(&context_);
         if (!status.ok()) {
             write_error(
-                error, error_capacity, "%s failed: backend=%d %s",
-                status.operation.c_str(), status.backend_code,
-                status.message.c_str());
+                error, error_capacity, "%s failed: backend=%d %s", status.operation.c_str(), status.backend_code, status.message.c_str());
             return false;
         }
         if (std::getenv("DEEP_EP_ASCEND_URMA_DUMP_DESCRIPTORS") != nullptr)
@@ -393,10 +370,12 @@ public:
         return true;
     }
 
-    bool run(
-        probe::RuntimeCase runtime_case, std::uint32_t rank,
-        std::uint32_t world_size, std::uint64_t iterations,
-        char* error, std::size_t error_capacity) {
+    bool run(probe::RuntimeCase runtime_case,
+             std::uint32_t rank,
+             std::uint32_t world_size,
+             std::uint64_t iterations,
+             char* error,
+             std::size_t error_capacity) {
         const std::uint32_t peer = (rank + 1) % world_size;
         std::uint64_t launch_count = std::max<std::uint64_t>(iterations, 1);
         std::uint32_t operations = 1;
@@ -404,228 +383,175 @@ public:
         std::uint32_t pressure_depth = 0;
         std::uint64_t pressure_remaining = 0;
         if (runtime_case == probe::RuntimeCase::kQueueWrap) {
-            const auto depth = inspect_sq_depth(
-                context_, peer, error, error_capacity);
+            const auto depth = inspect_sq_depth(context_, peer, error, error_capacity);
             if (depth == 0)
                 return false;
-            command_capacity = inspect_command_capacity(
-                context_, error, error_capacity);
+            command_capacity = inspect_command_capacity(context_, error, error_capacity);
             operations = probe::queue_wrap_batch_operations(command_capacity);
             if (operations == 0) {
                 if (error != nullptr && error[0] == '\0')
-                    write_error(
-                        error, error_capacity,
-                        "command queue capacity %u cannot hold queue-wrap "
-                        "barriers and payload", command_capacity);
+                    write_error(error,
+                                error_capacity,
+                                "command queue capacity %u cannot hold queue-wrap "
+                                "barriers and payload",
+                                command_capacity);
                 return false;
             }
-            launch_count = (static_cast<std::uint64_t>(depth) +
-                            operations - 1) /
-                           operations + 1;
+            launch_count = (static_cast<std::uint64_t>(depth) + operations - 1) / operations + 1;
         } else if (runtime_case == probe::RuntimeCase::kProfileMixed) {
-            pressure_depth = inspect_cq_depth(
-                context_, peer, error, error_capacity);
-            command_capacity = inspect_command_capacity(
-                context_, error, error_capacity);
-            if (pressure_depth <= 1 ||
-                command_capacity < probe::kMixedProfileCommandCount) {
+            pressure_depth = inspect_cq_depth(context_, peer, error, error_capacity);
+            command_capacity = inspect_command_capacity(context_, error, error_capacity);
+            if (pressure_depth <= 1 || command_capacity < probe::kMixedProfileCommandCount) {
                 if (error != nullptr && error[0] == '\0')
-                    write_error(
-                        error, error_capacity,
-                        "cannot force queue pressure: cq_depth=%u "
-                        "command_capacity=%u",
-                        pressure_depth, command_capacity);
+                    write_error(error,
+                                error_capacity,
+                                "cannot force queue pressure: cq_depth=%u "
+                                "command_capacity=%u",
+                                pressure_depth,
+                                command_capacity);
                 return false;
             }
             pressure_remaining = pressure_depth - 1;
-            launch_count = (pressure_remaining + command_capacity - 1) /
-                command_capacity + 1;
+            launch_count = (pressure_remaining + command_capacity - 1) / command_capacity + 1;
         }
 
         auto* device_state = static_cast<probe::RuntimeState*>(window_);
         for (std::uint64_t launch = 0; launch < launch_count; ++launch) {
             const std::uint64_t generation = launch + 1;
-            const bool finalize_profile_pressure =
-                runtime_case == probe::RuntimeCase::kProfileMixed &&
-                pressure_remaining == 0;
-            const bool synchronize_ranks = finalize_profile_pressure ||
-                runtime_case == probe::RuntimeCase::kRouteSignalOrder ||
-                runtime_case == probe::RuntimeCase::kRouteSignalPreBarrier ||
-                runtime_case == probe::RuntimeCase::kRouteSignalPostBarrier ||
-                runtime_case == probe::RuntimeCase::kRoutePutSignalOrder ||
-                runtime_case == probe::RuntimeCase::kRoutePlanOrder;
+            const bool finalize_profile_pressure = runtime_case == probe::RuntimeCase::kProfileMixed && pressure_remaining == 0;
+            const bool synchronize_ranks = finalize_profile_pressure || runtime_case == probe::RuntimeCase::kRouteSignalOrder ||
+                runtime_case == probe::RuntimeCase::kRouteSignalPreBarrier || runtime_case == probe::RuntimeCase::kRouteSignalPostBarrier ||
+                runtime_case == probe::RuntimeCase::kRoutePutSignalOrder || runtime_case == probe::RuntimeCase::kRoutePlanOrder;
             if (runtime_case == probe::RuntimeCase::kProfileMixed) {
-                operations = finalize_profile_pressure ? 1 :
-                    static_cast<std::uint32_t>(std::min<std::uint64_t>(
-                        pressure_remaining, command_capacity));
+                operations = finalize_profile_pressure
+                    ? 1
+                    : static_cast<std::uint32_t>(std::min<std::uint64_t>(pressure_remaining, command_capacity));
             }
             probe::RuntimeState state;
-            state.source =
-                (static_cast<std::uint64_t>(rank + 1) << 32U) | generation;
+            state.source = (static_cast<std::uint64_t>(rank + 1) << 32U) | generation;
             state.generation = generation;
             for (std::uint64_t word = 0; word < probe::kRoutePlanWords; ++word)
                 state.route_source[word] = state.source + word;
             if (!probe::reset_synchronize_and_launch(
-                    synchronize_ranks, stream_,
+                    synchronize_ranks,
+                    stream_,
                     [&] {
-                        return check_acl(
-                            aclrtMemcpy(
-                                device_state, sizeof(state), &state,
-                                sizeof(state), ACL_MEMCPY_HOST_TO_DEVICE),
-                            "initialize runtime state", error,
-                            error_capacity);
+                        return check_acl(aclrtMemcpy(device_state, sizeof(state), &state, sizeof(state), ACL_MEMCPY_HOST_TO_DEVICE),
+                                         "initialize runtime state",
+                                         error,
+                                         error_capacity);
                     },
                     [&](aclrtStream stream) {
-                        const auto status = HcclBarrier(
-                            reinterpret_cast<HcclComm>(
-                                static_cast<std::uintptr_t>(
-                                    communicator_handle_)),
-                            stream);
+                        const auto status =
+                            HcclBarrier(reinterpret_cast<HcclComm>(static_cast<std::uintptr_t>(communicator_handle_)), stream);
                         if (status == HCCL_SUCCESS)
                             return true;
-                        write_error(
-                            error, error_capacity,
-                            "final profile stream barrier failed with HCCL "
-                            "status %d",
-                            static_cast<int>(status));
+                        write_error(error,
+                                    error_capacity,
+                                    "final profile stream barrier failed with HCCL "
+                                    "status %d",
+                                    static_cast<int>(status));
                         return false;
                     },
                     [&](aclrtStream stream) {
-                        const int launch_status =
-                            deep_ep_ascend_urma_launch_runtime_probe(
-                                device_state, context_, runtime_case, peer,
-                                generation, operations,
-                                finalize_profile_pressure, stream);
+                        const int launch_status = deep_ep_ascend_urma_launch_runtime_probe(
+                            device_state, context_, runtime_case, peer, generation, operations, finalize_profile_pressure, stream);
                         if (launch_status == 0)
                             return true;
-                        write_error(
-                            error, error_capacity,
-                            "kernel launch failed with %d", launch_status);
+                        write_error(error, error_capacity, "kernel launch failed with %d", launch_status);
                         return false;
                     }))
                 return false;
-            if (!check_acl(
-                    aclrtSynchronizeStream(stream_), "synchronize stream",
-                    error, error_capacity) ||
-                !copy_from_device(
-                    &state, device_state, sizeof(state), "copy runtime state",
-                    error, error_capacity))
+            if (!check_acl(aclrtSynchronizeStream(stream_), "synchronize stream", error, error_capacity) ||
+                !copy_from_device(&state, device_state, sizeof(state), "copy runtime state", error, error_capacity))
                 return false;
-            if (state.success != 1 ||
-                state.diagnostic.error != transport::DeviceTransportError::kNone) {
-                if (std::getenv(
-                        "DEEP_EP_ASCEND_URMA_DUMP_DESCRIPTORS") != nullptr)
+            if (state.success != 1 || state.diagnostic.error != transport::DeviceTransportError::kNone) {
+                if (std::getenv("DEEP_EP_ASCEND_URMA_DUMP_DESCRIPTORS") != nullptr)
                     dump_transport_descriptors(context_, peer);
-                write_error(
-                    error, error_capacity,
-                    "semantic failure: case=%u generation=%llu success=%u "
-                    "diagnostic=%u opcode=%u team=%u logical_peer=%u "
-                    "world_peer=%d channel=%u "
-                    "sq_position=%u cq_expected=%u cq_tail=%u "
-                    "cqe_word0=0x%08x raw_sq_head=0x%llx "
-                    "observed=0x%llx",
-                    static_cast<unsigned>(runtime_case),
-                    static_cast<unsigned long long>(generation), state.success,
-                    static_cast<unsigned>(state.diagnostic.error),
-                    static_cast<unsigned>(state.diagnostic.opcode),
-                    static_cast<unsigned>(state.diagnostic.team),
-                    state.diagnostic.peer, state.diagnostic.world_peer,
-                    state.diagnostic.channel,
-                    state.diagnostic.sq_head, state.diagnostic.cq_head,
-                    state.diagnostic.cq_tail,
-                    state.diagnostic.backend_status,
-                    static_cast<unsigned long long>(
-                        state.diagnostic.reserved),
-                    static_cast<unsigned long long>(state.observed));
+                write_error(error,
+                            error_capacity,
+                            "semantic failure: case=%u generation=%llu success=%u "
+                            "diagnostic=%u opcode=%u team=%u logical_peer=%u "
+                            "world_peer=%d channel=%u "
+                            "sq_position=%u cq_expected=%u cq_tail=%u "
+                            "cqe_word0=0x%08x raw_sq_head=0x%llx "
+                            "observed=0x%llx",
+                            static_cast<unsigned>(runtime_case),
+                            static_cast<unsigned long long>(generation),
+                            state.success,
+                            static_cast<unsigned>(state.diagnostic.error),
+                            static_cast<unsigned>(state.diagnostic.opcode),
+                            static_cast<unsigned>(state.diagnostic.team),
+                            state.diagnostic.peer,
+                            state.diagnostic.world_peer,
+                            state.diagnostic.channel,
+                            state.diagnostic.sq_head,
+                            state.diagnostic.cq_head,
+                            state.diagnostic.cq_tail,
+                            state.diagnostic.backend_status,
+                            static_cast<unsigned long long>(state.diagnostic.reserved),
+                            static_cast<unsigned long long>(state.observed));
                 return false;
             }
             if (probe::runtime_case_records_transport_profile(runtime_case)) {
                 transport::TransportStageProfile profile{};
-                const auto profile_status =
-                    transport_->read_stage_profile(&profile);
-                if (!profile_status.ok() ||
-                    profile.abi_version !=
-                        transport::kTransportStageProfileAbiVersion ||
-                    profile.struct_size !=
-                        sizeof(transport::TransportStageProfile) ||
-                    profile.generation != generation ||
-                    profile.completion_generation != generation ||
-                    profile.command_count == 0 ||
-                    profile.service_start_cycles == 0 ||
-                    profile.service_end_cycles <
-                        profile.service_start_cycles) {
-                    write_error(
-                        error, error_capacity,
-                        "profile failure: generation=%llu completion=%llu "
-                        "commands=%u service=%llu..%llu",
-                        static_cast<unsigned long long>(profile.generation),
-                        static_cast<unsigned long long>(
-                            profile.completion_generation),
-                        profile.command_count,
-                        static_cast<unsigned long long>(
-                            profile.service_start_cycles),
-                        static_cast<unsigned long long>(
-                            profile.service_end_cycles));
+                const auto profile_status = transport_->read_stage_profile(&profile);
+                if (!profile_status.ok() || profile.abi_version != transport::kTransportStageProfileAbiVersion ||
+                    profile.struct_size != sizeof(transport::TransportStageProfile) || profile.generation != generation ||
+                    profile.completion_generation != generation || profile.command_count == 0 || profile.service_start_cycles == 0 ||
+                    profile.service_end_cycles < profile.service_start_cycles) {
+                    write_error(error,
+                                error_capacity,
+                                "profile failure: generation=%llu completion=%llu "
+                                "commands=%u service=%llu..%llu",
+                                static_cast<unsigned long long>(profile.generation),
+                                static_cast<unsigned long long>(profile.completion_generation),
+                                profile.command_count,
+                                static_cast<unsigned long long>(profile.service_start_cycles),
+                                static_cast<unsigned long long>(profile.service_end_cycles));
                     return false;
                 }
                 if (finalize_profile_pressure &&
-                    (profile.command_count !=
-                         probe::kMixedProfileCommandCount ||
-                     profile.put_command_count !=
-                         probe::kMixedProfilePutCommandCount ||
-                     profile.command_bytes !=
-                         probe::kMixedProfilePayloadBytes ||
-                     profile.sq_depth != 0 || profile.cq_depth != 0 ||
-                     profile.sq_high_watermark != pressure_depth - 1 ||
-                     profile.cq_high_watermark != pressure_depth - 1 ||
-                     profile.wait_cycles == 0 ||
-                     profile.flags != 0 ||
-                     profile.payload_command_cycles != 0 ||
-                     profile.control_command_cycles != 0 ||
-                     profile.flush_command_cycles != 0 ||
-                     profile.barrier_command_cycles != 0 ||
+                    (profile.command_count != probe::kMixedProfileCommandCount ||
+                     profile.put_command_count != probe::kMixedProfilePutCommandCount ||
+                     profile.command_bytes != probe::kMixedProfilePayloadBytes || profile.sq_depth != 0 || profile.cq_depth != 0 ||
+                     profile.sq_high_watermark != pressure_depth - 1 || profile.cq_high_watermark != pressure_depth - 1 ||
+                     profile.wait_cycles == 0 || profile.flags != 0 || profile.payload_command_cycles != 0 ||
+                     profile.control_command_cycles != 0 || profile.flush_command_cycles != 0 || profile.barrier_command_cycles != 0 ||
                      profile.barrier_poll_cycles != 0 ||
-                     transport::transport_stage_profile_command_metrics_status(
-                         profile, true) !=
-                         transport::TransportStageProfileCommandMetricsStatus::
-                             kValid)) {
-                    write_error(
-                        error, error_capacity,
-                        "mixed profile failure: commands=%u puts=%u bytes=%llu "
-                        "depth=%u/%u hwm=%u/%u expected_hwm=%u wait=%llu "
-                        "payload=%llu control=%llu flush=%llu barrier=%llu "
-                        "barrier_poll=%llu",
-                        profile.command_count, profile.put_command_count,
-                        static_cast<unsigned long long>(profile.command_bytes),
-                        profile.sq_depth, profile.cq_depth,
-                        profile.sq_high_watermark,
-                        profile.cq_high_watermark, pressure_depth - 1,
-                        static_cast<unsigned long long>(profile.wait_cycles),
-                        static_cast<unsigned long long>(
-                            profile.payload_command_cycles),
-                        static_cast<unsigned long long>(
-                            profile.control_command_cycles),
-                        static_cast<unsigned long long>(
-                            profile.flush_command_cycles),
-                        static_cast<unsigned long long>(
-                            profile.barrier_command_cycles),
-                        static_cast<unsigned long long>(
-                            profile.barrier_poll_cycles));
+                     transport::transport_stage_profile_command_metrics_status(profile, true) !=
+                         transport::TransportStageProfileCommandMetricsStatus::kValid)) {
+                    write_error(error,
+                                error_capacity,
+                                "mixed profile failure: commands=%u puts=%u bytes=%llu "
+                                "depth=%u/%u hwm=%u/%u expected_hwm=%u wait=%llu "
+                                "payload=%llu control=%llu flush=%llu barrier=%llu "
+                                "barrier_poll=%llu",
+                                profile.command_count,
+                                profile.put_command_count,
+                                static_cast<unsigned long long>(profile.command_bytes),
+                                profile.sq_depth,
+                                profile.cq_depth,
+                                profile.sq_high_watermark,
+                                profile.cq_high_watermark,
+                                pressure_depth - 1,
+                                static_cast<unsigned long long>(profile.wait_cycles),
+                                static_cast<unsigned long long>(profile.payload_command_cycles),
+                                static_cast<unsigned long long>(profile.control_command_cycles),
+                                static_cast<unsigned long long>(profile.flush_command_cycles),
+                                static_cast<unsigned long long>(profile.barrier_command_cycles),
+                                static_cast<unsigned long long>(profile.barrier_poll_cycles));
                     return false;
                 }
             }
-            if (runtime_case == probe::RuntimeCase::kProfileMixed &&
-                !finalize_profile_pressure)
+            if (runtime_case == probe::RuntimeCase::kProfileMixed && !finalize_profile_pressure)
                 pressure_remaining -= operations;
         }
         return true;
     }
 
-    bool matches(
-        std::int64_t communicator_handle, std::uint32_t rank,
-        std::uint32_t world_size) const {
-        return communicator_handle_ == communicator_handle && rank_ == rank &&
-            world_size_ == world_size;
+    bool matches(std::int64_t communicator_handle, std::uint32_t rank, std::uint32_t world_size) const {
+        return communicator_handle_ == communicator_handle && rank_ == rank && world_size_ == world_size;
     }
 
     bool shutdown(char* error, std::size_t error_capacity) {
@@ -634,10 +560,12 @@ public:
             const auto status = transport_->destroy();
             if (!status.ok()) {
                 success = false;
-                write_error(
-                    error, error_capacity, "%s failed: backend=%d %s",
-                    status.operation.c_str(), status.backend_code,
-                    status.message.c_str());
+                write_error(error,
+                            error_capacity,
+                            "%s failed: backend=%d %s",
+                            status.operation.c_str(),
+                            status.backend_code,
+                            status.message.c_str());
             }
             transport_.reset();
         }
@@ -647,22 +575,16 @@ public:
             const aclError result = aclrtDestroyStream(stream);
             if (result != ACL_SUCCESS && success) {
                 success = false;
-                write_error(
-                    error, error_capacity,
-                    "destroy stream failed with ACL status %d",
-                    static_cast<int>(result));
+                write_error(error, error_capacity, "destroy stream failed with ACL status %d", static_cast<int>(result));
             }
         }
         if (window_ != nullptr) {
             void* window = window_;
             window_ = nullptr;
-            const aclError result = aclrtFree(window);
+            const int result = static_cast<int>(HcommMemFree(window));
             if (result != ACL_SUCCESS && success) {
                 success = false;
-                write_error(
-                    error, error_capacity,
-                    "free window failed with ACL status %d",
-                    static_cast<int>(result));
+                write_error(error, error_capacity, "free symmetric window failed with HCCL status %d", result);
             }
         }
         context_ = {};
@@ -681,10 +603,13 @@ private:
 
 }  // namespace
 
-extern "C" int deep_ep_ascend_urma_run_case(
-    std::int64_t communicator_handle, std::uint32_t rank,
-    std::uint32_t world_size, const char* case_name,
-    std::uint64_t iterations, char* error, std::size_t error_capacity) {
+extern "C" int deep_ep_ascend_urma_run_case(std::int64_t communicator_handle,
+                                            std::uint32_t rank,
+                                            std::uint32_t world_size,
+                                            const char* case_name,
+                                            std::uint64_t iterations,
+                                            char* error,
+                                            std::size_t error_capacity) {
     if (error != nullptr && error_capacity != 0)
         error[0] = '\0';
     if (communicator_handle == 0 || world_size < 2 || rank >= world_size) {
@@ -692,107 +617,80 @@ extern "C" int deep_ep_ascend_urma_run_case(
         return 2;
     }
 
-    const bool teardown = case_name != nullptr &&
-        std::strcmp(case_name, "teardown") == 0;
+    const bool teardown = case_name != nullptr && std::strcmp(case_name, "teardown") == 0;
     probe::RuntimeCase runtime_case{};
     if (!teardown && !parse_case(case_name, &runtime_case)) {
-        write_error(error, error_capacity, "unknown case: %s",
-                    case_name == nullptr ? "<null>" : case_name);
+        write_error(error, error_capacity, "unknown case: %s", case_name == nullptr ? "<null>" : case_name);
         return 2;
     }
 
     static std::unique_ptr<RuntimeResources> resources;
     if (teardown) {
-        if (resources != nullptr && !resources->matches(
-                communicator_handle, rank, world_size)) {
-            write_error(
-                error, error_capacity,
-                "persistent runtime resources do not match communicator topology");
+        if (resources != nullptr && !resources->matches(communicator_handle, rank, world_size)) {
+            write_error(error, error_capacity, "persistent runtime resources do not match communicator topology");
             return 2;
         }
-        const bool shutdown = resources == nullptr || resources->shutdown(
-            error, error_capacity);
+        const bool shutdown = resources == nullptr || resources->shutdown(error, error_capacity);
         resources.reset();
         return shutdown ? 0 : 1;
     }
 
-    if (resources != nullptr && !resources->matches(
-            communicator_handle, rank, world_size)) {
-        write_error(
-            error, error_capacity,
-            "persistent runtime resources do not match communicator topology");
+    if (resources != nullptr && !resources->matches(communicator_handle, rank, world_size)) {
+        write_error(error, error_capacity, "persistent runtime resources do not match communicator topology");
         return 2;
     }
     if (resources == nullptr) {
         auto candidate = std::make_unique<RuntimeResources>();
-        if (!candidate->initialize(
-                communicator_handle, rank, world_size, error, error_capacity))
+        if (!candidate->initialize(communicator_handle, rank, world_size, error, error_capacity))
             return 1;
         resources = std::move(candidate);
     }
-    if (!resources->run(
-            runtime_case, rank, world_size, iterations, error,
-            error_capacity))
+    if (!resources->run(runtime_case, rank, world_size, iterations, error, error_capacity))
         return 1;
     return 0;
 }
 
-extern "C" int deep_ep_ascend_urma_run_local_phase_boundary(
-    char* error, std::size_t error_capacity) {
+extern "C" int deep_ep_ascend_urma_run_local_phase_boundary(char* error, std::size_t error_capacity) {
     if (error != nullptr && error_capacity != 0)
         error[0] = '\0';
     probe::RuntimeState* device_state = nullptr;
     aclrtStream stream = nullptr;
-    bool success = check_acl(
-        aclrtMalloc(
-            reinterpret_cast<void**>(&device_state), sizeof(*device_state),
-            ACL_MEM_MALLOC_HUGE_FIRST),
-        "allocate local smoke state", error, error_capacity);
+    bool success = check_acl(aclrtMalloc(reinterpret_cast<void**>(&device_state), sizeof(*device_state), ACL_MEM_MALLOC_HUGE_FIRST),
+                             "allocate local smoke state",
+                             error,
+                             error_capacity);
     if (success) {
         success = check_acl(
-            aclrtMemset(
-                device_state, sizeof(*device_state), 0,
-                sizeof(*device_state)),
-            "zero local smoke state", error, error_capacity);
+            aclrtMemset(device_state, sizeof(*device_state), 0, sizeof(*device_state)), "zero local smoke state", error, error_capacity);
     }
     if (success) {
-        success = check_acl(
-            aclrtCreateStream(&stream), "create local smoke stream", error,
-            error_capacity);
+        success = check_acl(aclrtCreateStream(&stream), "create local smoke stream", error, error_capacity);
     }
-    transport::DeviceTransportContext context =
-        transport::make_device_transport_context();
+    transport::DeviceTransportContext context = transport::make_device_transport_context();
     context.topology.world_size = 1;
     context.topology.scale_up_size = 1;
     context.topology.scale_out_size = 1;
     if (success) {
-        const int launch_status = deep_ep_ascend_urma_launch_runtime_probe(
-            device_state, context, probe::RuntimeCase::kPhaseBoundary, 0, 1,
-            1, false, stream);
+        const int launch_status =
+            deep_ep_ascend_urma_launch_runtime_probe(device_state, context, probe::RuntimeCase::kPhaseBoundary, 0, 1, 1, false, stream);
         if (launch_status != 0) {
-            write_error(
-                error, error_capacity, "local smoke launch failed with %d",
-                launch_status);
+            write_error(error, error_capacity, "local smoke launch failed with %d", launch_status);
             success = false;
         }
     }
     if (success) {
-        success = check_acl(
-            aclrtSynchronizeStream(stream), "synchronize local smoke", error,
-            error_capacity);
+        success = check_acl(aclrtSynchronizeStream(stream), "synchronize local smoke", error, error_capacity);
     }
     probe::RuntimeState state;
     if (success) {
-        success = copy_from_device(
-            &state, device_state, sizeof(state), "copy local smoke state",
-            error, error_capacity);
+        success = copy_from_device(&state, device_state, sizeof(state), "copy local smoke state", error, error_capacity);
     }
     if (success && state.success != 1) {
-        write_error(
-            error, error_capacity,
-            "local phase boundary failed: sequence=%u observed=0x%llx",
-            state.phase_sequence,
-            static_cast<unsigned long long>(state.observed));
+        write_error(error,
+                    error_capacity,
+                    "local phase boundary failed: sequence=%u observed=0x%llx",
+                    state.phase_sequence,
+                    static_cast<unsigned long long>(state.observed));
         success = false;
     }
     if (stream != nullptr)

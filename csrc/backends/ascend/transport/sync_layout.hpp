@@ -85,6 +85,12 @@ inline constexpr std::uint64_t barrier_offset(
             member_count + source_member) * sizeof(std::uint64_t);
 }
 
+DEEP_EP_ASCEND_SYNC_LAYOUT_CALLEE std::uint64_t sync_window_bytes(
+    std::uint32_t member_count) {
+    return (kLogicalSignalCount + kLogicalBarrierCount) *
+        static_cast<std::uint64_t>(member_count) * sizeof(std::uint64_t);
+}
+
 }  // namespace deep_ep::ascend::transport::sync_layout
 
 #undef DEEP_EP_ASCEND_SYNC_LAYOUT_CALLEE

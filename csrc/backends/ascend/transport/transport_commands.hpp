@@ -10,7 +10,7 @@ namespace deep_ep::ascend::transport {
 
 inline constexpr std::uint32_t kTransportCommandAbiVersion = 3;
 inline constexpr std::uint32_t kStagedTransportCannCompatibility =
-    0x00090200U;
+    0x00090300U;
 inline constexpr std::uint32_t kScaleUpTeamMask = 1U;
 inline constexpr std::uint32_t kScaleOutTeamMask = 2U;
 inline constexpr std::uint32_t kWorldTeamMask =
@@ -102,6 +102,21 @@ struct alignas(64) StagedTransportContext {
     std::uint64_t reserved = 0;
 };
 
+struct DeviceChannelTable {
+    std::uint32_t abi_version = kTransportCommandAbiVersion;
+    std::uint32_t struct_size = sizeof(DeviceChannelTable);
+    std::uint32_t member_count = 0;
+    std::uint32_t self_member = 0;
+    std::uint32_t channel_count = 0;
+    std::uint32_t reserved = 0;
+    std::uintptr_t channels = 0;
+    std::uintptr_t remote_bases = 0;
+    std::uintptr_t remote_sync_bases = 0;
+    std::uintptr_t local_sync_base = 0;
+    std::uint64_t window_bytes = 0;
+    std::uint64_t sync_bytes = 0;
+};
+
 static_assert(sizeof(TransportCommand) == 128);
 static_assert(sizeof(TransportCommandQueue) == 64);
 static_assert(sizeof(TransportServiceState) == 64);
@@ -112,6 +127,8 @@ static_assert(std::is_trivially_copyable_v<TransportCommandQueue>);
 static_assert(std::is_trivially_copyable_v<TransportServiceState>);
 static_assert(std::is_trivially_copyable_v<DeviceTransportDiagnostic>);
 static_assert(std::is_trivially_copyable_v<StagedTransportContext>);
+static_assert(sizeof(DeviceChannelTable) == 72);
+static_assert(std::is_trivially_copyable_v<DeviceChannelTable>);
 
 namespace command {
 

@@ -216,6 +216,10 @@ int hd(void*, void* d, const void* s, std::uint64_t n) { return h2d(nullptr,d,s,
 int dh(void*, void* d, const void* s, std::uint64_t n) { return d2h(nullptr,d,s,n); }
 int hf(void*, void* p) { return free_(nullptr,p); }
 int noop1(void*, std::uintptr_t) { return 0; }
+int sym_window(void*, std::int64_t, void*, std::uint64_t,
+               std::uintptr_t* v, std::uint64_t* offset) {
+    *v = 0; *offset = 0; return 0;
+}
 
 std::unique_ptr<runtime::CannRuntimeResources> resources(
     int world_size = 2, bool hybrid = false) {
@@ -226,7 +230,8 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
         nullptr, current_device, stream, pool_stream, create_event, record_event,
         query_event, wait_event, synchronize_event, destroy_event};
     transport::CannHostApi h{
-        nullptr, rank_, size_, team, window, ha, hz, hd, dh, hf, noop1, noop1};
+        nullptr, rank_, size_, team, window, sym_window, ha, hz, hd, dh, hf,
+        noop1, noop1};
     transport::TransportConfig c{}; c.rank=0; c.world_size=world_size; c.communicator_handle=1;
     c.device_buffer_bytes=2*1024*1024; c.requested_channels=1;
     if (hybrid) {

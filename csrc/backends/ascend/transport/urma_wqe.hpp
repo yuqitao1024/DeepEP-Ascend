@@ -142,13 +142,26 @@ DEEP_EP_ASCEND_AICORE_WQE_CALLEE inline Faa64Request make_faa64(
     const cann_abi::SqContext& sq,
     const cann_abi::RegisteredBuffer& remote_memory,
     std::uint32_t head, std::uint64_t remote_address,
-    std::uint64_t fetch_result_address, std::uint64_t add_value) {
+    std::uint64_t fetch_result_address, std::uint64_t add_value,
+    std::uint32_t local_buffer_count, std::uintptr_t local_buffers) {
     Faa64Request result{};
     result.sqe = detail::make_sqe(
         sq, remote_memory, head, remote_address,
         cann_abi::kUrmaFaaOpcode, false);
     result.fetch_result.bytes = sizeof(std::uint64_t);
     result.fetch_result.address = fetch_result_address;
+    auto* local = reinterpret_cast<const cann_abi::RegisteredBuffer*>(
+        local_buffers);
+    for (std::uint32_t index = 0; index < local_buffer_count; ++index) {
+        const auto& buffer = local[index];
+        if (fetch_result_address >= buffer.address &&
+            sizeof(std::uint64_t) <= buffer.bytes &&
+            fetch_result_address - buffer.address <=
+                buffer.bytes - sizeof(std::uint64_t)) {
+            result.fetch_result.token_id = buffer.token_id;
+            break;
+        }
+    }
     result.add_value = add_value;
     return result;
 }

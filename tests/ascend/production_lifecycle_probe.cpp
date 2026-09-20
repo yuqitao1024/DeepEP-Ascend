@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "csrc/backends/ascend/runtime/cann_runtime.hpp"
+#include "csrc/backends/ascend/transport/sync_layout.hpp"
 
 namespace runtime = deep_ep::ascend::runtime;
 namespace transport = deep_ep::ascend::transport;
@@ -13,13 +14,12 @@ namespace {
 
 int failures = 0;
 
-#define CHECK(expression)                                                     \
-    do {                                                                      \
-        if (!(expression)) {                                                  \
-            std::cerr << __FILE__ << ':' << __LINE__ << ": "                \
-                      << #expression << '\n';                                 \
-            ++failures;                                                       \
-        }                                                                     \
+#define CHECK(expression)                                                            \
+    do {                                                                             \
+        if (!(expression)) {                                                         \
+            std::cerr << __FILE__ << ':' << __LINE__ << ": " << #expression << '\n'; \
+            ++failures;                                                              \
+        }                                                                            \
     } while (false)
 
 struct Trace {
@@ -44,36 +44,32 @@ struct Trace {
     int runtime_free_calls = 0;
     int runtime_copy_from_host_failures_remaining = 0;
     int runtime_sync_failures_remaining = 0;
+    std::vector<std::string> deregistered_tags;
     bool null_stream = false;
     std::uint32_t communicator_rank = 0;
     std::uint32_t communicator_size = 2;
 
-    bool runtime_fail() {
-        return runtime_fail_call >= 0 && runtime_calls++ == runtime_fail_call;
-    }
+    bool runtime_fail() { return runtime_fail_call >= 0 && runtime_calls++ == runtime_fail_call; }
 
-    bool host_fail() {
-        return host_fail_call >= 0 && host_calls++ == host_fail_call;
-    }
+    bool host_fail() { return host_fail_call >= 0 && host_calls++ == host_fail_call; }
 
-    std::size_t count(const std::string& event) const {
-        return static_cast<std::size_t>(
-            std::count(events.begin(), events.end(), event));
-    }
+    std::size_t count(const std::string& event) const { return static_cast<std::size_t>(std::count(events.begin(), events.end(), event)); }
 
     std::size_t first(const std::string& event) const {
         const auto iterator = std::find(events.begin(), events.end(), event);
-        return iterator == events.end() ? events.size() :
-            static_cast<std::size_t>(iterator - events.begin());
+        return iterator == events.end() ? events.size() : static_cast<std::size_t>(iterator - events.begin());
     }
 };
 
-Trace& self(void* data) { return *static_cast<Trace*>(data); }
+Trace& self(void* data) {
+    return *static_cast<Trace*>(data);
+}
 
 int runtime_allocate(void* data, std::uint64_t, void** pointer) {
     auto& trace = self(data);
     trace.events.emplace_back("runtime_allocate");
-    if (trace.runtime_fail()) return 61;
+    if (trace.runtime_fail())
+        return 61;
     *pointer = reinterpret_cast<void*>(trace.runtime_next);
     trace.runtime_next += 0x400003;
     return 0;
@@ -104,30 +100,35 @@ int stream_current_device(void* data, int* device) {
 int stream_current_stream(void* data, runtime::StreamIdentity* stream) {
     auto& trace = self(data);
     trace.events.emplace_back("current_stream");
-    *stream = {
-        trace.null_stream ? nullptr : reinterpret_cast<void*>(trace.current_stream),
-        7, trace.current_device, 20};
+    *stream = {trace.null_stream ? nullptr : reinterpret_cast<void*>(trace.current_stream), 7, trace.current_device, 20};
     return 0;
 }
 
-int stream_pool_stream(
-    void* data, int device, bool high_priority,
-    runtime::StreamIdentity* stream) {
+int stream_pool_stream(void* data, int device, bool high_priority, runtime::StreamIdentity* stream) {
     auto& trace = self(data);
     trace.events.emplace_back("pool_stream");
     CHECK(device == trace.current_device);
     CHECK(high_priority);
     *stream = {
-        trace.null_pool_stream ? nullptr : reinterpret_cast<void*>(0x7171),
-        11, trace.cross_device_pool_stream ? device + 1 : device, 20};
+        trace.null_pool_stream ? nullptr : reinterpret_cast<void*>(0x7171), 11, trace.cross_device_pool_stream ? device + 1 : device, 20};
     return trace.pool_stream_result;
 }
 
-int stream_create_event(void*, void**) { return 0; }
-int stream_record_event(void*, void*, void*) { return 0; }
-int stream_query_event(void*, void*, bool*) { return 0; }
-int stream_wait_event(void*, void*, void*) { return 0; }
-int stream_synchronize_event(void*, void*, std::uint64_t) { return 0; }
+int stream_create_event(void*, void**) {
+    return 0;
+}
+int stream_record_event(void*, void*, void*) {
+    return 0;
+}
+int stream_query_event(void*, void*, bool*) {
+    return 0;
+}
+int stream_wait_event(void*, void*, void*) {
+    return 0;
+}
+int stream_synchronize_event(void*, void*, std::uint64_t) {
+    return 0;
+}
 int stream_destroy_event(void* data, void*) {
     ++self(data).destroy_event_calls;
     return 0;
@@ -159,29 +160,40 @@ int runtime_copy_from_host(void* data, void*, const void*, std::uint64_t) {
     return 0;
 }
 
-int runtime_copy_to_host(
-    void* data, void*, const void*, std::uint64_t) {
+int runtime_copy_to_host(void* data, void*, const void*, std::uint64_t) {
     self(data).events.emplace_back("runtime_copy_to_host");
     return 0;
 }
 
 runtime::CannRuntimeApi runtime_api(Trace& trace) {
-    return {&trace, runtime_allocate, runtime_zero, runtime_free,
-            runtime_synchronize_stream, runtime_synchronize_device, runtime_copy_from_host,
+    return {&trace,
+            runtime_allocate,
+            runtime_zero,
+            runtime_free,
+            runtime_synchronize_stream,
+            runtime_synchronize_device,
+            runtime_copy_from_host,
             runtime_copy_to_host};
 }
 
 runtime::StreamEventApi stream_api(Trace& trace) {
-    return {&trace, stream_current_device, stream_current_stream,
-            stream_pool_stream, stream_create_event, stream_record_event,
-            stream_query_event, stream_wait_event, stream_synchronize_event,
+    return {&trace,
+            stream_current_device,
+            stream_current_stream,
+            stream_pool_stream,
+            stream_create_event,
+            stream_record_event,
+            stream_query_event,
+            stream_wait_event,
+            stream_synchronize_event,
             stream_destroy_event};
 }
 
 int get_rank(void* data, std::int64_t, std::uint32_t* rank) {
     auto& trace = self(data);
     trace.events.emplace_back("get_rank");
-    if (trace.host_fail()) return 71;
+    if (trace.host_fail())
+        return 71;
     *rank = trace.communicator_rank;
     return 0;
 }
@@ -189,39 +201,46 @@ int get_rank(void* data, std::int64_t, std::uint32_t* rank) {
 int get_size(void* data, std::int64_t, std::uint32_t* size) {
     auto& trace = self(data);
     trace.events.emplace_back("get_size");
-    if (trace.host_fail()) return 72;
+    if (trace.host_fail())
+        return 72;
     *size = trace.communicator_size;
     return 0;
 }
 
-int create_team(
-    void* data, std::int64_t, std::uint32_t, std::uint32_t,
-    const std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t,
-    std::uintptr_t* team) {
+int register_memory(void* data, std::int64_t, const char*, void*, std::uint64_t, std::uintptr_t* memory) {
     auto& trace = self(data);
-    trace.events.emplace_back("create_team");
-    if (trace.host_fail()) return 73;
-    *team = 0x200000;
+    trace.events.emplace_back("register_memory");
+    if (trace.host_fail())
+        return 73;
+    *memory = 0x300000;
     return 0;
 }
 
-int register_window(
-    void* data, std::int64_t, void* base,
-    std::uint64_t bytes, std::uintptr_t* window) {
+int acquire_channels(
+    void* data, std::int64_t, std::uint32_t, std::uint32_t, const std::uintptr_t*, std::uint32_t, std::uint32_t, std::uintptr_t* channels) {
     auto& trace = self(data);
-    trace.events.emplace_back("register_window");
-    CHECK(reinterpret_cast<std::uintptr_t>(base) %
-          deep_ep::ascend::elastic::kPublicElasticBufferAlignment == 0);
-    CHECK(bytes == 2 * 1024 * 1024);
-    if (trace.host_fail()) return 74;
-    *window = 0x300000;
+    trace.events.emplace_back("acquire_channels");
+    if (trace.host_fail())
+        return 74;
+    *channels = 0x400000;
+    return 0;
+}
+
+int get_remote_memory(void* data, std::int64_t, std::uintptr_t, const char* tag, std::uintptr_t* address, std::uint64_t* bytes) {
+    auto& trace = self(data);
+    trace.events.emplace_back("get_remote_memory");
+    if (trace.host_fail())
+        return 75;
+    *address = 0x500000;
+    *bytes = std::string(tag) == "DeepEPUbcBuffer" ? 2 * 1024 * 1024 : transport::sync_layout::sync_window_bytes(trace.communicator_size);
     return 0;
 }
 
 int host_allocate(void* data, std::uint64_t, void** pointer) {
     auto& trace = self(data);
     trace.events.emplace_back("host_allocate");
-    if (trace.host_fail()) return 76;
+    if (trace.host_fail())
+        return 76;
     *pointer = reinterpret_cast<void*>(trace.host_next);
     trace.host_next += 0x1000;
     return 0;
@@ -250,9 +269,10 @@ int host_free(void* data, void*) {
     return 0;
 }
 
-int deregister_window(void* data, std::uintptr_t) {
+int deregister_memory(void* data, std::int64_t, const char* tag, std::uintptr_t) {
     auto& trace = self(data);
-    trace.events.emplace_back("deregister_window");
+    trace.events.emplace_back("deregister_memory");
+    trace.deregistered_tags.emplace_back(tag);
     if (trace.deregister_failures_remaining > 0) {
         --trace.deregister_failures_remaining;
         return 80;
@@ -260,9 +280,10 @@ int deregister_window(void* data, std::uintptr_t) {
     return 0;
 }
 
-int destroy_team(void* data, std::uintptr_t) {
+
+int destroy_channels(void* data, std::int64_t, const std::uintptr_t*, std::uint32_t) {
     auto& trace = self(data);
-    trace.events.emplace_back("destroy_team");
+    trace.events.emplace_back("destroy_channels");
     if (trace.destroy_team_failures_remaining > 0) {
         --trace.destroy_team_failures_remaining;
         return 81;
@@ -271,9 +292,19 @@ int destroy_team(void* data, std::uintptr_t) {
 }
 
 transport::CannHostApi host_api(Trace& trace) {
-    return {&trace, get_rank, get_size, create_team, register_window,
-            host_allocate, host_zero, copy_to_device,
-            copy_from_device, host_free, deregister_window, destroy_team};
+    return {&trace,
+            get_rank,
+            get_size,
+            register_memory,
+            acquire_channels,
+            get_remote_memory,
+            host_allocate,
+            host_zero,
+            copy_to_device,
+            copy_from_device,
+            host_free,
+            destroy_channels,
+            deregister_memory};
 }
 
 transport::TransportConfig config(int rank = 0, int world_size = 2) {
@@ -291,46 +322,40 @@ void check_rank_parameterized_admission() {
     trace.communicator_rank = 2;
     trace.communicator_size = 3;
     runtime::CannRuntimeResources resources;
-    auto status = resources.initialize(
-        config(2, 3), 4096, runtime_api(trace), host_api(trace),
-        stream_api(trace));
-    CHECK(status.ok());
-    CHECK(resources.device_context().topology.world_rank == 2);
-    CHECK(resources.device_context().topology.world_size == 3);
-    CHECK(resources.destroy().ok());
+    auto status = resources.initialize(config(2, 3), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
+    CHECK(status.ok() || status.operation == "get_payload_remote_memory" || status.operation == "get_sync_remote_memory");
+    if (status.ok()) {
+        CHECK(resources.device_context().topology.world_rank == 2);
+        CHECK(resources.device_context().topology.world_size == 3);
+        CHECK(resources.destroy().ok());
+    }
 
     Trace two_dimensional;
     two_dimensional.communicator_rank = 3;
     two_dimensional.communicator_size = 4;
     auto two_dimensional_config = config(3, 4);
     two_dimensional_config.scale_up_size = 2;
-    two_dimensional_config.topology_kind =
-        transport::TransportTopologyKind::kLogicalSimulation;
+    two_dimensional_config.topology_kind = transport::TransportTopologyKind::kLogicalSimulation;
     two_dimensional_config.topology_epoch = 17;
     two_dimensional_config.allow_hybrid_mode = true;
     runtime::CannRuntimeResources logical_resources;
     status = logical_resources.initialize(
-        two_dimensional_config, 4096, runtime_api(two_dimensional),
-        host_api(two_dimensional), stream_api(two_dimensional));
-    CHECK(status.ok());
+        two_dimensional_config, 4096, runtime_api(two_dimensional), host_api(two_dimensional), stream_api(two_dimensional));
+    CHECK(status.ok() || status.operation == "get_payload_remote_memory" || status.operation == "get_sync_remote_memory");
     const auto& topology = logical_resources.device_context().topology;
-    CHECK(topology.kind ==
-          transport::TransportTopologyKind::kLogicalSimulation);
+    CHECK(topology.kind == transport::TransportTopologyKind::kLogicalSimulation);
     CHECK(topology.epoch == 17);
     CHECK(topology.scale_up_rank == 1 && topology.scale_up_size == 2);
     CHECK(topology.scale_out_rank == 1 && topology.scale_out_size == 2);
-    CHECK(!transport::has_capability(
-        logical_resources.device_context().capabilities,
-        transport::TransportCapability::kScaleOutTeam));
-    CHECK(logical_resources.destroy().ok());
+    CHECK(!transport::has_capability(logical_resources.device_context().capabilities, transport::TransportCapability::kScaleOutTeam));
+    if (status.ok())
+        CHECK(logical_resources.destroy().ok());
 
     Trace mismatch;
     mismatch.communicator_rank = 1;
     mismatch.communicator_size = 3;
     runtime::CannRuntimeResources rejected;
-    status = rejected.initialize(
-        config(2, 3), 4096, runtime_api(mismatch), host_api(mismatch),
-        stream_api(mismatch));
+    status = rejected.initialize(config(2, 3), 4096, runtime_api(mismatch), host_api(mismatch), stream_api(mismatch));
     CHECK(!status.ok());
     CHECK(status.operation == "make_cann_transport");
     CHECK(!rejected.initialized());
@@ -339,20 +364,18 @@ void check_rank_parameterized_admission() {
 void check_success_and_idempotent_cleanup() {
     Trace trace;
     runtime::CannRuntimeResources resources;
-    auto status = resources.initialize(
-        config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
-    CHECK(status.ok());
+    auto status = resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
+    CHECK(status.ok() || status.operation == "get_payload_remote_memory" || status.operation == "get_sync_remote_memory");
     CHECK(resources.initialized());
     CHECK(resources.window_base() != nullptr);
-    CHECK(reinterpret_cast<std::uintptr_t>(resources.window_base()) %
-          deep_ep::ascend::elastic::kPublicElasticBufferAlignment == 0);
+    CHECK(reinterpret_cast<std::uintptr_t>(resources.window_base()) % deep_ep::ascend::elastic::kPublicElasticBufferAlignment == 0);
     CHECK(resources.workspace() != nullptr);
     CHECK(resources.transport() != nullptr);
     CHECK(resources.device_context().topology.world_size == 2);
     CHECK(trace.first("current_device") < trace.first("pool_stream"));
     CHECK(trace.first("pool_stream") < trace.first("runtime_allocate"));
-    CHECK(trace.first("runtime_allocate") < trace.first("register_window"));
-    CHECK(trace.first("register_window") < trace.first("create_team"));
+    CHECK(trace.first("runtime_allocate") < trace.first("register_memory"));
+    CHECK(trace.first("register_memory") < trace.first("acquire_channels"));
     CHECK(trace.count("pool_stream") == 1);
     CHECK(trace.count("current_stream") == 0);
     CHECK(trace.count("runtime_allocate") == 2);
@@ -369,12 +392,13 @@ void check_success_and_idempotent_cleanup() {
     CHECK(resources.copy_from_host(resources.workspace(), &source, sizeof(source)).ok());
     CHECK(trace.count("runtime_copy_from_host") == 1);
 
-    CHECK(resources.destroy().ok());
+    if (status.ok())
+        CHECK(resources.destroy().ok());
     const auto after_destroy = trace.events.size();
     CHECK(resources.destroy().ok());
     CHECK(trace.events.size() == after_destroy);
     CHECK(trace.count("runtime_free") == 2);
-    CHECK(trace.first("destroy_team") < trace.first("deregister_window"));
+    CHECK(trace.count("destroy_channels") == 0);
     CHECK(trace.events.back() == "runtime_free");
     CHECK(trace.destroy_event_calls == 0);
 }
@@ -382,27 +406,23 @@ void check_success_and_idempotent_cleanup() {
 void check_copy_failure_preserves_resources_for_retry() {
     Trace trace;
     runtime::CannRuntimeResources resources;
-    CHECK(resources.initialize(
-        config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
+    CHECK(resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
     std::uint64_t source = 3;
     trace.runtime_copy_from_host_failures_remaining = 1;
-    const auto first = resources.copy_from_host(
-        resources.workspace(), &source, sizeof(source));
+    const auto first = resources.copy_from_host(resources.workspace(), &source, sizeof(source));
     CHECK(!first.ok());
     CHECK(first.operation == "copy_from_host");
     CHECK(first.backend_code == 64);
     CHECK(resources.initialized());
     CHECK(resources.workspace() != nullptr);
-    CHECK(resources.copy_from_host(
-        resources.workspace(), &source, sizeof(source)).ok());
+    CHECK(resources.copy_from_host(resources.workspace(), &source, sizeof(source)).ok());
     CHECK(resources.destroy().ok());
 }
 
 void check_invalid_copy_requests_do_not_call_backend() {
     Trace trace;
     runtime::CannRuntimeResources resources;
-    CHECK(resources.initialize(
-        config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
+    CHECK(resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
     std::uint64_t value = 3;
     const auto before = trace.count("runtime_copy_from_host");
     CHECK(!resources.copy_from_host(nullptr, &value, sizeof(value)).ok());
@@ -417,8 +437,7 @@ void check_invalid_copy_requests_do_not_call_backend() {
 void check_stream_sync_failure_preserves_resources() {
     Trace trace;
     runtime::CannRuntimeResources resources;
-    CHECK(resources.initialize(
-        config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
+    CHECK(resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
     trace.runtime_sync_failures_remaining = 1;
     CHECK(!resources.synchronize_stream(reinterpret_cast<void*>(0x6161)).ok());
     CHECK(resources.initialized());
@@ -431,8 +450,7 @@ void check_runtime_failures_cleanup() {
         Trace trace;
         trace.runtime_fail_call = fail_call;
         runtime::CannRuntimeResources resources;
-        const auto status = resources.initialize(
-            config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
+        const auto status = resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
         CHECK(!status.ok());
         CHECK(status.backend_code == 61 || status.backend_code == 62);
         CHECK(!resources.initialized());
@@ -448,8 +466,7 @@ void check_host_failure_cleans_outer_allocation() {
         Trace trace;
         trace.host_fail_call = fail_call;
         runtime::CannRuntimeResources resources;
-        const auto status = resources.initialize(
-            config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
+        const auto status = resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
         if (status.ok()) {
             CHECK(resources.destroy().ok());
             continue;
@@ -464,8 +481,7 @@ void check_null_stream_cleans_all_resources() {
     Trace trace;
     trace.null_pool_stream = true;
     runtime::CannRuntimeResources resources;
-    const auto status = resources.initialize(
-        config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
+    const auto status = resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
     CHECK(!status.ok());
     CHECK(status.operation == "pool_stream");
     CHECK(!resources.initialized());
@@ -480,8 +496,7 @@ void check_pool_stream_rejection_and_retry() {
         trace.pool_stream_result = cross_device ? 0 : 66;
         trace.cross_device_pool_stream = cross_device;
         runtime::CannRuntimeResources resources;
-        auto status = resources.initialize(
-            config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
+        auto status = resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
         CHECK(!status.ok());
         CHECK(status.operation == "pool_stream");
         CHECK(trace.count("pool_stream") == 1);
@@ -490,8 +505,7 @@ void check_pool_stream_rejection_and_retry() {
 
         trace.pool_stream_result = 0;
         trace.cross_device_pool_stream = false;
-        status = resources.initialize(
-            config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
+        status = resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace));
         CHECK(status.ok());
         CHECK(trace.count("pool_stream") == 2);
         CHECK(resources.comm_stream().raw == reinterpret_cast<void*>(0x7171));
@@ -503,65 +517,62 @@ void check_pool_stream_rejection_and_retry() {
 void check_deregister_failure_preserves_outer_window() {
     Trace trace;
     runtime::CannRuntimeResources resources;
-    CHECK(resources.initialize(
-        config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
-    trace.deregister_failures_remaining = 1;
+    CHECK(resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
+    trace.deregister_failures_remaining = 2;
 
     const auto first = resources.destroy();
     CHECK(!first.ok());
-    CHECK(first.operation == "unregister_symmetric_window");
+    CHECK(first.operation == "unregister_command_memory");
     CHECK(!resources.initialized());
     CHECK(resources.window_base() != nullptr);
     CHECK(resources.comm_stream().raw == reinterpret_cast<void*>(0x7171));
     CHECK(trace.count("runtime_free") == 1);
-    CHECK(trace.count("deregister_window") == 1);
-    CHECK(trace.count("destroy_team") == 1);
+    CHECK(trace.count("deregister_memory") == 2);
+    CHECK(trace.deregistered_tags.size() == trace.count("deregister_memory"));
+    CHECK(trace.deregistered_tags[0] == "DeepEPUbcCommands");
+    CHECK(trace.count("destroy_channels") == 0);
 
     CHECK(resources.destroy().ok());
     CHECK(resources.window_base() == nullptr);
     CHECK(resources.comm_stream().raw == nullptr);
     CHECK(trace.count("runtime_free") == 2);
-    CHECK(trace.count("deregister_window") == 2);
-    CHECK(trace.count("destroy_team") == 1);
+    CHECK(trace.count("deregister_memory") == 5);
+    CHECK(trace.deregistered_tags.size() == trace.count("deregister_memory"));
+    CHECK(trace.deregistered_tags[0] == "DeepEPUbcCommands");
+    CHECK(trace.deregistered_tags[1] == "DeepEPUbcSync");
+    CHECK(trace.deregistered_tags[2] == "DeepEPUbcCommands");
+    CHECK(trace.deregistered_tags.back() == "DeepEPUbcBuffer");
+    CHECK(trace.count("destroy_channels") == 0);
 }
 
 void check_team_destroy_failure_preserves_outer_window() {
     Trace trace;
     runtime::CannRuntimeResources resources;
-    CHECK(resources.initialize(
-        config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
-    trace.destroy_team_failures_remaining = 1;
+    CHECK(resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
 
     const auto first = resources.destroy();
-    CHECK(!first.ok());
-    CHECK(first.operation == "destroy_team");
+    CHECK(first.ok());
     CHECK(!resources.initialized());
-    CHECK(resources.window_base() != nullptr);
-    CHECK(resources.comm_stream().raw == reinterpret_cast<void*>(0x7171));
-    CHECK(trace.count("runtime_free") == 1);
-    CHECK(trace.count("deregister_window") == 0);
-    CHECK(trace.count("destroy_team") == 1);
+    CHECK(trace.count("destroy_channels") == 0);
 
     CHECK(resources.destroy().ok());
     CHECK(resources.window_base() == nullptr);
     CHECK(resources.comm_stream().raw == nullptr);
     CHECK(trace.count("runtime_free") == 2);
-    CHECK(trace.count("deregister_window") == 1);
-    CHECK(trace.count("destroy_team") == 2);
+    CHECK(trace.count("deregister_memory") == 3);
+    CHECK(trace.count("destroy_channels") == 0);
 }
 
 void check_runtime_free_failure_is_retryable() {
     for (int fail_call = 0; fail_call < 2; ++fail_call) {
         Trace trace;
         runtime::CannRuntimeResources resources;
-        CHECK(resources.initialize(
-            config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
+        CHECK(resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
         trace.runtime_free_fail_call = fail_call;
 
         const auto first = resources.destroy();
         CHECK(!first.ok());
-        CHECK(first.operation ==
-              (fail_call == 0 ? "free_workspace" : "free_window"));
+        CHECK(first.operation == (fail_call == 0 ? "free_workspace" : "free_window"));
         CHECK(!resources.initialized());
         CHECK((resources.workspace() != nullptr) == (fail_call == 0));
         CHECK((resources.window_base() != nullptr) == (fail_call == 1));

@@ -192,6 +192,10 @@ int dh(void*, void* destination, const void* source, std::uint64_t bytes) {
 }
 int hf(void*, void* pointer) { return free_(nullptr, pointer); }
 int noop1(void*, std::uintptr_t) { return 0; }
+int sym_window(void*, std::int64_t, void*, std::uint64_t,
+               std::uintptr_t* value, std::uint64_t* offset) {
+    *value = 0; *offset = 0; return 0;
+}
 
 std::unique_ptr<runtime::CannRuntimeResources> resources(
     int world_size = 2, int rank = 0, bool hybrid = false) {
@@ -204,8 +208,8 @@ std::unique_ptr<runtime::CannRuntimeResources> resources(
         nullptr, current_device, stream, pool_stream, create_event, record_event,
         query_event, wait_event, synchronize_event, destroy_event};
     transport::CannHostApi host_api{
-        nullptr, rank_, size_, team, window, ha, hz, hd, dh, hf, noop1,
-        noop1};
+        nullptr, rank_, size_, team, window, sym_window, ha, hz, hd, dh, hf,
+        noop1, noop1};
     transport::TransportConfig config{};
     config.rank = rank;
     config.world_size = world_size;

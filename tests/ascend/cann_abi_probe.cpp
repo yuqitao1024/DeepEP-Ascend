@@ -7,6 +7,7 @@
 
 #include <hcomm/hcomm_res_entity_defs.h>
 #include <hcomm/hcomm_team_entity_defs.h>
+#include <hcomm/hcomm_channel.h>
 #include <pto/comm/async/urma/urma_types.hpp>
 
 namespace cann_abi = deep_ep::ascend::transport::cann_abi;
@@ -36,7 +37,9 @@ std::size_t member_offset(Root& root, Member& member) {
     CHECK(offsetof(our_type, our_member) ==                                   \
           member_offset(package_object, package_object.package_member))
 
-static_assert(cann_abi::kCompatibilityVersion == 0x00090200U);
+static_assert(cann_abi::kCompatibilityVersion == 0x00090300U);
+static_assert(cann_abi::kHcommChannelVersion == 5U);
+static_assert(HCOMM_CHANNEL_VERSION == cann_abi::kHcommChannelVersion);
 static_assert(cann_abi::kUbcCtpProtocol == 4U);
 static_assert(cann_abi::kDefaultQueueIndex == 0U);
 static_assert(cann_abi::kUrmaWriteOpcode == 3U);

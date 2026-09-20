@@ -13,6 +13,7 @@
 #define DEEP_EP_ASCEND_HAS_CANN_RUNTIME 1
 #include <acl/acl.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
+#include <hcomm/hcomm_res.h>
 #else
 #define DEEP_EP_ASCEND_HAS_CANN_RUNTIME 0
 #endif
@@ -36,6 +37,26 @@ bool valid_api(const CannRuntimeApi& api) {
            api.free_device != nullptr && api.synchronize_stream != nullptr &&
            api.synchronize_device != nullptr && api.copy_from_host != nullptr &&
            api.copy_to_host != nullptr;
+}
+
+int allocate_device(
+    const CannRuntimeApi& api, std::uint64_t bytes, void** pointer,
+    bool symmetric) {
+    if (symmetric && api.allocate_symmetric_device != nullptr)
+        return api.allocate_symmetric_device(api.user_data, bytes, pointer);
+    return api.allocate_device(api.user_data, bytes, pointer);
+}
+
+bool uses_symmetric_allocator(const CannRuntimeApi& api, bool symmetric) {
+    return symmetric && api.allocate_symmetric_device != nullptr &&
+        api.free_symmetric_device != nullptr;
+}
+
+int free_device(
+    const CannRuntimeApi& api, void* pointer, bool symmetric) {
+    if (symmetric && api.free_symmetric_device != nullptr)
+        return api.free_symmetric_device(api.user_data, pointer);
+    return api.free_device(api.user_data, pointer);
 }
 
 bool valid_stream_api(const StreamEventApi& api) {
@@ -77,6 +98,14 @@ int runtime_free(void*, void* pointer) {
     return aclrtFree(pointer);
 }
 
+int runtime_allocate_symmetric(void*, std::uint64_t bytes, void** pointer) {
+    return static_cast<int>(HcommMemAlloc(pointer, static_cast<std::size_t>(bytes)));
+}
+
+int runtime_free_symmetric(void*, void* pointer) {
+    return static_cast<int>(HcommMemFree(pointer));
+}
+
 int runtime_synchronize_stream(void*, void* stream) {
     return aclrtSynchronizeStream(static_cast<aclrtStream>(stream));
 }
@@ -107,7 +136,8 @@ CannRuntimeApi make_cann_runtime_api() {
 #if DEEP_EP_ASCEND_HAS_CANN_RUNTIME
     return {nullptr, runtime_allocate, runtime_zero, runtime_free,
             runtime_synchronize_stream, runtime_synchronize_device,
-            runtime_copy_from_host, runtime_copy_to_host};
+            runtime_copy_from_host, runtime_copy_to_host,
+            runtime_allocate_symmetric, runtime_free_symmetric};
 #else
     return {};
 #endif
@@ -198,7 +228,8 @@ TransportStatus CannRuntimeResources::initialize_impl(
     comm_stream_ = comm_stream;
     status = allocate(
         static_cast<std::uint64_t>(config.device_buffer_bytes),
-        elastic::kPublicElasticBufferAlignment, &window_, "allocate_window");
+        elastic::kPublicElasticBufferAlignment, &window_, "allocate_window",
+        true);
     if (!status.ok()) {
         (void)destroy();
         return status;
@@ -234,7 +265,7 @@ TransportStatus CannRuntimeResources::initialize_impl(
     }
     status = allocate(
         workspace_bytes, elastic::kAscendElasticAlignment, &workspace_,
-        "allocate_workspace");
+        "allocate_workspace", false);
     if (!status.ok()) {
         (void)destroy();
         return status;
@@ -245,15 +276,21 @@ TransportStatus CannRuntimeResources::initialize_impl(
 
 TransportStatus CannRuntimeResources::allocate(
     std::uint64_t bytes, std::uint64_t alignment,
-    CannRuntimeAllocation* allocation, const char* operation) {
+    CannRuntimeAllocation* allocation, const char* operation,
+    bool symmetric) {
     if (allocation == nullptr || bytes == 0 || alignment == 0 ||
         (alignment & (alignment - 1)) != 0 ||
         bytes > std::numeric_limits<std::uint64_t>::max() - (alignment - 1))
         return TransportStatus::invalid(operation, "invalid allocation size");
-    const auto owner_bytes = bytes + alignment - 1;
+    const bool use_symmetric_allocator =
+        uses_symmetric_allocator(runtime_api_, symmetric);
+    // HcommMemAlloc provides a device address accepted by HcclCommMemReg and
+    // keeps DeepEP's public-window allocator contract unchanged.
+    const auto owner_bytes = use_symmetric_allocator ? bytes :
+        bytes + alignment - 1;
     void* owner = nullptr;
-    int result = runtime_api_.allocate_device(
-        runtime_api_.user_data, owner_bytes, &owner);
+    int result = allocate_device(
+        runtime_api_, owner_bytes, &owner, use_symmetric_allocator);
     if (result != 0)
         return backend_failure(operation, result);
     if (owner == nullptr)
@@ -261,14 +298,16 @@ TransportStatus CannRuntimeResources::allocate(
             operation, 0, "CANN returned a null device allocation");
 
     const auto address = reinterpret_cast<std::uintptr_t>(owner);
-    const auto aligned_address = (address + alignment - 1) & ~(alignment - 1);
+    const auto aligned_address = use_symmetric_allocator ? address :
+        (address + alignment - 1) & ~(alignment - 1);
     void* aligned = reinterpret_cast<void*>(aligned_address);
     result = runtime_api_.zero_device(runtime_api_.user_data, aligned, bytes);
     if (result != 0) {
-        (void)runtime_api_.free_device(runtime_api_.user_data, owner);
+        (void)free_device(runtime_api_, owner, use_symmetric_allocator);
         return backend_failure(operation, result);
     }
-    *allocation = {owner, aligned, owner_bytes, bytes};
+    *allocation = {owner, aligned, owner_bytes, bytes,
+                   use_symmetric_allocator};
     return TransportStatus::success();
 }
 
@@ -277,8 +316,8 @@ void CannRuntimeResources::free_allocation(
     TransportStatus& first_error) {
     if (allocation.owner == nullptr)
         return;
-    const int result = runtime_api_.free_device(
-        runtime_api_.user_data, allocation.owner);
+    const int result = free_device(
+        runtime_api_, allocation.owner, allocation.symmetric);
     if (result != 0) {
         retain_first(backend_failure(operation, result), first_error);
         return;

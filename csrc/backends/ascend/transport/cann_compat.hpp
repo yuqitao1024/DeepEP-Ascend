@@ -5,7 +5,11 @@
 
 namespace deep_ep::ascend::transport::cann_abi {
 
-inline constexpr std::uint32_t kCompatibilityVersion = 0x00090200U;
+// CANN 9.3.0 / HCOMM ABI generation.  This backend intentionally targets
+// 9.3 only; accepting the 9.2 marker would allow a mixed-version device
+// context to pass validation and fail later inside HCOMM.
+inline constexpr std::uint32_t kCompatibilityVersion = 0x00090300U;
+inline constexpr std::uint32_t kHcommChannelVersion = 5U;
 inline constexpr std::uint32_t kUbcCtpProtocol = 4U;
 inline constexpr std::uint32_t kDefaultQueueIndex = 0U;
 inline constexpr std::uint32_t kUrmaWriteOpcode = 3U;

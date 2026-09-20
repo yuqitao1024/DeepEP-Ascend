@@ -40,7 +40,7 @@ The first functional transport supports:
 
 ### In scope
 
-- CANN 9.2.0 on `dav-3510`;
+- CANN 9.3.0 on Ascend 950;
 - single-host, multi-NPU communication;
 - the public HCCL team, window, and channel resource APIs;
 - UBC_CTP channels owned by the AIV communication engine;
@@ -68,12 +68,11 @@ behavior and no corresponding capability bits.
 
 ## CANN Reference Findings
 
-CANN 9.2.0 exposes host resource creation through:
+CANN 9.3.0 exposes host resource creation through:
 
-- `HcclWorldTeamCreate`;
-- `HcclTeamWindowRegister`;
-- `HcclTeamChannelsCreate`;
-- the matching deregistration and destruction functions.
+- `HcclTeamCreate`;
+- `HcclCommSymWinGet`;
+- the matching team destruction and symmetric-memory free functions.
 
 The generated team and window handles refer to device-visible descriptors.
 AIN resolves a peer channel from the team's contiguous channel table and
@@ -184,7 +183,7 @@ layouts required to read:
   producer/consumer counters;
 - UBC_CTP SQE, SGE, and CQE fields used by write, inline write, and FAA.
 
-The definitions are versioned for CANN 9.2.0 and `dav-3510`. Tests enforce
+The definitions are versioned for CANN 9.3.0 and `dav-3510`. Tests enforce
 structure sizes, alignments, and offsets against the CANN package. A mismatch
 is a build or initialization failure, never a best-effort continuation.
 
@@ -203,7 +202,8 @@ Initialization proceeds in this order:
 1. Validate communicator rank and size against `TransportConfig`.
 2. Create a world team with the synchronization memory required by channel zero
    signals and barrier session zero.
-3. Register the symmetric device buffer as the team window.
+3. Query the symmetric arena window and offset for the device buffer with
+   `HcclCommSymWinGet`.
 4. Create at least one AIV UBC_CTP channel per non-local peer.
 5. Allocate and zero the command buffer, service state, and diagnostic buffer.
 6. Export the device team handle, window handle, local window base, topology,
@@ -481,7 +481,7 @@ No CUDA source, link option, or runtime behavior changes in Phase 2D.
 
 - backend-neutral facade ABI remains unchanged;
 - production device code has no `asc/impl` include;
-- compatibility layouts match CANN 9.2.0 sizes and offsets;
+- compatibility layouts match CANN 9.3.0 sizes and offsets;
 - communicator, team, window, and channel validation reports structured errors;
 - partial initialization and repeated destruction release resources once;
 - deferred capability bits remain disabled.
@@ -603,7 +603,7 @@ Phase 2D's minimal transport layer is complete when:
 
 1. host resources are created and destroyed exclusively through supported CANN
    host APIs;
-2. the backend-owned compatibility layouts pass CANN 9.2.0 ABI checks;
+2. the backend-owned compatibility layouts pass CANN 9.3.0 ABI checks;
 3. the mixed SIMT-command/AICore-service boundary and its required hardware
    primitives are proven by compile and runtime probes;
 4. put, 64-bit put-value, 64-bit FAA, signal, flush, and barrier pass the

@@ -247,6 +247,16 @@ int register_window(
     return 0;
 }
 
+int get_symmetric_window(
+    void* data, std::int64_t, void* base, std::uint64_t,
+    std::uintptr_t* window, std::uint64_t* offset) {
+    auto& trace = self(data);
+    trace.registered_window = base;
+    *window = 0;
+    *offset = 0;
+    return 0;
+}
+
 int host_allocate(void* data, std::uint64_t bytes, void** pointer) {
     auto& trace = self(data);
     *pointer = std::malloc(static_cast<std::size_t>(bytes));
@@ -294,6 +304,7 @@ int destroy_team(void* data, std::uintptr_t) {
 
 transport::CannHostApi host_api(Trace& trace) {
     return {&trace, get_rank, get_size, create_team, register_window,
+            get_symmetric_window,
             host_allocate, host_zero, host_copy_to_device,
             host_copy_from_device, host_free, deregister_window, destroy_team};
 }

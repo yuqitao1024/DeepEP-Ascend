@@ -26,6 +26,8 @@ struct CannRuntimeApi {
     int (*synchronize_device)(void*) = nullptr;
     int (*copy_from_host)(void*, void*, const void*, std::uint64_t) = nullptr;
     int (*copy_to_host)(void*, void*, const void*, std::uint64_t) = nullptr;
+    int (*allocate_symmetric_device)(void*, std::uint64_t, void**) = nullptr;
+    int (*free_symmetric_device)(void*, void*) = nullptr;
 };
 
 CannRuntimeApi make_cann_runtime_api();
@@ -35,6 +37,7 @@ struct CannRuntimeAllocation {
     void* aligned = nullptr;
     std::uint64_t owner_bytes = 0;
     std::uint64_t bytes = 0;
+    bool symmetric = false;
 };
 
 class CannRuntimeResources {
@@ -88,7 +91,8 @@ private:
         const StreamEventApi& stream_event_api);
     transport::TransportStatus allocate(
         std::uint64_t bytes, std::uint64_t alignment,
-        CannRuntimeAllocation* allocation, const char* operation);
+        CannRuntimeAllocation* allocation, const char* operation,
+        bool symmetric = false);
     void free_allocation(
         CannRuntimeAllocation& allocation, const char* operation,
         transport::TransportStatus& first_error);

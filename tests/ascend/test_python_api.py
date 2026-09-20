@@ -279,6 +279,11 @@ def _install_fake_torch(platform, events):
                      if gathered is not None else [value] * len(output))
 
     distributed.all_gather_object = all_gather_object
+    distributed.get_global_rank = lambda group, rank: rank
+    def broadcast_object_list(payload, src, group):
+        payload[0] = payload[0] if payload[0] is not None else b"root-info"
+        events.append(("dist.broadcast_object_list", src))
+    distributed.broadcast_object_list = broadcast_object_list
     torch.distributed = distributed
 
     sys.modules["torch"] = torch
@@ -473,6 +478,7 @@ def _install_fake_extension(platform, events):
             raise _transport_error("calculate_elastic_buffer_size")
         return 2 * 1024 * 1024 if platform == "ascend" else 8192
 
+
     extension.EventHandle = EventHandle
     extension.ElasticBuffer = ElasticRuntime
     extension.calculate_elastic_buffer_size = calculate_elastic_buffer_size
@@ -499,6 +505,8 @@ def _install_fake_extension(platform, events):
         extension.create_nccl_comm = create_nccl_comm
         extension.create_cpu_handle = lambda num_bytes: (
             events.append(("extension.create_cpu_handle", num_bytes)) or (101, 202))
+    else:
+        extension.get_hccl_root_info = lambda: b"root-info"
         extension.get_physical_domain_size = lambda handle: (2, 4)
         extension.get_logical_domain_size = lambda handle, hybrid: (2, 4)
 
@@ -729,8 +737,8 @@ def _scenario_ascend_construction():
     assert len(extension.runtime_args) == 1
     runtime_args = extension.runtime_args[0]
     assert runtime_args[:6] == (
-        1, 2, 4242, [], 2 * 1024 * 1024, 0)
-    assert runtime_args[9:11] == (3, 0)
+        1, 2, b"root-info", [], 2 * 1024 * 1024, 0)
+    assert runtime_args[10:12] == (3, 0)
     assert "group.barrier" not in events
     assert events.count("runtime.get_logical_domain_size") == 1
     assert events.count("runtime.get_physical_domain_size") == 1
@@ -2503,8 +2511,9 @@ def _scenario_cuda_preservation():
         group, num_bytes=0, explicitly_destroy=True)
     assert zero_buffer.num_bytes == 0
     zero_runtime_args = extension.runtime_args[-1]
-    assert zero_runtime_args[:6] == (5, 8, 4242, [], 0, 0)
-    assert zero_runtime_args[9:11] == (7, 129)
+    assert zero_runtime_args[:6] == (
+        5, 8, 4242, [], 0, 0)
+    assert zero_runtime_args[10:12] == (7, 129)
     zero_buffer.destroy()
     events.clear()
 
@@ -2531,7 +2540,7 @@ def _scenario_cuda_preservation():
 
     runtime_args = extension.runtime_args[-1]
     assert runtime_args[:6] == (5, 8, 4242, [], 4096, 0)
-    assert runtime_args[9:11] == (7, 129)
+    assert runtime_args[10:12] == (7, 129)
     assert buffer.nccl_comm_handle is buffer.comm_handle
     assert buffer.num_allocated_qps == 129
     assert (buffer.num_scaleout_ranks, buffer.num_scaleup_ranks) == (2, 4)
