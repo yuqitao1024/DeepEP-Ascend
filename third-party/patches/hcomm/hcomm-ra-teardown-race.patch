@@ -1,0 +1,58 @@
+diff --git a/src/coll_communicator_mgr/rank_info_detect/rank_info_detect.cc b/src/coll_communicator_mgr/rank_info_detect/rank_info_detect.cc
+index 698ae2c62..6f5aea997 100644
+--- a/src/coll_communicator_mgr/rank_info_detect/rank_info_detect.cc
++++ b/src/coll_communicator_mgr/rank_info_detect/rank_info_detect.cc
+@@ -104,6 +104,6 @@ HcclResult RankInfoDetect::SetupServer(HcclRootHandleV2& rootHandle)
+     // 4. 拉起线程，调用RankInfoDetectService.Run()，注意新线程中需要HrtSetDevice
+     std::thread threadHandle(
+-        &RankInfoDetect::SetupRankInfoDetectService, this, hrtErrMGetErrorContextPub(), serverSocket, devLogicId_,
++        &RankInfoDetect::SetupRankInfoDetectService, hrtErrMGetErrorContextPub(), serverSocket, devLogicId_,
+         devPhyId_, identifier_, wlistInfo_);
+     threadHandle.detach();
+
+diff --git a/src/coll_communicator_mgr/rank_info_detect/rank_info_detect.h b/src/coll_communicator_mgr/rank_info_detect/rank_info_detect.h
+index b5c74baf4..90035d666 100644
+--- a/src/coll_communicator_mgr/rank_info_detect/rank_info_detect.h
++++ b/src/coll_communicator_mgr/rank_info_detect/rank_info_detect.h
+@@ -50,7 +50,7 @@ private:
+     vector<RaSocketWhitelist> wlistInfo_{};
+     std::string identifier_{};
+     std::shared_ptr<RankInfoDetectClient> rankInfoDetectClient;
+-    void SetupRankInfoDetectService(
++    static void SetupRankInfoDetectService(
+         ErrContextPub errorContext, shared_ptr<Socket> serverSocket, s32 devLogicId, u32 devPhyId,
+         std::string identifier, vector<RaSocketWhitelist> wlistInfo);
+     std::shared_ptr<Socket> ServerInit();
+
+diff --git a/src/coll_communicator_mgr/rank_info_detect/rank_info_detect_client.cc b/src/coll_communicator_mgr/rank_info_detect/rank_info_detect_client.cc
+index 76efba2c8..70f351f15 100644
+--- a/src/coll_communicator_mgr/rank_info_detect/rank_info_detect_client.cc
++++ b/src/coll_communicator_mgr/rank_info_detect/rank_info_detect_client.cc
+@@ -8,7 +8,6 @@
+  * See LICENSE in the root of the software repository for the full text of the License.
+  */
+ 
+-#include <thread>
+ #include <cstdlib>
+ #include <fstream>
+ #include <limits.h>
+@@ -956,13 +955,13 @@ void RankInfoDetectClient::TearDown()
+     // deinit handle
+     HostSocketHandleManager::GetInstance().Destroy(devPhyId_, clientSocket_->GetLocalIp());
+ 
+-    // deinit ra in detach thread to avoid block main thread
++    // Release RA resources before this client is destroyed. The server-side
++    // rank-info worker remains asynchronous, so this cleanup must not capture
++    // or call back into the client object.
+     s32 deviceLogicId = HrtGetDevice();
+-    std::thread{[deviceLogicId]() {
+-        EXCEPTION_CATCH(
+-            HccpPeerManager::GetInstance().DeInit(deviceLogicId),
+-            HCCL_ERROR("[RankInfoDetectClient::TearDown] DeInit exception"));
+-    }}.detach();
++    EXCEPTION_CATCH(
++        HccpPeerManager::GetInstance().DeInit(deviceLogicId),
++        HCCL_ERROR("[RankInfoDetectClient::TearDown] DeInit exception"));
+ 
+     HCCL_INFO("[RankInfoDetectClient::%s] end.", __func__);
+ }

@@ -38,7 +38,9 @@ from tests.utils.ep_benchmark_manifest import (
 
 
 BF16_TOLERANCE = 1 / 128
-NUM_SMS = 56
+# Kept as a test-harness fallback only.  Real runs resolve this from
+# aclrtGetDeviceInfo(AICORE_CORE_NUM) and use AICore * 2.
+NUM_SMS = 64
 NUM_QPS = 0
 WORK_COUNT_KEYS = frozenset({
     "input_tokens",
@@ -1418,11 +1420,18 @@ def run_benchmark(args: Any, selected_case_ids: tuple[str, ...]) -> int:
     import torch_npu
 
     import deep_ep
-    from deep_ep.utils.envs import init_seed
+    from deep_ep.utils.envs import get_ascend_aiv_count, init_seed
 
     del torch_npu
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.npu.set_device(local_rank)
+    device_aiv_count = get_ascend_aiv_count(local_rank)
+    if args.num_sms is None:
+        args.num_sms = device_aiv_count
+    elif args.num_sms > device_aiv_count:
+        raise ValueError(
+            f"--num-sms={args.num_sms} exceeds device AIV count "
+            f"{device_aiv_count}")
     dist.init_process_group(backend="hccl", timeout=timedelta(minutes=5))
     group = dist.group.WORLD
     rank = dist.get_rank(group)

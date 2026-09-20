@@ -29,12 +29,19 @@ from ..utils.envs import (
     check_fast_rdma_atomic_support,
     check_nvlink_connections, check_torch_deterministic,
     get_nvlink_gbs, get_rdma_gbs, preflight_ascend_contract,
-    preflight_ascend_topology
+    preflight_ascend_topology, get_ascend_aiv_count
 )
 
 
 _ASCEND_DEVICE_TRANSPORT_CAPABILITIES = 0x775
-_ASCEND_MAX_DATA_BLOCKS = 56
+_ASCEND_MAX_DATA_BLOCKS = 64
+
+
+def _ascend_max_data_blocks() -> int:
+    try:
+        return get_ascend_aiv_count()
+    except RuntimeError:
+        return _ASCEND_MAX_DATA_BLOCKS
 
 
 class EPHandle:
@@ -696,7 +703,7 @@ class ElasticBuffer:
         if capturing:
             scalar_error = "unsupported_graph_capture"
         elif (not isinstance(num_sms, int) or num_sms < 1 or
-              num_sms > _ASCEND_MAX_DATA_BLOCKS or num_qps != 0 or
+              num_sms > _ascend_max_data_blocks() or num_qps != 0 or
               ((self.allow_hybrid_mode or self.num_scaleout_ranks > 1) and
                num_sms != 1)):
             scalar_error = "invalid_launch_configuration"
@@ -821,7 +828,7 @@ class ElasticBuffer:
         if capturing:
             scalar_error = "unsupported_graph_capture"
         elif (not isinstance(num_sms, int) or num_sms < 1 or
-              num_sms > _ASCEND_MAX_DATA_BLOCKS or num_qps != 0 or
+              num_sms > _ascend_max_data_blocks() or num_qps != 0 or
               ((self.allow_hybrid_mode or self.num_scaleout_ranks > 1) and
                num_sms != 1)):
             scalar_error = "invalid_launch_configuration"
@@ -1513,7 +1520,7 @@ class ElasticBuffer:
             if num_sms == 0:
                 num_sms = (1 if self.allow_hybrid_mode or
                            self.num_scaleout_ranks > 1 else
-                           _ASCEND_MAX_DATA_BLOCKS)
+                           _ascend_max_data_blocks())
             self._preflight_ascend_dispatch(
                 x, sf, topk_idx, topk_weights, handle, num_experts,
                 num_max_tokens_per_rank, expert_alignment, num_sms, num_qps,
@@ -1706,12 +1713,12 @@ class ElasticBuffer:
         else:
             num_sms = resolved_num_sms
             if (not isinstance(num_sms, int) or num_sms < 1 or
-                    num_sms > _ASCEND_MAX_DATA_BLOCKS or num_qps != 0 or
+                    num_sms > _ascend_max_data_blocks() or num_qps != 0 or
                     ((self.allow_hybrid_mode or self.num_scaleout_ranks > 1) and
                      num_sms != 1)):
                 raise RuntimeError(
                     'DeepEP Ascend backend: combine requires num_sms in '
-                    '[1, 56] for direct scale-up, num_sms=1 for hybrid or '
+                    '[1, 64] for direct scale-up, num_sms=1 for hybrid or '
                     'scale-out, and num_qps=0')
             if previous_event_before_epilogue is not None:
                 raise RuntimeError(

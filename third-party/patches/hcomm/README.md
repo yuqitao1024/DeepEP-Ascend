@@ -8,10 +8,26 @@ committed.
 
 - HCOMM repository baseline: `8c5d5ad081e763f981c237d8dfdb15faea292d6e`
 - Patch: `hcomm-team-window-deregister.patch`
+- Incremental patch: `hcomm-ra-teardown-race.patch`
 - Patch SHA256: `7394982ec1c5432b3fe15898974e64441ba5a24a2bf5c110e49bb758174a9329`
 - Compiler: `GCC: (Do-Compiler V100R001C30B0032) 7.3.0`
 - Patched `libhcomm.so` SHA256: `afb65298169b7810269322a32576429bcd67798a3336718a2642d2fb97332e77`
 - Full package SHA256: `33432305ed72929415d8aef825fd31927ffbda87972bed541b21b3f43cad5da9`
+
+The RA teardown fix is committed and pushed to the HCOMM fork as the single
+commit `0be69b346` on
+`fix/ra-teardown-race-953`. Apply the incremental patch after the lifecycle
+patch when reproducing the fixed tree:
+
+```bash
+git apply /path/to/hcomm-team-window-deregister.patch
+git apply /path/to/hcomm-ra-teardown-race.patch
+```
+
+It keeps the rank-info server asynchronous, but changes its thread entry to a
+static function so the detached worker never invokes a member function through
+a destroyed `RankInfoDetect` object. RA cleanup in `RankInfoDetectClient` stays
+synchronous and does not capture the client object.
 
 Apply the patch from a clean checkout at the baseline commit:
 

@@ -48,8 +48,10 @@ struct CoreTilingInput {
     CoreTopology topology{};
 };
 
-// One logical data block per physical AIV core on the target device.
-inline constexpr std::uint32_t kAscendMaxDataBlocks = 56;
+// One logical data block per physical AIV core on the target device.  Current
+// Ascend devices expose up to 64 AIVs; the Python layer selects the actual
+// device count at runtime while this bound sizes the static tiling ABI.
+inline constexpr std::uint32_t kAscendMaxDataBlocks = 64;
 inline constexpr std::uint32_t kCoreTilingAbiVersion = 21;
 inline constexpr std::uint64_t kDirectDeviceIndexLimit = 0x7fffffffULL;
 

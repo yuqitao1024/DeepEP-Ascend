@@ -12,14 +12,15 @@ The deterministic case enumeration is defined in
 
 ## Ascend data-block profiles
 
-Ascend direct EP uses 72 AI Vector data blocks by default. Pass
-`--num-sms 1` for the compatibility baseline; values outside `[1, 56]` are
-rejected before the device runtime is imported. This setting does not change
-case IDs, workload routing, logical-byte formulas, or the workload fingerprint.
-The selected value is recorded as `device.num_sms` in `benchmark.json`.
+Ascend direct EP resolves the device's AI Vector data-block count at runtime
+as `AICore * 2` through `aclrtGetDeviceInfo(AICORE_CORE_NUM)`. Pass
+`--num-sms N` only to override it for a controlled comparison; the override
+must not exceed the device's reported AIV count. `--num-sms 1` remains the
+compatibility baseline. The selected value is recorded as `device.num_sms` in
+`benchmark.json`.
 
-A short two-rank 1-versus-72 measurement uses the same workload manifest and
-case ID for both runs:
+A short two-rank one-block-versus-device-AIV measurement uses the same
+workload manifest and case ID for both runs:
 
 ```bash
 CASE=ep-bf16-align128-bias0-hcopy1-prev0-async0-alloc0
@@ -28,14 +29,14 @@ torchrun --standalone --nproc-per-node=2 \
   tests/ascend/benchmark/bench_ep.py \
   --num-tokens 16 --hidden 128 --num-topk 2 --num-experts 8 \
   --cases "$CASE" --num-sms 1 --warmups 1 --iterations 3 \
-  --dump-manifest /tmp/ascend-56aiv-workload.json \
+  --dump-manifest /tmp/ascend-aiv-workload.json \
   --output /tmp/ascend-1block.json
 
 torchrun --standalone --nproc-per-node=2 \
   tests/ascend/benchmark/bench_ep.py \
-  --workload-manifest /tmp/ascend-56aiv-workload.json \
-  --cases "$CASE" --num-sms 56 --warmups 1 --iterations 3 \
-  --output /tmp/ascend-72block.json
+  --workload-manifest /tmp/ascend-aiv-workload.json \
+  --cases "$CASE" --warmups 1 --iterations 3 \
+  --output /tmp/ascend-aiv-block.json
 ```
 
 Compact combine and expanded combine with multiple reduction use the split
@@ -291,7 +292,8 @@ DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace
 
 Keep the environment exports and build/run command in the same TaskQueue
 shell. The benchmark initializes HCCL, maps `LOCAL_RANK` to the local NPU,
-uses `allow_hybrid_mode=False`, defaults to `num_sms=56`, keeps `num_qps=0`,
+uses `allow_hybrid_mode=False`, resolves `num_sms` from the device AIV count,
+keeps `num_qps=0`,
 and destroys the buffer before the process group. Here `num_qps=0` means the
 CUDA QP tuning argument is unused; HCOMM still owns the Ascend communication
 resources.
@@ -323,7 +325,7 @@ DEEP_EP_PLATFORM=ascend python setup.py build_ext --inplace &&
 python -m torch.distributed.run --standalone --nproc-per-node=2 \
   tests/ascend/benchmark/bench_ep.py \
   --num-tokens 16 --hidden 128 --num-topk 2 --num-experts 4 \
-  --num-sms 56 --warmups 1 --iterations 1 \
+  --num-sms 64 --warmups 1 --iterations 1 \
   --output /tmp/ascend-ep2-performance-smoke.json
 '
 ```

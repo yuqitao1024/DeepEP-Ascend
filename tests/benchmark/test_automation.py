@@ -93,7 +93,7 @@ def complete_report(platform, profile_name, device_name):
     ]
     device = {"name": device_name}
     if platform == "ascend":
-        device.update(num_sms=profile.ascend_num_sms, num_qps=0)
+        device.update(num_sms=profile.ascend_num_sms or 64, num_qps=0)
     return {
         "schema_version": SCHEMA_VERSION,
         "formula_version": 1,
@@ -203,10 +203,8 @@ def test_representative_report_requires_one_case_and_five_operations():
     ("device", "field"),
     (
         ({"name": "Ascend 950"}, "device.num_sms"),
-        (
-            {"name": "Ascend 950", "num_sms": 1, "num_qps": 0},
-            "device.num_sms",
-        ),
+        ({"name": "Ascend 950", "num_sms": 0, "num_qps": 0},
+         "device.num_sms"),
         (
             {"name": "Ascend 950", "num_sms": 72, "num_qps": 1},
             "device.num_qps",
@@ -1028,7 +1026,7 @@ def test_ascend_command_uses_current_python_distributed_launcher_and_staging_onl
     assert ("--num-experts", "8") in pairs
     assert ("--warmups", "1") in pairs
     assert ("--iterations", "1") in pairs
-    assert ("--num-sms", "72") in pairs
+    assert "--num-sms" not in pairs
     assert ("--workload-manifest", str(manifest)) in pairs
     assert ("--output", str(staging)) in pairs
     assert "benchmark.json" not in command

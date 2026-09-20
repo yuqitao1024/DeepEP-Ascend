@@ -1,4 +1,5 @@
 import functools
+import ctypes
 import inspect
 import json
 import os
@@ -19,6 +20,31 @@ AscendHybridPreflightRecord = Tuple[str, int, str, str]
 _local_rank = None
 _local_seed = 0
 _global_seed = 0
+_ACL_DEV_ATTR_AICORE_CORE_NUM = 101
+
+
+@functools.lru_cache(maxsize=None)
+def get_ascend_aiv_count(device_index: int | None = None) -> int:
+    """Return the device AIV count as AICore count multiplied by two."""
+    if device_index is None:
+        device_index = int(os.environ.get("LOCAL_RANK", "0"))
+    value = ctypes.c_int64()
+    try:
+        runtime = ctypes.CDLL("libascendcl.so")
+        runtime.aclrtGetDeviceInfo.argtypes = [
+            ctypes.c_uint32, ctypes.c_int, ctypes.POINTER(ctypes.c_int64)]
+        runtime.aclrtGetDeviceInfo.restype = ctypes.c_int
+        result = runtime.aclrtGetDeviceInfo(
+            ctypes.c_uint32(device_index),
+            ctypes.c_int(_ACL_DEV_ATTR_AICORE_CORE_NUM),
+            ctypes.byref(value))
+    except (OSError, AttributeError) as error:
+        raise RuntimeError("unable to load Ascend runtime device-info API") from error
+    if result != 0 or value.value <= 0:
+        raise RuntimeError(
+            f"aclrtGetDeviceInfo(AICORE_CORE_NUM) failed: ret={result}, "
+            f"device={device_index}")
+    return int(value.value) * 2
 
 
 class _AscendTopologyConfigError(Exception):

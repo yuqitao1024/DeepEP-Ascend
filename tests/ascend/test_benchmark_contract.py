@@ -658,7 +658,7 @@ def test_benchmark_parser_preserves_production_size_defaults():
     assert args.warmups == 30
     assert args.iterations == 30
     assert args.allow_multiple_reduction == 1
-    assert args.num_sms == 56
+    assert args.num_sms is None
     assert args.profile_stages is False
 
 
@@ -679,15 +679,14 @@ def test_stage_profile_environment_is_enabled_only_on_request(monkeypatch):
     assert os.environ[name] == "1"
 
 
-def test_benchmark_parser_accepts_one_and_56_data_blocks():
+def test_benchmark_parser_accepts_positive_data_blocks():
     parser = build_parser()
 
     assert parser.parse_args(["--num-sms", "1"]).num_sms == 1
     assert parser.parse_args(["--num-sms", "56"]).num_sms == 56
+    assert parser.parse_args(["--num-sms", "72"]).num_sms == 72
     with pytest.raises(SystemExit):
         parser.parse_args(["--num-sms", "0"])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--num-sms", "57"])
 
 
 def test_default_selection_contains_all_current_supported_cases():

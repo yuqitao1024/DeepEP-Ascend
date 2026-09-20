@@ -93,7 +93,8 @@ def identify_profile(report: dict) -> BenchmarkProfile:
                 platform != "ascend"
                 or (
                     isinstance(device, dict)
-                    and device.get("num_sms") == profile.ascend_num_sms
+                    and isinstance(device.get("num_sms"), int)
+                    and device.get("num_sms") > 0
                     and device.get("num_qps") == 0
                 )
             )
@@ -194,9 +195,8 @@ def validate_complete_report(
         if not isinstance(name, str) or "h800" not in name.lower():
             raise ValueError("device.name")
     if platform == "ascend":
-        _require_equal(
-            device.get("num_sms"), profile.ascend_num_sms, "device.num_sms"
-        )
+        if not isinstance(device.get("num_sms"), int) or device.get("num_sms") <= 0:
+            raise ValueError("device.num_sms")
         _require_equal(device.get("num_qps"), 0, "device.num_qps")
 
     expected_cases = profile_cases(profile)

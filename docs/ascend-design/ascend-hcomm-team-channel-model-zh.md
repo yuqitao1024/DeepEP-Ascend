@@ -10,7 +10,9 @@
 
 - **API/ABI 事实**：来自仓库使用的 CANN 头文件、历史提交和 DeepEP 已验证实现；
 - **运行时观察**：来自 NPU4Px2、NPU8P/NPU8P-ALT 的实际探测结果；
-- **已验证判断**：9.3 的 DeepEP 适配方向已在 NPU8P-ALT 的设备 0/1 上完成 2-rank 资源建立验证；payload 传输仍需接入 DeepEP AICore service 后验证。
+- **已验证判断**：9.3 的 DeepEP 适配方向已在 NPU8P-ALT 的设备 0/1 上完成
+  2-rank 资源建立、payload URMA case 和重复构造/销毁验证；完整 DeepEP
+  8-rank benchmark 仍属于设备资源空闲后的验收项。
 - **2026-09-19 更新**：2-rank put、put-value64、faa64、signal、
    signal-set、flush、async-lifecycle、payload-signal-order、
    barrier-repeat 和 teardown 已通过。9.3 的 AIV channel 不能调用
@@ -915,6 +917,20 @@ channel 表，也不能把业务 MR 先于 command/sync MR 注销。
 5. AIV channel 交给 communicator teardown。业务侧只需停止使用 handle
    并清空自建表。
 
+### 5.7.1 已定位的 HCOMM 问题与修复状态
+
+此前验证中出现过两类容易混淆的问题：
+
+| 现象 | 根因 | 修复/当前结论 |
+| --- | --- | --- |
+| `WaitSocketReady -> wait UB Memory LSA ring socket ready timeout -> RegisterWindow ret[9]` | 重复生命周期中的 team/window/channel 仍复用旧的 memory generation，旧 AIV channel 保留了第一轮同步内存；同时不能依赖 9.3 AIV 的 in-place `UpdateMemInfo` | 旧生命周期 patch 已按 memory version 建立 channel generation，保留历史 channel 到通信域销毁；重复构造/销毁验证通过 |
+| `HCOMM global deinit` 阶段 `SIGSEGV` | rank-info server 线程以已析构 `RankInfoDetect` 对象的成员函数作为入口，异步线程可能通过悬空 `this` 访问对象生命周期 | HCOMM 增量修复 `0be69b346` 将 server 线程入口改为静态函数并保留异步服务；client RA `DeInit()` 同步执行，避免 RA 与全局资源析构并发；增量 patch 见 `third-party/patches/hcomm/hcomm-ra-teardown-race.patch` |
+| 9.3 AIV 调用 `HcclChannelDestroy` 返回 backend=5 | 不是资源泄漏或随机失败，而是 9.3 明确限制 AIV channel 由 communicator 管理 | DeepEP 已改为停止 service、drain SQ/CQ、释放自建 staged 资源，最后交给 communicator teardown |
+
+截至本次记录，以上 HCOMM 层阻塞问题均已有对应修复或明确生命周期规约。
+自编译修复版 HCOMM 已通过 8-rank、3 次构造/销毁回归且无 SIGSEGV；尚未
+宣称完整 DeepEP 8-rank 性能验收已经完成。
+
 ### 5.8 共享队列
 
 9.3 team 描述和 channel 配置都提供共享队列能力。`HcclChannelConfig` 的
@@ -1175,14 +1191,14 @@ DeepEP 9.2 的设备侧通信实现依赖三个强假设：
 ## 8. 尚待验证的问题
 
 资源建立路径已经验证成功；2-rank 探针已经确认 AIV/UBC_CTP channel、业务
-MR、SQ/CQ、remote EID 和 token 都可被读出。以下问题仍需在 DeepEP 生产
-路径中验证：
+MR、SQ/CQ、remote EID 和 token 都可被读出。HCOMM 生命周期问题已闭环，
+剩余项目属于 DeepEP 集成验收：
 
 1. AICore service 直接消费 `HcclChannelAcquire` 返回的 `ChannelEntity*`；
 2. remote 业务 MR 的地址与对称 offset 的组合方式；
 3. signal/barrier 的同步内存来源：显式注册同步 MR，或复用 HCCL 内部资源；
 4. 多 peer、多 channel 的资源布局和并发策略；
-5. AIV channel 与 communicator teardown 的完整资源释放行为（已确认不能调用 `HcclChannelDestroy`，还需在更多 rank 数下回归）；
+5. AIV channel 与 communicator teardown 在 8-rank DeepEP 生产路径中的完整回归（HCOMM 独立生命周期测试已通过）；
 6. 完整 write/inline write/FAA payload 传输和 flush/drain 语义；
 7. 8-rank 典型 case 的功能与性能。
 
@@ -1235,3 +1251,4 @@ MR、SQ/CQ、remote EID 和 token 都可被读出。以下问题仍需在 DeepEP
 - NPU8P-ALT CANN 9.3.0：手工 HCOMM endpoint/channel 路径停在 `CONNECTING`。
 - NPU8P-ALT CANN 9.3.0：设备 0/1 上已验证 `HcclCommMemReg → HcclRankGraphGetLinks → HcclChannelAcquire` 返回可用 AIV/UBC_CTP `ChannelEntity`，并读取出业务 MR、SQ/CQ 和 token。
 - NPU8P-ALT CANN 9.3.0：设备 0/1 上已通过完整 2-rank URMA case 列表；`HcclChannelDestroy` 对 AIV channel 返回 backend=5，PTO `Finalize()` 参考实现同样不销毁 AIV channel。
+- HCOMM `0be69b346`：rank-info server 使用静态异步线程入口，去掉已析构 `RankInfoDetect::this`；client RA `DeInit()` 同步完成，避免 global deinit 阶段资源并发释放。

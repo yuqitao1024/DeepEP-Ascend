@@ -334,6 +334,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_direct_device_hot_path_uses_32_bit_control_indices(self):
         """Keeps shape iteration narrow while addresses and offsets stay wide."""
+        self.assertIn(
+            "kAscendMaxDataBlocks = 64",
+            (ELASTIC / "tiling.hpp").read_text(),
+            "C++ launch validation must accept the runtime AICore*2 count")
         kernels = (ELASTIC / "kernels.hpp").read_text()
         grid_begin = kernels.index("struct DirectDataGridStride")
         grid_end = kernels.index(
