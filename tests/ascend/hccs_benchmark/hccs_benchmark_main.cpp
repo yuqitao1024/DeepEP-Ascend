@@ -360,7 +360,7 @@ deep_ep_hccs_benchmark_representative_record_bytes() {
     input.num_max_tokens_per_rank = 8192;
     input.num_scale_factor_packs = 7168 / 128;
     input.scale_factor_pack_bytes = sizeof(float);
-    input.data_num_blocks = 72;
+    input.data_num_blocks = 56;
     input.topology.world_rank = 0;
     input.topology.world_size = 8;
     input.topology.scale_up_rank = 0;

@@ -92,6 +92,20 @@ The output is `build/hccs-benchmark/hccs_benchmark.so`.
 
 ## Run
 
+To rebuild and execute the complete reference matrix on one host, source the
+selected CANN/HCOMM environment, activate a Torch-NPU-capable Python
+environment, then run:
+
+```bash
+tests/ascend/hccs_benchmark/run_all.sh
+```
+
+The script writes results under `results/hccs-benchmark` by default. Override
+`HCCS_BENCHMARK_BUILD_DIR`, `HCCS_BENCHMARK_OUTPUT_DIR`,
+`HCCS_BENCHMARK_MASTER_PORT_BASE`, `HCCS_BENCHMARK_WARMUPS`, or
+`HCCS_BENCHMARK_ITERATIONS` as needed. It requires two and then eight healthy,
+idle NPU devices in the same shell environment.
+
 Choose unused master ports if these examples conflict with another distributed
 job. The commands below use 20 warmups and 50 measured iterations.
 
