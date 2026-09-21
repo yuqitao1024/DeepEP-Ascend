@@ -4,7 +4,8 @@
 
 P5 targets the remaining gap between the Ascend 950 production EP path and
 the available HCCS payload transport capability. The representative
-transport-only probe reaches `2535.046 GB/s`, while the retained P4 normal
+transport-only probe reaches `2601.679 GB/s` on the current CANN 9.3.0 / HCOMM
+environment, while the retained P4 normal
 Dispatch result reaches about `217.1 logical GB/s`. These values use different
 byte formulas and cannot be divided to obtain a hardware-efficiency number.
 They do establish that large contiguous HCOMM payload puts are not the first
@@ -136,6 +137,48 @@ The Ascend HCCS benchmark separates physical and software layers:
 | Independent-link extrapolation | 2927.775 aggregate GB/s | topology reference, not measured production bandwidth |
 | Representative transport-only | 0.903 ms, 2535.046 aggregate GB/s | production facade, command queue, service, put, flush, and CQ |
 | Full representative Dispatch | about 35.9-37.3 ms | includes all production preparation and consumer work |
+
+The CANN 9.2.0 table above is retained as historical evidence. The current
+validation environment is CANN 9.3.0 with the locally rebuilt HCOMM package.
+Its benchmark artifacts are committed under
+`tests/ascend/hccs_benchmark/results/cann-9.3.0/`. The key measurements are:
+
+| Probe | Result | Interpretation |
+| --- | ---: | --- |
+| One-way 64 MiB P2P | 52.433588 GB/s | average of both directions |
+| EP8 32 MiB/peer all-to-all | 2594.172740 aggregate GB/s | measured concurrent HCCS/HCOMM result |
+| Independent-link extrapolation | 2936.280928 aggregate GB/s | `8 * 7 * 52.433588`; not a measured production bandwidth |
+| Eight-rank contention factor | 88.35% | all-to-all divided by independent-link extrapolation |
+| Representative transport-only | 0.880306 ms, 2601.678822 aggregate GB/s | production facade, command queue, service, put, flush, and CQ |
+
+The router-aware model must not assume that every token is pushed to seven
+remote peers. For the fixed representative manifest, the mean number of unique
+remote destination ranks per token is:
+
+```text
+346,603 remote destinations / 65,536 tokens = 4.6294651
+```
+
+Thus the no-contention router-aware aggregate reference is:
+
+```text
+8 * 4.6294651 * 52.433588 GB/s = 1941.915726 GB/s
+```
+
+Applying the measured 88.35% eight-rank contention factor gives:
+
+```text
+1941.915726 GB/s * 0.883489 = 1715.661738 GB/s
+```
+
+This router-aware value is the correct fixed-workload link-level planning
+reference for Dispatch and Combine. It is not a public logical-bandwidth target
+because the benchmark logical-byte formulas include additional traffic and
+local work. The measured representative transport-only result
+(`2601.679 GB/s`) is higher because the nonuniform routing matrix allows the
+shorter peer transfers to fill the contention gaps; it is an upper data-plane
+measurement, not the uniform all-to-all model. The uniform all-to-all result
+remains the basis for the contention factor.
 
 The transport-only probe sends the representative remote payload matrix but
 excludes grouping, offsets, production record packing, control publication,

@@ -250,6 +250,33 @@ than the 32 MiB/peer all-to-all point. The two byte volumes are not identical,
 but the result shows no material penalty from representative rank imbalance at
 this message size.
 
+### CANN 9.3.0 validation
+
+The historical CANN 9.2.0 results above are retained for comparison. A fresh
+run on NPU8P-ALT with CANN 9.3.0 and the locally rebuilt HCOMM package is
+stored under `results/cann-9.3.0/`:
+
+| Probe | Mean | Aggregate GB/s |
+| --- | ---: | ---: |
+| 64 MiB P2P, average of both directions | 1.279883 ms | 52.433588 |
+| EP8 all-to-all, 32 MiB/peer | 0.724334 ms | 2594.172740 |
+| Representative transport-only | 0.880306 ms | 2601.678822 |
+
+The 9.3.0 independent-link reference is
+`8 * 7 * 52.433588 = 2936.280928 GB/s`, so the measured all-to-all
+contention factor is `2594.172740 / 2936.280928 = 88.35%`.
+The fixed representative routing manifest has only
+`4.6294651` unique remote destination ranks per token on average, not seven.
+Its router-aware reference is therefore:
+
+```text
+No contention: 8 * 4.6294651 * 52.433588 = 1941.915726 GB/s
+With measured contention: 1941.915726 * 0.883489 = 1715.661738 GB/s
+```
+
+The router-aware value is the link-level planning reference for Dispatch and
+Combine. It is not a replacement for the benchmark logical-bandwidth formula.
+
 ## Interpretation for DeepEP dispatch
 
 The representative full dispatch measurement used during this investigation
@@ -378,3 +405,12 @@ is in
 | `hccs_benchmark.hpp` | `1130d512c2484b6d830f412563b30162d02e5c8e25baf8a50a1f5a292afecf42` |
 | `hccs_benchmark_main.cpp` | `d52480ab4fdaf0e5b28e46f730886bf26ba22ac08851b0638475480bd5f9fb6c` |
 | `CMakeLists.txt` | `5476d8f31b944711e30996ca9e8c15cb59fc18519ff43f1efedbacab0d23ec37` |
+
+The CANN 9.3.0 result files committed with this benchmark have these hashes:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `results/cann-9.3.0/p2p-0-to-1.json` | `2b44f0dce9baa88a41658eeb1842942c3655ea357473698acf0fe255a265f419` |
+| `results/cann-9.3.0/p2p-1-to-0.json` | `276a42c4d95878bb9f2ea4ca21eb0c1c15cacdaa4f2a03c55050566064dd5e1b` |
+| `results/cann-9.3.0/all-to-all-ep8.json` | `206d364aad2e5aa269cb6f0b8096dfc222293e876b39e517a744d334422818d7` |
+| `results/cann-9.3.0/transport-only-ep8.json` | `6c57c8a9ca5507424ac168aef8425423758f3db54cc36758882fd7932bb00a95` |
