@@ -1391,46 +1391,38 @@ public:
         }
 #endif
 #if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
-        if (profile.acquire_peer_count != 0 &&
-            profile.acquire_peer_count <= 16) {
-            pybind11::list acquire_peer_diagnostics;
-            for (std::uint32_t index = 0;
-                 index < profile.acquire_peer_count; ++index) {
-                pybind11::dict peer_record;
-                peer_record["world_rank"] =
-                    profile.acquire_peer_world_rank[index];
-                peer_record["first_ready_cycles"] =
-                    profile.acquire_peer_first_ready_cycles[index];
-                acquire_peer_diagnostics.append(peer_record);
-            }
+        pybind11::list acquire_peer_diagnostics;
+        for (std::uint32_t index = 0;
+             index < profile.acquire_peer_count &&
+             index < 16; ++index) {
+            pybind11::dict peer_record;
+            peer_record["world_rank"] = profile.acquire_peer_world_rank[index];
+            peer_record["first_ready_cycles"] =
+                profile.acquire_peer_first_ready_cycles[index];
+            acquire_peer_diagnostics.append(peer_record);
+        }
+        if (!acquire_peer_diagnostics.empty())
             result["acquire_peer_diagnostics"] = acquire_peer_diagnostics;
-            result["acquire_wait_start_cycles"] =
-                profile.acquire_wait_start_cycles;
-            result["acquire_wait_end_cycles"] =
-                profile.acquire_wait_end_cycles;
-            result["acquire_vf_start_cycles"] =
-                profile.acquire_vf_start_cycles;
-            result["acquire_vf_end_cycles"] =
-                profile.acquire_vf_end_cycles;
-            result["validate_vf_start_cycles"] =
-                profile.validate_vf_start_cycles;
-            result["validate_vf_end_cycles"] =
-                profile.validate_vf_end_cycles;
-            if (profile.release_peer_publish_count != 0 &&
-                profile.release_peer_publish_count <= 16) {
-                pybind11::list release_peer_publish_diagnostics;
-                for (std::uint32_t destination_rank = 0;
-                     destination_rank < profile.release_peer_publish_count;
-                     ++destination_rank) {
-                    pybind11::dict peer_record;
-                    peer_record["world_rank"] = destination_rank;
-                    peer_record["publish_cycles"] =
-                        profile.release_peer_publish_cycles[destination_rank];
-                    release_peer_publish_diagnostics.append(peer_record);
-                }
-                result["release_peer_publish_diagnostics"] =
-                    release_peer_publish_diagnostics;
+        result["acquire_wait_start_cycles"] = profile.acquire_wait_start_cycles;
+        result["acquire_wait_end_cycles"] = profile.acquire_wait_end_cycles;
+        result["acquire_vf_start_cycles"] = profile.acquire_vf_start_cycles;
+        result["acquire_vf_end_cycles"] = profile.acquire_vf_end_cycles;
+        result["validate_vf_start_cycles"] = profile.validate_vf_start_cycles;
+        result["validate_vf_end_cycles"] = profile.validate_vf_end_cycles;
+        if (profile.release_peer_publish_count != 0 &&
+            profile.release_peer_publish_count <= 16) {
+            pybind11::list release_peer_publish_diagnostics;
+            for (std::uint32_t destination_rank = 0;
+                 destination_rank < profile.release_peer_publish_count;
+                 ++destination_rank) {
+                pybind11::dict peer_record;
+                peer_record["world_rank"] = destination_rank;
+                peer_record["publish_cycles"] =
+                    profile.release_peer_publish_cycles[destination_rank];
+                release_peer_publish_diagnostics.append(peer_record);
             }
+            result["release_peer_publish_diagnostics"] =
+                release_peer_publish_diagnostics;
         }
 #endif
         if (host_timeline_profile_.generation == profile.generation) {
@@ -1448,6 +1440,12 @@ public:
                 host_timeline_profile_.dispatch_prelaunch_end_ns;
             host_timeline_ns["dispatch_synchronize_end_ns"] =
                 host_timeline_profile_.dispatch_synchronize_end_ns;
+            host_timeline_ns["combine_entry_ns"] =
+                host_timeline_profile_.combine_entry_ns;
+            host_timeline_ns["combine_submit_end_ns"] =
+                host_timeline_profile_.combine_submit_end_ns;
+            host_timeline_ns["combine_completion_end_ns"] =
+                host_timeline_profile_.combine_completion_end_ns;
             result["host_timeline_ns"] = host_timeline_ns;
         }
         return result;
@@ -2987,6 +2985,9 @@ public:
         if (stage_profile_enabled_)
             host_timeline_profile_.reset(0);
         auto combine_host_phase_start_ns = host_profile_start();
+        if (stage_profile_enabled_)
+            host_timeline_profile_.combine_entry_ns =
+                combine_host_phase_start_ns;
         TORCH_CHECK(!previous_event_before_epilogue.has_value(),
                     "DeepEP Ascend backend: combine does not support "
                     "previous_event_before_epilogue");
@@ -3512,6 +3513,9 @@ public:
         host_profile_record(
             runtime::HostTimelinePhase::kCombineSubmit,
             combine_host_phase_start_ns);
+        if (stage_profile_enabled_)
+            host_timeline_profile_.combine_submit_end_ns =
+                runtime::host_timestamp_ns();
         combine_host_phase_start_ns = host_profile_start();
         status = completion.event->record(stream);
         if (!status.ok()) {
@@ -3534,6 +3538,9 @@ public:
             host_profile_record(
                 runtime::HostTimelinePhase::kCombineCompletionWait,
                 combine_host_phase_start_ns);
+            if (stage_profile_enabled_)
+                host_timeline_profile_.combine_completion_end_ns =
+                    runtime::host_timestamp_ns();
         }
         return {combined_x, combined_weights, std::move(event)};
     }

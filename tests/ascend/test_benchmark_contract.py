@@ -40,6 +40,10 @@ from tests.ascend.benchmark.timeline_report import (
     build_timeline_report,
     render_timeline_markdown,
 )
+from tests.ascend.benchmark.critical_path_report import (
+    build_critical_path_report,
+    render_critical_path_markdown,
+)
 from tests.ascend.benchmark import workloads
 from tests.ascend.benchmark.workloads import classify_ascend_case
 from tests.utils.ep_benchmark_core import build_dispatch_arguments
@@ -972,6 +976,7 @@ def test_stage_profile_capture_runs_outside_event_timing():
     runtime._prepare_case = lambda _case: prepared
     runtime.synchronized_step = lambda operation, _label: operation()
     runtime.timer = SimpleNamespace(measure=measure)
+    runtime.synchronize_host_entry = lambda: events.append("host-entry-sync")
     runtime.torch = SimpleNamespace(
         npu=SimpleNamespace(synchronize=lambda: events.append("synchronize")))
 
@@ -983,6 +988,7 @@ def test_stage_profile_capture_runs_outside_event_timing():
     assert events.count("reset") == len(operation_ids)
     assert events.count("read") == len(operation_ids)
     assert events.count("synchronize") == len(operation_ids)
+    assert events.count("host-entry-sync") == len(operation_ids)
     assert all(record["work_counts"] == _literal_work_counts()
                for record in records)
     assert all(record["logical_byte_components"] == {}
@@ -1075,6 +1081,7 @@ def test_stage_profile_capture_tolerates_completed_service_outstanding_requests(
     runtime._prepare_case = lambda _case: prepared
     runtime.synchronized_step = lambda operation, _label: operation()
     runtime.timer = SimpleNamespace(measure=measure)
+    runtime.synchronize_host_entry = lambda: events.append("host-entry-sync")
     runtime.torch = SimpleNamespace(
         npu=SimpleNamespace(synchronize=lambda: events.append("synchronize")))
 
@@ -1095,6 +1102,7 @@ def test_stage_profile_capture_tolerates_completed_service_outstanding_requests(
     assert events.count("reset") == len(operation_ids)
     assert events.count("read") == len(operation_ids)
     assert events.count("synchronize") == len(operation_ids)
+    assert events.count("host-entry-sync") == len(operation_ids)
 
 
 def test_work_counts_and_logical_components_use_rank_max_and_byte_sum():
@@ -1702,6 +1710,7 @@ def _literal_timeline_operation(operation_id, raw_stages):
         })
     return {
         "operation_id": operation_id,
+        "device_seconds": {"mean": 0.001},
         "logical_byte_components": {"scaleup": 100},
         "work_counts": _literal_work_counts(7),
         "per_rank": [{
@@ -1716,10 +1725,25 @@ def _literal_timeline_operation(operation_id, raw_stages):
                 "idle_cycles": (len(stages) - 1) * 5,
                 "overlap_cycles": 0,
             },
-            "host_timeline_ns": {"total": 2_000_000},
+            "host_timeline_ns": {
+                "total": 2_000_000,
+                "dispatch_entry_ns": 1_000_000,
+                "dispatch_synchronize_end_ns": 2_000_000,
+                "combine_entry_ns": 1_000_000,
+                "combine_submit_end_ns": 2_000_000,
+                "combine_completion_end_ns": 2_000_000,
+            },
             "per_rank": [{
                 "rank": 0,
-                "host_timeline_ns": {"total": 2_000_000},
+                # The runtime records the exact host anchors needed to align
+                # the per-rank device timeline.
+                "host_timeline_ns": {
+                    "total": 2_000_000,
+                    "dispatch_entry_ns": 1_000_000,
+                    "dispatch_synchronize_end_ns": 2_000_000,
+                    "combine_entry_ns": 1_000_000,
+                    "combine_submit_end_ns": 2_000_000,
+                },
                 "device_timeline_cycles": {
                     "start": 100,
                     "end": 100 + len(stages) * 10 - 5,
@@ -1774,6 +1798,10 @@ def _literal_timeline_report():
             "operations": [
                 _literal_timeline_operation("combine", combine_stages),
                 _literal_timeline_operation("dispatch", dispatch_stages),
+                *(_literal_timeline_operation(
+                    operation_id, dispatch_stages)
+                    for operation_id in (
+                        "expanded_dispatch", "cached_dispatch")),
             ],
         }],
     }
@@ -1787,7 +1815,9 @@ def test_operation_stage_semantics_include_virtual_c3_in_stable_order():
 
 
 def test_timeline_report_builds_deterministic_per_rank_stage_rows():
-    timeline = build_timeline_report(_literal_timeline_report())
+    report = _literal_timeline_report()
+    report["cases"][0]["operations"] = report["cases"][0]["operations"][:2]
+    timeline = build_timeline_report(report)
 
     assert timeline["timeline_schema_version"] == 1
     assert timeline["source"] == {
@@ -1823,7 +1853,13 @@ def test_timeline_report_builds_deterministic_per_rank_stage_rows():
             "idle_cycles": 45,
             "overlap_cycles": 0,
         },
-        "host_timeline_ns": {"total": 2_000_000},
+        "host_timeline_ns": {
+            "total": 2_000_000,
+            "dispatch_entry_ns": 1_000_000,
+            "dispatch_synchronize_end_ns": 2_000_000,
+            "combine_entry_ns": 1_000_000,
+            "combine_submit_end_ns": 2_000_000,
+        },
         "work_counts": {"input_tokens": 7},
         "logical_byte_components": {"scaleup": 100},
         "ascend_functions": ["direct_dispatch_producer_control_vf"],
@@ -1896,6 +1932,74 @@ def test_timeline_report_cli_emits_json(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["rows"][0]["stage_id"] == "D0"
+
+
+def test_critical_path_report_aligns_ranks_on_host_anchor():
+    report = _literal_timeline_report()
+    report["world_size"] = 2
+    operation = report["cases"][0]["operations"][1]
+    operation["stage_profile"]["per_rank"][0].update({
+        "acquire_wait_start_cycles": 150,
+        "acquire_wait_end_cycles": 250,
+        "acquire_vf_start_cycles": 150,
+        "acquire_vf_end_cycles": 300,
+        "validate_vf_start_cycles": 300,
+        "validate_vf_end_cycles": 400,
+    })
+    operation["per_rank"].append({
+        "rank": 1,
+            "logical_byte_components": {"scaleup": 100},
+            "work_counts": _literal_work_counts(7),
+            "device_seconds": {"mean": 0.001},
+        })
+    rank_profiles = operation["stage_profile"]["per_rank"]
+    rank_profiles.append(json.loads(json.dumps(rank_profiles[0])))
+    rank_profiles[1]["rank"] = 1
+    rank_profiles[1]["host_timeline_ns"]["dispatch_entry_ns"] = 1_100_000
+    rank_profiles[1]["host_timeline_ns"]["dispatch_synchronize_end_ns"] = 2_100_000
+    rank_profiles[1].update({
+        "acquire_wait_start_cycles": 170,
+        "acquire_wait_end_cycles": 280,
+        "acquire_vf_start_cycles": 170,
+        "acquire_vf_end_cycles": 330,
+        "validate_vf_start_cycles": 330,
+        "validate_vf_end_cycles": 440,
+    })
+    for stage in rank_profiles[1]["stages"]:
+        stage["start"] += 20
+        stage["end"] += 20
+    rank_profiles[1]["device_timeline_cycles"]["start"] += 20
+    rank_profiles[1]["device_timeline_cycles"]["end"] += 20
+
+    critical_path = build_critical_path_report(report, "dispatch")
+
+    assert critical_path["operation_id"] == "dispatch"
+    assert critical_path["anchor"] == {
+        "name": "dispatch synchronize", "spread_ns": 100_000,
+        "cycle_hz": 1_000_000_000,
+    }
+    assert [rank["anchor_offset_ns"] for rank in critical_path["ranks"]] == [0, 100_000]
+    assert critical_path["ranks"][1]["device_first_cycles"] == 120
+    assert critical_path["ranks"][1]["stages"][0]["start"] == 120
+    assert critical_path["ranks"][1]["timeline"][0]["span_ns"] == 5
+    assert critical_path["ranks"][0]["acquire_vf_ns"] == 150
+    assert critical_path["ranks"][0]["acquire_wait_ns"] == 100
+    assert critical_path["ranks"][0]["validate_vf_ns"] == 100
+    assert critical_path["diagnostic_intervals"] == {
+        "acquire_vf_ns": {"min_ns": 150, "max_ns": 160, "spread_ns": 10},
+        "acquire_wait_ns": {"min_ns": 100, "max_ns": 110, "spread_ns": 10},
+        "validate_vf_ns": {"min_ns": 100, "max_ns": 110, "spread_ns": 10},
+    }
+    markdown = render_critical_path_markdown(critical_path)
+    assert "spread: 0.100 ms" in markdown
+    assert "never compared across NPUs" in markdown
+
+
+def test_critical_path_report_uses_completion_anchor_for_dispatch_family():
+    report = _literal_timeline_report()
+    for operation_id in ("expanded_dispatch", "cached_dispatch"):
+        critical_path = build_critical_path_report(report, operation_id)
+        assert critical_path["anchor"]["name"] == "dispatch synchronize"
 
 
 def test_fp8_empty_input_case_requests_exact_column_major_output():

@@ -222,6 +222,40 @@ PYTHONPATH=. python -m tests.ascend.benchmark.timeline_report \
   ascend-report.json --format markdown > p5-timeline.md
 ```
 
+
+Render a multi-rank critical-path summary:
+
+```bash
+PYTHONPATH=. python -m tests.ascend.benchmark.critical_path_report \
+  ascend-report.json --operation dispatch --format markdown
+```
+
+The helper converts every stage to a common host-anchored nanosecond timeline.
+It never subtracts absolute device-cycle counters from different NPUs. Each
+rank is aligned by pairing its local device-end cycles with a host completion
+anchor, then converting only cycle differences inside that rank. Dispatch uses
+the dispatch synchronize anchor; combine uses the combine completion anchor.
+Use --cycle-hz when the device cycle rate is not 1 GHz.
+
+The report also ranks critical-path candidates, identifies the latest rank, and
+summarizes acquire ready/release publish peer diagnostics when those fields are
+present. Peer diagnostics are compile-time optional; they are emitted only when
+DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS is enabled.
+
+When acquire/validate VF diagnostics are present, the report derives three
+per-rank intervals from absolute device-cycle fields: acquire VF, acquire wait,
+and validate VF. The report rejects intervals above 100 seconds because that
+usually means a probe raced with an old timestamp rather than a real execution
+interval.
+
+The critical-path report separates three views that are easy to conflate:
+operation mean latency is the benchmark timing result; active_ns is the largest
+merged on-device stage interval across ranks; idle_ns is the largest
+uninstrumented gap between device stages on a rank. A large idle_ns does not
+automatically mean the NPU is idle. It means the current stage mask cannot
+attribute that interval, so add a more precise stage before drawing an
+optimization conclusion.
+
 The renderer emits one row for each case, operation, rank, and stable P5 stage
 ID. Device timestamps stay in cycles because the report does not assume a
 device-cycle frequency. Host intervals are converted from nanoseconds to

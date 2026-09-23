@@ -1138,6 +1138,25 @@ __aicore__ inline void begin_profile(const DeviceTransportContext& context, Tran
     profile->barrier_first_observation_cycles = 0;
     profile->barrier_completion_cycles = 0;
     profile->barrier_poll_elapsed_cycles = 0;
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+    for (std::uint32_t index = 0;
+         index < sizeof(profile->acquire_peer_world_rank) /
+             sizeof(profile->acquire_peer_world_rank[0]);
+         ++index) {
+        profile->acquire_peer_first_ready_cycles[index] = 0;
+        profile->release_peer_publish_cycles[index] = 0;
+        profile->acquire_peer_world_rank[index] = 0;
+    }
+    profile->acquire_probe = 0;
+    profile->acquire_wait_start_cycles = 0;
+    profile->acquire_wait_end_cycles = 0;
+    profile->acquire_vf_start_cycles = 0;
+    profile->acquire_vf_end_cycles = 0;
+    profile->validate_vf_start_cycles = 0;
+    profile->validate_vf_end_cycles = 0;
+    profile->acquire_peer_count = 0;
+    profile->release_peer_publish_count = 0;
+#endif
     aicore::system_fence();
     aicore::flush_stage_profile_header(profile);
 }

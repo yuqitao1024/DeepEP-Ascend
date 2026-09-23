@@ -93,6 +93,9 @@ struct HostTimelineProfile {
     std::uint64_t dispatch_entry_ns = 0;
     std::uint64_t dispatch_prelaunch_end_ns = 0;
     std::uint64_t dispatch_synchronize_end_ns = 0;
+    std::uint64_t combine_entry_ns = 0;
+    std::uint64_t combine_submit_end_ns = 0;
+    std::uint64_t combine_completion_end_ns = 0;
 
     void reset(std::uint64_t next_generation) noexcept {
         generation = next_generation;
@@ -100,6 +103,9 @@ struct HostTimelineProfile {
         dispatch_entry_ns = 0;
         dispatch_prelaunch_end_ns = 0;
         dispatch_synchronize_end_ns = 0;
+        combine_entry_ns = 0;
+        combine_submit_end_ns = 0;
+        combine_completion_end_ns = 0;
     }
 
     bool bind_generation(std::uint64_t next_generation) noexcept {

@@ -832,3 +832,77 @@ all_reduce 不是合适的 host 对齐方法，或者 host 调度差异发生在
 3. 若消除 entry skew 后仍有稳定 pair 相关长尾，再回到 HCOMM service 的
    per-peer completion timestamp；
 4. Combine 需要单独做同样验证，不能继承 Dispatch 结论。
+
+## 15. 公共时间轴与 epilogue acquire/validate 拆分
+
+上一节只保留 host entry/synchronize 绝对时间，还不足以把 8 个 rank 的 device
+阶段放到同一时间轴上。现在 profiling 增加了两个层次：
+
+1. critical_path_report.py 以每个 rank 的 host 完成锚点（Dispatch 使用
+   dispatch_synchronize_end_ns，Combine 使用 combine_completion_end_ns）
+   对齐本 rank 的 device stage，只在 rank 内部做 cycle 差值换算，不跨 NPU
+   相减绝对 cycle；
+2. DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS=1 时，Dispatch/Combine 的
+   direct_*_epilogue_acquire_vf 与 direct_*_epilogue_validate*_vf 记录
+   acquire/validate 的起止 cycle。Dispatch 和 Combine acquire 还分别记录
+   per-source/per-contributor 的 first-ready cycle。
+
+这两类数据合并后，报告能直接输出：
+
+| 指标 | 含义 |
+| --- | --- |
+| acquire VF | acquire VF 从进入到退出的完整时间 |
+| acquire wait | 所有 source/contributor release 控制面 ready 的等待时间 |
+| validate VF | validate 阶段的计算/校验时间 |
+| acquire peers | 每个 peer 首次 ready 的相对 cycle，用于识别最晚 producer |
+
+使用方式：
+
+```bash
+PYTHONPATH=. python3 -m tests.ascend.benchmark.critical_path_report \
+  ascend-report.json --operation dispatch --format markdown
+```
+
+注意两点：
+
+1. epilogue_acquire/epilogue_validate stage 只是通用 stage mask 的粗粒度
+   覆盖，acquire/validate VF 字段才是专门拆分，不能混用；
+2. validate 是多 block、多线程 kernel。诊断字段只允许 blockIdx.x == 0 &&
+   threadIdx.x == 0 写入，否则多个线程同时写同一 profile 字段，会得到
+   相差多年的假时间戳。
+
+### 15.1 当前一轮 NPU8P-ALT 结果
+
+环境为 CANN 9.3.0 组合包、8 rank、ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0、
+--num-sms 56。Dispatch mean 约 21.552 ms，Combine mean 约 31.842 ms。
+
+Dispatch：
+
+| rank | acquire VF | validate VF | 最晚 ready source |
+| ---: | ---: | ---: | ---: |
+| 0 | 0.105 ms | 0.820 ms | source 7，约 0.029 ms |
+| 3 | 8.175 ms | 0.824 ms | source 0，约 8.076 ms |
+| 7 | 7.346 ms | 0.820 ms | source 0，约 7.247 ms |
+
+其他 rank 的 acquire 约 0.85 到 1.95 ms，validate 基本稳定在 0.813 到
+0.824 ms。rank 3/7 的 acquire 长尾和最晚 source 的 first-ready 时间几乎重合，
+说明等待主要发生在 producer release 控制面 ready，而不是 validate 计算。
+
+Combine：
+
+| rank | acquire VF | 说明 |
+| ---: | ---: | --- |
+| 0 | 1.579 ms | 无明显长尾 |
+| 3 | 12.317 ms | 明显长尾 |
+| 4 | 12.476 ms | 明显长尾 |
+| 7 | 12.360 ms | 明显长尾 |
+
+这一轮 Combine 的 per-contributor ready 和 validate 字段还是旧实现采集的：
+
+1. 当时没有 per-contributor first-ready，无法指出最晚 contributor；
+2. validate 多线程同时写同一字段，数据无效，已在实现中修复；
+3. acquire 的完整耗时仍然可信，因为 acquire VF 本身只有 thread 0 执行。
+
+因此当前结论是：Combine 的主要等待也在 acquire，但需要用修复后的打点再跑
+一轮，拿到 per-contributor ready 和有效 validate 时间后才能判断是 benchmark
+entry skew、producer release 发布，还是某条 contributor 路径晚到。
