@@ -1385,6 +1385,54 @@ public:
         result["stages"] = stages;
         result["service"] = raw_service;
         result["phase_cycles"] = phase_cycles;
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+        if (profile.acquire_probe != 0) {
+            result["acquire_probe"] = profile.acquire_probe;
+        }
+#endif
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+        if (profile.acquire_peer_count != 0 &&
+            profile.acquire_peer_count <= 16) {
+            pybind11::list acquire_peer_diagnostics;
+            for (std::uint32_t index = 0;
+                 index < profile.acquire_peer_count; ++index) {
+                pybind11::dict peer_record;
+                peer_record["world_rank"] =
+                    profile.acquire_peer_world_rank[index];
+                peer_record["first_ready_cycles"] =
+                    profile.acquire_peer_first_ready_cycles[index];
+                acquire_peer_diagnostics.append(peer_record);
+            }
+            result["acquire_peer_diagnostics"] = acquire_peer_diagnostics;
+            result["acquire_wait_start_cycles"] =
+                profile.acquire_wait_start_cycles;
+            result["acquire_wait_end_cycles"] =
+                profile.acquire_wait_end_cycles;
+            result["acquire_vf_start_cycles"] =
+                profile.acquire_vf_start_cycles;
+            result["acquire_vf_end_cycles"] =
+                profile.acquire_vf_end_cycles;
+            result["validate_vf_start_cycles"] =
+                profile.validate_vf_start_cycles;
+            result["validate_vf_end_cycles"] =
+                profile.validate_vf_end_cycles;
+            if (profile.release_peer_publish_count != 0 &&
+                profile.release_peer_publish_count <= 16) {
+                pybind11::list release_peer_publish_diagnostics;
+                for (std::uint32_t destination_rank = 0;
+                     destination_rank < profile.release_peer_publish_count;
+                     ++destination_rank) {
+                    pybind11::dict peer_record;
+                    peer_record["world_rank"] = destination_rank;
+                    peer_record["publish_cycles"] =
+                        profile.release_peer_publish_cycles[destination_rank];
+                    release_peer_publish_diagnostics.append(peer_record);
+                }
+                result["release_peer_publish_diagnostics"] =
+                    release_peer_publish_diagnostics;
+            }
+        }
+#endif
         if (host_timeline_profile_.generation == profile.generation) {
             pybind11::dict host_timeline_ns;
             for (std::size_t index = 0;
@@ -1394,6 +1442,12 @@ public:
                     host_timeline_profile_.phase_ns(phase);
             }
             host_timeline_ns["total"] = host_timeline_profile_.total_ns();
+            host_timeline_ns["dispatch_entry_ns"] =
+                host_timeline_profile_.dispatch_entry_ns;
+            host_timeline_ns["dispatch_prelaunch_end_ns"] =
+                host_timeline_profile_.dispatch_prelaunch_end_ns;
+            host_timeline_ns["dispatch_synchronize_end_ns"] =
+                host_timeline_profile_.dispatch_synchronize_end_ns;
             result["host_timeline_ns"] = host_timeline_ns;
         }
         return result;
@@ -1662,6 +1716,9 @@ public:
         if (stage_profile_enabled_)
             host_timeline_profile_.reset(0);
         const auto dispatch_prelaunch_start_ns = host_profile_start();
+        if (stage_profile_enabled_)
+            host_timeline_profile_.dispatch_entry_ns =
+                dispatch_prelaunch_start_ns;
         TORCH_CHECK(!cumulative_local_expert_recv_stats.has_value(),
                     "DeepEP Ascend backend: dispatch does not support "
                     "cumulative expert stats");
@@ -2454,6 +2511,9 @@ public:
             runtime::HostTimelinePhase::kDispatchPrelaunchSetup,
             dispatch_prelaunch_start_ns);
         if (stage_profile_enabled_)
+            host_timeline_profile_.dispatch_prelaunch_end_ns =
+                runtime::host_timestamp_ns();
+        if (stage_profile_enabled_)
             (void)host_timeline_profile_.bind_generation(generation);
         if (cached_mode) {
             const auto committed_descriptor = allow_hybrid_mode_ ?
@@ -2562,6 +2622,9 @@ public:
         host_profile_record(
             runtime::HostTimelinePhase::kDispatchSynchronize,
             host_phase_start_ns);
+        if (stage_profile_enabled_)
+            host_timeline_profile_.dispatch_synchronize_end_ns =
+                runtime::host_timestamp_ns();
         if (!cached_mode) {
             host_phase_start_ns = host_profile_start();
             status = resources_->copy_to_host(

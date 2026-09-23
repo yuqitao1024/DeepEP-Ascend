@@ -157,6 +157,40 @@ observe_release_control(
     return observation;
 }
 
+// Poll release state without issuing wait_signal. This avoids making an
+// earlier contributor hold up later contributors that are already ready.
+template <typename Transport, typename Boundary, typename ControlSlots>
+DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE ReleaseControlObservation
+observe_release_control_nonblocking(
+    Transport& facade, const transport::TransportTopology& topology,
+    const Boundary& boundary, int local_world_rank,
+    ControlSlots control_slots, std::uint32_t signal_index,
+    std::uint64_t generation) {
+    ReleaseControlObservation observation{};
+    if (boundary.control_slot_world_rank < 0 ||
+        boundary.control_slot_world_rank >= topology.world_size ||
+        control_slots == nullptr ||
+        sizeof(*control_slots) < 2 * sizeof(std::uint64_t))
+        return observation;
+    if (boundary.remote_acquire_required &&
+        boundary.control_slot_world_rank != local_world_rank) {
+        transport::TeamPeer route{};
+        if (!transport::device::detail::checked_device_team_peer_for_world_rank(
+                topology, boundary.signal_sender_world_rank, &route))
+            return observation;
+        if (facade.read_signal(route.team, route.peer, signal_index) <
+            generation)
+            return observation;
+    }
+    const auto slot = reinterpret_cast<transport::DeviceAddress>(
+        control_slots) + static_cast<std::uint64_t>(
+            boundary.control_slot_world_rank) * sizeof(*control_slots);
+    observation.generation = facade.load_acquire(slot);
+    observation.count = facade.load_acquire(slot + sizeof(std::uint64_t));
+    observation.acquired = observation.generation == generation;
+    return observation;
+}
+
 }  // namespace deep_ep::ascend::elastic::release_protocol
 
 #undef DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE

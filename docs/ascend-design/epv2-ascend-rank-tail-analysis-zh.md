@@ -280,6 +280,194 @@ NPU8P 当前无法连接，因此以下 D0 入口实验只完成了设计和 hos
 
 该 gate 只用于归因。即使它让后续 acquire 收敛，只要端到端时间不降，也不能保留为修复。
 
+### 6.2 per-source acquire 打点与反向顺序对照方法论
+
+2026-09-22 在 NPU8P-ALT、CANN 9.3.0、8 rank、Ascend950DT 上重新验证了 Dispatch acquire
+长尾。该方法论的目的是回答一个具体问题：**某个 source 看起来慢，是物理链路慢，还是
+固定遍历顺序造成的队头阻塞？**
+
+#### 打点位置
+
+诊断打点由 `DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS` 宏控制，默认关闭；开启时覆盖
+`direct_dispatch_epilogue_acquire_vf` 和 `direct_dispatch_epilogue_validate_records_vf`：
+
+1. 进入 acquire 循环前记录本 rank 的 `acquire_all_start`；
+2. 对每个 source，在执行 `observe_release_control()` 前记录 `acquire_peer_start`，
+   返回后记录 `acquire_peer_end`；
+3. 两者都相对同一个 `acquire_all_start` 归一化，导出 `world_rank`、`start_cycles`、
+   `end_cycles`；
+4. 同时记录两个专用 VF 的绝对 `start/end` cycle，用于计算真实 VF 间隙；profile 结构体、
+   pybind 导出和 benchmark 聚合只增加诊断字段，不改变通信协议。
+
+由于 `threadIdx.x != 0` 直接 return，该打点只覆盖 lane 0 的真实 acquire 路径。新增
+profile 写入使用局部计数器，字段用 `store_published()` 发布，最后写 count 并执行
+`system_fence()`，避免诊断自身在 GM 上做读改写或引入可见性问题。
+
+#### 必须固定不变的对照条件
+
+| 项目 | 要求 |
+| --- | --- |
+| 平台 | 同一 NPU8P-ALT，设备 0..7 |
+| CANN/HCOMM | 同一 CANN 9.3.0 与已验证 HCOMM tree |
+| workload | `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0` |
+| tokens/hidden/top-k/experts | 8192 / 7168 / 8 / 256 |
+| data blocks | 56 |
+| 编译宏 | `DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY=1` |
+| warmup/iterations | 30 / 30 |
+| benchmark | `--profile-stages` |
+
+特别注意：`DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY=1` 会跳过最终 producer release barrier，
+因此该实验的 `barrier_peer_diagnostics` 为空是预期，不应把 barrier 字段为空解释成采集失败。
+
+#### 分析步骤
+
+1. **只做 rank 内相对时间**：`GetSystemCycle()` / VF clock 的绝对值在不同 NPU 上有不同
+   原点。只计算同一 rank 内 `end-start`，以及相对同一 `acquire_all_start` 的 gap，不跨卡
+   比较绝对 cycle。
+2. **先看每个 rank 的阻塞 source**：对每个 rank，取 `wait = end_cycles - start_cycles`
+   最大的 source，统计所有 rank 的阻塞 source 分布。
+3. **区分总等待与队头等待**：串行 acquire 中，第一个未 ready 的 source 会挡住后续 source。
+   因此不能把 source 0 等待最长直接解释成 source 0 链路最慢。
+4. **做反向顺序对照**：只把 source 遍历顺序从 0..7 改为 7..0，其余 workload、编译宏、
+   打点和 benchmark 完全不变。若阻塞 source 随顺序改变而改变，则说明主要是顺序导致的
+   归因偏置；若固定不变，才支持该 source 的物理路径慢。
+5. **同时看发送端本地阶段**：对比每个 rank 的 producer record、release payload、release
+   control、release barrier 和 service start/end。若被怀疑的 source 这些阶段与其它 rank
+   同量级，则不支持该 rank 本地 producer 或 service 特别慢。
+6. **至少跑两轮正向加一轮反向**：单次 profile 有额外 launch 和时钟抖动；模式必须重复出现
+   才能作为优化依据。
+7. **最终仍以端到端指标验收**：acquire 等待下降、曲线变整齐都只是中间信号；必须看最慢
+   rank、operation mean/P95、正确性和完整完成语义。
+
+#### 2026-09-22 观察到的数据
+
+两轮正向 profile 中，7 个非 0 rank 的最大等待 source 几乎都落在 source 0：
+
+| 实验 | Dispatch 阻塞 source 分布 |
+| --- | --- |
+| run1 | source 0：7/7 个非 0 rank |
+| run2 | source 0：7/7 个非 0 rank |
+
+反向遍历后，阻塞 source 立即变成 source 7 和 source 4：
+
+| 实验 | Dispatch 阻塞 source 分布 |
+| --- | --- |
+| reverse | source 7：4 个 rank；source 4：4 个 rank |
+
+同时，被怀疑的 rank 0 自身 producer/release/service 与其它 rank 同量级：
+
+| 阶段 | 8 rank 范围 |
+| --- | ---: |
+| producer record | 约 220K--223K cycles |
+| release payload | 约 867K--904K cycles |
+| release control | 约 248K--268K cycles |
+| service 总周期 | 约 1.25M--1.31M cycles |
+
+因此结论是：**此前看到的 source 0 慢主要是固定顺序串行 acquire 的队头阻塞，不是 rank 0
+物理链路或本地 producer 特别慢。**
+
+反向遍历本身不是优化：Dispatch mean 从正向 run2 的约 21.72 ms 变为反向约 23.11 ms。
+它只是区分顺序归因偏置和固定 peer 慢的对照实验。
+
+#### 2026-09-22 ready-first 轮询验证
+
+按上述结论，direct_dispatch_epilogue_acquire_vf 已把固定顺序串行 acquire 前置为
+非阻塞 ready-first 轮询：每一轮扫描所有 source，先检查 control generation；需要
+remote acquire 的 source 在 control ready 后再检查 release signal。只要仍有
+source 未 ready，就执行一次 poll delay，并以统一的 acquire 超时控制该阶段；全部 ready
+后再进入原有 final acquisition/validation 循环，保证 count 读取、容量校验和错误诊断
+语义不变。这里保留原有 timeout 参数传递，final 阶段仍复用 observe_release_control()
+的阻塞等待，以保持与原串行实现一致的错误和超时路径。严格说，预扫描超时后 final
+阶段仍可能继续等待，整体超时语义没有收紧；若后续要求全局硬超时，需要把 final
+acquisition 重构为共享同一个 deadline。
+
+最终版本将 remote release signal 检查从 persistent pipeline 分支扩展到所有需要
+remote acquire 的 source。这个细节很重要：第一版只在 persistent pipeline 场景检查
+release signal，典型 case 正好走 persistent_source_pipeline=0 路径，预扫描实际只等待
+control generation，后续 final acquisition 仍可能按固定顺序阻塞。补齐该检查后，
+ready-first 才完整覆盖非 persistent direct dispatch。
+
+当前覆盖范围需要明确：Direct Dispatch 的
+`direct_dispatch_epilogue_acquire_vf` 已完成 ready-first；Direct Combine 的
+`direct_combine_epilogue_acquire_vf` 随后也改为先轮询所有 contributor 再最终读取。
+Hybrid Dispatch/Combine 的 acquire 仍未做同类改造。因此不能把本节早期结论外推到
+Hybrid 路径；当前无 scale-out 环境暂不验收 Hybrid。
+
+同一 8 rank 典型 case 的完整 ready-first 版本连续三轮均完成 benchmark 并输出 1 passed；
+其中第 1、3 轮在 JSON 写出后的 teardown 阶段偶发 SIGSEGV，第 2 轮正常退出。随后
+恢复未修改源码编译并运行同 case 对照，case 正常完成且 teardown 正常；再切回
+ready-first 版本运行，case 与 teardown 均正常。由于 SIGSEGV 均发生在 benchmark 完成、
+JSON 写出和 case 结果汇总之后，且出现 rank 不固定、不可稳定复现，当前不能把它归因
+于 ready-first；需要后续独立追踪 teardown 崩溃。
+
+| run | Dispatch mean | Dispatch P95 | 最大值 |
+| --- | ---: | ---: | ---: |
+| v3 run1 | 22.712 ms | 24.451 ms | 25.039 ms |
+| v3 run2 | 20.953 ms | 22.622 ms | 23.024 ms |
+| v3 run3 | 21.313 ms | 22.498 ms | 23.230 ms |
+
+这些 v3 结果是只覆盖 control ready 的过渡版本，仅作为实现演进记录，不作为最终
+性能结论。完整 ready-first 数据如下：
+
+| 实验 | Dispatch mean | Dispatch P95 | 说明 |
+| ready-first run1 | 20.381 ms | 21.671 ms | benchmark 完成，teardown SIGSEGV |
+| ready-first run2 | 20.807 ms | 22.066 ms | 全部正常 |
+| ready-first run3 | 20.920 ms | 22.662 ms | benchmark 完成，teardown SIGSEGV |
+| 未修改基线对照 | 22.104 ms | 23.123 ms | 全部正常 |
+| ready-first 复验 | 21.930 ms | 24.227 ms | 全部正常 |
+
+完整 ready-first 三轮平均 Dispatch mean 为 20.703 ms，未修改基线单轮为 22.104 ms，
+约低 6.3%。但当前样本量较小，且后两轮中间经历过排队和 CI 竞争，这个幅度只能作为
+方向性收益，不应直接写成稳定收益比例。更重要的是，ready-first 消除了串行 acquire 的
+归因偏置和潜在队头阻塞，使 consumer 的等待时间更接近所有 source 的最晚 ready 时间；
+它并不能消除最晚 producer 本身的耗时。后续优化仍需以 operation mean/P95、最慢 rank、
+正确性和 teardown 稳定性共同验收。
+
+#### 2026-09-22 ready-first 后剩余 rank 差异
+
+对 ready-first 后的 4 轮 benchmark 重新汇总：
+
+| 指标 | 结果 |
+| --- | --- |
+| operation CV | 约 5.3% |
+| P50 / mean | 约 1.005 |
+| P90 / mean | 约 1.061 |
+| P95 / mean | 约 1.075 |
+| P99 / mean | 约 1.114 |
+| max / mean | 约 1.145 |
+| rank mean spread | 每轮约 5.4%--6.3% |
+
+前三轮干净 ready-first 的 rank 均值平均后，最快 rank 约 19.20 ms，最慢 rank 约
+20.20 ms，差距约 1.0 ms，即 5.1%。这个量级已经不是此前 acquire 诊断中的巨大长尾。
+
+同一环境再跑一轮 `--profile-stages`，case 通过，Dispatch mean / P95 / max 为
+20.116 / 21.365 / 21.750 ms。阶段数据说明：
+
+| 阶段 | rank 间 spread | 判断 |
+| --- | ---: | --- |
+| producer record | 2.51% | 基本均匀 |
+| release payload | 2.95% | 基本均匀 |
+| epilogue copy | 0.84% | 基本均匀 |
+| service cycles | 3.79% | 基本均匀 |
+| release control | 12.39% | 绝对值约 0.24--0.27M cycles，有差异但不是最大项 |
+| release barrier | 12.06% | 绝对值约 0.04M cycles，影响很小 |
+
+真正显著的差异在 `epilogue_acquire` 结束到 `epilogue_validate` 开始的间隙：最快 rank
+约 76K cycles，最慢 rank 约 5.71M cycles。后续 epilogue 阶段的起始时间整体被这个间隙
+平移。因此当前剩余 rank 差异主要不是 producer record、payload publication 或最终输出
+copy 本身，而更像 acquire 后的设备侧等待/调度/同步间隙。下一步应把该 gap 作为独立
+阶段打点，并区分 kernel launch 间隔、等待剩余 source ready、以及 validate kernel 调度
+延迟；在未拆分前，不应把它直接归因于最晚 producer。
+
+#### 后续复用要求
+
+1. 所有临时 profile 字段必须有唯一前缀，例如 `acquire_peer_*`，结论记录后按前缀撤销；
+2. 远端源码不是 git 工作区时，应用 patch 前必须备份目标文件，并保留远端已有无关修改；
+3. 诊断任务必须通过 task-submit 提交，8 rank 显式占用 0,1,2,3,4,5,6,7；
+4. 诊断 JSON 保留在 /tmp 或任务产物目录，不提交用户 WIP 文档以外的诊断代码；
+5. 若后续把 acquire 改为 ready-first 或非阻塞轮询，需要重新设计字段：记录每个 source 的
+   first-ready cycle 和最终 acquire cycle，而不是继续沿用串行 wait gap。
+
 ## 7. 设备恢复后待验证项目
 
 ### P0：完成 D0/C0 入口归因
@@ -396,3 +584,251 @@ channel submit/CQ wait/HWM/字节数观测，以及同二进制 ABBA 性能对�
    真正开始 producer 的时间不齐；D0 entry gate 是恢复 NPU8P 后的第一优先级实验。
 6. Combine 除同类 arrival skew 外，还必须在 rebase 后基于 main 的 direct-local placement
    新路径重新测量，避免用旧 staging-copy 数据指导当前优化。
+
+## 11. Acquire 到 Validate 间隙的可复用定位方法
+
+这段间隙不能只看聚合的 `epilogue` 时间，也不能把 acquire 轮询时间直接当作
+`epilogue_acquire` 到 `epilogue_validate` 的原因。推荐固定使用下面的步骤：
+
+1. 使用同一份 CANN/HCOMM、固定 workload、固定 rank 数和固定 seed，开启
+   `--profile-stages`，至少运行一轮功能完整的 8-rank case。
+2. 仅在需要归因时编译 `DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS=1`。该宏默认关闭，
+   诊断字段结构保留在 profile ABI 中，但关闭时不会执行 probe、peer ready 和 wait
+   写入，也不会把这些字段导出到 JSON。
+3. 对每个 rank 优先读取诊断宏导出的 `acquire_vf_start/end_cycles` 和
+   `validate_vf_start/end_cycles`，用真实专用 VF 的边界计算间隙。通用
+   `stage_profile.per_rank[].stages` 中的 `epilogue_acquire/validate` 只代表通用
+   `dispatch_kernel`，这两个 stage 当前是 no-op，不能替代专用 VF 边界。
+4. 同时读取 `acquire_peer_diagnostics[].first_ready_cycles`，取最大值作为 source
+   ready 上界。这个值是 acquire 轮询起点的相对 cycle，只能和 acquire wait 的相对
+   采样比较，不能与不同 NPU 的绝对 `start/end` 直接相减。
+5. 先判断数量级：若间隙接近最晚 source ready，优先查 producer/release；若间隙
+   远大于 source ready，优先查 acquire 单 block 完成后到 validate 多 block kernel
+   的提交、依赖和 AIV 调度。
+6. 对照相邻 stage 的绝对时间，确认间隙内没有已记录的工作；再增加一次性、带明确
+   前缀的 queue submit/launch 采样，区分 host 提交延迟、SQ/CQ 依赖和设备 block 调度。
+
+本方法的关键是使用同一张卡上的绝对 stage 时间做边界差，并把 per-peer ready 时间
+作为独立证据，避免把“最晚 source”与“后续 kernel 没有及时启动”混为一谈。
+
+## 12. 当前 8-rank 诊断结论
+
+在 CANN 9.3.0、NPU8P、8-rank 典型 Dispatch case 上，使用真实专用 VF 边界得到：
+
+| rank | 最晚 source ready (cycles) | 真实 VF 间隙 (cycles) |
+| ---: | ---: | ---: |
+| 0 | 55,559 | 5,729 |
+| 1 | 52,826 | 6,000 |
+| 2 | 28,031 | 5,598 |
+| 3 | 69,052 | 6,466 |
+| 4 | 56,532 | 6,293 |
+| 5 | 55,094 | 6,083 |
+| 6 | 62,234 | 5,740 |
+| 7 | 60,253 | 6,956 |
+
+真实专用 VF 的 gap 在普通、Expanded、Cached 三种 Dispatch 中都稳定在约
+`5.4e3~7.1e3 cycles`，没有 rank 间数量级长尾。早期观察到的
+`2.1e6~2.4e6 cycles` 是 profiling 边界错误：通用 `dispatch_kernel` 的
+`kEpilogueAcquire/kEpilogueValidate` stage 只执行 no-op，而真正工作由随后单独提交
+的专用 VF kernel 完成。把这两个 no-op kernel 的时间相减，会把专用 VF launch 和其他
+提交间隔混入结果。
+
+因此当前没有证据表明 acquire 到 validate 存在需要修改的数据面等待。保留
+`acquire_vf_*`/`validate_vf_*` 作为宏控诊断字段；只有它们重新显示稳定的 rank tail
+时，才继续增加 queue submit、SQ/CQ 和 host launch 采样。`acquire_wait_end_cycles`
+仍是轮询内部相对计时，不能替代真实 VF 边界差。
+
+## 13. 2026-09-22 per-source first-ready 修正与重新归因
+
+本节修正第 12 节的结论边界：第 12 节中 acquire 到 validate 的真实专用 VF
+间隙仍是正确的，但当时使用的“最晚 source ready”来自有采样缺陷的字段。
+修正后，acquire 轮询本身仍有明显的 destination 相关等待。
+
+### 13.1 旧诊断字段的采样缺陷
+
+早期 `acquire_peer_first_ready_cycles` 逻辑是“记录前 16 次 ready 事件”，
+不是“记录每个 source 的第一次 ready”。ready-first 轮询会反复扫描已经 ready
+的 source，16 个槽位很快被重复 source 占满。例如 rank 3 曾记录到一串
+self-rank 重复项，因此当时的“最晚 source ready 只有约 69k cycles”不能作为
+最晚 ready 上界。
+
+诊断逻辑已改为：
+
+```text
+source_rank -> 独立槽位
+peer_ready_logged[source_rank] 防重复
+每个 source 只记录第一次 ready 的相对 cycle
+```
+
+这不改变通信协议和 acquire 轮询，只改变诊断数据的含义。
+
+### 13.2 修正后的 8-rank 数据
+
+运行环境：NPU8P-ALT，CANN 9.3.0，修正版 HCOMM，8 rank，tokens=8192，
+hidden=7168，top-k=8，experts=256，data blocks=56，30 warmup / 30 samples，
+`--profile-stages`。case 通过，Dispatch mean/P95 为
+`21.841 / 23.315 ms`，逻辑带宽 `356.49 GB/s`。
+
+每 rank 真实 acquire VF 时长与最晚 source：
+
+| rank | acquire VF span | 最晚 ready source | 最晚 ready cycles |
+| ---: | ---: | ---: | ---: |
+| 0 | 423,633 | 1 | 328,285 |
+| 1 | 104,580 | 7 | 29,470 |
+| 2 | 106,830 | 7 | 30,465 |
+| 3 | 9,635,830 | 1 | 9,543,607 |
+| 4 | 10,039,813 | 1 | 9,946,346 |
+| 5 | 2,113,279 | 1 | 2,019,338 |
+| 6 | 2,286,565 | 1 | 2,194,276 |
+| 7 | 9,411,780 | 1 | 9,317,407 |
+
+更具体的晚到矩阵：
+
+| destination | 明显晚到的 source | cycles 量级 |
+| ---: | --- | ---: |
+| 3 | 0、1、2、5、6 | 7.2M 到 9.5M |
+| 4 | 0、1、2、5、6 | 7.6M 到 9.9M |
+| 7 | 0、1、2、5、6 | 6.9M 到 9.3M |
+| 5 | 0、1、2 | 1.25M 到 2.02M |
+| 6 | 0、1、2 | 1.42M 到 2.19M |
+| 0、1、2 | 无明显数百万级晚到 | 最大约 328k |
+
+这推翻了两个简化解释：
+
+1. 不是某个固定 producer rank 对所有 destination 都晚。rank 0、1、2 之间的
+   acquire 几乎立即完成；它们发给 3、4、7 的数据却很晚可见。
+2. 不是本地 producer 或 service 独占资源慢。所有 rank 的
+   producer record、release payload/control/barrier 和 service span 都在同一量级。
+
+producer 侧证据：
+
+| 指标 | 8 rank 范围 |
+| --- | ---: |
+| producer record | 220.7k 到 227.6k cycles |
+| release payload | 869.4k 到 901.1k cycles |
+| release control | 240.9k 到 272.8k cycles |
+| release barrier | 38.6k 到 44.2k cycles |
+| service span | 1.254M 到 1.317M cycles |
+| payload bytes | 285.1M 到 287.4M bytes |
+
+每个 rank 仍只有 7 条大 payload put、30 条 command，SQ/CQ high watermark 为 3，
+结束时 depth 为 0。因此本 profile 不支持“某些 rank 本地命令构造或本地 drain
+特别慢”。
+
+### 13.3 新的当前假设
+
+剩余长尾更像是特定 source-destination 路径上的可见性或调度问题：
+
+```text
+rank 0/1/2 producer release 完成
+    -> 到 rank 3/4/7 的 control/signal 很晚可见
+    -> rank 3/4/7 的 acquire 等待 9-10M cycles
+    -> 后续 epilogue 起点整体后移
+```
+
+同一批 source 对 rank 5/6 的延迟约 1.2-2.2M，对 rank 0/1/2 基本立即可见。
+这更像 destination 相关的传输路径、channel 资源争用或 AICore service 调度
+问题，而不是所有远端路径共享的一个全局 barrier。
+
+目前还不能区分以下三个方向：
+
+1. 物理 HCCS 路径或 topology contention；
+2. HCOMM AIV channel/SQ/CQ 在特定 rank pair 上的资源冲突；
+3. host/device 对后续 acquire VF 的调度延迟，使数据实际已经可见但观测动作很晚。
+
+第 13 节写成时的下一步是补 per-destination release publication timestamp 和
+host 启动时间。第 14 节就是这两组数据的结论。
+
+## 14. 2026-09-22 release publication 与 host entry skew 结论
+
+本节继续第 13 节的验证，并把结论再修正一次。
+
+### 14.1 producer 侧发布不是数毫秒级瓶颈
+
+在 direct_dispatch_producer_release_body 中为每个 remote destination 记录
+control/signal 发布调用返回时的相对 cycle。宏控字段为
+release_peer_publish_cycles[16] 和 release_peer_publish_count，通过
+release_peer_publish_diagnostics 导出。
+
+三轮 profile 中，所有 producer 对 7 个远端 destination 的发布调用都在约
+0.079 到 0.083 ms 内完成；单个 producer 内部 destination 间差异约 0.063 到
+0.066 ms，形状完全由 0 到 7 的固定遍历顺序决定。v5 轮中最慢 acquire 是
+rank 7 等 source 0 约 3.814 ms，但 source 0 对 rank 7 的发布调用本身只有约
+0.078 ms。因此“发布循环慢”和“producer 本地 drain 慢”都不能解释主要长尾。
+
+注意这个 timestamp 只表示 producer 侧命令编码/发布调用返回，不等于 HCOMM
+service completion，也不等于远端可见时间。它的作用是先排除 producer 发布
+顺序本身的数毫秒差异。
+
+### 14.2 host entry skew 与 acquire 等待呈反向关系
+
+继续在 host timeline 中增加三个绝对时间：
+
+| 字段 | 含义 |
+| --- | --- |
+| dispatch_entry_ns | Python 调用进入 C++ dispatch |
+| dispatch_prelaunch_end_ns | prelaunch 参数准备和 launch 完成 |
+| dispatch_synchronize_end_ns | dispatch stream synchronize 结束 |
+
+这些字段只在 --profile-stages 时记录，不改变通信协议。
+
+v7 一轮的关键数据：
+
+| rank | entry 相对最早值 | acquire 等待 | device envelope | synchronize 结束相对最早值 |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 5.417 ms | 0.051 ms | 2.105 ms | 0.278 ms |
+| 1 | 0.388 ms | 3.790 ms | 4.377 ms | 0.113 ms |
+| 2 | 3.811 ms | 1.103 ms | 2.749 ms | 0.077 ms |
+| 3 | 3.802 ms | 1.140 ms | 2.774 ms | 0.066 ms |
+| 4 | 0.000 ms | 4.117 ms | 4.598 ms | 0.072 ms |
+| 5 | 0.870 ms | 3.487 ms | 4.201 ms | 0.001 ms |
+| 6 | 0.252 ms | 4.012 ms | 4.506 ms | 0.066 ms |
+| 7 | 0.037 ms | 4.170 ms | 4.624 ms | 0.002 ms |
+
+entry spread 是 5.417 ms，但 synchronize end spread 只有 0.346 ms。更直接地说：
+
+1. 最晚进入 Dispatch 的 rank 4/5/6/7，acquire 等待约 3.4 到 4.2 ms；
+2. 最早进入的 rank 0，acquire 等待只有 0.051 ms；
+3. 所有 rank 最后几乎同时结束，被慢 rank 拉齐。
+
+把每个 rank 的 release barrier 完成时间换算到公共 host 时间，再加上 first-ready
+等待，得到的最晚 ready 公共时间约为 5.165 到 6.498 ms。v5/v6 两轮也呈现同样
+关系：launch 相对晚的 rank，ready 等待短；launch 相对早的 rank，ready 等待长。
+
+### 14.3 当前归因
+
+第 13 节的“特定 source-destination 路径可见性慢”需要降级。它没有错在数据
+本身，而是错在把每个 rank 的 acquire 起点视为对齐：benchmark 在 capture
+profile 前调用 barrier(with_cpu_sync=True)，barrier 依赖 device 同步和 host
+调度，返回后各 rank 进入 Dispatch 的时刻仍可能相差 5 ms 以上。先进入的 rank
+先到 acquire，等后进入的 producer release；后进入的 rank 到达时控制面已经
+ready，于是表现为“某些 source 对某些 destination 晚到”。
+
+当前结论：
+
+1. producer release 发布本身约 0.08 ms 内完成，不是数毫秒级瓶颈；
+2. producer record、release payload/control/barrier、service span 各 rank 同量级；
+3. profile 下的几毫秒 acquire 长尾主要由 benchmark host 编排的 entry skew 造成；
+4. 尚不能证明 HCCS 路径或 HCOMM channel 存在固定数毫秒级长尾。
+
+### 14.4 后续动作
+
+优先修 benchmark/profile 编排，而不是先改通信数据面。当晚做了一个最小的
+profile-only A/B：在 capture profile 前，barrier 之后追加一次
+dist.all_reduce，希望 host 进程在进入 Dispatch 前再次汇合。
+
+结果没有消除 entry skew：entry spread 仍是 5.175 ms，acquire 等待仍是
+0.051 到 4.038 ms，最晚 ready 的公共时间约 5.046 到 6.248 ms。这说明单次
+all_reduce 不是合适的 host 对齐方法，或者 host 调度差异发生在 all_reduce
+返回之后。这个 A/B 只是排除了一个过于简单的修法，还不能推翻 entry skew
+归因。
+
+下一步仍然按下面的顺序：
+
+1. 在 profile 输出中保留 entry/prelaunch/synchronize 绝对时间，分析时先对齐
+   公共时间，不再直接比较各 rank 的 acquire VF 等待；
+2. 如果要修 benchmark，需要更可靠地控制各 rank 进入 Dispatch 的时刻，或
+   采样多轮 entry skew 后选择启动接近对齐的一轮；
+3. 若消除 entry skew 后仍有稳定 pair 相关长尾，再回到 HCOMM service 的
+   per-peer completion timestamp；
+4. Combine 需要单独做同样验证，不能继承 Dispatch 结论。

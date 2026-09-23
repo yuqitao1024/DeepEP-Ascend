@@ -89,6 +89,7 @@ inline int launch_direct_dispatch_epilogue_validate_records_variant_0(
         static_cast<std::uint8_t*>(arguments.workspace),
         arguments.source_metadata,
         tiling.transport_context.local_window_base,
+        tiling.transport_context.backend_context,
         tiling.transport_context.topology.world_rank,
         tiling.transport_context.topology.world_size,
         tiling.mode_flags,

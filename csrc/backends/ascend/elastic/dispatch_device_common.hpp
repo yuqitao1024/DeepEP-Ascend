@@ -891,6 +891,10 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
     std::uint32_t pipeline_source_chunk,
     std::uint64_t token_stride_bytes,
     std::uint32_t release_segment_value) {
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+    __gm__ transport::TransportStageProfile* release_profile = nullptr;
+    const std::uint64_t release_profile_start = __asc_simt_vf::clock();
+#endif
     if (threadIdx.x != 0)
         return;
     const auto release_segment =
@@ -913,6 +917,28 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
         transport_scale_up_direct, transport_topology_kind,
         transport_topology_epoch, transport_backend_context);
     transport::DeviceTransportFacade transport(context, 0);
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+    {
+        auto* staged = reinterpret_cast<__gm__ transport::StagedTransportContext*>(
+            context.backend_context);
+        if (context.abi_version == transport::kDeviceTransportAbiVersion &&
+            context.struct_size == sizeof(transport::DeviceTransportContext) &&
+            staged != nullptr &&
+            transport::simt::load_observed(&staged->abi_version) ==
+                transport::kTransportCommandAbiVersion &&
+            transport::simt::load_observed(&staged->struct_size) ==
+                sizeof(transport::StagedTransportContext) &&
+            transport::simt::load_observed(&staged->cann_compatibility) ==
+                transport::kStagedTransportCannCompatibility &&
+            transport::simt::load_observed(&staged->stage_profile) != 0 &&
+            transport::simt::load_observed(&staged->stage_profile_bytes) ==
+                sizeof(transport::TransportStageProfile)) {
+            release_profile = reinterpret_cast<
+                __gm__ transport::TransportStageProfile*>(
+                staged->stage_profile);
+        }
+    }
+#endif
     const auto status_address = reinterpret_cast<transport::DeviceAddress>(
         workspace + workspace_status_offset);
     if (transport.load_acquire(status_address) != 0)
@@ -1088,6 +1114,18 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
                 transport, route, remote_slot + sizeof(std::uint64_t), count,
                 remote_slot, generation,
                 transport::sync_layout::kDispatchReleaseSignalIndex);
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+            if (release_profile != nullptr &&
+                destination_rank < 16) {
+                transport::simt::store_published(
+                    &release_profile->release_peer_publish_cycles[
+                        destination_rank],
+                    __asc_simt_vf::clock() - release_profile_start);
+                transport::simt::store_published(
+                    &release_profile->release_peer_publish_count,
+                    static_cast<std::uint32_t>(destination_rank + 1));
+            }
+#endif
         }
     }
     if (release_barrier) {

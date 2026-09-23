@@ -386,6 +386,12 @@ def _aggregate_stage_profiles(
     barrier_diagnostics_seen = False
     barrier_peer_diagnostics = []
     barrier_peer_diagnostics_seen = False
+    acquire_peer_diagnostics = []
+    acquire_peer_diagnostics_seen = False
+    release_peer_publish_diagnostics = []
+    release_peer_publish_diagnostics_seen = False
+    acquire_probe_seen = False
+    acquire_vf_cycles_seen = False
     for rank, profile in enumerate(rank_profiles):
         if profile.get("completion_generation") != generation:
             raise ValueError("stage profile completion generation mismatch")
@@ -511,6 +517,58 @@ def _aggregate_stage_profiles(
                 normalized_phases.append(normalized_peers)
             barrier_peer_diagnostics.append(normalized_phases)
             barrier_peer_diagnostics_seen = True
+        rank_acquire_peer_diagnostics = profile.get("acquire_peer_diagnostics")
+        if rank_acquire_peer_diagnostics is not None:
+            if not isinstance(rank_acquire_peer_diagnostics, list):
+                raise ValueError("stage profile acquire peer diagnostics")
+            normalized_acquire_peers = []
+            for peer_record in rank_acquire_peer_diagnostics:
+                if not isinstance(peer_record, dict):
+                    raise ValueError("stage profile acquire peer record")
+                required = ("world_rank", "first_ready_cycles")
+                if any(type(peer_record.get(name)) is not int or
+                       peer_record[name] < 0 for name in required):
+                    raise ValueError(
+                        "stage profile acquire peer record fields")
+                normalized_acquire_peers.append(dict(peer_record, rank=rank))
+            acquire_peer_diagnostics.append(normalized_acquire_peers)
+            acquire_peer_diagnostics_seen = True
+        rank_release_peer_publish_diagnostics = profile.get(
+            "release_peer_publish_diagnostics")
+        if rank_release_peer_publish_diagnostics is not None:
+            if not isinstance(rank_release_peer_publish_diagnostics, list):
+                raise ValueError(
+                    "stage profile release peer publish diagnostics")
+            normalized_release_peers = []
+            for peer_record in rank_release_peer_publish_diagnostics:
+                if not isinstance(peer_record, dict):
+                    raise ValueError(
+                        "stage profile release peer publish record")
+                required = ("world_rank", "publish_cycles")
+                if any(type(peer_record.get(name)) is not int or
+                       peer_record[name] < 0 for name in required):
+                    raise ValueError(
+                        "stage profile release peer publish fields")
+                normalized_release_peers.append(dict(peer_record, rank=rank))
+            release_peer_publish_diagnostics.append(
+                normalized_release_peers)
+            release_peer_publish_diagnostics_seen = True
+        rank_acquire_probe = profile.get("acquire_probe")
+        if rank_acquire_probe is not None:
+            if type(rank_acquire_probe) is not int or rank_acquire_probe < 0:
+                raise ValueError("stage profile acquire probe")
+            acquire_probe_seen = True
+        vf_cycle_names = (
+            "acquire_vf_start_cycles", "acquire_vf_end_cycles",
+            "validate_vf_start_cycles", "validate_vf_end_cycles",
+        )
+        if any(name in profile for name in vf_cycle_names):
+            if any(
+                type(profile.get(name)) is not int or profile[name] < 0
+                for name in vf_cycle_names
+            ):
+                raise ValueError("stage profile acquire/validate VF cycles")
+            acquire_vf_cycles_seen = True
         rank_host_timeline = profile.get("host_timeline_ns")
         if rank_host_timeline is not None:
             if not isinstance(rank_host_timeline, dict) or not rank_host_timeline:
@@ -567,6 +625,29 @@ def _aggregate_stage_profiles(
         result["barrier_diagnostics"] = barrier_diagnostics
     if barrier_peer_diagnostics_seen:
         result["barrier_peer_diagnostics"] = barrier_peer_diagnostics
+    if acquire_peer_diagnostics_seen:
+        result["acquire_peer_diagnostics"] = acquire_peer_diagnostics
+        result["acquire_wait_start_cycles"] = [
+            profile.get("acquire_wait_start_cycles", 0)
+            for profile in rank_profiles
+        ]
+        result["acquire_wait_end_cycles"] = [
+            profile.get("acquire_wait_end_cycles", 0)
+            for profile in rank_profiles
+        ]
+    if release_peer_publish_diagnostics_seen:
+        result["release_peer_publish_diagnostics"] = (
+            release_peer_publish_diagnostics)
+    if acquire_probe_seen:
+        result["acquire_probe"] = [
+            profile.get("acquire_probe", 0) for profile in rank_profiles
+        ]
+    if acquire_vf_cycles_seen:
+        for name in (
+            "acquire_vf_start_cycles", "acquire_vf_end_cycles",
+            "validate_vf_start_cycles", "validate_vf_end_cycles",
+        ):
+            result[name] = [profile.get(name, 0) for profile in rank_profiles]
     return result
 
 
@@ -707,6 +788,11 @@ class AscendRuntime:
                 raise local_error
             raise RuntimeError(f"{label} failed on a peer rank")
         return result
+
+    def synchronize_host_entry(self) -> None:
+        value = self.torch.tensor([1], dtype=self.torch.int32,
+                                  device=self.device)
+        self.dist.all_reduce(value, group=self.group)
 
     def _launch(
         self,
@@ -1339,6 +1425,7 @@ class AscendRuntime:
             if getattr(self.args, "profile_stages", False):
                 def capture_profile():
                     self.buffer.barrier(with_cpu_sync=True, sequential=True)
+                    self.synchronize_host_entry()
                     self.buffer.reset_stage_profile()
                     operation()
                     self.torch.npu.synchronize()

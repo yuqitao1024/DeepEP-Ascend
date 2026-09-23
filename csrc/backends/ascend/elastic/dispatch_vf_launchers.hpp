@@ -282,6 +282,7 @@ extern "C" int deep_ep_ascend_launch_direct_dispatch_epilogue_validate_records(
     std::uint8_t* workspace,
     const std::int32_t* source_metadata,
     std::uintptr_t transport_local_window_base,
+    std::uintptr_t transport_backend_context,
     int transport_world_rank,
     int transport_world_size,
     CoreModeFlags mode_flags,

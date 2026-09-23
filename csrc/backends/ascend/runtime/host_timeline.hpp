@@ -90,10 +90,16 @@ struct HostTimelineProfile {
 
     std::uint64_t generation = 0;
     std::array<std::uint64_t, kPhaseCount> phase_durations_ns{};
+    std::uint64_t dispatch_entry_ns = 0;
+    std::uint64_t dispatch_prelaunch_end_ns = 0;
+    std::uint64_t dispatch_synchronize_end_ns = 0;
 
     void reset(std::uint64_t next_generation) noexcept {
         generation = next_generation;
         phase_durations_ns.fill(0);
+        dispatch_entry_ns = 0;
+        dispatch_prelaunch_end_ns = 0;
+        dispatch_synchronize_end_ns = 0;
     }
 
     bool bind_generation(std::uint64_t next_generation) noexcept {

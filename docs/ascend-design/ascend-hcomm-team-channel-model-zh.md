@@ -197,6 +197,29 @@ Channel 是资源容器，SQ/CQ 是其中的队列。一条 channel 至少包含
 
 因此“channel 数量”与“SQ/CQ 深度”、“WQE 数量”都不是一回事。增加 channel 数可以增加独立路径；增加 SQ 深度可以容纳更多未完成请求；一次 payload 传输可能拆成多个 WQE。
 
+#### 当前 DeepEP 的 channel/Jetty 实际配置
+
+这里需要把“one-to-many”拆成两个不同问题：
+
+1. **业务通信关系**：一个 producer 会根据路由向多个 destination peer 发数据，这确实是 one-to-many。
+2. **HCOMM 资源关系**：当前不是一个 shared Jetty 被多个 peer 并发复用的 one-to-many channel。DeepEP 为每个 peer 单独获取 AIV channel，并在设备侧按 `peer * channel_count + channel` 维护表项。
+
+当前 CANN 9.3 路径的实际入口是：
+
+```text
+CannHostTransport::acquire_backend_channels
+  -> cann_acquire_channels
+     -> HcclRankGraphGetLayers / HcclRankGraphGetLinks
+     -> HcclChannelDescInit
+     -> HcclChannelAcquire(COMM_ENGINE_AIV)
+  -> CannHostTransport::build_device_tables
+```
+
+默认配置由 `configure_transport_channels_from_environment` 设置为 1；只有设置
+`DEEP_EP_ASCEND_CHANNELS=2..4` 才会为每个 peer 创建多条 channel。当前验收基线未设置该环境变量，因此是 **每个 peer 1 条 AIV channel**，不是固定的 8 条，也不是 7 个 peer 共用一条 Jetty。
+
+CANN 9.3 的 `HcclChannelConfig` 支持 shared queue/Jetty 配置，但 shared Jetty 的 channel 不能并发调用，调用方必须自行串行化。DeepEP 默认关闭该模式，原因是 producer 和 AICore service 需要保留独立队列上的并发和 overlap；除非后续专门做 shared-Jetty 的串行化实验，否则不能把当前实现描述成“Jetty one-to-many”。
+
 #### notify 与 registered buffer
 
 `ChannelEntity` 中的 notify 表和 buffer 表是两类不同资源：
@@ -1215,6 +1238,28 @@ MR、SQ/CQ、remote EID 和 token 都可被读出。HCOMM 生命周期问题已�
 9. **“SIMT 可以直接敲 doorbell”**：当前 CANN 参考实现和 DeepEP 验证均指向 AICore `st_dev/ld_dev` 路径；SIMT producer 先记录命令。
 
 ## 10. 参考文件
+
+### 10.1 当前实现的代码入口
+
+将概念映射到当前 DeepEP 代码时，按下面的调用链查最有效：
+
+```text
+CannHostTransport::acquire_channels
+  -> CannHostTransport::acquire_backend_channels
+  -> cann_acquire_channels
+     -> HcclCommMemReg / HcclRankGraphGetLinks
+     -> HcclChannelDescInit / HcclChannelAcquire
+  -> CannHostTransport::build_device_tables
+  -> device::channel_count / resolve_channel
+  -> aicore::execute_body
+```
+
+其中 host 侧实现位于 `csrc/backends/ascend/transport/cann_transport.cpp`，channel
+数量的环境变量入口位于 `transport/channel_config.hpp`；设备侧的 peer/channel 索引
+位于 `transport/device_transport_commands.hpp`，SQ/CQ 和 WQE 消费位于
+`transport/aicore_transport_service.hpp`。DeepEP 的 release 操作从
+`elastic/release_protocol.hpp::put_staged_records_striped` 和
+`publish_control_and_release` 进入传输命令队列。
 
 ### 本仓库
 

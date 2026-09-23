@@ -8,6 +8,13 @@
 
 namespace deep_ep::ascend::transport {
 
+#ifndef DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+#define DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS 0
+#endif
+#ifndef DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP
+#define DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP 0
+#endif
+
 inline constexpr std::uint32_t kTransportStageProfileAbiVersion = 3;
 inline constexpr std::uint32_t kTransportProfileStageCount = 16;
 inline constexpr std::uint32_t kTransportProfileMaxBlocks = 72;
@@ -89,6 +96,18 @@ struct alignas(64) TransportStageProfile {
     TransportStageCycles stages[kTransportProfileStageCount]{};
     TransportBarrierPeerCycles barrier_peers[
         kTransportProfileBarrierPhaseCount][kTransportProfileMaxBarrierPeers]{};
+    std::uint64_t acquire_peer_first_ready_cycles[16]{};
+    std::uint64_t release_peer_publish_cycles[16]{};
+    std::uint64_t acquire_probe{};
+    std::uint64_t acquire_wait_start_cycles{};
+    std::uint64_t acquire_wait_end_cycles{};
+    std::uint64_t acquire_vf_start_cycles{};
+    std::uint64_t acquire_vf_end_cycles{};
+    std::uint64_t validate_vf_start_cycles{};
+    std::uint64_t validate_vf_end_cycles{};
+    std::uint32_t acquire_peer_world_rank[16]{};
+    std::uint32_t acquire_peer_count{};
+    std::uint32_t release_peer_publish_count{};
 };
 
 struct TransportQueueDepthSnapshot {
