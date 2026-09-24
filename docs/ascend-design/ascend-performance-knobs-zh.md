@@ -166,6 +166,11 @@ same-binary ABBA；不要把多个历史候选叠加在一次 run 里。
 - `DEEP_EP_ASCEND_PREFLIGHT=stable|full`
   - 默认 `stable`。stable 模式把逐调用 host 校验移到稳定边界，full 模式保留
     旧诊断能力。
+  - 对 Combine C++ prelaunch，stable 继续保留 descriptor、shape、capacity 和
+    tiling 的本地校验，但跳过 source metadata / rank prefix 的大规模 D2H
+    和 host 逐行校验；full 会保留这些 host 侧诊断。
+  - stable 模式仍依赖 `direct_combine_producer_plan.asc` 的设备侧 metadata
+    校验兜底。
 - `DEEP_EP_ASCEND_PROFILE_STAGES=1`
   - 开启 stage profile。会保留或增加 profile 相关 kernel/字段，适合归因，
     不应和无 profile 结果混比。

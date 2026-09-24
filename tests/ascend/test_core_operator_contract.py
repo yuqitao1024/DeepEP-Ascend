@@ -332,6 +332,38 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertEqual(
                 combine.count(f"HostTimelinePhase::{phase}"), count, phase)
 
+    def test_combine_stable_preflight_avoids_source_metadata_host_copy(self):
+        """Keeps the Combine hot path local while retaining full diagnostics."""
+        source = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        begin = source.index("    combine(const torch::Tensor& x,")
+        end = source.index("\n    }\n};", begin)
+        combine = source[begin:end]
+
+        gate = combine.index(
+            'environment_is("DEEP_EP_ASCEND_PREFLIGHT", "full")')
+        validation_begin = combine.index("if (full_host_validation) {")
+        validation_end = combine.index("kCombineStreamSetup", validation_begin)
+        validation = combine[validation_begin:validation_end]
+        self.assertLess(gate, validation_begin)
+        for marker in (
+                "std::vector<std::int32_t> host_prefix(num_ranks_)",
+                "psum_num_recv_tokens_per_scaleup_rank.data_ptr()",
+                "src_metadata.data_ptr()",
+                "is_valid_combine_source_identity"):
+            self.assertIn(marker, validation)
+
+        setup_begin = combine.index("kCombineStreamSetup")
+        hot_path = combine[validation_end:setup_begin]
+        self.assertNotIn("copy_to_host", hot_path)
+        self.assertNotIn("host_prefix", hot_path)
+        self.assertNotIn("host_metadata", hot_path)
+
+        direct_plan = (
+            ELASTIC / "direct_combine_producer_plan.asc").read_text()
+        self.assertIn(
+            "is_valid_combine_source_identity", direct_plan)
+        self.assertIn("CombineProtocolError::kInvalidMetadata", direct_plan)
+
     def test_direct_device_hot_path_uses_32_bit_control_indices(self):
         """Keeps shape iteration narrow while addresses and offsets stay wide."""
         self.assertIn(

@@ -3271,76 +3271,80 @@ public:
             runtime::HostTimelinePhase::kCombineHostValidation,
             combine_host_phase_start_ns);
         combine_host_phase_start_ns = host_profile_start();
-        std::vector<std::int32_t> host_prefix(num_ranks_);
-        std::vector<std::int32_t> host_metadata(
-            static_cast<std::size_t>(num_source_rows * (num_topk + 2)));
-        status = resources_->copy_to_host(
-            host_prefix.data(),
-            psum_num_recv_tokens_per_scaleup_rank.data_ptr(),
-            host_prefix.size() * sizeof(std::int32_t));
-        if (!status.ok())
-            raise_transport_status(status, rank_idx_);
-        if (!host_metadata.empty()) {
+        const bool full_host_validation =
+            environment_is("DEEP_EP_ASCEND_PREFLIGHT", "full");
+        if (full_host_validation) {
+            std::vector<std::int32_t> host_prefix(num_ranks_);
+            std::vector<std::int32_t> host_metadata(
+                static_cast<std::size_t>(num_source_rows * (num_topk + 2)));
             status = resources_->copy_to_host(
-                host_metadata.data(), src_metadata.data_ptr(),
-                host_metadata.size() * sizeof(std::int32_t));
+                host_prefix.data(),
+                psum_num_recv_tokens_per_scaleup_rank.data_ptr(),
+                host_prefix.size() * sizeof(std::int32_t));
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
-        }
-        host_profile_record(
-            runtime::HostTimelinePhase::kCombineMetadataToHost,
-            combine_host_phase_start_ns);
-        combine_host_phase_start_ns = host_profile_start();
-        std::uint64_t previous_end = 0;
-        for (int destination_rank = 0; destination_rank < num_ranks_;
-             ++destination_rank) {
-            const std::int32_t encoded_end = host_prefix[destination_rank];
-            TORCH_CHECK(encoded_end >= 0 &&
-                            static_cast<std::uint64_t>(encoded_end) >=
-                                previous_end &&
-                            static_cast<std::uint64_t>(encoded_end) <=
-                                num_source_rows,
-                        "DeepEP Ascend backend: combine rank prefix is invalid");
-            const auto end = static_cast<std::uint64_t>(encoded_end);
-            std::uint64_t records = 0;
-            for (std::uint64_t row = previous_end; row < end; ++row) {
-                const auto* metadata = host_metadata.data() +
-                    row * (num_topk + 2);
-                TORCH_CHECK(
-                    elastic::is_valid_combine_source_identity(
-                        metadata[0], destination_rank, rank_idx_, capacity,
-                        descriptor.num_tokens) &&
-                        elastic::decode_dispatch_source_rank(
-                            metadata[1], num_topk) == destination_rank &&
-                        elastic::is_dispatch_local_index(
-                            elastic::decode_dispatch_local_index(
-                                metadata[1], num_topk), num_topk),
-                    "DeepEP Ascend backend: combine source metadata is invalid");
-                std::uint64_t valid_slots = 0;
-                for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
-                    const auto input_row = metadata[2 + lane];
-                    TORCH_CHECK(
-                        use_expanded_layout ?
-                            elastic::combine_expanded_input_row_is_valid(
-                                input_row, num_input_rows) :
-                            input_row == -1,
-                        "DeepEP Ascend backend: combine expanded slot is invalid");
-                    valid_slots += input_row == -1 ? 0 : 1;
-                }
-                records += !use_expanded_layout ? 1 :
-                    (allow_multiple_reduction_ ?
-                         (valid_slots == 0 ? 0 : 1) : valid_slots);
+            if (!host_metadata.empty()) {
+                status = resources_->copy_to_host(
+                    host_metadata.data(), src_metadata.data_ptr(),
+                    host_metadata.size() * sizeof(std::int32_t));
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
             }
-            const auto record_capacity =
-                use_expanded_layout && !allow_multiple_reduction_ ?
-                    capacity * num_topk : capacity;
-            TORCH_CHECK(records <= record_capacity,
-                        "DeepEP Ascend backend: combine source metadata "
-                        "exceeds capacity");
-            previous_end = end;
+            host_profile_record(
+                runtime::HostTimelinePhase::kCombineMetadataToHost,
+                combine_host_phase_start_ns);
+            combine_host_phase_start_ns = host_profile_start();
+            std::uint64_t previous_end = 0;
+            for (int destination_rank = 0; destination_rank < num_ranks_;
+                 ++destination_rank) {
+                const std::int32_t encoded_end = host_prefix[destination_rank];
+                TORCH_CHECK(encoded_end >= 0 &&
+                                static_cast<std::uint64_t>(encoded_end) >=
+                                    previous_end &&
+                                static_cast<std::uint64_t>(encoded_end) <=
+                                    num_source_rows,
+                            "DeepEP Ascend backend: combine rank prefix is invalid");
+                const auto end = static_cast<std::uint64_t>(encoded_end);
+                std::uint64_t records = 0;
+                for (std::uint64_t row = previous_end; row < end; ++row) {
+                    const auto* metadata = host_metadata.data() +
+                        row * (num_topk + 2);
+                    TORCH_CHECK(
+                        elastic::is_valid_combine_source_identity(
+                            metadata[0], destination_rank, rank_idx_, capacity,
+                            descriptor.num_tokens) &&
+                            elastic::decode_dispatch_source_rank(
+                                metadata[1], num_topk) == destination_rank &&
+                            elastic::is_dispatch_local_index(
+                                elastic::decode_dispatch_local_index(
+                                    metadata[1], num_topk), num_topk),
+                        "DeepEP Ascend backend: combine source metadata is invalid");
+                    std::uint64_t valid_slots = 0;
+                    for (std::uint64_t lane = 0; lane < num_topk; ++lane) {
+                        const auto input_row = metadata[2 + lane];
+                        TORCH_CHECK(
+                            use_expanded_layout ?
+                                elastic::combine_expanded_input_row_is_valid(
+                                    input_row, num_input_rows) :
+                                input_row == -1,
+                            "DeepEP Ascend backend: combine expanded slot is invalid");
+                        valid_slots += input_row == -1 ? 0 : 1;
+                    }
+                    records += !use_expanded_layout ? 1 :
+                        (allow_multiple_reduction_ ?
+                             (valid_slots == 0 ? 0 : 1) : valid_slots);
+                }
+                const auto record_capacity =
+                    use_expanded_layout && !allow_multiple_reduction_ ?
+                        capacity * num_topk : capacity;
+                TORCH_CHECK(records <= record_capacity,
+                            "DeepEP Ascend backend: combine source metadata "
+                            "exceeds capacity");
+                previous_end = end;
+            }
+            TORCH_CHECK(previous_end == num_source_rows,
+                        "DeepEP Ascend backend: combine rank prefix tail mismatch");
         }
-        TORCH_CHECK(previous_end == num_source_rows,
-                    "DeepEP Ascend backend: combine rank prefix tail mismatch");
 
         TORCH_CHECK(tiling.control_launch.num_blocks == 1 &&
                         tiling.data_launch.num_blocks ==

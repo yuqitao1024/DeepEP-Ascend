@@ -433,15 +433,47 @@ qualification 结论。后续如需正式对齐，应使用相同 workload、相
 30 warmups / 30 measured iterations 协议，并分别报告 stable 与 full 或
 kernel-only 口径。
 
-## 后续工作
+## Combine C++ prelaunch 瓶颈与规避方案
 
-1. 列出 dispatch 和 combine 的完整 contract 字段；
-2. 标记每个字段的校验时机和跨 rank必要性；
-3. 实现 stable/full 两种 preflight 模式；
-4. 为 stable 热路径、本地错误、full 远端错误和 contract mismatch 增加单元测试；
-5. 构造跨 rank contract 不一致的失败测试；
-6. 在 NPU8P 上重复 2/4/8-rank profiling；
-7. 清理本轮临时 profiling 代码，只保留可维护的诊断字段或文档。
+在 Python preflight 切换为 stable 后，Combine 长尾仍集中在 C++ prelaunch。
+8-rank、8192 tokens、hidden 7168、top-k 8、256 experts、64 data blocks 的
+profile 显示，各 rank producer record 耗时约 3.35-3.39 ms，input rows 差异
+小于 1%，说明主要问题不是计算量或物理链路。
+
+各 rank submit 时间差直接转化为设备侧 acquire wait：
+
+| Run | rank submit spread | acquire wait max |
+| --- | ---: | ---: |
+| rerun2 | 2.022 ms | 3.235 ms |
+| rerun3 | 1.408 ms | 1.939 ms |
+| rerun4 | 2.612 ms | 3.956 ms |
+
+host timeline 中可归因的三个阶段为：
+
+| 阶段 | observed mean | observed max |
+| --- | ---: | ---: |
+| combine metadata D2H | 0.58-0.79 ms | 1.4 ms |
+| combine host validation | 0.30-0.33 ms | - |
+| descriptor D2H | 0.13-0.21 ms | - |
+
+其中 metadata D2H 包含 rank prefix 和约 4.3 万行 source metadata；host
+validation 逐行校验 source identity、destination、lane 和 expanded slot。
+将 host entry 人工对齐到 0.414 ms spread 后，acquire wait 仍有 2.692 ms，
+说明剩余问题确实在 C++ prelaunch，而不是 Python wrapper。
+
+规避方案：
+
+1. stable 模式保留 descriptor D2H、descriptor/shape/capacity/tiling 本地校验；
+2. stable 模式跳过 rank prefix 和 source metadata 的大规模 D2H；
+3. stable 模式跳过 host 逐行 source metadata 校验；
+4. full 模式保留完整 D2H 与逐行校验，用于协议诊断；
+5. 不新增环境变量，C++ 与 Python 共用 `DEEP_EP_ASCEND_PREFLIGHT`。
+
+stable 模式的正确性兜底在设备侧：
+`direct_combine_producer_plan.asc` 会校验 source identity、destination
+rank、local index 和 expanded input row，非法 metadata 会记录
+`CombineProtocolError::kInvalidMetadata`。因此该方案将错误发现时机从
+launch 前移到设备侧协议检查，而不是取消校验。
 
 ## 当前工作区说明
 
@@ -449,3 +481,59 @@ kernel-only 口径。
 deep_ep/utils/envs.py 和 tests/ascend/benchmark/runtime.py，用于输出
 wrapper/preflight 分段时间。分析完成后，这些临时诊断修改已从本地工作区
 还原；本文档中的数据来自远端诊断结果文件，不依赖这些临时代码继续存在。
+
+### Combine C++ prelaunch 优化验证结果
+
+2026-09-24 已实现 stable/full gating，并在 NPU8P 上验证。环境为 CANN 9.3.0、
+HCOMM 9.3.0、8 rank、8192 tokens、hidden 7168、top-k 8、256 experts、
+64 data blocks、30 warmups / 30 iterations、`--profile-stages`，并保留
+`DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY=1`。
+
+结果文件与任务：
+
+- stable/full 快速 A/B：task `task_20260924_190637_2519056188`，
+  `combine-gating-stable-smoke.json` 与 `combine-gating-full-smoke.json`；
+- stable 三次 30-iteration 重跑：task `task_20260924_191032_253197525980`，
+  `combine-gating-stable-8rank-topk8-8192tokens-30iter-rerun{1,2,3}.json`。
+
+stable 三次重跑的 Combine 结果如下：
+
+| Run | Combine mean | Combine p95 | Combine logical bandwidth | submit spread |
+| --- | ---: | ---: | ---: | ---: |
+| rerun1 | 15.153 ms | 15.458 ms | 719.426 GB/s | 0.888 ms |
+| rerun2 | 14.937 ms | 15.505 ms | 729.809 GB/s | 1.464 ms |
+| rerun3 | 14.992 ms | 15.525 ms | 727.123 GB/s | 1.715 ms |
+
+优化前的 rerun2 基线为 Combine mean 16.685 ms、p95 18.318 ms、
+653.371 GB/s，submit spread 2.022 ms。三次新 run 的 Combine mean 改善
+约 1.7-1.748 ms，p95 改善约 2.8-2.9 ms，带宽从约 653 GB/s 提升到约
+719-730 GB/s。
+
+host timeline 证明预期路径生效：
+
+| 阶段 | 优化前 mean | 优化后 mean |
+| --- | ---: | ---: |
+| source metadata / rank prefix D2H | 0.636 ms | 0.0 ms |
+| host 逐行 source validation | 0.334 ms | 0.003 ms |
+| descriptor D2H | 0.178 ms | 0.181 ms |
+
+full 模式快速 A/B（2 warmups / 2 iterations）同样 correctness 通过；
+其 Combine mean 为 30.953 ms、352.191 GB/s，host metadata D2H mean 约
+0.778 ms、host validation mean 约 0.337 ms。stable 快速 A/B 的 Combine
+mean 为 15.564 ms、700.402 GB/s。两者共同说明 stable gating 没有取消
+诊断能力，只是把默认路径的大规模 D2H 和逐行 host 校验关掉。
+
+注意：第一次多迭代 run（task
+`task_20260924_190417_25108005998`）在 benchmark 完成并写出 JSON 后，
+个别 rank 的 Python 进程在退出阶段出现 SIGSEGV，因此 task exit code 为
+1，但 case correctness 为 passed。随后同 workload 的三次 rerun（task
+`task_20260924_191032_253197525980`）均 exit 0 且 correctness 通过；
+stable/full 快速 A/B task 也 exit 0。该退出期问题看起来是偶发，后续
+需要单独复现定位，不能和本优化收益混在一起。
+
+## 后续工作
+
+1. 跟踪多迭代 benchmark 退出阶段偶发 SIGSEGV；
+2. 为 full 模式构造非法 source metadata 的负向测试；
+3. 将 Combine 校验字段表补充到 contract 字段清单；
+4. 清理本轮临时 profiling 代码，只保留可维护的诊断字段或文档。
