@@ -311,23 +311,40 @@ descriptor 变化、显式配置变化时递增 epoch。只有 epoch 变化时�
 
 ## 推荐路线
 
-不能采用“各 rank 本地 fingerprint 相同就各自跳过 collective”的方案：如果
-部分 rank 跳过而另一部分 rank 仍进入 all_gather_object，同一 process group
-会因 collective 操作不匹配而挂死。因此优先采用方案 C 的安全变体：
-所有 rank 每次都参与同一个轻量级 fingerprint 交换，但只在 fingerprint 变化
-时回退到完整的 Python object contract 聚合。
+推荐路线改为借鉴 CUDA 的设计原则：Ascend 不照抄 CUDA 实现，但 hot path
+尽量薄，安全检查放在正确 seam。也就是说，稳定配置在 construction/topology
+等稳定 seam 做完整跨 rank 校验；dispatch/combine 热路径只做本地 contract
+检查，不再每次执行 Python object collective。
 
-具体路线：
+方案 B 是主线，方案 C 不再作为第一阶段实现。原因是即使换成小 tensor
+collective，每次调用仍有一次集合通信，仍可能保留 rank skew；而稳定配置
+的正确检查点本来就是 buffer construction/topology，不应重复放在逐 token
+dispatch/combine 路径上。
 
-1. 梳理 dispatch/combine contract 字段；
-2. 为完整 contract 计算 64-bit fingerprint；
-3. 在 process group 上用预分配的小 tensor 做 all_gather，交换 fingerprint；
-4. 所有 fingerprint 一致时，直接跳过完整 contract 的 object 聚合；
-5. 任一 fingerprint 缺失、非法或不一致时，所有 rank 进入同一个
-   all_gather_object 回退路径，交换并比较完整 contract；
-6. 本地 error_code 必须编码进 fingerprint 交换结果，不能在本地直接抛出；
-7. 用 2/4/8-rank 对比 preflight、C++ entry spread、acquire wait 和五个
-   operation 的 device mean/p95。
+具体设计：
+
+1. 新增 DEEP_EP_ASCEND_PREFLIGHT 模式：
+   - stable：默认模式，热路径本地校验；
+   - full：保留现有 all_gather_object 逐调用跨 rank 校验，用于测试和诊断；
+2. construction、construction_communicator、topology 继续完整跨 rank 校验；
+3. dispatch、combine 在 stable 模式下只执行：
+   - tensor 类型、dtype、shape、contiguous、device 检查；
+   - handle ownership 和 descriptor generation 检查；
+   - scalar、capacity、alignment、event/stream 模式检查；
+4. 本地非法 contract 在进入 C++ runtime 前直接拒绝；
+5. 跨 rank 不一致由稳定 seam 的完整校验和 full 模式诊断覆盖；
+6. 不改变公开 API 语义和 benchmark 的 logical_gbps 公式。
+
+### 风险与边界
+
+如果某个 dynamic 字段既无法本地校验，也未被稳定 construction contract 覆盖，
+stable 模式可能不会在调用前发现该字段的跨 rank 不一致。因此：
+
+1. 每次引入新的 contract 字段时，必须标记它的校验 seam；
+2. 无法归入稳定 seam 的跨 rank 字段，只能加入 full 模式，不能默认依赖
+   stable 模式发现；
+3. correctness matrix 必须同时覆盖 stable 和 full 模式；
+4. NPU 失败排查时优先使用 full 模式复现旧诊断能力。
 
 ## 验收指标
 
@@ -341,12 +358,87 @@ descriptor 变化、显式配置变化时递增 epoch。只有 epoch 变化时�
 6. logical_gbps 继续使用原有公式，可作为端到端改进证据；
 7. 额外记录 post-preflight kernel 诊断，用于确认数据面收益。
 
+## 实现与验证结果
+
+2026-09-24 已按上述设计实现：
+
+- 新增 DEEP_EP_ASCEND_PREFLIGHT=stable/full，默认 stable；
+- stable 模式下 dispatch/combine 只做本地 contract 拒绝，不再执行
+  dist.all_gather_object；
+- construction、construction_communicator、topology 仍完整跨 rank 聚合；
+- full 模式保留原有逐调用跨 rank object collective，用于诊断。
+
+该实现与 CUDA 的对齐关系是：
+
+- 已对齐的原则：公开 dispatch/combine 热路径保持薄，不在每次调用中执行
+  Python object collective；稳定配置检查集中在 construction/topology 等
+  变化点；本地非法输入在进入 runtime 前拒绝。
+- 不照抄的部分：CUDA 没有 Ascend 的 HCCL symmetric-root/topology 协议，也
+  没有对应的跨 rank contract 聚合需求；Ascend 保留这些稳定 seam 的完整
+  聚合，并额外提供 full 模式用于复现和定位协议问题。
+- 语义边界：stable 模式不再逐调用比较 dynamic contract 的跨 rank 差异。
+  这与 CUDA hot path 的行为一致，但意味着如果未来新增无法本地校验、也未
+  纳入稳定 seam 的字段，必须在 full 模式下验证，并明确该字段的校验时机。
+
+验证结果：
+
+- 本地 host 测试：tests/ascend/test_python_api.py 与
+  tests/ascend/test_benchmark_contract.py 共 141 passed，2 skipped；
+- NPU8P host 隔离场景：stable hot-path 与 full collective preflight 场景
+  均 exit 0；
+- NPU8P 2-rank FP8 runtime matrix：12 cases passed，任务
+  task_20260924_124714_5090062284；
+- NPU8P 8-rank 典型 case A/B：
+  stable 任务 task_20260924_124838_51411112691；
+  full 任务 task_20260924_124924_52755128092；
+  workload 为 4096 tokens、hidden 7168、top-k 6、256 experts、FP8、56 blocks。
+
+8-rank 五个操作的结果如下：
+
+| operation | stable device mean | full device mean | device 改善 |
+| --- | ---: | ---: | ---: |
+| dispatch | 5.527 ms | 16.162 ms | 10.635 ms |
+| expanded_dispatch | 13.899 ms | 25.608 ms | 11.709 ms |
+| cached_dispatch | 35.176 ms | 50.032 ms | 14.856 ms |
+| combine | 10.978 ms | 26.261 ms | 15.283 ms |
+| reduced_combine | 11.710 ms | 26.734 ms | 15.024 ms |
+
+stable 模式的 logical_gbps 为：
+
+| operation | stable logical_gbps | full logical_gbps |
+| --- | ---: | ---: |
+| dispatch | 587.982 GB/s | 201.086 GB/s |
+| expanded_dispatch | 269.722 GB/s | 146.394 GB/s |
+| cached_dispatch | 92.390 GB/s | 64.957 GB/s |
+| combine | 422.529 GB/s | 176.628 GB/s |
+| reduced_combine | 396.127 GB/s | 173.506 GB/s |
+
+注意：本轮 warmups=1、iterations=1，用于 A/B 快速验证；结果足以证明逐调用
+object collective 是主要瓶颈，但正式性能报告仍应使用稳定的多迭代协议。
+
+### 与历史 366 GB/s 的口径对齐
+
+P7 优化文档中的 dispatch 约 366.611 GB/s 来自 30 warmups、30 measured
+iterations 的默认路径 qualification，是稳定多采样统计，并且当时的诊断口径
+没有把本轮逐调用 Python object preflight 纳入 dispatch 的 device event span。
+
+本节 full 模式的 201.086 GB/s 是为了复现旧 preflight 行为而显式打开
+DEEP_EP_ASCEND_PREFLIGHT=full 后的单次 A/B 采样；start event 在 Python
+preflight 前记录，因此 device span 包含 object gather 造成的 host 延迟和
+rank skew。它不是对 P7 历史 366 GB/s 的同口径复测。
+
+stable 模式的 587.982 GB/s 同样是 warmups=1、iterations=1 的快速 A/B 结果，
+只能用于和本轮 full 模式比较收益，不能直接替代历史 366 GB/s 的正式
+qualification 结论。后续如需正式对齐，应使用相同 workload、相同提交、相同
+30 warmups / 30 measured iterations 协议，并分别报告 stable 与 full 或
+kernel-only 口径。
+
 ## 后续工作
 
 1. 列出 dispatch 和 combine 的完整 contract 字段；
 2. 标记每个字段的校验时机和跨 rank必要性；
-3. 实现 fingerprint 快速交换和完整 contract 回退路径；
-4. 为 fingerprint 一致、本地错误、远端错误和 contract mismatch 增加单元测试；
+3. 实现 stable/full 两种 preflight 模式；
+4. 为 stable 热路径、本地错误、full 远端错误和 contract mismatch 增加单元测试；
 5. 构造跨 rank contract 不一致的失败测试；
 6. 在 NPU8P 上重复 2/4/8-rank profiling；
 7. 清理本轮临时 profiling 代码，只保留可维护的诊断字段或文档。

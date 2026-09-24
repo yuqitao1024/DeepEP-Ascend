@@ -965,6 +965,8 @@ def _scenario_ascend_topology_preflight_remote_parse_failure():
 
 def _scenario_ascend_collective_contract_preflight():
     deep_ep, extension, events = _load_package("ascend", True)
+    saved_preflight = os.environ.get("DEEP_EP_ASCEND_PREFLIGHT")
+    os.environ["DEEP_EP_ASCEND_PREFLIGHT"] = "full"
 
     def valid_record(stage, contract):
         return _fixed_preflight_record(stage, contract)
@@ -1146,10 +1148,65 @@ def _scenario_ascend_collective_contract_preflight():
         raise AssertionError("peer combine handle failure was ignored")
     assert len(runtime.combine_calls) == combine_calls
     buffer.destroy()
+    if saved_preflight is None:
+        os.environ.pop("DEEP_EP_ASCEND_PREFLIGHT", None)
+    else:
+        os.environ["DEEP_EP_ASCEND_PREFLIGHT"] = saved_preflight
+
+
+def _scenario_ascend_stable_preflight_hot_path():
+    deep_ep, extension, events = _load_package("ascend", True)
+    group = _FakeGroup(events, rank=0, size=2)
+    buffer = deep_ep.ElasticBuffer(
+        group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
+        explicitly_destroy=True)
+    runtime = extension.runtime_instances[-1]
+    torch = sys.modules["torch"]
+    x = _FakeTensor("npu", (1, 16), torch.bfloat16)
+    topk_idx = _FakeTensor("npu", (1, 1), torch.int64)
+
+    _, _, _, handle, _ = buffer.dispatch(
+        x, topk_idx=topk_idx, num_experts=2, num_max_tokens_per_rank=1)
+    hot_path_gathers = [
+        event for event in events if isinstance(event, tuple) and
+        len(event) == 2 and event[0] == "dist.all_gather_object" and
+        event[1][0] in ("dispatch", "combine")
+    ]
+    assert not hot_path_gathers, hot_path_gathers
+    assert runtime.dispatch_calls
+    buffer.combine(x, handle)
+    assert runtime.combine_calls
+    hot_path_gathers = [
+        event for event in events if isinstance(event, tuple) and
+        len(event) == 2 and event[0] == "dist.all_gather_object" and
+        event[1][0] in ("dispatch", "combine")
+    ]
+    assert not hot_path_gathers, hot_path_gathers
+
+    dispatch_calls = len(runtime.dispatch_calls)
+    try:
+        buffer.dispatch(x, topk_idx=topk_idx, num_experts=2,
+                        num_max_tokens_per_rank=0)
+    except RuntimeError as error:
+        assert ("dispatch preflight failed on rank 0 (invalid_capacity)"
+                in str(error)), error
+    else:
+        raise AssertionError("stable mode accepted an invalid local contract")
+    assert len(runtime.dispatch_calls) == dispatch_calls
+
+    construction_gathers = [
+        event for event in events if isinstance(event, tuple) and
+        len(event) == 2 and event[0] == "dist.all_gather_object" and
+        event[1][0] in ("topology", "construction")
+    ]
+    assert construction_gathers, construction_gathers
+    buffer.destroy()
 
 
 def _scenario_ascend_hybrid_collective_preflight():
     deep_ep, extension, events = _load_package("ascend", True)
+    saved_preflight = os.environ.get("DEEP_EP_ASCEND_PREFLIGHT")
+    os.environ["DEEP_EP_ASCEND_PREFLIGHT"] = "full"
     os.environ["DEEP_EP_ASCEND_LOGICAL_SIMULATION"] = "1"
     os.environ["DEEP_EP_ASCEND_SCALE_UP_SIZE"] = "2"
     os.environ["DEEP_EP_ASCEND_TOPOLOGY_EPOCH"] = "9"
@@ -1385,6 +1442,10 @@ def _scenario_ascend_hybrid_collective_preflight():
 
     for buffer, _, _ in direct_buffers + hybrid_buffers:
         buffer.destroy()
+    if saved_preflight is None:
+        os.environ.pop("DEEP_EP_ASCEND_PREFLIGHT", None)
+    else:
+        os.environ["DEEP_EP_ASCEND_PREFLIGHT"] = saved_preflight
 
 
 def _scenario_ascend_implicit_size():
@@ -1492,6 +1553,10 @@ def _scenario_ascend_contextmanager_gate():
 
 def _scenario_ascend_dispatch():
     deep_ep, extension, events = _load_package("ascend", True)
+    saved_preflight = os.environ.get("DEEP_EP_ASCEND_PREFLIGHT")
+    os.environ["DEEP_EP_ASCEND_PREFLIGHT"] = "full"
+    elastic = importlib.import_module("deep_ep.buffers.elastic")
+    max_data_blocks = elastic._ascend_max_data_blocks()  # noqa: SLF001
     buffer = deep_ep.ElasticBuffer(
         _FakeGroup(events, rank=0, size=2), num_bytes=2 * 1024 * 1024,
         allow_hybrid_mode=False, explicitly_destroy=True)
@@ -1508,12 +1573,12 @@ def _scenario_ascend_dispatch():
     assert len(dispatch_args) == 29
     assert dispatch_args[2] is topk_idx
     assert dispatch_args[3] is topk_weights
-    assert dispatch_args[18:20] == (56, 0)
+    assert dispatch_args[18:20] == (max_data_blocks, 0)
     assert dispatch_args[20:24] == (None, None, False, False)
     assert dispatch_args[25] is True
     assert recv_topk_weights is topk_weights
     assert isinstance(handle, deep_ep.EPHandle)
-    assert handle.num_sms == 56
+    assert handle.num_sms == max_data_blocks
     assert handle.topk_idx is not topk_idx
     assert handle.token_metadata_at_forward is not None
     assert event.event is None
@@ -1760,7 +1825,7 @@ def _scenario_ascend_dispatch():
     assert no_weights_args[0] is x
     assert no_weights_args[2] is no_weights_idx
     assert no_weights_args[3] is None
-    assert no_weights_args[18:20] == (56, 0)
+    assert no_weights_args[18:20] == (max_data_blocks, 0)
     assert no_weights_args[24] is False
     assert recv_x is x
     assert recv_topk_idx is no_weights_idx
@@ -1787,10 +1852,16 @@ def _scenario_ascend_dispatch():
     assert empty_event.event is None
 
     buffer.destroy()
+    if saved_preflight is None:
+        os.environ.pop("DEEP_EP_ASCEND_PREFLIGHT", None)
+    else:
+        os.environ["DEEP_EP_ASCEND_PREFLIGHT"] = saved_preflight
 
 
 def _scenario_ascend_fp8_dispatch():
     deep_ep, extension, events = _load_package("ascend", True)
+    saved_preflight = os.environ.get("DEEP_EP_ASCEND_PREFLIGHT")
+    os.environ["DEEP_EP_ASCEND_PREFLIGHT"] = "full"
     group = _FakeGroup(events, rank=0, size=2)
     buffer = deep_ep.ElasticBuffer(
         group, num_bytes=2 * 1024 * 1024, allow_hybrid_mode=False,
@@ -2036,6 +2107,10 @@ def _scenario_ascend_fp8_dispatch():
         raise AssertionError("asymmetric SF layout reached runtime")
     assert len(runtime.dispatch_calls) == calls
     buffer.destroy()
+    if saved_preflight is None:
+        os.environ.pop("DEEP_EP_ASCEND_PREFLIGHT", None)
+    else:
+        os.environ["DEEP_EP_ASCEND_PREFLIGHT"] = saved_preflight
 
 
 def _scenario_ascend_owner_device_preflight():
@@ -2079,6 +2154,8 @@ def _scenario_ascend_owner_device_preflight():
 
 def _scenario_ascend_dispatch_optimized():
     deep_ep, extension, events = _load_package("ascend", True)
+    elastic = importlib.import_module("deep_ep.buffers.elastic")
+    max_data_blocks = elastic._ascend_max_data_blocks()  # noqa: SLF001
     buffer = deep_ep.ElasticBuffer(
         _FakeGroup(events, rank=0, size=2), num_bytes=2 * 1024 * 1024,
         allow_hybrid_mode=False, explicitly_destroy=True)
@@ -2109,9 +2186,9 @@ def _scenario_ascend_dispatch_optimized():
         raise AssertionError("valid explicit Ascend counts changed before runtime")
     buffer.dispatch(
         x, topk_idx=topk_idx, num_experts=2,
-        num_max_tokens_per_rank=1, num_sms=56, num_qps=0)
-    if runtime.dispatch_calls[-1][18:20] != (56, 0):
-        raise AssertionError("56-block Ascend dispatch changed before runtime")
+        num_max_tokens_per_rank=1, num_sms=max_data_blocks, num_qps=0)
+    if runtime.dispatch_calls[-1][18:20] != (max_data_blocks, 0):
+        raise AssertionError("default-block Ascend dispatch changed before runtime")
     buffer.destroy()
 
 
@@ -2653,6 +2730,8 @@ SCENARIOS = {
         _scenario_ascend_topology_preflight_remote_parse_failure,
     "ascend_collective_contract_preflight":
         _scenario_ascend_collective_contract_preflight,
+    "ascend_stable_preflight_hot_path":
+        _scenario_ascend_stable_preflight_hot_path,
     "ascend_hybrid_collective_preflight":
         _scenario_ascend_hybrid_collective_preflight,
     "ascend_implicit_size": _scenario_ascend_implicit_size,
@@ -2738,6 +2817,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_ascend_collective_contract_preflight_precedes_runtime_work(self):
         self.run_scenario("ascend_collective_contract_preflight")
+
+    def test_ascend_stable_preflight_keeps_hot_path_local(self):
+        self.run_scenario("ascend_stable_preflight_hot_path")
 
     def test_hybrid_collective_preflight_rejects_asymmetric_records_before_runtime(self):
         self.run_scenario("ascend_hybrid_collective_preflight")

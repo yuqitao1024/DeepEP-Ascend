@@ -21,6 +21,9 @@ _local_rank = None
 _local_seed = 0
 _global_seed = 0
 _ACL_DEV_ATTR_AICORE_CORE_NUM = 101
+_ASCEND_PREFLIGHT_STABLE = "stable"
+_ASCEND_PREFLIGHT_FULL = "full"
+_ASCEND_PREFLIGHT_HOT_PATH_STAGES = frozenset(("dispatch", "combine"))
 
 
 @functools.lru_cache(maxsize=None)
@@ -131,6 +134,32 @@ def _first_ascend_contract_mismatch(reference: Dict[str, Any],
     return "contract_mismatch"
 
 
+def _ascend_preflight_mode() -> str:
+    mode = os.environ.get("DEEP_EP_ASCEND_PREFLIGHT",
+                          _ASCEND_PREFLIGHT_STABLE)
+    if mode not in (_ASCEND_PREFLIGHT_STABLE, _ASCEND_PREFLIGHT_FULL):
+        raise RuntimeError(
+            f"DeepEP Ascend backend: invalid preflight mode {mode!r} "
+            "(expected 'stable' or 'full')")
+    return mode
+
+
+def _preflight_ascend_contract_local(
+        group: dist.ProcessGroup, stage: str,
+        contract: Optional[Dict[str, Any]],
+        error_code: Optional[str] = None) -> Dict[str, Any]:
+    """Validate a hot-path contract locally without a Python collective."""
+    if error_code is not None:
+        raise RuntimeError(
+            f"DeepEP Ascend backend: {stage} preflight failed on rank "
+            f"{group.rank()} ({error_code})")
+    if not _encode_ascend_preflight_contract(contract):
+        raise RuntimeError(
+            f"DeepEP Ascend backend: {stage} preflight failed on rank "
+            f"{group.rank()} (invalid_preflight_record)")
+    return contract
+
+
 def preflight_ascend_topology(group: dist.ProcessGroup) -> Tuple[str, int, int, int]:
     """Validate and aggregate the explicit Ascend topology configuration."""
     world_size = group.size()
@@ -180,7 +209,18 @@ def preflight_ascend_topology(group: dist.ProcessGroup) -> Tuple[str, int, int, 
 def preflight_ascend_contract(group: dist.ProcessGroup, stage: str,
                               contract: Optional[Dict[str, Any]],
                               error_code: Optional[str] = None) -> Dict[str, Any]:
-    """Aggregate a rank-local Ascend contract before collective runtime work."""
+    """Validate an Ascend contract at the appropriate process-group seam.
+
+    Construction and topology contracts are stable and are always aggregated
+    across ranks. Dispatch and combine are hot paths: by default they only
+    reject invalid local contracts. Set DEEP_EP_ASCEND_PREFLIGHT=full to retain
+    the legacy per-call cross-rank diagnostic collective.
+    """
+    if (_ascend_preflight_mode() == _ASCEND_PREFLIGHT_STABLE and
+            stage in _ASCEND_PREFLIGHT_HOT_PATH_STAGES):
+        return _preflight_ascend_contract_local(
+            group, stage, contract, error_code)
+
     world_size = group.size()
     encoded_contract = _encode_ascend_preflight_contract(contract)
     local = (stage, int(error_code is None and bool(encoded_contract)),
