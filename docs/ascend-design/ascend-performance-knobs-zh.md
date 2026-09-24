@@ -204,6 +204,18 @@ num_topk=6, num_experts=256, num_sms=56
 warmups=30, iterations=30
 ```
 
+口径说明：历史 P5-P7 优化验收使用的“representative workload”是 8192
+tokens、top-k 8、72 data blocks。2026-09-24 的 host-preflight 分析、selector
+复核和跨机器对照使用的是本文记录的 4096 tokens、top-k 6、56 data blocks
+口径；两者不是同一 workload，不能直接混比。
+
+2026-09-24 所有 selector 复核和跨机器对照 JSON 中的 workload 元数据均已
+确认：8-rank 三次 selector 复核、NPU8P 4-rank、NPU4Px2 4-rank 均为
+`num_tokens=4096`、`num_topk=6`。其中 8-rank workload fingerprint 为
+`dd523e34557a25bbda218f7346e772c147e1dc2a0035241ec1f9712b565dbbc3`；
+两个 4-rank 对照的 fingerprint 相同，为
+`b8f607ea337761f2c581c4221dd5dfb54e5fc49d6d7e8a03f11896fc8a9cfdb5`。
+
 如果目标是与既有 8-rank stable preflight 数据直接比较，保持 `--profile-stages`。
 如果目标是正式无 profile 性能，则去掉 `--profile-stages`，并重新建立基线，
 不要跨口径混合比较。
@@ -237,3 +249,42 @@ selector 环境；correctness 均通过。
 - `CHANNELS=2`：`preflight-stable-8rank-channels2-30iter.json`，
   task `task_20260924_141958_11324995765`，
   SHA-256 `7f1063b5ed3ddf370fc553a35ffbb0426c7d2fde39a1942cff9c257bc4e55526`。
+
+## 2026-09-24 NPU4Px2 / NPU8P 4-rank 对照
+
+同一 commit `37d8276`、stable preflight、4-rank、hidden 7168、top-k 6、
+256 experts、56 data blocks、30 warmup/30 iterations，并且都使用
+`--profile-stages`。每 rank 4096 tokens。
+
+| Host | Device | CANN/HCOMM | Allocation |
+| --- | --- | --- | --- |
+| NPU4Px2 | Ascend950PR，设备 4-7 | CANN 9.3.0，`/data/y00621698/pkg-9.3/cann-9.3.0` | 直接运行；运行前 `npu-smi` 确认 4-7 组内无其他进程 |
+| NPU8P | Ascend950DT，设备 0-3 | CANN 9.3.0，`/data/disk2/cann_version/0916/use_cann/cann-9.3.0` | task-submit |
+
+NPU4Px2 的 4-7 卡属于同一个 UB group；NPU8P 的 0-3 卡由 task-submit 锁定。
+两台机器都是 4-rank 全 UB 互联。NPU4Px2 直接运行时需要显式设置
+`HCCL_NPU_SOCKET_PORT_RANGE=60000-60099`，否则会遇到默认 16666 端口已被
+绑定的问题。
+
+| Operation | NPU4Px2 mean | NPU8P mean | Time ratio | NPU4Px2 GB/s | NPU8P GB/s | Bandwidth ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 3.218 ms | 5.609 ms | 0.574 | 375.122 | 215.216 | 1.743 |
+| Expanded Dispatch | 9.979 ms | 12.494 ms | 0.799 | 165.825 | 132.434 | 1.252 |
+| Cached Dispatch | 27.083 ms | 33.001 ms | 0.821 | 44.568 | 36.576 | 1.218 |
+| Combine | 5.965 ms | 9.665 ms | 0.617 | 298.954 | 184.517 | 1.620 |
+| Reduced Combine | 6.523 ms | 10.217 ms | 0.639 | 273.395 | 174.542 | 1.565 |
+
+结论：在该 4-rank representative case 上，NPU4Px2/Ascend950PR 五项操作都
+快于 NPU8P/Ascend950DT。普通 Dispatch 和 Combine 的差距最大，logical
+bandwidth 分别约为 1.74x 和 1.62x；expanded/cached 路径差距较小，约为
+1.22x 到 1.25x。这个跨机器结论只能用于描述两台机器在上述固定环境下的表现，
+不能单独归因给某一个硬件或驱动差异。
+
+结果文件与任务：
+
+- NPU4Px2：`/data/y00621698/deepep-37d8276/results/npu4px2-4rank-stable-30iter.json`，
+  SHA-256
+  `429cab942bca89b46f1abd235dc2b3da277b75295c830bbb272074e9bc211006`。
+- NPU8P：`/home/pyptouser/yuqitao/deepep-preflight-9476200/results/preflight-stable-4rank-30iter.json`，
+  task `task_20260924_140434_96976420629`，SHA-256
+  `cb99f66314468908779064bb56a7d5cde0ff91422a8ad8259dc44b0661836a95`。
