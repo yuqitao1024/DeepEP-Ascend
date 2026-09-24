@@ -21,8 +21,12 @@ DEEP_EP_ASCEND_SIMT_CALLEE void system_fence() {
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE void poll_nop() {
+#if DEEP_EP_ASCEND_POLLING_NOP
     for (std::uint32_t cycle = 0; cycle < kPollingNopCycles; ++cycle)
         asc_nop();
+#else
+    // Driver 25.6.rc2.b023 no longer requires the polling NOP cadence.
+#endif
 }
 
 template <typename T>

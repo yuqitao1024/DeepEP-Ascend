@@ -20,7 +20,11 @@ __aicore__ inline void system_fence() {
 }
 
 __aicore__ inline void poll_nop() {
+#if DEEP_EP_ASCEND_POLLING_NOP
     AscendC::Nop<kPollingNopCycles>();
+#else
+    // Driver 25.6.rc2.b023 no longer requires the polling NOP cadence.
+#endif
 }
 
 __aicore__ inline void flush_cacheline(__gm__ void* address) {

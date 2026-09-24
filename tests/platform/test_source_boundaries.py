@@ -55,6 +55,29 @@ class RegistrationBoundaryTest(unittest.TestCase):
         self.assertIn("TORCH_NPU_ROOT", ascend)
         self.assertIn("torch_npu", ascend)
 
+    def test_ascend_polling_nop_is_a_disabled_build_time_selector(self):
+        cmake = self.read("CMakeLists.txt")
+        self.assertIn("option(DEEP_EP_ASCEND_POLLING_NOP", cmake)
+        self.assertIn(
+            '       "Insert NOP instructions in device polling loops (diagnostic only)" OFF)',
+            cmake)
+        self.assertIn("DEEP_EP_ASCEND_POLLING_NOP=$<BOOL:", cmake)
+
+        setup = self.read("setup.py")
+        self.assertIn("environ.get('DEEP_EP_ASCEND_POLLING_NOP', '0')", setup)
+        self.assertIn("-DDEEP_EP_ASCEND_POLLING_NOP=", setup)
+
+        aicore = self.read(
+            "csrc/backends/ascend/transport/aicore_intrinsics.hpp")
+        self.assertIn("#if DEEP_EP_ASCEND_POLLING_NOP", aicore)
+        self.assertIn("AscendC::Nop<kPollingNopCycles>();", aicore)
+        self.assertIn("#else", aicore)
+
+        simt = self.read("csrc/backends/ascend/transport/simt_intrinsics.hpp")
+        self.assertIn("#if DEEP_EP_ASCEND_POLLING_NOP", simt)
+        self.assertIn("asc_nop();", simt)
+        self.assertIn("#else", simt)
+
 
 if __name__ == "__main__":
     unittest.main()
