@@ -147,9 +147,10 @@ rerun1 中每个 rank 都出现稳定 gap：
 | epilogue_metadata -> epilogue_copy | 约 0.39 ms |
 | epilogue_expert_count -> epilogue_expert_prefix | 约 0.33 ms |
 
-这些 gap 的总量超过多数 stage 本身。当前怀疑点是 one-stage-per-launch、
+这些 gap 的总量超过多数 stage 本身。最初怀疑点是 one-stage-per-launch、
 AICore/VF 分离提交和 transport service 顺序执行带来的固定调度成本，而不是
-数据量。
+数据量。2026-09-26 的完整 kernel trace 已修正这一归因：大部分固定 gap
+是阶段计时未覆盖的专用 VF kernel，见下文“D4 后普通 Dispatch 关键路径复核”。
 
 设计方向：
 
@@ -521,9 +522,166 @@ python -m torch.distributed.run --standalone --nproc-per-node=8 \
   `task_20260926_042722_128910326848`（任务脚本成功表示两次诊断已执行，
   两个 workload 本身均退出 1，并非功能通过）。
 
-### D5. Cached Dispatch 专项
+### D4 后普通 Dispatch 关键路径复核（2026-09-26）
 
-优先级：P1。
+按当前开发范围，暂停 D5 Cached Dispatch，集中优化普通 Dispatch。
+基线为 `645fa84`，NPU8P device 0-7、8 rank、8192 tokens/rank、hidden
+7168、top-k 8、256 experts、FP8、64 AIV。CANN/HCOMM 仍使用
+`/data/disk2/cann_version/0916/use_cann/cann-9.3.0`，沿用 D4 的优化开关。
+基线二进制 SHA256：
+`75cd9b35f5dbcd29a832f7cabde77b4ff625f5da011a309666e1ab5a7a2ab4f2`。
+
+#### 阶段采样
+
+三次独立 `--profile-stages --warmups 30 --iterations 30` 均通过五操作功能
+校验。以下 mean/p95 属于开启阶段 profiling 的计时路径，不与 D4 无 profiling
+的 6.149 ms 直接比较，也不据此判断回退。
+
+| Run | Dispatch mean / ms | p95 / ms | Host completion anchor spread / ms |
+| --- | ---: | ---: | ---: |
+| 1 | 6.559796 | 7.037377 | 0.31439 |
+| 2 | 6.573279 | 6.914325 | 0.26603 |
+| 3 | 6.583718 | 6.873264 | 0.37044 |
+
+各 rank 已计时 stage 活动约 1.745-1.809 ms；阶段之间尚未归属的时间约
+2.25-3.20 ms。这部分不能标成 NPU idle 或 host launch 开销。
+Release attribution 的 max-per-rank CQ drain 为 810504/811306/812556
+cycles，flush command 为 903840/915266/910554 cycles；两者存在包含关系，
+不能相加。不同 rank 的最大值也不能合成为一条实际关键路径。
+
+同三次采样的 host count bridge（max-per-rank）为 0.373/0.315/0.325 ms，
+prelaunch setup 为 0.089/0.149/0.091 ms，prefix H2D 均为 0。
+这与 D1 的 device-side public prefix 路径一致；约 0.5 ms 的固定 VF 工作
+应与 host preflight 分开归因。
+
+#### 完整 kernel trace
+
+另外使用 Torch-NPU CPU/NPU profiler，在普通 Dispatch 的 30 次预热后
+捕获三次调用；HCCL 入口同步的 host 提交放在调用标记外，但没有额外等待
+设备完成，因此其异步执行可能延续到标记内。五操作 benchmark 校验通过，
+随后八个 rank 都导出了 trace，任务正常退出 0。第 0 次捕获有明显 profiler
+启动扰动，固定 kernel 耗时统计只使用第 1/2 次，共 16 个 rank/capture 样本。
+
+| 专用 kernel | min / μs | median / μs | max / μs |
+| --- | ---: | ---: | ---: |
+| epilogue_validate_records | 521.460 | 522.217 | 523.135 |
+| producer_prefix | 435.098 | 435.791 | 436.204 |
+| epilogue_count_experts | 327.694 | 329.170 | 329.777 |
+| epilogue_parallel_prefix | 169.314 | 175.490 | 176.181 |
+| epilogue_metadata | 169.892 | 170.616 | 171.621 |
+| producer_release | 160.963 | 166.369 | 171.057 |
+| epilogue_copy_outputs | 164.742 | 165.776 | 167.026 |
+| producer_record | 117.869 | 119.043 | 122.056 |
+| epilogue_acquire | 66.228 | 68.658 | 1687.572 |
+
+例如 rank 0 第 2 次捕获，从首个 Dispatch kernel 到最后的 complete kernel
+跨度为 3.68189 ms，kernel 时长之和 3.68129 ms，间隙合计仅约 0.59 μs。
+原来约 0.44/0.52/0.33/0.18 ms 的阶段间 gap，分别对应 producer prefix、
+validate records、count experts、parallel prefix 的真实执行。
+metadata→copy 的约 0.39 ms 区间还包含 metadata、assign destinations、
+reduce errors、clear padding 和 copy outputs 专用 kernel。
+
+该 rank 的完整 host 调用约 5.975 ms，首个 kernel 前约 0.558 ms，最后一个
+kernel 后约 1.735 ms。首个 kernel 前的区间可能包含入口 HCCL 等待，不能
+视为纯 host 开销。host 尾部可见 narrow 和 CPU tensor copy；当前 trace
+没有覆盖所有自定义 runtime API，不能把这些剩余时间全部归因于 preflight
+或 pybind。另一些 rank/capture 确有较长间隙（最高约 1.345 ms）和 acquire
+等待（最高约 1.688 ms）。两次捕获不足以判断其发生频率或证明同步缺陷。
+
+后续按单变量推进：
+
+1. 专家计数的线程内 histogram 已完成独立对照，未取得稳定收益，撤回实现
+   （见下文）。后续计数优化需先验证存储布局与并行粒度，不能假定普通局部
+   数组一定比 GM 计数快。
+2. 下一优先项是 validate records 的并行粒度，以及 producer/epilogue prefix 的
+   串行扫描；保留全部校验和确定性的错误汇总，不通过删检查获得收益。
+3. 入口 HCCL 显式等待后的 20 次 capture 已完成（见下文）；下一步细分
+   kernel 完成后的结果回读、runtime completion 和 handle 收尾时间，同时
+   保留 host 提交边界测量，区分晚提交与跨 rank 等待。
+4. 所有候选以无 profiling 的重复 ABBA 验收，普通 Dispatch 收益稳定才保留。
+
+原始结果位于 NPU8P `/home/pyptouser/yuqitao/deepep-d4/results/`：
+`dispatch-after-d4-profile-{1,2,3}.json`、
+`dispatch-after-d4-kernel-trace.json`、`dispatch-after-d4-traces/rank{0..7}.json`。
+阶段采样 task 为 `task_20260926_044701_133165922041`，完整 trace task 为
+`task_20260926_044925_134136317897`。
+
+#### 等待入口 HCCL 完成后的补充 trace
+
+在 D4 基线上，调用标记前显式 `torch.npu.synchronize()`，然后捕获 20 次
+普通 Dispatch。剔除每 rank 第 0 次，剩余 8 × 19 = 152 个 rank/capture
+样本。五操作校验通过，trace 全部导出，任务退出 0。
+
+| 区间 | median / μs | p95 / μs | max / μs |
+| --- | ---: | ---: | ---: |
+| 调用标记开始 → 首个 Dispatch kernel | 265.928 | 438.356 | 582.259 |
+| 首个 → 最后一个 Dispatch kernel | 3884.224 | 4123.776 | 4241.832 |
+| 上述 kernel 之间的间隙总和 | 13.196 | 23.428 | 412.121 |
+| epilogue acquire kernel | 240.877 | 493.392 | 613.832 |
+| 最后一个 Dispatch kernel → 调用标记结束 | 1557.563 | 2520.315 | 3125.087 |
+
+这是 rank/capture 样本的分布，不能相加各行 p95/max，也不是 benchmark 的
+逐 iteration max-rank latency。标记结束包含显式设备同步和返回值处理。
+最后一行还可能包含数据回读/其他 runtime 操作，不能标成纯 CPU 或设备空闲。
+
+固定 kernel 再次得到确认：validate median 522.055 μs，producer prefix
+435.728 μs，count experts 329.165 μs，epilogue prefix 175.530 μs。
+因此可以优先优化实际 VF 工作；另需细分较大的调用尾部，避免把它与阶段
+gap 混在一起。显式同步改变了各 rank 的进入时序，且所有数据仍在 profiler
+下，不能根据本次 acquire 最大值较小就宣称长尾已修复。
+
+结果在 D4 目录的 `results/dispatch-entry-synced-trace.json` 和
+`results/dispatch-entry-synced-traces/rank{0..7}.json`，task 为
+`task_20260926_050616_141016430903`。
+
+#### 专家计数私有 histogram 对照：不保留
+
+单变量候选只改 `direct_dispatch_epilogue_count_experts.asc`：每线程仍拥有
+一个 128-record tile，在 local experts ≤ 32 时用 32 个 `uint64_t` 局部
+计数器累加，结束后写回 GM；更大 expert 数保留旧分支。未修改 ABI、workspace
+布局、错误传播或同步协议。独立目录编译完成，源码目录对照只有这个文件不同。
+
+候选完整 trace 中 count experts 的 median 从 329.170 μs 增至 392.195 μs，
+其他固定 VF kernel 基本不变。仅凭源码减少 GM 更新次数，不能推断实际访存
+或指令成本下降；本次没有编译器 lowering 证据，不将变慢进一步归因于某种
+特定 spill 或 UB 行为。
+
+三组无 profiling 的 ABBA，每次 2 warmups / 30 iterations，与 D4 验收口径
+一致。A 为 D4，B 为私有 histogram。每组表值是两个 A/B run 各自均值：
+
+| 组 | A Dispatch mean / ms | B mean / ms | mean 收益 | A p95 / ms | B p95 / ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 6.157462 | 6.149411 | +0.131% | 6.699107 | 6.896977 |
+| 2 | 6.074498 | 6.362223 | -4.737% | 6.583800 | 6.736078 |
+| 3 | 6.243174 | 6.604998 | -5.796% | 6.792412 | 7.191284 |
+
+六个等长 run 合并：A **6.158378 ms / 1264.309 GB/s**，B **6.372211 ms /
+1221.882 GB/s**。带宽沿用八 rank 聚合 logical bytes，不能解释为单链路 P2P
+带宽。A 与 D4 先前 6.149285 ms / 1266.178 GB/s 的结果一致。
+
+12 次 run 都完成五操作功能校验，没有卡死或协议错误。B 第一组第一次在
+完整成功结果后出现已知 teardown SIGSEGV，按既定严格检查接受；其余正常
+退出。Expanded Dispatch 合并均值为 17.274230 → 17.406393 ms，亦无收益。
+结论：撤回候选，生产 kernel 维持 `645fa84`；不新增性能开关或诊断代码。
+
+原始 A 结果在 `/home/pyptouser/yuqitao/deepep-d4/results/`，B 在
+`/home/pyptouser/yuqitao/deepep-dispatch-hist/results/`，文件名均为
+`hist-abba{1,2,3}-{A1,B1,B2,A2}.json` 及对应 `.log`（各目录只有对应 A 或 B）。
+B 的 `hist-kernel-trace.json`、`hist-traces/rank{0..7}.json` 和实验源码保留在
+独立目录中。候选二进制 SHA256 为
+`1a1f4e6f9d4017bad8798f9007d8ba69cd3375690505c8ad8bfb058f89eb271e`。
+编译 task `task_20260926_045604_135826716442`，候选 trace task
+`task_20260926_045806_136990814002`，ABBA task
+`task_20260926_045900_137634923157`，均已结束。
+
+本轮临时采样/分析脚本与下载结果归档于本地
+`/tmp/deepep-dispatch-after-d4-20260926.3mBLpT/scratch/`；远端新增脚本归档于
+`/home/pyptouser/yuqitao/dispatch-after-d4-20260926.R8hw7E/`。主工作树只保留
+本文的测量与决策记录，不保留实验 kernel 或临时诊断代码。
+
+### D5. Cached Dispatch 专项（暂停）
+
+优先级：暂停；2026-09-26 按用户要求，先集中优化普通 Dispatch。
 
 当前五操作中 Cached Dispatch 约 70.3-71.4 ms，远高于 Normal Dispatch 的
 约 7.3 ms。Cached path 不使用 device prefix、parallel prefix、token fanout
@@ -566,7 +724,7 @@ python -m torch.distributed.run --standalone --nproc-per-node=8 \
 2. D2 launch-boundary profile 与小 stage 合并；
 3. D3 release 拆分 profile；
 4. D4 epilogue copy 双缓冲/arrival-driven；
-5. D5 Cached Dispatch 专项。
+5. D4 后普通 Dispatch 的专用 VF kernel 与长尾归因；D5 Cached Dispatch 暂停。
 
 每一步都必须：
 
