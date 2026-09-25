@@ -578,20 +578,16 @@ __aicore__ inline bool drain_channel(const DeviceTransportContext& context,
     const auto head_value = aicore::load_device(reinterpret_cast<__gm__ std::uint64_t*>(peer.sq->head));
     const std::uint32_t expected = urma::sq_request_count(head_value);
     std::uint32_t tail = aicore::load_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->tail));
-    const auto cqe_scratch = service_scratch[32];
     while (tail != expected) {
         auto* cqe = reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->base +
                                                             static_cast<std::uint64_t>(tail % peer.cq->depth) * peer.cq->entry_bytes);
-        AscendC::GlobalTensor<std::uint32_t> cqe_global;
-        cqe_global.SetGlobalBuffer(cqe);
         std::uint64_t retry = 0;
         std::uint32_t word0 = 0;
         do {
             aicore::poll_nop();
-            aicore::sync_event<AscendC::HardEvent::S_MTE2>();
-            AscendC::DataCopy(cqe_scratch, cqe_global, std::uint32_t{16});
-            aicore::sync_event<AscendC::HardEvent::MTE2_S>();
-            word0 = cqe_scratch.GetValue(0);
+            // Owner and status share one word. Bypass DCache to observe the
+            // device's CQE publication without a 64-byte GM-to-UB transfer.
+            word0 = aicore::load_published(cqe);
             if (urma::cqe_owner_valid((word0 >> 2U) & 1U, tail, peer.cq->depth))
                 break;
             ++retry;
@@ -632,6 +628,49 @@ __aicore__ inline bool drain_channel(const DeviceTransportContext& context,
     aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->tail), tail);
     finish_drain_profile<ProfileEnabled>(context, profile, wait_start);
     return true;
+}
+
+template <bool ProfileEnabled = true>
+__aicore__ inline std::uint64_t command_profile_clock() {
+    if constexpr (ProfileEnabled)
+        return static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+    return 0;
+}
+
+template <bool ProfileEnabled = true>
+__aicore__ inline void record_transport_command_cycles(
+    __gm__ TransportStageProfile* profile,
+    TransportCommandOpcode opcode,
+    std::uint64_t start_cycles,
+    std::uint64_t end_cycles) {
+    if constexpr (!ProfileEnabled)
+        return;
+    if (profile == nullptr)
+        return;
+    const auto cycle_class = command::aicore_transport_service_cycle_class(
+        opcode);
+    if (cycle_class == TransportServiceCycleClass::kUnclassified)
+        return;
+    TransportServiceCycleBreakdown breakdown{
+        profile->payload_command_cycles,
+        profile->control_command_cycles,
+        profile->flush_command_cycles,
+        profile->barrier_command_cycles,
+        profile->barrier_poll_cycles,
+    };
+    const auto recorded = record_transport_service_cycles(
+        breakdown, cycle_class, start_cycles, end_cycles);
+    if (!recorded.valid)
+        return;
+    profile->payload_command_cycles =
+        recorded.cycles.payload_command_cycles;
+    profile->control_command_cycles =
+        recorded.cycles.control_command_cycles;
+    profile->flush_command_cycles = recorded.cycles.flush_command_cycles;
+    profile->barrier_command_cycles =
+        recorded.cycles.barrier_command_cycles;
+    profile->barrier_poll_cycles =
+        recorded.cycles.barrier_poll_cycles;
 }
 
 template <typename Request>
@@ -1083,6 +1122,7 @@ __aicore__ inline bool execute_barrier(const DeviceTransportContext& context,
             if (profile != nullptr) {
                 const auto poll_end = static_cast<std::uint64_t>(AscendC::GetSystemCycle());
                 profile->barrier_poll_elapsed_cycles += poll_end - start_cycles;
+                profile->barrier_poll_cycles += poll_end - start_cycles;
                 profile->barrier_poll_iterations += retry;
                 if (first_observation >= start_cycles)
                     profile->barrier_first_observation_cycles += first_observation - start_cycles;
@@ -1125,6 +1165,7 @@ __aicore__ inline void begin_profile(const DeviceTransportContext& context, Tran
     profile->command_bytes = 0;
     profile->service_start_cycles = 0;
     profile->service_end_cycles = 0;
+    profile->service_active_cycles = 0;
     profile->wait_cycles = 0;
     profile->payload_command_cycles = 0;
     profile->control_command_cycles = 0;
@@ -1159,6 +1200,7 @@ __aicore__ inline void begin_profile(const DeviceTransportContext& context, Tran
 #endif
     aicore::system_fence();
     aicore::flush_stage_profile_header(profile);
+    aicore::flush_cacheline(&profile->service_active_cycles);
 }
 
 __aicore__ inline void complete_profile(const DeviceTransportContext& context, std::uint64_t generation) {
@@ -1371,7 +1413,11 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
         if (!success) {
             // Validation is complete before any transport submission.
         } else if (current->opcode == TransportCommandOpcode::kFlush) {
+            const auto command_start = detail::command_profile_clock<ProfileEnabled>();
             success = detail::drain_all<ProfileEnabled>(context, queue, index, current->opcode, retry_limit, profile, wqe_scratch);
+            detail::record_transport_command_cycles<ProfileEnabled>(
+                profile, current->opcode, command_start,
+                detail::command_profile_clock<ProfileEnabled>());
             if (!success)
                 detail::record_error(queue,
                                      DeviceTransportError::kInvalidQueue,
@@ -1382,7 +1428,11 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
                                      current->world_peer,
                                      current->channel);
         } else if (current->opcode == TransportCommandOpcode::kBarrier) {
+            const auto command_start = detail::command_profile_clock<ProfileEnabled>();
             success = detail::execute_barrier<ProfileEnabled>(context, queue, current, index, state, retry_limit, profile, wqe_scratch);
+            detail::record_transport_command_cycles<ProfileEnabled>(
+                profile, current->opcode, command_start,
+                detail::command_profile_clock<ProfileEnabled>());
             if (!success)
                 detail::record_error(queue,
                                      DeviceTransportError::kInvalidQueue,
@@ -1393,7 +1443,11 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
                                      current->world_peer,
                                      current->channel);
         } else if (current->opcode == TransportCommandOpcode::kSignal) {
+            const auto command_start = detail::command_profile_clock<ProfileEnabled>();
             success = detail::execute_signal<ProfileEnabled>(context, queue, current, index, retry_limit, profile, wqe_scratch);
+            detail::record_transport_command_cycles<ProfileEnabled>(
+                profile, current->opcode, command_start,
+                detail::command_profile_clock<ProfileEnabled>());
             if (!success)
                 detail::record_error(queue,
                                      DeviceTransportError::kInvalidAddress,
@@ -1435,12 +1489,19 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
                                          current->channel);
                     success = false;
                 } else {
+                    const std::uint64_t command_start_cycles =
+                        detail::command_profile_clock<ProfileEnabled>();
                     const auto sq = detail::snapshot_sq(peer.sq);
                     const auto remote_buffer = detail::snapshot_buffer(remote);
                     const auto request = urma::make_write(
                         sq, remote_buffer, 0, remote_address, current->source, static_cast<std::uint32_t>(current->bytes), local->token_id);
                     success = detail::post_request<ProfileEnabled>(
                         context, queue, peer, request, index, current->opcode, retry_limit, profile, wqe_scratch);
+                    if constexpr (ProfileEnabled) {
+                        detail::record_transport_command_cycles<ProfileEnabled>(
+                            profile, current->opcode, command_start_cycles,
+                            static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+                    }
                 }
             } else if (current->opcode == TransportCommandOpcode::kPutValue64) {
                 auto* remote = detail::resolve_buffer(
@@ -1456,13 +1517,22 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
                                          current->channel);
                     success = false;
                 } else {
+                    const std::uint64_t command_start_cycles =
+                        detail::command_profile_clock<ProfileEnabled>();
                     const auto sq = detail::snapshot_sq(peer.sq);
                     const auto remote_buffer = detail::snapshot_buffer(remote);
                     const auto request = urma::make_inline_write64(sq, remote_buffer, 0, remote_address, current->value);
                     success = detail::post_request<ProfileEnabled>(
                         context, queue, peer, request, index, current->opcode, retry_limit, profile, wqe_scratch);
+                    if constexpr (ProfileEnabled) {
+                        detail::record_transport_command_cycles<ProfileEnabled>(
+                            profile, current->opcode, command_start_cycles,
+                            static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+                    }
                 }
             } else if (current->opcode == TransportCommandOpcode::kRemoteAdd64) {
+                const std::uint64_t command_start_cycles =
+                    detail::command_profile_clock<ProfileEnabled>();
                 success =
                     detail::post_faa<ProfileEnabled>(context,
                                                      queue,
@@ -1475,6 +1545,12 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
                                                      retry_limit,
                                                      profile,
                                                      wqe_scratch);
+                if constexpr (ProfileEnabled) {
+                    detail::record_transport_command_cycles<ProfileEnabled>(
+                        profile, current->opcode, command_start_cycles,
+                        static_cast<std::uint64_t>(
+                            AscendC::GetSystemCycle()));
+                }
             } else {
                 detail::record_error(queue,
                                      DeviceTransportError::kUnsupportedOperation,
@@ -1495,8 +1571,13 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
         state->consumed_count = index + 1;
     }
     if (execution_success && !terminally_drained) {
+        const auto command_start = detail::command_profile_clock<ProfileEnabled>();
         execution_success =
             detail::drain_all<ProfileEnabled>(context, queue, count, TransportCommandOpcode::kFlush, retry_limit, profile, wqe_scratch);
+        // Include the implicit final drain even when no Flush was enqueued.
+        detail::record_transport_command_cycles<ProfileEnabled>(
+            profile, TransportCommandOpcode::kFlush, command_start,
+            detail::command_profile_clock<ProfileEnabled>());
     }
     aicore::flush_cacheline(output);
     const bool completed = execution_success && state->consumed_count == count && output->error == DeviceTransportError::kNone;
@@ -1514,8 +1595,23 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
     aicore::flush_cacheline(state);
 }
 
-__aicore__ static __attribute__((noinline)) void execute_profiled(const DeviceTransportContext& context) {
+__aicore__ static __attribute__((noinline)) void execute_profiled_body(const DeviceTransportContext& context) {
     execute_body<true>(context);
+}
+
+__aicore__ static __attribute__((noinline)) void execute_profiled(const DeviceTransportContext& context) {
+    // Keep the interval timer outside the large executor's codegen boundary.
+    const auto begin = detail::command_profile_clock<true>();
+    execute_profiled_body(context);
+    const auto end = detail::command_profile_clock<true>();
+    auto* profile = detail::profile_buffer<true>(context);
+    if (profile != nullptr) {
+        profile->service_start_cycles = record_transport_stage_start(profile->service_start_cycles, begin);
+        profile->service_end_cycles = record_transport_stage_end(profile->service_start_cycles, profile->service_end_cycles, end);
+        profile->service_active_cycles += end - begin;
+        aicore::flush_stage_profile_header(profile);
+        aicore::flush_cacheline(&profile->service_active_cycles);
+    }
 }
 
 template <bool ProfileEnabled = true>

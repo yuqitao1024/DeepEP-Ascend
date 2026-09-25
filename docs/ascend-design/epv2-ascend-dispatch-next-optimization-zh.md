@@ -241,6 +241,137 @@ high watermark 均为 3，说明当前没有证据表明队列深度或 channel 
 - 能明确 0.9 ms 中 transport 执行、提交和等待占比；
 - 任何重排都必须通过 two-generation buffer reuse 和错误注入测试。
 
+#### D3 计时口径修正（2026-09-26）
+
+本轮先校正 profile，再决定是否修改发布协议。此前 D3 smoke 不能作为
+优化收益证据：Dispatch 的 release-ablation mask 只包含 stage 13/14，
+漏掉 stage 1–12；phase 推导仍使用旧的 14/15 编号。现修正为完整的
+1–14，并将 expert_count（stage 8）归入 consumer compute。
+
+计时定义：
+
+- `service.start/end` 保留首尾时间戳，二者差值是跨 launch 的 envelope。
+- `service_active_cycles` 累加每次 service 执行区间，计时器位于独立
+  noinline wrapper，避免在大型 executor 中保留长生命周期计时状态。
+- payload/control/flush/barrier 四类 command cycles 互不重叠；flush
+  包括未显式入队的最终 drain，control 包括 Signal。
+- `cq_drain_cycles` 是 CQ drain 函数的耗时，包含轮询、CQ 处理和状态更新，
+  不能等同于纯网络等待；它与 barrier poll 都是上述 command 时间的子集。
+- `other_active_cycles` 只从 active 时间扣除四类 command，不再次扣除
+  drain/poll。`launch_gap_cycles` 单独记录 envelope 与 active 的差值。
+- 缺失或不合法的计时标为 unavailable，不用零值冒充实测。跨 rank 的
+  max 仅用于观察各项上界，不可相加或用于占比；占比需使用同一 rank。
+
+新增 profile 字段后 ABI 从 3 升至 4，host/device 必须一起重新编译。
+非 profile 路径中的新增时钟读取通过 `if constexpr` 编译移除。逻辑
+带宽公式及 benchmark event 计时边界保持原样。历史表中的
+`service_submit` 是旧 envelope 口径，不能直接作为当前 active 提交耗时。
+
+上一轮任务 `task_20260925_234411_233712123803` 在结果输出前超时，
+不是已知的 teardown SIGSEGV；旧 `d3-smoke.json` 是此前成功任务遗留。
+本轮使用唯一输出文件名，并分别验证退出状态、correctness 和全部 rank
+的 profile，避免误用旧结果。尚未根据这些诊断保留任何协议重排优化。
+
+修正后的三次 profile：NPU8P、devices 0–7，CANN
+`/data/disk2/cann_version/0916/use_cann/cann-9.3.0`，同树 HCOMM，
+8192 tokens / hidden 7168 / top-k 8 / experts 256 / FP8 / num_sms 64。
+`d3-attribution-v4-r1/r2/r3.json` 全部五个操作、八个 rank 的 profile
+一致性检查通过，任务正常退出，未复现先前的输出前超时。
+
+以下每列取该次 **service active 最慢的同一 rank**，单位为 cycles，
+不能将 drain 与 flush 再相加：
+
+| Dispatch 指标 | r1 (rank 4) | r2 (rank 2) | r3 (rank 2) |
+| --- | ---: | ---: | ---: |
+| service active | 1254978 | 1253398 | 1242317 |
+| payload command | 73571 | 74556 | 69646 |
+| control command | 203209 | 200100 | 183394 |
+| flush command | 901788 | 907680 | 922091 |
+| CQ drain（嵌套） | 800354 | 807532 | 830587 |
+| other active | 76410 | 71062 | 67186 |
+| launch gap（active 外） | 108805 | 110284 | 107686 |
+
+CQ drain 占 active 约 64%–67%。signal-only 配置下没有 Barrier opcode，
+因此 barrier command/poll 为零是有效结果，不代表 release_barrier stage
+不存在。每 rank 仍为 7 个 payload put、总计 30 个 commands、SQ/CQ
+high watermark 3，采样结束时 SQ/CQ depth 都为零。
+
+这些计时包含 profile 自身开销，仅用于定位。当前 command counters
+覆盖整个 operation，尚未独立拆开 release VF 的命令构造及逐 peer
+control/signal 发布；不能将 `release_payload` 的 AICore stage span
+当作包含该 VF 的端到端 release 时间。
+
+本轮独立实验：将 CQ owner/status 轮询从 64B MTE2/UB 往返改为
+cache-bypassing 32-bit scalar read，保持完成检查、tail/doorbell 更新和
+payload→control 发布顺序不变。
+
+#### D3 CQ scalar poll：保留（2026-09-26）
+
+三组无 profile 的 ABBA，A 为上述计时修正后的 MTE2 版本，B 仅替换
+CQ poll。每次 warmups=2、iterations=30，五个操作均使用同一典型
+case `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0`。测量边界、
+逻辑带宽公式和性能 selector 完全一致；没有重排 payload/control。
+
+Dispatch device event mean（ms）：
+
+| Batch | A1 | B1 | B2 | A2 | A mean | B mean | 改善 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| abba2 | 6.612239 | 6.661284 | 6.234582 | 6.577938 | 6.595088 | 6.447933 | 2.231% |
+| abba3 | 6.653921 | 6.507129 | 6.414394 | 6.570464 | 6.612193 | 6.460761 | 2.290% |
+| abba4 | 6.594972 | 6.588084 | 6.414740 | 6.620831 | 6.607901 | 6.501412 | 1.612% |
+
+每组分别以两次 A、两次 B 的 run mean 求平均；三组总体 Dispatch
+均值约从 6.605 ms 降至 6.470 ms，改善约 2.04%。保留依据是三组
+独立 ABBA 的均值改善复现，不设置百分比门槛。单次 run 和 p95 仍有
+波动，不声称 tail latency 有稳定收益。
+
+其他操作的 batch mean 改善（正数为更快）：
+
+| Operation | abba2 | abba3 | abba4 |
+| --- | ---: | ---: | ---: |
+| Expanded Dispatch | +0.516% | -0.284% | +0.183% |
+| Cached Dispatch | +0.315% | -0.205% | -0.165% |
+| Combine | +0.615% | +0.811% | -0.713% |
+| Reduced Combine | +1.330% | +0.313% | +0.028% |
+
+三组共 12 次运行、每次五操作 correctness 均通过；候选单独一次
+10-iteration profile 的全部 rank 也通过归因一致性检查。未观察到
+输出前卡死。已知 teardown SIGSEGV 仅在 JSON 完整写出且五操作全部
+通过后接受，不视作正常退出；相关日志保留。未修改既有完成错误码、
+owner/status 校验、重试计数、SQ/CQ tail 或 doorbell 更新。
+
+复现与证据均在 NPU8P `/home/pyptouser/yuqitao/deepep-d3/`：
+
+- `results/d3-attribution-v4-r{1,2,3}.json`：归因基线；
+- `results/d3-cq-scalar-profile.json`：候选 profile；
+- `results/d3-cq-abba{2,3,4}-{A1,B1,B2,A2}.json` 及同名 `.log`；
+- `d3-run-verified.sh`、`.scratch/d3-abba.sh`：环境与运行命令；
+- A 二进制 SHA256：`f8cd209b52e9b1ce0abb3b2b9cef40907b61ff87275db885dfa82cf3eaf19124`；
+- B 二进制 SHA256：`0eb9dc732d1e5fe9fffa9ec83993810c557802146dfa8737fd49ae08975db8c7`；
+- 三组任务：`task_20260926_032650_304226011631`、
+  `task_20260926_032943_305511715446`、`task_20260926_033306_30687755755`。
+
+`abba1` 在 A1 已写结果后的已知 teardown SIGSEGV 处中断，不纳入
+完整 ABBA 统计。以上结论覆盖 NPU8P 的指定环境和典型 case，不扩展
+声称其他 CANN/设备或所有 workload 均有收益。
+
+最终源码额外补充了 active interval 超出 envelope 时的拒绝检查，重新
+编译并运行 `task_20260926_033841_309434719540`：
+`d3-final-profile.json` 的五操作、全部 rank 归因检查通过；
+`d3-final-performance.json` 的五操作 correctness 通过，30-iteration
+mean 分别为 Dispatch **6.522 ms**、Expanded Dispatch 19.987 ms、
+Cached Dispatch 67.293 ms、Combine 14.669 ms、Reduced Combine
+14.948 ms。这一单次收尾运行不替代上述三组 ABBA。performance 运行
+在写出完整结果后出现已知 teardown SIGSEGV，未出现计算期间错误。
+最终二进制 SHA256 为
+`c6d9af28b527d360c6bfce57136d41db414db9c20f9c7e3608db668be187735d`。
+本地 benchmark/transport/SIMT-URMA 相关测试 **136 passed, 3 skipped**；
+另通过 profile codegen boundary 的两个 source contract 检查。
+
+D3 本轮完成 service 归因及一个有重复收益的优化；release VF 内部的
+命令构造、逐 peer 发布细分仍待补齐。分批 payload 和 control/completion
+重叠尚未实施，后续仍须按 two-generation reuse 和错误注入要求验证。
+
 ### D4. D8 epilogue copy 优化
 
 优先级：P1。

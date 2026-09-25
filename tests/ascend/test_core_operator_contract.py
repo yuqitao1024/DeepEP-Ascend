@@ -269,8 +269,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         ]
         self.assertIn("++profile->command_count;", command_loop)
         self.assertIn(
-            "profile->service_end_cycles =\n"
-            "                record_transport_stage_end(", execute)
+            "profile->service_end_cycles = record_transport_stage_end(",
+            execute)
         self.assertNotIn("std::uint64_t service_start_cycles = 0;", execute)
         self.assertNotIn("accumulate_transport_service_interval(", execute)
 

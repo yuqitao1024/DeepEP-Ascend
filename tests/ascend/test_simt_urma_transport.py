@@ -445,13 +445,16 @@ class AscendSimtUrmaTransportTest(unittest.TestCase):
         self.assertIn("AscendC::SetFlag<Event>", intrinsics)
         self.assertIn("AscendC::WaitFlag<Event>", intrinsics)
 
-    def test_urma_cqe_polling_uses_mte2(self):
+    def test_urma_cqe_polling_bypasses_cache_and_preserves_completion_checks(self):
         service = (
             TRANSPORT / "aicore_transport_service.hpp").read_text()
-        self.assertIn("sync_event<AscendC::HardEvent::S_MTE2>", service)
-        self.assertIn("DataCopy(cqe_scratch", service)
-        self.assertIn("sync_event<AscendC::HardEvent::MTE2_S>", service)
+        self.assertIn("word0 = aicore::load_published(cqe);", service)
+        self.assertNotIn("DataCopy(cqe_scratch", service)
         self.assertNotIn("word0 = cqe->words[0]", service)
+        self.assertIn("urma::cqe_owner_valid((word0 >> 2U) & 1U, tail, peer.cq->depth)", service)
+        self.assertIn("const auto substatus = (word0 >> 16U) & 0xffU;", service)
+        self.assertIn("const auto status = (word0 >> 24U) & 0xffU;", service)
+        self.assertIn("if (status != 0 || substatus != 0)", service)
 
     def test_barrier_signal_polling_uses_cache_bypassing_scalar_read(self):
         service = (

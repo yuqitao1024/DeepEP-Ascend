@@ -1031,6 +1031,18 @@ def test_stage_profile_capture_tolerates_completed_service_outstanding_requests(
                     "flush_command_cycles": 1,
                     "barrier_command_cycles": 1,
                     "barrier_poll_cycles": 1,
+                    "release_attribution": {
+                        "available": True,
+                        "payload_command_cycles": 1,
+                        "control_command_cycles": 1,
+                        "flush_command_cycles": 1,
+                        "barrier_command_cycles": 1,
+                        "barrier_poll_cycles": 1,
+                        "service_active_cycles": 5,
+                        "cq_drain_cycles": 1,
+                        "launch_gap_cycles": 1,
+                        "other_active_cycles": 1,
+                    },
                     "barrier_diagnostics": {
                         "issue_cycles": 0,
                         "drain_cycles": 0,
@@ -1386,6 +1398,18 @@ def _literal_stage_profile(rank, *, generation=9, operation="dispatch"):
             "flush_command_cycles": 9,
             "barrier_command_cycles": 30,
             "barrier_poll_cycles": 20 + rank * 2,
+            "release_attribution": {
+                "available": True,
+                "payload_command_cycles": 40 + rank * 5,
+                "control_command_cycles": 15,
+                "flush_command_cycles": 9,
+                "barrier_command_cycles": 30,
+                "barrier_poll_cycles": 20 + rank * 2,
+                "service_active_cycles": 112 + rank * 6,
+                "cq_drain_cycles": 10,
+                "launch_gap_cycles": 12,
+                "other_active_cycles": 18 + rank,
+            },
             "barrier_diagnostics": {
                 "issue_cycles": 11 + rank,
                 "drain_cycles": 12 + rank,
@@ -1465,6 +1489,21 @@ def test_stage_semantic_rejects_unknown_operations_and_stages(
         stage_semantic(operation_id, raw_name)
 
 
+@pytest.mark.parametrize("invalid", [False, True])
+def test_release_attribution_missing_or_invalid_is_not_measured_zero(invalid):
+    profiles = [_literal_stage_profile(0), _literal_stage_profile(1)]
+    if invalid:
+        profiles[1]["service"]["release_attribution"]["available"] = False
+    else:
+        del profiles[1]["service"]["release_attribution"]
+    result = _aggregate_stage_profiles("dispatch", profiles)
+    assert result["release_attribution"] == {
+        "available": False,
+        "reason": "missing_or_invalid_rank_attribution",
+    }
+    assert result["per_rank"][0]["service"]["release_attribution"]["available"]
+
+
 def test_stage_profile_rank_aggregation_derives_literal_block_span():
     aggregated = _aggregate_stage_profiles(
         "dispatch", [_literal_stage_profile(0), _literal_stage_profile(1)])
@@ -1483,6 +1522,19 @@ def test_stage_profile_rank_aggregation_derives_literal_block_span():
         "flush_command_cycles": 9,
         "barrier_command_cycles": 30,
         "barrier_poll_cycles": 22,
+    }
+    assert aggregated["release_attribution"] == {
+        "available": True,
+        "aggregation": "max_per_rank_not_additive",
+        "payload_command_cycles": 45,
+        "control_command_cycles": 15,
+        "flush_command_cycles": 9,
+        "barrier_command_cycles": 30,
+        "barrier_poll_cycles": 22,
+        "service_active_cycles": 118,
+        "cq_drain_cycles": 10,
+        "launch_gap_cycles": 12,
+        "other_active_cycles": 19,
     }
     assert aggregated["barrier_diagnostics"] == {
         "issue_cycles": 12,

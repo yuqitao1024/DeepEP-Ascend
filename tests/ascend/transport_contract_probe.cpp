@@ -37,7 +37,7 @@ static_assert(kTransportProfileMaxBlocks == 72);
 static_assert(sizeof(TransportStageBlockCycles) == 64);
 static_assert(alignof(TransportStageBlockCycles) == 64);
 static_assert(offsetof(TransportStageProfile, command_bytes) == 64);
-static_assert(kTransportStageProfileAbiVersion == 3);
+static_assert(kTransportStageProfileAbiVersion == 4);
 static_assert(kTransportStageProfileHeaderCacheLineCount == 3);
 static_assert(kDefaultOptions == 0);
 static_assert((kAggregateRequests & kDefaultOptions) == 0);
@@ -97,7 +97,7 @@ int main() {
     constexpr auto combine_pipeline_mask =
         ((std::uint64_t{1} << 12U) - 1U) & ~full_mask;
     constexpr auto dispatch_release_ablation_mask =
-        (std::uint64_t{1} << 13U) | (std::uint64_t{1} << 14U);
+        ((std::uint64_t{1} << 15U) - 1U) & ~full_mask;
     constexpr auto combine_release_ablation_mask =
         ((std::uint64_t{1} << 15U) - 1U) & ~full_mask;
     constexpr auto observed_dispatch_mask =
@@ -440,6 +440,54 @@ int main() {
         invalid_wait_phases.cq_wait != 0 ||
         invalid_wait_phases.barrier_wait != 0)
         return 52;
+
+    stage_spans[8] = 3;  // expert count is compute, not wait
+    stage_spans[13] = 17;  // release control
+    stage_spans[14] = 23;  // release barrier
+    stage_spans[15] = 1000;  // unrelated producer pipeline
+    const auto release_phases = derive_stage_profile_phase_cycles(
+        TransportProfileOperation::kDispatch, dispatch_release_ablation_mask,
+        stage_spans.data(), 100, 200, 10, 20);
+    if (release_phases.publication != 70 ||
+        release_phases.consumer_wait != 0 ||
+        release_phases.consumer_compute != 3)
+        return 55;
+
+    const auto active_phases = derive_stage_profile_phase_cycles(
+        TransportProfileOperation::kDispatch, dispatch_release_ablation_mask,
+        stage_spans.data(), 100, 1000, 10, 20, 100);
+    if (active_phases.service_submit != 70 || active_phases.publication != 70)
+        return 56;  // inter-launch gaps are not submission time
+    const auto invalid_active_phases = derive_stage_profile_phase_cycles(
+        TransportProfileOperation::kDispatch, dispatch_release_ablation_mask,
+        stage_spans.data(), 100, 200, 10, 20, 101);
+    if (invalid_active_phases.service_submit != 0 || invalid_active_phases.producer != 0)
+        return 61;
+
+    TransportStageProfile attribution_profile{};
+    attribution_profile.service_start_cycles = 100;
+    attribution_profile.service_end_cycles = 1000;
+    attribution_profile.service_active_cycles = 100;
+    attribution_profile.payload_command_cycles = 10;
+    attribution_profile.control_command_cycles = 20;
+    attribution_profile.flush_command_cycles = 30;
+    attribution_profile.barrier_command_cycles = 35;
+    attribution_profile.barrier_poll_cycles = 15;
+    attribution_profile.wait_cycles = 25;
+    const auto attribution = derive_transport_service_attribution(attribution_profile);
+    if (!attribution.valid || attribution.launch_gap_cycles != 800 ||
+        attribution.other_active_cycles != 5)
+        return 57;  // nested wait/poll must not be double-counted
+    attribution_profile.payload_command_cycles = std::numeric_limits<std::uint64_t>::max();
+    if (derive_transport_service_attribution(attribution_profile).valid)
+        return 58;  // overflowing sums are invalid, not a zero residual
+    attribution_profile.payload_command_cycles = 10;
+    attribution_profile.service_active_cycles = 901;
+    if (derive_transport_service_attribution(attribution_profile).valid)
+        return 59;
+    attribution_profile.service_active_cycles = 0;
+    if (derive_transport_service_attribution(attribution_profile).valid)
+        return 60;  // missing active timing is not a measured zero
 
     const auto no_action = RemoteAction::none();
     const auto signal_add = RemoteAction::signal_add(128, 7);

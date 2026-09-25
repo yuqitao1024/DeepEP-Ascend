@@ -368,6 +368,12 @@ def _aggregate_stage_profiles(
         "control_command_cycles", "flush_command_cycles",
         "barrier_command_cycles", "barrier_poll_cycles",
     )
+    release_attribution_names = (
+        "payload_command_cycles", "control_command_cycles",
+        "flush_command_cycles", "barrier_command_cycles",
+        "barrier_poll_cycles", "service_active_cycles", "cq_drain_cycles",
+        "launch_gap_cycles", "other_active_cycles",
+    )
     barrier_diagnostic_names = (
         "issue_cycles", "drain_cycles", "poll_iterations", "peer_count",
         "first_observation_cycles", "completion_cycles",
@@ -382,6 +388,8 @@ def _aggregate_stage_profiles(
     device_timeline_cycles = {name: 0 for name in timeline_cycle_names}
     phase_cycles = {name: 0 for name in phase_names}
     service_cycles = {name: 0 for name in service_cycle_names}
+    release_attribution = {name: 0 for name in release_attribution_names}
+    release_attribution_available = True
     barrier_diagnostics = {name: 0 for name in barrier_diagnostic_names}
     barrier_diagnostics_seen = False
     barrier_peer_diagnostics = []
@@ -475,6 +483,22 @@ def _aggregate_stage_profiles(
             if type(value) is not int or value < 0:
                 raise ValueError(f"stage profile service cycles.{name}")
             service_cycles[name] = max(service_cycles[name], value)
+        rank_release_attribution = rank_service.get("release_attribution")
+        if rank_release_attribution is None:
+            release_attribution_available = False
+        else:
+            if not isinstance(rank_release_attribution, dict):
+                raise ValueError("stage profile release attribution")
+            if type(rank_release_attribution.get("available")) is not bool:
+                raise ValueError("stage profile release attribution.available")
+            release_attribution_available &= rank_release_attribution["available"]
+            for name in release_attribution_names:
+                value = rank_release_attribution.get(name)
+                if type(value) is not int or value < 0:
+                    raise ValueError(
+                        f"stage profile release attribution.{name}")
+                release_attribution[name] = max(
+                    release_attribution[name], value)
         rank_barrier_diagnostics = rank_service.get("barrier_diagnostics")
         if rank_barrier_diagnostics is not None:
             if not isinstance(rank_barrier_diagnostics, dict):
@@ -611,6 +635,12 @@ def _aggregate_stage_profiles(
         "device_timeline_cycles": device_timeline_cycles,
         "phase_cycles": phase_cycles,
         "service_cycles": service_cycles,
+        "release_attribution": (
+            dict(release_attribution, available=True,
+                 aggregation="max_per_rank_not_additive")
+            if release_attribution_available else
+            {"available": False, "reason": "missing_or_invalid_rank_attribution"}
+        ),
         "pipeline_cycles": {
             "producer": producer,
             "network": network,

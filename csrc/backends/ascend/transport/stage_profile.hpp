@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <type_traits>
 
@@ -15,7 +16,7 @@ namespace deep_ep::ascend::transport {
 #define DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP 0
 #endif
 
-inline constexpr std::uint32_t kTransportStageProfileAbiVersion = 3;
+inline constexpr std::uint32_t kTransportStageProfileAbiVersion = 4;
 inline constexpr std::uint32_t kTransportProfileStageCount = 16;
 inline constexpr std::uint32_t kTransportProfileMaxBlocks = 72;
 inline constexpr std::uint32_t kTransportProfileBarrierPhaseCount = 2;
@@ -108,6 +109,8 @@ struct alignas(64) TransportStageProfile {
     std::uint32_t acquire_peer_world_rank[16]{};
     std::uint32_t acquire_peer_count{};
     std::uint32_t release_peer_publish_count{};
+    // Sum of execute_body intervals; excludes gaps between service launches.
+    std::uint64_t service_active_cycles{};
 };
 
 struct TransportQueueDepthSnapshot {
@@ -151,6 +154,36 @@ struct TransportServiceCycleAccumulation {
     bool valid = false;
     TransportServiceCycleBreakdown cycles{};
 };
+
+struct TransportServiceAttribution {
+    bool valid = false;
+    std::uint64_t launch_gap_cycles = 0;
+    std::uint64_t other_active_cycles = 0;
+};
+
+// Command classes are disjoint; CQ drain and barrier poll are nested subsets
+// and must not be subtracted again. Subtract incrementally to avoid overflow.
+inline constexpr TransportServiceAttribution derive_transport_service_attribution(
+    const TransportStageProfile& profile) {
+    if (profile.service_start_cycles == 0 ||
+        profile.service_end_cycles < profile.service_start_cycles)
+        return {};
+    const auto envelope = profile.service_end_cycles - profile.service_start_cycles;
+    if (profile.service_active_cycles == 0 || profile.service_active_cycles > envelope)
+        return {};
+    auto remaining = profile.service_active_cycles;
+    for (auto cycles : {profile.payload_command_cycles, profile.control_command_cycles,
+                        profile.flush_command_cycles, profile.barrier_command_cycles}) {
+        if (cycles > remaining)
+            return {};
+        remaining -= cycles;
+    }
+    if (profile.wait_cycles > profile.service_active_cycles ||
+        profile.barrier_poll_cycles > profile.barrier_command_cycles ||
+        profile.barrier_poll_cycles > profile.service_active_cycles - profile.wait_cycles)
+        return {};
+    return {true, envelope - profile.service_active_cycles, remaining};
+}
 
 DEEP_EP_ASCEND_PROFILE_INLINE std::uint64_t
 accumulate_transport_service_counter(
@@ -294,6 +327,7 @@ inline constexpr std::uint64_t kTransportDispatchPipelineStageMask =
 inline constexpr std::uint64_t kTransportCombinePipelineStageMask =
     ((std::uint64_t{1} << 12U) - 1U) & ~kTransportStageProfileFullMask;
 inline constexpr std::uint64_t kTransportDispatchReleaseAblationStageMask =
+    kTransportDispatchPipelineStageMask |
     (std::uint64_t{1} << 13U) | (std::uint64_t{1} << 14U);
 inline constexpr std::uint64_t kTransportCombineReleaseAblationStageMask =
     ((std::uint64_t{1} << 15U) - 1U) & ~kTransportStageProfileFullMask;
@@ -456,7 +490,8 @@ inline TransportStageProfilePhaseCycles derive_stage_profile_phase_cycles(
     TransportProfileOperation operation, std::uint64_t stage_mask,
     const std::uint64_t* stage_spans, std::uint64_t service_start_cycles,
     std::uint64_t service_end_cycles, std::uint64_t wait_cycles,
-    std::uint64_t barrier_poll_cycles = 0) {
+    std::uint64_t barrier_poll_cycles = 0,
+    std::uint64_t service_active_cycles = 0) {
     TransportStageProfilePhaseCycles phases{};
     if (stage_spans == nullptr ||
         stage_profile_mask_status(operation, stage_mask) !=
@@ -478,15 +513,19 @@ inline TransportStageProfilePhaseCycles derive_stage_profile_phase_cycles(
             total += stage_spans[stage];
         return total;
     };
-    const std::uint64_t service_cycles =
-        service_end_cycles - service_start_cycles;
+    const std::uint64_t service_cycles = service_active_cycles != 0 ?
+        service_active_cycles : service_end_cycles - service_start_cycles;
+    if (service_cycles > service_end_cycles - service_start_cycles ||
+        wait_cycles > service_cycles ||
+        barrier_poll_cycles > service_cycles - wait_cycles)
+        return phases;
     const bool release_ablation = stage_mask ==
         transport_stage_profile_pipeline_mask(operation, true);
     const std::uint64_t release_cycles = stage_spans[5] +
         (release_ablation ? stage_spans[
-            operation == TransportProfileOperation::kDispatch ? 14 : 12] : 0) +
+            operation == TransportProfileOperation::kDispatch ? 13 : 12] : 0) +
         (release_ablation ? stage_spans[
-            operation == TransportProfileOperation::kDispatch ? 15 : 13] : 0) +
+            operation == TransportProfileOperation::kDispatch ? 14 : 13] : 0) +
         (release_ablation &&
              operation == TransportProfileOperation::kCombine ?
              stage_spans[14] : 0);
@@ -497,9 +536,10 @@ inline TransportStageProfilePhaseCycles derive_stage_profile_phase_cycles(
         service_cycles - wait_cycles - barrier_poll_cycles;
     phases.cq_wait = wait_cycles;
     phases.barrier_wait = barrier_poll_cycles;
-    phases.consumer_wait = sum_stages(6, 8);
+    phases.consumer_wait = sum_stages(6,
+        operation == TransportProfileOperation::kDispatch ? 7 : 8);
     phases.consumer_compute = operation == TransportProfileOperation::kDispatch ?
-        sum_stages(9, 11) : sum_stages(9, 10);
+        sum_stages(8, 11) : sum_stages(9, 10);
     phases.epilogue = stage_spans[
         operation == TransportProfileOperation::kDispatch ? 12 : 11];
     return phases;

@@ -1202,6 +1202,24 @@ public:
         raw_service["barrier_command_cycles"] =
             profile.barrier_command_cycles;
         raw_service["barrier_poll_cycles"] = profile.barrier_poll_cycles;
+        pybind11::dict release_attribution;
+        release_attribution["payload_command_cycles"] =
+            profile.payload_command_cycles;
+        release_attribution["control_command_cycles"] =
+            profile.control_command_cycles;
+        release_attribution["flush_command_cycles"] =
+            profile.flush_command_cycles;
+        release_attribution["barrier_command_cycles"] =
+            profile.barrier_command_cycles;
+        release_attribution["barrier_poll_cycles"] =
+            profile.barrier_poll_cycles;
+        const auto attribution = transport::derive_transport_service_attribution(profile);
+        release_attribution["available"] = attribution.valid;
+        release_attribution["service_active_cycles"] = profile.service_active_cycles;
+        release_attribution["cq_drain_cycles"] = profile.wait_cycles;
+        release_attribution["launch_gap_cycles"] = attribution.launch_gap_cycles;
+        release_attribution["other_active_cycles"] = attribution.other_active_cycles;
+        raw_service["release_attribution"] = release_attribution;
         pybind11::dict barrier_diagnostics;
         barrier_diagnostics["issue_cycles"] = profile.barrier_issue_cycles;
         barrier_diagnostics["drain_cycles"] = profile.barrier_drain_cycles;
@@ -1364,7 +1382,8 @@ public:
         const auto phases = transport::derive_stage_profile_phase_cycles(
             profile.operation, profile.valid_stage_mask, stage_spans,
             profile.service_start_cycles, profile.service_end_cycles,
-            profile.wait_cycles, profile.barrier_poll_cycles);
+            profile.wait_cycles, profile.barrier_poll_cycles,
+            profile.service_active_cycles);
 
         pybind11::dict phase_cycles;
         phase_cycles["producer"] = phases.producer;
