@@ -1234,6 +1234,12 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
         expanded ? num_topk_u32 : 1;
     const std::uint32_t logical_count =
         total_records * copies_per_record;
+    // Keep two tiles in flight across record boundaries, including when a
+    // whole record fits in one tile. Each free-buffer event is consumed before
+    // MTE2 overwrites that buffer and produced after MTE3 finishes reading it.
+    std::uint32_t buffer_index = 0;
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
     for (std::uint32_t logical = block_index; logical < logical_count;
          logical += block_count) {
         const std::uint32_t compact_record =
@@ -1283,17 +1289,23 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
             const std::uint32_t copy_bytes = static_cast<std::uint32_t>(
                 consumer_copy_plan.vector_bytes - byte < TileBytes ?
                     consumer_copy_plan.vector_bytes - byte : TileBytes);
+            const auto event_id = buffer_index == 0 ? EVENT_ID0 : EVENT_ID1;
+            auto* tile_ub = payload_ub + buffer_index * TileBytes;
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
             dispatch_copy_gm_to_ub(
-                payload_ub, record + token_hidden_offset + byte, copy_bytes);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
+                tile_ub, record + token_hidden_offset + byte, copy_bytes);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
             dispatch_copy_ub_to_gm(
                 recv_x + destination * token_hidden_bytes + byte,
-                payload_ub, copy_bytes);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+                tile_ub, copy_bytes);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
+            buffer_index ^= 1;
         }
     }
+    // Also consume unused initial events for empty or one-tile workloads.
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
 }
 
 __aicore__ inline void direct_dispatch_epilogue_vector_payload_select(

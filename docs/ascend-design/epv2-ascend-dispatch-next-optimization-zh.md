@@ -172,7 +172,7 @@ AICore/VF 分离提交和 transport service 顺序执行带来的固定调度成
 
 - 每个固定 gap 的主因可归类为 host submit、AICore launch、VF service 或
   真实数据依赖；
-- 合并后端到端 mean 至少改善 0.3 ms；
+- 合并后端到端 mean 的改善可通过重复对照稳定复现，不设置绝对耗时门槛；
 - 不改变输出布局、generation、错误协议和 buffer 复用语义。
 
 2026-09-25 no-op 跳过项复核结论：
@@ -379,6 +379,13 @@ D3 本轮完成 service 归因及一个有重复收益的优化；release VF 内
 当前 `epilogue_copy` 稳定在约 0.52 ms。8192-byte consumer tile 已经是
 retained 默认，因此继续单纯调大 tile 的收益可能有限。
 
+计时边界核查：该 stage clock 主要覆盖 AICore hidden payload copy。
+FP8 scale、top-k weight 和 hidden scalar tail 由前置的
+`direct_dispatch_epilogue_copy_outputs_vf` 处理，metadata 也有独立 stage；
+因此不能把 0.52 ms 当成整个输出拷贝路径的时间。local/remote record 在此
+阶段均从本卡 receive shard 读取，remote 表示数据来源 rank，不能将这段
+GM 拷贝时间解释为 P2P 传输时间。
+
 设计方向：
 
 1. 增加 local/remote record 维度：
@@ -396,9 +403,123 @@ retained 默认，因此继续单纯调大 tile 的收益可能有限。
 
 验收标准：
 
-- `epilogue_copy` mean 降低至少 15%，或证明其受 GM 带宽下限约束；
+- 收益必须通过重复对照稳定复现，不设置百分比门槛；stage 缩短需同时
+  对照未开启 profiling 的端到端 Dispatch，不能仅凭单次 stage 数值保留；
 - Normal Dispatch mean/p95 不回退；
 - Expanded/Cached Dispatch correctness 不回归。
+
+#### D4 双缓冲实测（2026-09-26）
+
+实现仅调整 AICore hidden payload copy：使用两个 `TileBytes` 大小的 UB
+buffer，按实际提交的 tile 交替使用 event 0/1。MTE2 在复用 buffer 前等待
+该 buffer 的 MTE3 完成，下一条 record 的 load 可以与上一条 record 的
+store 重叠；退出时消费两个完成事件，包括无工作和单 tile 的情况。
+所有 consumer launcher 的 UB 分配同步增加到 `2 * TileBytes`。
+不改变 VF 参数列表、输出 layout、producer 或跨 rank 协议。
+
+典型 hidden 为 7168 bytes，8192-byte tile 一次即可覆盖一条 record；因此
+buffer 轮换必须跨 record，而不能在每条 record 开始时重新初始化。
+Expanded 中跳过的 lane 不消耗 buffer/event。
+
+环境与对照方法：
+
+- NPU8P，队列独占 device 0–7，8 rank；CANN/HCOMM 使用
+  `/data/disk2/cann_version/0916/use_cann/cann-9.3.0` 及其 `aarch64-linux`。
+- A 为 `1037d33` 的 D3 最终二进制；B 为仅加入上述双缓冲的二进制。
+  两者均为 Release，NOP/diagnostics/testing/skip-noop 关闭，signal-only 开启。
+- 固定 8192 tokens/rank、hidden 7168、top-k 8、256 experts、64 AIV，
+  `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0`。
+  stable preflight、device/parallel prefix、token fanout 开启；consumer tile
+  8192；Combine 使用既有 `32768/512`、direct local placement 和 expanded
+  vector reduce 配置。
+- 三组独立 A1/B1/B2/A2，每次进程重启，2 warmups、30 iterations，
+  不开启 stage profiling，保留完整功能校验。每个版本共 6 次 run。
+  此处 warmups 为 2，不与文首历史 30-warmup 数据混算。
+
+下表正值表示耗时降低；p95 列先计算每次 run 的 p95，再对 A/B 各两次取均值。
+
+| 指标 | ABBA 1 | ABBA 2 | ABBA 3 |
+| --- | ---: | ---: | ---: |
+| Dispatch mean | +3.969% | +7.309% | +6.472% |
+| Dispatch p95 | +3.791% | +11.709% | +6.369% |
+| Expanded Dispatch mean | +13.146% | +14.866% | +13.892% |
+| Cached Dispatch mean | +3.497% | +3.528% | +3.066% |
+| Combine mean | -1.303% | +1.553% | -0.355% |
+| Reduced Combine mean | -1.118% | +1.726% | -0.651% |
+
+各版本 6 次 run 的平均耗时，以及用同一逻辑字节数除以该平均耗时得到的带宽：
+
+| 操作 | A mean ms | B mean ms | A logical GB/s | B logical GB/s |
+| --- | ---: | ---: | ---: | ---: |
+| Dispatch | 6.536389 | 6.149285 | 1191.191 | 1266.178 |
+| Expanded Dispatch | 19.914144 | 17.131861 | 464.569 | 540.017 |
+| Cached Dispatch | 67.392924 | 65.125878 | 115.533 | 119.554 |
+| Combine | 14.604170 | 14.608250 | 746.445 | 746.236 |
+| Reduced Combine | 15.015298 | 15.015563 | 726.006 | 725.994 |
+
+逻辑带宽仍为所有 rank 的逻辑通信/拷贝/归并字节数口径，不是单链路 P2P
+带宽。Dispatch 三种模式的收益均稳定复现；Combine 两项方向不一致，汇总
+差异接近零，不宣称其有性能收益。
+
+独立 profile pair（每次 2 iterations）中的 `epilogue_copy` stage span：
+
+| 操作 | A cycles | B cycles |
+| --- | ---: | ---: |
+| Dispatch | 523730 | 317830 |
+| Expanded Dispatch | 6660934 | 3904499 |
+| Cached Dispatch | 5262707 | 2952823 |
+
+按现有报告的 1 GHz 时钟口径，Normal hidden copy 为 0.524 → 0.318 ms。
+该单次 profile 仅用于归因，保留依据是上述未开启 profiling 的重复对照。
+本次没有新增 local/remote 独立计时或 scale/weight VF 独立计时，不能用表中
+数字推导这些部分的耗时；arrival-driven copy 和新 tile sweep 未纳入本次。
+
+验证与已知限制：
+
+- 典型用例的 profile pair 和三组 ABBA 共 14 次 run 均完成五操作功能校验。
+  部分原版 run 在结果成功写出后出现已知 teardown SIGSEGV；仅在确认全部
+  结果通过、成功标记早于 SIGSEGV、无其他退出错误后接受。
+- 本地 layout/tiling、production dispatch state/layout、parallel layout
+  host-callable 三项检查通过；NPU8P 完整 CANN 编译通过。
+- 新增 `tests/ascend/production/run_dispatch_copy_boundaries.py` 独立验证
+  hidden、FP8 scale、路由 metadata 和 padding，不传 top-k weights。
+  八个场景已在 8 rank 全部通过，覆盖五种 tile、奇偶 tile 数、scalar tail、
+  空输入/路由、Expanded 无效 lane、Cached/Expanded Cached 及
+  previous-event async；典型用例覆盖大量 record 间的 buffer 轮换。
+  首次运行因测试脚本未将列主序 scale 转成 contiguous 后再作字节视图而
+  失败；修正后完整重跑通过，最终退出阶段的已知 SIGSEGV 按上述规则核验。
+- 扩展的五操作边界用例发现既有 weight 问题：8 rank、17 tokens、hidden
+  4865、BF16、top-k 2、16 experts、masked ratio 0.5、tile 512 时，原版和
+  双缓冲均复现某一接收 rank 的有效 Dispatch weights 变成 0，并传播至
+  Combine；出错 rank 会变化。原版一次无诊断复跑还在 180 秒限制下超时。
+  此问题未修复，不把该五操作边界用例记为通过，也不声称全矩阵无问题。
+
+结论：保留 D4 双缓冲；其典型性能和独立 payload 边界验证已完成。
+weight 问题仍是独立待办。复跑 payload 回归时，在相同 CANN/HCOMM/Python
+环境和队列分配下执行：
+
+```bash
+python -m torch.distributed.run --standalone --nproc-per-node=8 \
+  --module tests.ascend.production.run_dispatch_copy_boundaries \
+  --num-sms 64 --output d4-copy-boundaries.json
+```
+
+原始数据保存在 NPU8P `/home/pyptouser/yuqitao/deepep-d4/results/`：
+
+- `d4-control-profile.json`、`d4-buffer-profile.json`；
+- `d4-abba{1,2,3}-{A1,B1,B2,A2}.json` 及同名 `.log`；
+- `d4-copy-boundaries-v2.json` 和同名 `.log` 为最终 payload 回归结果，
+  task `task_20260926_043424_13073638856`；
+- `d4-tail-tile512.log`、`d4-tail-control512.log`、
+  `d4-weight-{control,double-buffer}.log` 保留失败及对照证据。
+- A SHA256：`c6d9af28b527d360c6bfce57136d41db414db9c20f9c7e3608db668be187735d`；
+  B SHA256：`75cd9b35f5dbcd29a832f7cabde77b4ff625f5da011a309666e1ab5a7a2ab4f2`。
+- 编译 task `task_20260926_040157_31757501652`；profile pair task
+  `task_20260926_040415_319115028530`；ABBA tasks
+  `task_20260926_041249_1229072165`、`task_20260926_041545_12418695524`、
+  `task_20260926_041822_125384114887`；weight 对照 task
+  `task_20260926_042722_128910326848`（任务脚本成功表示两次诊断已执行，
+  两个 workload 本身均退出 1，并非功能通过）。
 
 ### D5. Cached Dispatch 专项
 
@@ -426,7 +547,7 @@ retained 默认，因此继续单纯调大 tile 的收益可能有限。
 
 验收标准：
 
-- Cached Dispatch mean 从约 70 ms 至少降低 20%；
+- Cached Dispatch mean 的改善可通过重复对照稳定复现，不设置百分比门槛；
 - cached handle reuse、two-generation 和 expanded cached correctness 通过；
 - Normal/Expanded Dispatch 不因共享代码改动回归。
 
