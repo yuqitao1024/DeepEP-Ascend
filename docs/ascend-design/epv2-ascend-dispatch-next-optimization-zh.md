@@ -183,9 +183,12 @@ AICore/VF 分离提交和 transport service 顺序执行带来的固定调度成
   stage 计时。
 - 初次三次测试使用了 `--profile-stages`。该开关在 profile 模式下会主动
   关闭跳过逻辑，因此初次数据不是 no-op 跳过的有效 A/B 证据。
-- 补做三次无 `--profile-stages 的 ABBA 对照。Dispatch OFF 均值
-  6.454 ms，ON 均值 6.712 ms；Expanded OFF 19.931 ms，ON 20.116 ms；
-  Cached OFF 67.188 ms，ON 67.640 ms。ON 没有稳定收益，且多次偏慢。
+- 补做三次无 `--profile-stages` 的 ABBA 对照。二进制归属复核为：
+  `deepep-d1-publish` 是 OFF，`deepep-d2-noop` 是 ON。Dispatch OFF
+  均值 6.969 ms，ON 均值 6.810 ms；Expanded OFF 20.291 ms，ON
+  20.180 ms；Cached OFF 67.805 ms，ON 67.507 ms。Normal Dispatch 的
+  差异在 run-to-run 波动范围内；ON 对 Expanded/Cached 有稳定小幅
+  正向，但幅度远小于 stage gap 本身。
 - 代表 correctness 集（normal、previous-event、async、async+bias2）通过，
   `4 cases passed`。结果归档于 NPU8P
   `/home/pyptouser/yuqitao/deepep-d2-noop/results/d2-noop-{run1,run2,run3,regress}.json`。
