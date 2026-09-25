@@ -1959,6 +1959,12 @@ public:
             tiling.symmetric_window_layout.dispatch_route_plan_slot_bytes >
                 tiling.symmetric_window_layout.dispatch_staging_shard_bytes)
             early_route_plan_config.enabled = false;
+        const bool full_dispatch_count_validation =
+            environment_is("DEEP_EP_ASCEND_PREFLIGHT", "full");
+        const bool device_public_count_publication =
+            device_prefix_config.enabled &&
+            !full_dispatch_count_validation &&
+            early_route_plan_config.enabled == false;
         TORCH_CHECK(tiling.communication_buffer_bytes <=
                         static_cast<std::uint64_t>(num_buffer_bytes_) &&
                         tiling.workspace_bytes <= resources_->workspace_bytes(),
@@ -2453,6 +2459,12 @@ public:
             kernel_expert_prefix.data_ptr<std::int32_t>();
         arguments.unaligned_per_expert =
             kernel_unaligned.data_ptr<std::int32_t>();
+        arguments.public_expert_prefix =
+            expert_prefix.data_ptr<std::int32_t>();
+        arguments.public_unaligned =
+            unaligned.data_ptr<std::int32_t>();
+        arguments.public_count_publication =
+            device_public_count_publication ? 1U : 0U;
         arguments.destination_slots = destination_slots.data_ptr<std::int32_t>();
         arguments.source_metadata = source_metadata.data_ptr<std::int32_t>();
         arguments.num_recv_tokens = static_cast<std::uint64_t>(
@@ -2623,7 +2635,7 @@ public:
         if (stage_profile_enabled_)
             host_timeline_profile_.dispatch_synchronize_end_ns =
                 runtime::host_timestamp_ns();
-        if (!cached_mode) {
+        if (!cached_mode && !device_public_count_publication) {
             host_phase_start_ns = host_profile_start();
             status = resources_->copy_to_host(
                 host_kernel_count_bridge.data(),
@@ -2715,6 +2727,59 @@ public:
                 raise_transport_status(status, rank_idx_);
             host_profile_record(
                 runtime::HostTimelinePhase::kDispatchPrefixToDevice,
+                host_phase_start_ns);
+        } else if (device_public_count_publication) {
+            host_phase_start_ns = host_profile_start();
+            status = resources_->copy_to_host(
+                host_kernel_count_bridge.data(),
+                kernel_count_bridge.data_ptr(),
+                host_kernel_count_bridge.size() * sizeof(std::int32_t));
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            std::memcpy(
+                host_rank_prefix.data(),
+                host_kernel_count_bridge.data() +
+                    count_bridge_layout.rank_prefix_offset,
+                host_rank_prefix.size() * sizeof(std::int32_t));
+            std::int32_t kernel_expanded_tail = 0;
+            std::memcpy(
+                &kernel_expanded_tail,
+                host_kernel_count_bridge.data() +
+                    count_bridge_layout.kernel_expert_prefix_offset +
+                    num_experts,
+                sizeof(std::int32_t));
+            per_expert_list.assign(
+                static_cast<std::size_t>(local_experts), 0);
+            std::memcpy(
+                per_expert_list.data(),
+                host_kernel_count_bridge.data() +
+                    count_bridge_layout.kernel_unaligned_offset +
+                    first_local_expert,
+                per_expert_list.size() * sizeof(std::int32_t));
+            std::int32_t expanded_tail = 0;
+            for (int local_expert = 0; local_expert < local_experts;
+                 ++local_expert) {
+                std::uint64_t aligned_actual = 0;
+                TORCH_CHECK(
+                    per_expert_list[local_expert] >= 0 &&
+                        align_without_overflow(
+                            static_cast<std::uint64_t>(
+                                per_expert_list[local_expert]),
+                            alignment, &aligned_actual),
+                    "DeepEP Ascend backend: dispatch returned invalid expert counts: ",
+                    "local_expert=", local_expert,
+                    ", actual=", per_expert_list[local_expert]);
+                per_expert_list[local_expert] =
+                    static_cast<std::int32_t>(aligned_actual);
+                expanded_tail += static_cast<std::int32_t>(aligned_actual);
+            }
+            TORCH_CHECK(kernel_expanded_tail == expanded_tail,
+                        "DeepEP Ascend backend: dispatch returned invalid expert counts: ",
+                        "kernel_tail=", kernel_expanded_tail,
+                        ", expected_tail=", expanded_tail);
+            num_expanded_tokens = expanded_tail;
+            host_profile_record(
+                runtime::HostTimelinePhase::kDispatchCountsToHost,
                 host_phase_start_ns);
         }
         const int num_recv_tokens = host_rank_prefix.back();

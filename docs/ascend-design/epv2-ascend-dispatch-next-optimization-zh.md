@@ -93,6 +93,47 @@ DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY=1
 - Normal Dispatch mean/p95 改善或保持 neutral；
 - cached/hybrid/stream/expanded 路径不回归。
 
+2026-09-25 实现结论：
+
+- 已实现独立 `direct_dispatch_publish_counts` VF kernel，在 D6 expert
+  prefix 后直接生成 public expert prefix 与 unaligned count。
+- 不把 public 指针追加到既有 prefix kernel 参数链，避免复现 argument list
+  330 类问题；full preflight 自动关闭该优化，保留原完整 host 校验。
+- stable 路径 host 侧只做一次 kernel count bridge D2H，host 内存内拆出
+  rank tail 与本地 expert counts；不再执行 public count bridge H2D。
+- NPU8P 8-rank、8192 tokens、hidden 7168、top-k 8、256 experts、
+  30 warmups/30 iterations，D1 与 baseline 各 3 次：
+
+| Operation | Baseline mean | D1 mean | 变化 |
+| --- | ---: | ---: | ---: |
+| dispatch | 7.306 ms | 6.969 ms | -4.6% |
+| expanded_dispatch | 20.620 ms | 20.291 ms | -1.6% |
+| cached_dispatch | 70.527 ms | 67.804 ms | -3.9% |
+| combine | 14.707 ms | 14.878 ms | +1.2% |
+| reduced_combine | 15.039 ms | 15.226 ms | +1.2% |
+
+- D1 三次 run 的 `counts_to_host + prefix_to_device` 为 0.288、0.338、
+  0.646 ms；baseline 三次为 0.868、0.664、0.923 ms。收益方向稳定，但
+  host readback 本身仍有较大 run-to-run 抖动。
+- full preflight 与 stable correctness case 均通过。30 iteration 长跑中，
+  D1 与 baseline 都出现过 rank teardown 阶段 SIGSEGV；case 本身
+  显示 `1 cases passed`，且崩溃也在未启用 D1 的 baseline 出现，因此不是
+  D1 新引入问题。该 teardown 问题需单独跟踪，不能算作功能失败。
+
+原始结果归档在 NPU8P 工作区：
+
+- D1: `/home/pyptouser/yuqitao/deepep-d1-publish/results/d1-perf-run{1,2,3}.json`
+- Baseline: `/home/pyptouser/yuqitao/deepep-baseline/results/d1-baseline-run{1,2,3}.json`
+- Stable/full smoke:
+  `deepep-d1-publish/results/d1-smoke-r5.json` 与
+  `deepep-d1-publish/results/d1-full-smoke-r5.json`
+- 语义修复后的最终 stable smoke:
+  `deepep-d1-publish/results/d1-final-smoke.json`，结果 `1 cases passed`。
+- Stream/previous-event 代表 case（previous-event、async、async+allocate、
+  async+bias2）合跑结果 `3 cases passed`，归档为
+  `deepep-d1-publish/results/d1-stream-regress.json`。该进程同样在 case
+  全部通过后的 teardown 阶段出现 SIGSEGV，与 D1 的 correctness 结果无关。
+
 ### D2. Stage 间固定 gap 优化
 
 优先级：P0。

@@ -109,6 +109,7 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
         csrc/backends/ascend/elastic/direct_dispatch_publish_route_plan.asc
         csrc/backends/ascend/elastic/direct_dispatch_acquire_route_plan.asc
         csrc/backends/ascend/elastic/direct_dispatch_reduce_errors.asc
+        csrc/backends/ascend/elastic/direct_dispatch_publish_counts.asc
         csrc/backends/ascend/elastic/direct_dispatch_producer_record.asc
         csrc/backends/ascend/elastic/direct_dispatch_persistent_chunk_begin.asc
         csrc/backends/ascend/elastic/direct_dispatch_persistent_chunk_complete.asc

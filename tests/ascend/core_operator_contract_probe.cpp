@@ -507,6 +507,23 @@ int main() {
             device_prefix_config.enabled)
             return 98;
     }
+    DispatchParallelPrefixConfig parallel_prefix_contract{};
+    if (select_dispatch_parallel_prefix_config(
+            nullptr, true, false, true, false, false, false,
+            &parallel_prefix_contract) !=
+                DispatchParallelPrefixConfigStatus::kEnabled ||
+        !parallel_prefix_contract.enabled ||
+        select_dispatch_parallel_prefix_config(
+            "1", true, false, true, true, false, false,
+            &parallel_prefix_contract) !=
+                DispatchParallelPrefixConfigStatus::kDisabled ||
+        parallel_prefix_contract.enabled ||
+        select_dispatch_parallel_prefix_config(
+            nullptr, false, false, true, false, false, false,
+            &parallel_prefix_contract) !=
+                DispatchParallelPrefixConfigStatus::kDisabled ||
+        parallel_prefix_contract.enabled)
+        return 99;
     DispatchConsumerTileConfig consumer_tile_config{};
     if (select_dispatch_consumer_tile_config(
             "1024", true, false, true, false, false, false,
@@ -857,10 +874,12 @@ int main() {
         return 91;
     constexpr std::uint64_t pipeline_generation = 17;
     constexpr std::uint32_t pipeline_blocks = 56;
+    static_assert(pipeline_blocks < kAscendMaxDataBlocks);
     if (dispatch_persistent_producer_blocks(1) != 1 ||
         dispatch_persistent_producer_blocks(54) != 54 ||
         dispatch_persistent_producer_blocks(55) != 55 ||
-        dispatch_persistent_producer_blocks(56) != 55)
+        dispatch_persistent_producer_blocks(56) != 56 ||
+        dispatch_persistent_producer_blocks(64) != 63)
         return 190;
     if (dispatch_pipeline_producer_must_wait_for_reuse(0) ||
         dispatch_pipeline_producer_must_wait_for_reuse(1) ||
@@ -1788,7 +1807,7 @@ int main() {
         if (build_core_tiling(input, &tiling).code !=
             TilingStatusCode::kInvalidArgument)
             return 37;
-        input.data_num_blocks = 57;
+        input.data_num_blocks = kAscendMaxDataBlocks + 1;
         if (build_core_tiling(input, &tiling).code !=
             TilingStatusCode::kInvalidArgument)
             return 38;

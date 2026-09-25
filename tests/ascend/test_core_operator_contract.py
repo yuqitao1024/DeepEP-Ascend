@@ -3560,6 +3560,14 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "split_dispatch ? 0 :\n"
             "            (do_expand ? expanded_records : max_recv_tokens)",
             dispatch)
+        self.assertRegex(
+            dispatch,
+            r"device_prefix_config\.enabled\s*&&\s*"
+            r"!full_dispatch_count_validation")
+        self.assertIn("arguments.public_count_publication =", dispatch)
+        self.assertIn(
+            "launch_direct_dispatch_publish_counts_variant_0",
+            (ROOT / "csrc/backends/ascend/elastic/dispatch.asc").read_text())
 
     def test_combine_payload_copy_plan_is_aicore_callable(self):
         """Catches calling a host-only copy-plan helper from combine.asc."""

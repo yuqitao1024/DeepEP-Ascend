@@ -214,6 +214,29 @@ inline int launch_direct_dispatch_epilogue_parallel_prefix_variant_0(
         stream, launch, tiling.launch.num_threads);
 }
 
+inline int launch_direct_dispatch_publish_counts_variant_0(
+    DispatchArguments arguments, CoreTiling tiling, void* stream,
+    std::uint32_t vf_num_threads) {
+    return deep_ep_ascend_launch_direct_dispatch_publish_counts(
+        arguments.prefix_per_expert,
+        arguments.unaligned_per_expert,
+        arguments.public_expert_prefix,
+        arguments.public_unaligned,
+        static_cast<std::uint32_t>(tiling.num_experts),
+        static_cast<std::uint32_t>(tiling.num_experts /
+            tiling.transport_context.topology.world_size),
+        static_cast<std::uint32_t>(
+            tiling.transport_context.topology.world_rank),
+        static_cast<std::uint32_t>(
+            tiling.transport_context.topology.world_size),
+        static_cast<std::uint32_t>(tiling.expert_alignment),
+        static_cast<std::uint32_t>(
+            (tiling.mode_flags &
+             (CoreModeFlags{1} <<
+              static_cast<std::uint8_t>(CoreMode::kExpanded))) != 0),
+        stream, vf_num_threads);
+}
+
 inline int launch_direct_dispatch_epilogue_prefix_variant_0(
     DispatchArguments arguments, CoreTiling tiling, void* stream,
     CoreLaunchShape launch, DirectDispatchStage stage,

@@ -675,6 +675,9 @@ struct DispatchArguments {
     std::int32_t* prefix_per_rank = nullptr;
     std::int32_t* prefix_per_expert = nullptr;
     std::int32_t* unaligned_per_expert = nullptr;
+    std::int32_t* public_expert_prefix = nullptr;
+    std::int32_t* public_unaligned = nullptr;
+    std::uint32_t public_count_publication = 0;
     std::int32_t* destination_slots = nullptr;
     std::int32_t* source_metadata = nullptr;
     HybridRouteRecord* route_records = nullptr;

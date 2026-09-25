@@ -672,6 +672,19 @@ extern "C" int deep_ep_ascend_launch_direct_dispatch_reduce_errors(
     void* stream, CoreLaunchShape launch,
     std::uint32_t vf_num_threads);
 
+extern "C" int deep_ep_ascend_launch_direct_dispatch_publish_counts(
+    const std::int32_t* kernel_expert_prefix,
+    const std::int32_t* kernel_unaligned,
+    std::int32_t* public_expert_prefix,
+    std::int32_t* public_unaligned,
+    std::uint32_t num_experts,
+    std::uint32_t local_experts,
+    std::uint32_t world_rank,
+    std::uint32_t world_size,
+    std::uint32_t expert_alignment,
+    std::uint32_t expand_mode,
+    void* stream, std::uint32_t vf_num_threads);
+
 extern "C" int deep_ep_ascend_launch_vf_dispatch_epilogue(
     std::uint8_t* communication_buffer,
     std::uint8_t* workspace,
