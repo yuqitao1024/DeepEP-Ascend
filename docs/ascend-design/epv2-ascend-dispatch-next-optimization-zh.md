@@ -189,6 +189,15 @@ AICore/VF 分离提交和 transport service 顺序执行带来的固定调度成
   `/home/pyptouser/yuqitao/deepep-d2-noop/results/d2-noop-{run1,run2,run3,regress}.json`。
 - 结论：按“稳定复现即保留”标准，该宏改为默认开启；不改变 stage 语义和
   profile 输出。
+- 随后把非 profile 跳过范围从 acquire/validate 扩展到
+  validate_reduce/expert_count/expert_prefix/metadata 四个 redundant
+  AICore launch。三次 30-iteration 结果：Dispatch mean 6.919 ms，对比
+  仅跳过 acquire/validate 的 6.810 ms 无稳定收益；但 Expanded Dispatch
+  20.083 ms、Cached Dispatch 67.604 ms 均有稳定小幅改善。代表
+  correctness 集 `4 cases passed`。
+- 按逐项独立保留规则，本次扩展暂不保留，恢复只跳过 acquire/validate；
+  Expanded/Cached 的正向结果记录为后续专门验证线索，不能作为单独保留
+  Normal Dispatch 回退项的理由。
 
 ### D3. Release payload/control 拆分
 
