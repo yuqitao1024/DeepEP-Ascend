@@ -297,7 +297,6 @@ enum class DirectDispatchStage : std::uint8_t {
     kEpilogueAcquire,
     kEpiloguePrepare = kEpilogueAcquire,
     kEpilogueValidate,
-    kEpilogueValidateReduce,
     kEpilogueExpertCount,
     kEpilogueExpertPrefix,
     kEpilogueMetadata,
@@ -329,13 +328,12 @@ inline constexpr DirectDispatchPipeline direct_dispatch_pipeline(
         DirectDispatchStage::kProducerRelease,
         DirectDispatchStage::kEpilogueAcquire,
         DirectDispatchStage::kEpilogueValidate,
-        DirectDispatchStage::kEpilogueValidateReduce,
         DirectDispatchStage::kEpilogueExpertCount,
         DirectDispatchStage::kEpilogueExpertPrefix,
         DirectDispatchStage::kEpilogueMetadata,
         DirectDispatchStage::kEpilogueCopy,
         DirectDispatchStage::kEpilogueComplete,
-    }, cpu_sync ? 10U : 13U};
+    }, cpu_sync ? 9U : 12U};
     return pipeline;
 }
 
@@ -351,13 +349,12 @@ inline constexpr DirectDispatchPipeline direct_dispatch_profile_pipeline(
         DirectDispatchStage::kProducerReleaseBarrier,
         DirectDispatchStage::kEpilogueAcquire,
         DirectDispatchStage::kEpilogueValidate,
-        DirectDispatchStage::kEpilogueValidateReduce,
         DirectDispatchStage::kEpilogueExpertCount,
         DirectDispatchStage::kEpilogueExpertPrefix,
         DirectDispatchStage::kEpilogueMetadata,
         DirectDispatchStage::kEpilogueCopy,
         DirectDispatchStage::kEpilogueComplete,
-    }, cpu_sync ? 12U : 15U};
+    }, cpu_sync ? 11U : 14U};
     return pipeline;
 }
 

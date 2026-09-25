@@ -1276,10 +1276,11 @@ public:
             "full", "producer_control", "producer_group",
             "producer_prefix", "producer_record", "release_payload",
             "epilogue_acquire", "epilogue_validate",
-            "epilogue_validate_reduce", "epilogue_expert_count",
+            "epilogue_expert_count",
             "epilogue_expert_prefix", "epilogue_metadata",
             "epilogue_copy", "epilogue_complete", "release_control",
-            "release_barrier",
+            "release_barrier", "producer_record_pipeline",
+            "producer_release_pipeline",
         };
         constexpr const char* combine_stage_names[] = {
             "full", "producer_control", "producer_plan",

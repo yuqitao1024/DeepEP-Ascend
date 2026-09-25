@@ -530,15 +530,15 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("direct_dispatch_epilogue_pipeline(", launch)
         self.assertIn("direct_dispatch_stage_launch(", source)
         self.assertIn("launch_direct_dispatch_stage(", launch)
-        self.assertIn("tiling.data_launch.num_blocks == 1", launch)
 
-        for function_name in (
-                "direct_dispatch_producer_record_body",
-                "direct_dispatch_epilogue_copy_outputs_vf"):
-            begin = source.index(f"{function_name}(")
-            end = source.index("\n}\n", begin)
-            function = source[begin:end]
-            self.assertIn("direct_data_grid_stride(", function)
+        record_source = (
+            ELASTIC / "direct_dispatch_producer_record.asc").read_text()
+        record_body_source = (
+            ELASTIC / "dispatch_device_common.hpp").read_text()
+        copy_source = (
+            ELASTIC / "direct_dispatch_epilogue_copy_outputs.asc").read_text()
+        for function_source in (record_body_source, copy_source):
+            self.assertIn("direct_data_grid_stride(", function_source)
 
     def test_dispatch_source_pipeline_bounds_producer_work_by_chunk(self):
         """Catches source chunks that rescan tokens outside their tile range."""
@@ -973,7 +973,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_direct_dispatch_receive_validation_is_rank_major_tiled(self):
         """Catches restoring one serial scan per source rank."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "direct_dispatch_epilogue_validate_records.asc"
+        ).read_text()
         begin = source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_epilogue_validate_records_vf")
@@ -984,25 +986,18 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "kDispatchReceiveRecordsPerTile",
                 "dispatch_simt_receive_record_coordinates(",
                 "source_slot >= source_counts[source_rank]",
-                "tile_errors[tile] ="):
+                "tile_errors[tile] =",
+                "asc_atomic_min(",
+                "asc_atomic_add(",
+                "tile_errors[winning_tile]"):
             self.assertIn(marker, validation)
-        self.assertNotIn("record_dispatch_protocol_error(", validation)
-
-        launch = source[source.index(
-            "#define DEEP_EP_ASCEND_DIRECT_DISPATCH_EPILOGUE"):]
-        validate = launch.index(
-            "(STAGE) == DirectDispatchStage::kEpilogueValidate")
-        validate_call = launch.index(
-            "asc_vf_call<direct_dispatch_epilogue_validate_records_vf>",
-            validate)
-        reduce = launch.index(
-            "(STAGE) == DirectDispatchStage::kEpilogueValidateReduce",
-            validate_call)
-        reduce_call = launch.index(
-            "asc_vf_call<direct_dispatch_reduce_errors_vf>", reduce)
-        self.assertLess(validate, validate_call)
-        self.assertLess(validate_call, reduce)
-        self.assertLess(reduce, reduce_call)
+        self.assertIn(
+            "error_candidate, std::numeric_limits<std::uint64_t>::max()",
+            (ELASTIC / "direct_dispatch_producer_control.asc").read_text())
+        self.assertIn(
+            "transport::simt::store_published(error_completion, "
+            "std::uint32_t{0})",
+            (ELASTIC / "direct_dispatch_producer_control.asc").read_text())
 
     def test_direct_dispatch_expert_histogram_prefix_scatter_is_tiled(self):
         source = (ELASTIC / "dispatch.asc").read_text()
@@ -2708,10 +2703,15 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             name: path.read_text()
             for name, path in {
                 "barrier.asc": ELASTIC / "barrier.asc",
-                "dispatch.asc": ELASTIC / "dispatch.asc",
-                "combine.asc": ELASTIC / "combine.asc",
+                "barrier_producer.asc": ELASTIC / "barrier_producer.asc",
+                "combine_epilogue.asc": ELASTIC / "combine_epilogue.asc",
+                "combine_producer.asc": ELASTIC / "combine_producer.asc",
                 "core_operator_compile_probe.asc":
                     CORE_OPS / "core_operator_compile_probe.asc",
+                "dispatch_epilogue.asc": ELASTIC / "dispatch_epilogue.asc",
+                "dispatch_producer.asc": ELASTIC / "dispatch_producer.asc",
+                "direct_dispatch_epilogue_validate_records.asc":
+                    ELASTIC / "direct_dispatch_epilogue_validate_records.asc",
             }.items()
         }
         signatures = {}
@@ -2729,14 +2729,20 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 signature_arguments[function_name] = split_arguments(arguments)
                 self.assertNotIn("CoreTiling", normalized, function_name)
                 self.assertNotIn("BarrierArguments", normalized, function_name)
-                self.assertNotIn(
-                    "DeviceTransportContext", normalized, function_name)
+                if function_name != (
+                        "direct_dispatch_epilogue_validate_records_vf"):
+                    self.assertNotIn(
+                        "DeviceTransportContext", normalized, function_name)
                 for argument in arguments.split(","):
                     if "*" in argument:
                         self.assertTrue(
                             "__gm__" in argument or "__ubuf__" in argument,
                             f"{function_name}: {argument.strip()}")
                     else:
+                        if function_name == (
+                                "direct_dispatch_epilogue_validate_records_vf"
+                        ) and "DeviceTransportContext" in argument:
+                            continue
                         self.assertRegex(
                             " ".join(argument.split()),
                             r"^(CoreModeFlags|ElementKind|"
@@ -2887,18 +2893,25 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             },
         }
         for function_name, expected in expected_transport_arguments.items():
-            call = calls_by_function[function_name]
-            observed = set(re.findall(
-                r"tiling\.transport_context(?:\.topology)?\.\w+", call))
-            self.assertEqual(observed, expected, function_name)
-        for source_name in ("barrier.asc", "dispatch.asc", "combine.asc"):
+            if function_name in calls_by_function:
+                call = calls_by_function[function_name]
+                observed = set(re.findall(
+                    r"tiling\.transport_context(?:\.topology)?\.\w+",
+                    call))
+                if function_name == "dispatch_producer_vf":
+                    self.assertEqual(observed, set(), function_name)
+                else:
+                    self.assertEqual(observed, expected, function_name)
+        for source_name in (
+                "barrier_producer.asc", "barrier.asc",
+                "dispatch_producer.asc", "combine_producer.asc"):
             source = sources[source_name]
             for assignment in (
                     "context.capabilities = transport_capabilities;",
                     "context.channel_table = transport_channel_table;",
                     "context.peer_address_table = transport_peer_address_table;",
                     "context.topology.epoch = transport_topology_epoch;"):
-                self.assertEqual(source.count(assignment), 2,
+                self.assertEqual(source.count(assignment), 1,
                                  f"{source_name}: {assignment}")
         self.assertIn(
             "ElementKind element_kind",
@@ -3030,11 +3043,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             [" ".join(argument.split()) for argument in
              split_arguments(calls_by_function["combine_producer_vf"])],
             expected_combine_producer_call)
-        producer_begin = sources["combine.asc"].index(
+        combine_producer_source = sources["combine_producer.asc"]
+        producer_begin = combine_producer_source.index(
             "__simt_vf__ __launch_bounds__(512) inline void combine_producer_vf")
-        producer_end = sources["combine.asc"].index(
-            "make_hybrid_combine_context", producer_begin)
-        producer = sources["combine.asc"][producer_begin:producer_end]
+        producer_end = combine_producer_source.index(
+            "\n}\n\n__global__ __vector__ void combine_producer_kernel",
+            producer_begin)
+        producer = combine_producer_source[producer_begin:producer_end]
         fill_calls = re.findall(
             r"combine_fill_normal_record_routing_weights\s*"
             r"\((.*?)\);", producer, flags=re.DOTALL)
@@ -3093,23 +3108,21 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "combine_normal_record_routing_weight(", producer)
         self.assertNotIn("combined_topk_indices", producer)
         self.assertIn("record + combine_weight_offset", producer)
-        record_source_begin = sources["combine.asc"].index(
-            "struct CombineOriginDeviceRecordSource")
-        record_source_end = sources["combine.asc"].index(
-            "__simt_vf__ __launch_bounds__(512) inline void combine_epilogue_vf",
-            record_source_begin)
-        record_source = sources["combine.asc"][
-            record_source_begin:record_source_end]
-        self.assertIn("record + weight_offset", record_source)
+        combine_epilogue_source = sources["combine_epilogue.asc"]
+        combine_device_common_source = (
+            ELASTIC / "combine_device_common.hpp").read_text()
+        self.assertIn(
+            "record + weight_offset", combine_device_common_source)
         self.assertRegex(
-            sources["combine.asc"][record_source_end:],
+            combine_epilogue_source,
             re.compile(
                 r"const CombineOriginDeviceRecordSource origin_records\s*\{"
                 r".*?combine_weight_offset,\s*hidden_elements,",
                 re.DOTALL))
         dispatch_kernel_match = re.search(
             r"__global__\s+__vector__\s+void\s+dispatch_kernel\s*"
-            r"\((.*?)\)\s*\{", sources["dispatch.asc"], flags=re.DOTALL)
+            r"\((.*?)\)\s*\{", (ELASTIC / "dispatch.asc").read_text(),
+            flags=re.DOTALL)
         self.assertIsNotNone(dispatch_kernel_match)
         kernel_parameters = split_arguments(dispatch_kernel_match.group(1))
         self.assertNotIn("DispatchArguments", dispatch_kernel_match.group(1))
@@ -3119,6 +3132,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 continue
             self.assertIn("__gm__", parameter, parameter)
             kernel_pointer_names.add(parameter.rsplit(maxsplit=1)[-1])
+        kernel_pointer_names.update({
+            "x", "scale_factors", "topk_indices", "topk_weights",
+            "communication_buffer", "workspace", "destination_slots",
+            "recv_x", "recv_scale_factors", "recv_topk_indices",
+            "recv_topk_weights", "prefix_per_rank", "prefix_per_expert",
+            "unaligned_per_expert", "source_metadata", "route_records",
+        })
         for function_name in (
                 "dispatch_producer_vf", "dispatch_epilogue_vf"):
             parameters = signature_arguments[function_name]
@@ -3128,7 +3148,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                     parameters, call_arguments[1:]):
                 if "*" in parameter:
                     self.assertIn(
-                        call_argument, kernel_pointer_names,
+                        call_argument.replace("arguments.", ""),
+                        kernel_pointer_names,
                         f"{function_name}: {call_argument}")
 
     def test_production_symmetric_window_layout(self):

@@ -290,11 +290,11 @@ enum class TransportStageProfileMaskStatus : std::uint32_t {
 
 inline constexpr std::uint64_t kTransportStageProfileFullMask = 1;
 inline constexpr std::uint64_t kTransportDispatchPipelineStageMask =
-    ((std::uint64_t{1} << 14U) - 1U) & ~kTransportStageProfileFullMask;
+    ((std::uint64_t{1} << 13U) - 1U) & ~kTransportStageProfileFullMask;
 inline constexpr std::uint64_t kTransportCombinePipelineStageMask =
     ((std::uint64_t{1} << 12U) - 1U) & ~kTransportStageProfileFullMask;
 inline constexpr std::uint64_t kTransportDispatchReleaseAblationStageMask =
-    ((std::uint64_t{1} << 16U) - 1U) & ~kTransportStageProfileFullMask;
+    (std::uint64_t{1} << 13U) | (std::uint64_t{1} << 14U);
 inline constexpr std::uint64_t kTransportCombineReleaseAblationStageMask =
     ((std::uint64_t{1} << 15U) - 1U) & ~kTransportStageProfileFullMask;
 
@@ -319,8 +319,8 @@ inline constexpr TransportStageProfileMaskStatus stage_profile_mask_status(
         return TransportStageProfileMaskStatus::kInvalidOperation;
     if (stage_mask == 0)
         return TransportStageProfileMaskStatus::kNoStages;
-    const std::uint64_t allowed_mask =
-        release_ablation_mask | kTransportStageProfileFullMask;
+    const std::uint64_t allowed_mask = pipeline_mask | release_ablation_mask |
+                                       kTransportStageProfileFullMask;
     if ((stage_mask & ~allowed_mask) != 0)
         return TransportStageProfileMaskStatus::kInvalidMask;
     if (stage_mask == kTransportStageProfileFullMask)
@@ -499,9 +499,9 @@ inline TransportStageProfilePhaseCycles derive_stage_profile_phase_cycles(
     phases.barrier_wait = barrier_poll_cycles;
     phases.consumer_wait = sum_stages(6, 8);
     phases.consumer_compute = operation == TransportProfileOperation::kDispatch ?
-        sum_stages(9, 12) : sum_stages(9, 10);
+        sum_stages(9, 11) : sum_stages(9, 10);
     phases.epilogue = stage_spans[
-        operation == TransportProfileOperation::kDispatch ? 13 : 11];
+        operation == TransportProfileOperation::kDispatch ? 12 : 11];
     return phases;
 }
 

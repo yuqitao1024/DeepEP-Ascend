@@ -87,19 +87,6 @@ _DISPATCH_STAGES = MappingProxyType({
         ),
         ("received_records",),
     ),
-    "epilogue_validate_reduce": StageSemantic(
-        "D5", "acquire/count",
-        (
-            "direct_dispatch_epilogue_acquire_vf",
-            "direct_dispatch_epilogue_validate_records_vf",
-            "direct_dispatch_epilogue_count_experts_vf",
-        ),
-        (
-            "notify results, acquire, validation, and token traversal in "
-            "dispatch_copy_epilogue_impl"
-        ),
-        ("received_records",),
-    ),
     "epilogue_expert_count": StageSemantic(
         "D5", "acquire/count",
         (

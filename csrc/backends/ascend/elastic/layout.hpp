@@ -228,6 +228,8 @@ struct WorkspaceLayout {
     std::uint64_t dispatch_expert_bitmap_bytes = 0;
     std::uint64_t dispatch_receive_tile_error_offset = 0;
     std::uint64_t dispatch_receive_tile_error_bytes = 0;
+    std::uint64_t dispatch_receive_error_candidate_offset = 0;
+    std::uint64_t dispatch_receive_error_completion_offset = 0;
     std::uint64_t dispatch_receive_tile_count = 0;
     std::uint64_t dispatch_expert_tile_count_offset = 0;
     std::uint64_t dispatch_expert_tile_count_bytes = 0;

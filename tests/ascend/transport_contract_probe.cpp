@@ -93,11 +93,11 @@ int main() {
 
     constexpr auto full_mask = std::uint64_t{1};
     constexpr auto dispatch_pipeline_mask =
-        ((std::uint64_t{1} << 14U) - 1U) & ~full_mask;
+        ((std::uint64_t{1} << 13U) - 1U) & ~full_mask;
     constexpr auto combine_pipeline_mask =
         ((std::uint64_t{1} << 12U) - 1U) & ~full_mask;
     constexpr auto dispatch_release_ablation_mask =
-        ((std::uint64_t{1} << 16U) - 1U) & ~full_mask;
+        (std::uint64_t{1} << 13U) | (std::uint64_t{1} << 14U);
     constexpr auto combine_release_ablation_mask =
         ((std::uint64_t{1} << 15U) - 1U) & ~full_mask;
     constexpr auto observed_dispatch_mask =
@@ -105,7 +105,7 @@ int main() {
         (std::uint64_t{1} << 3U) | (std::uint64_t{1} << 5U) |
         (std::uint64_t{1} << 6U) | (std::uint64_t{1} << 8U) |
         (std::uint64_t{1} << 9U) | (std::uint64_t{1} << 10U) |
-        (std::uint64_t{1} << 12U) | (std::uint64_t{1} << 13U);
+        (std::uint64_t{1} << 11U) | (std::uint64_t{1} << 12U);
     constexpr auto observed_combine_mask =
         (std::uint64_t{1} << 1U) | (std::uint64_t{1} << 2U) |
         (std::uint64_t{1} << 3U) | (std::uint64_t{1} << 4U) |
@@ -116,7 +116,7 @@ int main() {
             TransportStageProfileMaskStatus::kInvalidMask ||
         stage_profile_mask_status(
             TransportProfileOperation::kDispatch,
-            dispatch_pipeline_mask & ~(std::uint64_t{1} << 13U)) !=
+            dispatch_pipeline_mask & ~(std::uint64_t{1} << 12U)) !=
             TransportStageProfileMaskStatus::kPartialMask ||
         stage_profile_mask_status(
             TransportProfileOperation::kCombine,
@@ -157,12 +157,12 @@ int main() {
             TransportStageProfileMaskStatus::kPartialMask ||
         stage_profile_mask_status(
             TransportProfileOperation::kDispatch,
-            std::uint64_t{1} << 13U) !=
+            std::uint64_t{1} << 12U) !=
             TransportStageProfileMaskStatus::kPartialMask ||
         stage_profile_mask_status(
             TransportProfileOperation::kDispatch,
             full_mask | (std::uint64_t{1} << 1U) |
-                (std::uint64_t{1} << 13U)) !=
+                (std::uint64_t{1} << 12U)) !=
             TransportStageProfileMaskStatus::kPartialMask)
         return 9;
 

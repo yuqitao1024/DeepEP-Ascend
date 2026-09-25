@@ -35,6 +35,9 @@ static_assert(offsetof(DispatchPipelineState, hidden_progress) == 37248);
 static_assert(
     offsetof(DispatchPipelineState, release_completed_generation) / 64 !=
     offsetof(DispatchPipelineState, generation) / 64);
+static_assert(
+    offsetof(WorkspaceLayout, dispatch_receive_error_candidate_offset) <
+        offsetof(WorkspaceLayout, dispatch_receive_error_completion_offset));
 
 namespace {
 
@@ -1443,14 +1446,13 @@ int main() {
         DirectDispatchStage::kProducerRelease,
         DirectDispatchStage::kEpilogueAcquire,
         DirectDispatchStage::kEpilogueValidate,
-        DirectDispatchStage::kEpilogueValidateReduce,
         DirectDispatchStage::kEpilogueExpertCount,
         DirectDispatchStage::kEpilogueExpertPrefix,
         DirectDispatchStage::kEpilogueMetadata,
         DirectDispatchStage::kEpilogueCopy,
         DirectDispatchStage::kEpilogueComplete,
     };
-    if (direct_pipeline.count != 13)
+    if (direct_pipeline.count != 12)
         return 43;
     for (std::uint32_t index = 0; index < direct_pipeline.count; ++index) {
         if (direct_pipeline.stages[index] != expected_direct_stages[index])
@@ -1458,15 +1460,15 @@ int main() {
         const auto launch = direct_dispatch_stage_launch(
             tiling, direct_pipeline.stages[index]);
         const bool data_stage =
-            index == 1 || index == 3 || index == 6 || index == 8 ||
-            index == 10 || index == 11;
+            index == 1 || index == 3 || index == 6 || index == 7 ||
+            index == 9 || index == 10;
         if (launch.num_blocks != (data_stage ? 56U : 1U) ||
             launch.num_threads != 512 || launch.dynamic_ub_bytes != 0)
             return 45;
     }
     const auto cpu_sync_pipeline = direct_dispatch_pipeline(true);
-    if (cpu_sync_pipeline.count != 10 ||
-        cpu_sync_pipeline.stages[9] !=
+    if (cpu_sync_pipeline.count != 9 ||
+        cpu_sync_pipeline.stages[8] !=
             DirectDispatchStage::kEpilogueExpertPrefix)
         return 46;
     const auto dispatch_profile_pipeline =
@@ -1481,14 +1483,13 @@ int main() {
         DirectDispatchStage::kProducerReleaseBarrier,
         DirectDispatchStage::kEpilogueAcquire,
         DirectDispatchStage::kEpilogueValidate,
-        DirectDispatchStage::kEpilogueValidateReduce,
         DirectDispatchStage::kEpilogueExpertCount,
         DirectDispatchStage::kEpilogueExpertPrefix,
         DirectDispatchStage::kEpilogueMetadata,
         DirectDispatchStage::kEpilogueCopy,
         DirectDispatchStage::kEpilogueComplete,
     };
-    if (dispatch_profile_pipeline.count != 15)
+    if (dispatch_profile_pipeline.count != 14)
         return 80;
     for (std::uint32_t index = 0;
          index < dispatch_profile_pipeline.count; ++index) {
@@ -1498,8 +1499,8 @@ int main() {
     }
     const auto cpu_sync_profile_pipeline =
         direct_dispatch_profile_pipeline(true);
-    if (cpu_sync_profile_pipeline.count != 12 ||
-        cpu_sync_profile_pipeline.stages[11] !=
+    if (cpu_sync_profile_pipeline.count != 11 ||
+        cpu_sync_profile_pipeline.stages[10] !=
             DirectDispatchStage::kEpilogueExpertPrefix)
         return 82;
     if (direct_dispatch_release_segment(
@@ -1534,8 +1535,6 @@ int main() {
             DirectDispatchStage::kEpilogueAcquire) ||
         !direct_dispatch_epilogue_stage(
             DirectDispatchStage::kEpilogueValidate) ||
-        !direct_dispatch_epilogue_stage(
-            DirectDispatchStage::kEpilogueValidateReduce) ||
         !direct_dispatch_epilogue_stage(
             DirectDispatchStage::kEpilogueExpertCount) ||
         !direct_dispatch_epilogue_stage(
@@ -1988,8 +1987,8 @@ int main() {
     };
     for (const auto fixture : {
              ScratchFixture{2, 288, 4, 16, 32, 512},
-             ScratchFixture{4, 448, 6, 32, 48, 960},
-             ScratchFixture{8, 800, 10, 64, 80, 1856}}) {
+             ScratchFixture{4, 480, 6, 32, 48, 960},
+             ScratchFixture{8, 832, 10, 64, 80, 1856}}) {
         for (const auto operation : {
                  OperationKind::kDispatch, OperationKind::kCombine}) {
             input = valid_input();
@@ -2049,6 +2048,9 @@ int main() {
                         fixture.dispatch_expert_bitmap_bytes ||
                     rank_scratch.dispatch_error_offset %
                             alignof(std::uint64_t) != 0 ||
+                    rank_scratch.dispatch_receive_error_candidate_offset +
+                            sizeof(std::uint64_t) >
+                        rank_scratch.dispatch_error_offset ||
                     rank_scratch.dispatch_rank_bitmap_offset <
                         rank_scratch.dispatch_error_offset +
                             rank_scratch.dispatch_error_count *

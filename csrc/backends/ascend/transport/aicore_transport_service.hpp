@@ -1187,7 +1187,7 @@ __aicore__ inline std::uint64_t stage_profile_completed_mask(TransportProfileOpe
                                                              bool release_ablation) {
     if (stage == 0)
         return kTransportStageProfileFullMask;
-    if (operation == TransportProfileOperation::kDispatch && stage == 13)
+    if (operation == TransportProfileOperation::kDispatch && stage == 12)
         return device_stage_profile_pipeline_mask(operation, release_ablation);
     if (operation == TransportProfileOperation::kCombine && stage == 11)
         return device_stage_profile_pipeline_mask(operation, release_ablation);
@@ -1208,7 +1208,8 @@ __aicore__ inline void record_stage_start(const DeviceTransportContext& context,
         return;
     profile->operation = operation;
     profile->generation = generation;
-    const bool release_ablation_stage = (operation == TransportProfileOperation::kDispatch && stage >= 14) ||
+    const bool release_ablation_stage = (operation == TransportProfileOperation::kDispatch &&
+                                         (stage == 13 || stage == 14)) ||
         (operation == TransportProfileOperation::kCombine && stage >= 12);
     if (block == 0 && release_ablation_stage) {
         profile->flags |= kTransportStageProfileReleaseAblation;

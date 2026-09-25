@@ -1411,7 +1411,6 @@ def _literal_stage_profile(rank, *, generation=9, operation="dispatch"):
         ("dispatch", "release_barrier", "D4"),
         ("dispatch", "epilogue_acquire", "D5"),
         ("dispatch", "epilogue_validate", "D5"),
-        ("dispatch", "epilogue_validate_reduce", "D5"),
         ("dispatch", "epilogue_expert_count", "D5"),
         ("dispatch", "epilogue_expert_prefix", "D6"),
         ("dispatch", "epilogue_metadata", "D7"),

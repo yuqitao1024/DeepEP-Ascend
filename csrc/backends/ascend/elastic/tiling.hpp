@@ -52,7 +52,7 @@ struct CoreTilingInput {
 // Ascend devices expose up to 64 AIVs; the Python layer selects the actual
 // device count at runtime while this bound sizes the static tiling ABI.
 inline constexpr std::uint32_t kAscendMaxDataBlocks = 64;
-inline constexpr std::uint32_t kCoreTilingAbiVersion = 21;
+inline constexpr std::uint32_t kCoreTilingAbiVersion = 22;
 inline constexpr std::uint64_t kDirectDeviceIndexLimit = 0x7fffffffULL;
 
 constexpr std::uint64_t default_elastic_runtime_workspace_bytes() noexcept {
@@ -390,6 +390,19 @@ inline bool build_workspace_layout(
         if (!checked_align(
                 scratch_cursor, alignof(std::uint64_t), &scratch_cursor))
             return false;
+        layout.dispatch_receive_error_candidate_offset = scratch_cursor;
+        if (!checked_add(scratch_cursor, sizeof(std::uint64_t),
+                         &scratch_cursor))
+            return false;
+        layout.dispatch_receive_error_completion_offset = scratch_cursor;
+        if (!checked_add(scratch_cursor, sizeof(std::uint32_t),
+                         &scratch_cursor))
+            return false;
+    }
+    if (parallel_dispatch) {
+        if (!checked_align(
+                scratch_cursor, alignof(std::uint64_t), &scratch_cursor))
+            return false;
         layout.dispatch_error_offset = scratch_cursor;
         if (!checked_add(
                 scratch_cursor, dispatch_error_bytes, &scratch_cursor))
@@ -589,6 +602,14 @@ inline bool build_workspace_layout(
               layout.scratch_offset,
               layout.dispatch_receive_tile_error_offset,
               &layout.dispatch_receive_tile_error_offset) ||
+          !checked_add(
+              layout.scratch_offset,
+              layout.dispatch_receive_error_candidate_offset,
+              &layout.dispatch_receive_error_candidate_offset) ||
+          !checked_add(
+              layout.scratch_offset,
+              layout.dispatch_receive_error_completion_offset,
+              &layout.dispatch_receive_error_completion_offset) ||
           !checked_add(
               layout.scratch_offset,
               layout.dispatch_expert_tile_count_offset,

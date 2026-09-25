@@ -112,6 +112,10 @@ bool same_workspace_layout(
                rhs.dispatch_receive_tile_error_offset &&
            lhs.dispatch_receive_tile_error_bytes ==
                rhs.dispatch_receive_tile_error_bytes &&
+           lhs.dispatch_receive_error_candidate_offset ==
+               rhs.dispatch_receive_error_candidate_offset &&
+           lhs.dispatch_receive_error_completion_offset ==
+               rhs.dispatch_receive_error_completion_offset &&
            lhs.dispatch_receive_tile_count ==
                rhs.dispatch_receive_tile_count &&
            lhs.dispatch_expert_tile_count_offset ==
