@@ -8,7 +8,7 @@ option(DEEP_EP_ASCEND_TESTING "Enable Ascend validation-only diagnostics" OFF)
 option(DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
        "Enable Dispatch acquire ready/gap diagnostics" OFF)
 option(DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP
-       "Skip redundant non-profile Dispatch epilogue no-op kernels" ON)
+       "Skip redundant non-profile Dispatch epilogue no-op kernels" OFF)
 option(DEEP_EP_ASCEND_POLLING_NOP
        "Insert NOP instructions in device polling loops (diagnostic only)" OFF)
 

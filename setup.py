@@ -29,7 +29,7 @@ def get_ascend_acquire_diagnostics(environ=os.environ):
 
 
 def get_ascend_skip_epilogue_noop(environ=os.environ):
-    value = environ.get('DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP', '1')
+    value = environ.get('DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP', '0')
     if value not in ('0', '1'):
         raise ValueError(
             'DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP must be 0 or 1')
