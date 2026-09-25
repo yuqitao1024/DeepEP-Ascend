@@ -593,8 +593,8 @@ kernel 后约 1.735 ms。首个 kernel 前的区间可能包含入口 HCCL 等�
 1. 专家计数的线程内 histogram 已完成独立对照，未取得稳定收益，撤回实现
    （见下文）。后续计数优化需先验证存储布局与并行粒度，不能假定普通局部
    数组一定比 GM 计数快。
-2. 下一优先项是 validate records 的并行粒度，以及 producer/epilogue prefix 的
-   串行扫描；保留全部校验和确定性的错误汇总，不通过删检查获得收益。
+2. validate records 的并行粒度实验见下文；其后评估 producer/epilogue prefix
+   的串行扫描。保留全部校验和确定性的错误汇总，不通过删检查获得收益。
 3. 入口 HCCL 显式等待后的 20 次 capture 已完成（见下文）；下一步细分
    kernel 完成后的结果回读、runtime completion 和 handle 收尾时间，同时
    保留 host 提交边界测量，区分晚提交与跨 rank 等待。
@@ -678,6 +678,131 @@ B 的 `hist-kernel-trace.json`、`hist-traces/rank{0..7}.json` 和实验源码�
 `/tmp/deepep-dispatch-after-d4-20260926.3mBLpT/scratch/`；远端新增脚本归档于
 `/home/pyptouser/yuqitao/dispatch-after-d4-20260926.R8hw7E/`。主工作树只保留
 本文的测量与决策记录，不保留实验 kernel 或临时诊断代码。
+
+### 普通 Dispatch 接收记录校验并行化（2026-09-26）
+
+基于上一轮已确认的约 522 μs 校验耗时，本轮只改
+`direct_dispatch_epilogue_validate_records.asc` 的 uncached tile 分工。
+对照 A 为 D4 二进制 `75cd9b35...`，候选 B 为
+`38a0b3f211d8d43c25aea814ba40a28ea4487bbe96570e87693a2b9387cfd25d`。
+仍使用 NPU8P device 0-7、8192 tokens/rank、hidden 7168、top-k 8、256
+experts、FP8、64 AIV 和同一 CANN/HCOMM、优化开关。
+
+实现与协议边界：
+
+- 原来每线程串行检查一个 128-record tile；普通路径改为每个 32-thread
+  subgroup 拥有一个 tile，每 lane 检查连续 4 条记录。
+- 每 lane 仍按记录顺序取第一个错误，`asc_ballot` 选最早出错的 lane，
+  `asc_shfl` 传递该 lane 的错误与 diagnostic peer，只有 lane 0 写 tile
+  结果。连续分段保证最小出错 lane 对应最早出错记录，不能改成仅按错误码
+  取最小值，也不能直接把记录交错分配后仍按 lane 顺序取错误。
+- 跨 tile 的 atomic-min、block 内完成汇总、最后一个 block 发布错误的
+  顺序均保持原样。kernel 参数、workspace、generation 和发布协议未变。
+- cached 模式和不满完整 subgroup 的 launch 保留逐线程扫描。D5 继续暂停。
+
+#### 功能回归
+
+新增 `tests/ascend/production/run_dispatch_validation.py` 和 host adapter
+`tests/ascend/core_ops/dispatch_validate_adapter.cpp`。adapter 使用生产
+launcher 声明与真实 C++ POD，Python 只传指针和标量，不复制复杂参数 ABI。
+测试从已加载的 `_C` 取得生产 launcher 地址，构造本地 device receive records，
+与独立串行 oracle 比较 status、每 tile 错误、全局候选、完成计数和 tile
+输出边界。
+
+原版与候选均在 device 0-7 通过，每设备 33 个场景，包括：
+
+- 1/8 个 source 的布局；capacity 0/1/17/129/137；空路由、部分 source count；
+- 32/128/512 threads、跨多次 grid-stride 的 8193 capacity、最后一个部分 tile；
+- 同 lane 多个错误、不同 lane 中错误码相反的先后顺序、跨 tile 多个错误；
+- 已有 status 不被覆盖、cached identity 和 expanded cached 非本地 slot；
+- top-k 1/2/8/32。
+
+该测试直接覆盖生产校验 kernel，但不提交跨 rank transport 操作；真正的
+8-rank 协议和输出验收另由五操作 benchmark 完成。复跑时，在匹配的
+CANN/Python 环境中，通过主机规定的 CPU/NPU 队列分别执行：
+
+```bash
+c++ -std=c++17 -shared -fPIC -I. \
+  tests/ascend/core_ops/dispatch_validate_adapter.cpp \
+  -o build/dispatch-validate-adapter.so
+
+python -m torch.distributed.run --standalone --nproc-per-node=8 \
+  tests/ascend/production/run_dispatch_validation.py \
+  --adapter "$PWD/build/dispatch-validate-adapter.so" \
+  --output "$PWD/results/dispatch-validation"
+```
+
+#### Kernel 归因
+
+候选同样在入口 HCCL 完成后捕获 20 次普通 Dispatch，剔除首轮，8 × 19 个
+样本中 validate kernel median **46.121 μs**，p95 **47.511 μs**，范围
+45.003-48.310 μs。此前对照 median 为 522.055 μs，减少约 476 μs。
+producer prefix 435.750 μs、count experts 329.833 μs、epilogue prefix
+175.596 μs，未随该修改明显改变。该结果支持减少每 lane 串行记录数的假设；
+最终保留依据仍是无 profiling 的端到端重复对照。
+
+#### 端到端 ABBA：保留
+
+三组 ABBA，每次 2 warmups / 30 iterations，不开 stage profiling。全部
+报告的 workload fingerprint、64 AIV、30 个采样和五操作结果已核对。
+每组的 A/B mean 和 p95 分别是两个对应 run 的指标均值：
+
+| 组 | A Dispatch mean / ms | B mean / ms | mean 收益 | A p95 / ms | B p95 / ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 6.352133 | 5.852685 | 7.863% | 7.008137 | 6.290833 |
+| 2 | 6.219534 | 5.833915 | 6.200% | 6.652391 | 6.439599 |
+| 3 | 6.311999 | 6.002317 | 4.906% | 6.841331 | 6.475157 |
+
+六个等长 run 合并：
+
+| 操作 | A mean / ms | B mean / ms | B logical GB/s |
+| --- | ---: | ---: | ---: |
+| Dispatch | 6.294555 | 5.896305 | 1320.503 |
+| Expanded Dispatch | 17.281871 | 16.703687 | 553.859 |
+| Cached Dispatch | 65.133734 | 65.161330 | 119.489 |
+| Combine | 14.587793 | 14.514459 | 751.058 |
+| Reduced Combine | 15.072036 | 15.036815 | 724.968 |
+
+Normal Dispatch mean 改善约 **6.327%**，logical bandwidth 从
+**1236.956 → 1320.503 GB/s**；仍是八 rank 聚合逻辑带宽，并非单链路 P2P
+吞吐。这里的百分比只与本轮配对 A 对比，不与上一轮 6.158 ms 的基线混算。
+Expanded Dispatch 三组 mean 改善 4.355%/2.973%/2.696%，合并约 3.346%。
+Cached/Combine/Reduced Combine 各组方向不一致，未观察到稳定变化。
+
+验证完成情况：
+
+- 原版和候选各自 8 × 33 个 kernel 回归全部通过。
+- 完整 CANN 编译通过；本地 receive-validation 契约、production dispatch
+  state/layout、C++ layout/tiling 三项检查通过；host adapter 也通过
+  `-Wall -Wextra -Werror` 编译。
+- 12 次 ABBA、一次候选 trace，以及 BF16 同步、FP8 previous-event +
+  async + allocate-on-comm-stream 两个补充 case，均完成五操作功能校验，
+  本轮没有 SIGSEGV、卡死、超时或协议错误。
+- 这不是完整 144-case 矩阵验收；此前 D4 记录的小规模 weight 边界问题
+  不在本次修改范围内，仍未修复。
+
+结论：保留接收记录 subgroup 并行校验，无需新增性能开关。后续固定 kernel
+优先看约 436 μs 的 producer prefix，再评估约 329 μs 的专家计数及约
+176 μs 的 epilogue prefix；调用尾部的结果回读/handle 收尾继续单独归因。
+
+原始数据：
+
+- A：`/home/pyptouser/yuqitao/deepep-d4/results/validate-abba{1,2,3}-{A1,A2}.json`；
+- B：`/home/pyptouser/yuqitao/deepep-dispatch-validate/results/` 下的
+  `validate-abba{1,2,3}-{B1,B2}.json`、`validate-bf16-sync.json`、
+  `validate-fp8-async.json`、`validate-parallel-trace.json`，以及对应 `.log`；
+- 相同 B 目录内的 `validate-{serial,parallel}-errors.rank{0..7}.json`
+  保存两版 33-case 结果，`validate-parallel-traces/rank{0..7}.json` 保存 trace；
+- adapter 编译 task `task_20260926_060207_152818122900`；原版回归 task
+  `task_20260926_060229_152895320037`；候选编译 task
+  `task_20260926_060356_15338624653`；候选回归及 trace task
+  `task_20260926_060608_154577515958`；补充 case 与 ABBA task
+  `task_20260926_060732_155451626370`。所有任务均退出 0。
+
+临时脚本和下载数据归档于本地
+`/tmp/deepep-dispatch-validate-20260926.SJ6VvQ/scratch/`，远端新增采样/执行
+脚本归档于 `/home/pyptouser/yuqitao/dispatch-validate-20260926.MEgemf/`。
+生产源码不含本轮临时诊断，新增的 adapter/runner 仅作为可复跑设备回归保留。
 
 ### D5. Cached Dispatch 专项（暂停）
 
