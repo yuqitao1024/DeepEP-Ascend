@@ -128,7 +128,7 @@ Ascend build 的编译宏在构建时固化，修改后必须重新构建 extens
 | `DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY` | `ON` | 生产构建保持开启。设为 `0` 可恢复最终 direct producer release barrier，用于协议对照 |
 | `DEEP_EP_ASCEND_TESTING` | `OFF` | 性能和生产构建不要开启。开启后包含 validation-only 诊断和 fault hooks |
 | `DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS` | `OFF` | 只在需要 acquire 长尾归因时构建。性能测试不要开启 |
-| `DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP` | `OFF` | 历史候选已做过 correctness A/B，但端到端无收益；不作为生产优化推荐 |
+| `DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP` | `ON` | 跳过非 profile direct Dispatch epilogue 的 redundant no-op kernel；profile 模式仍保留 stage 计时。2026-09-25 在 D1 后三次 8-rank 复测有稳定小幅收益 |
 | `DEEP_EP_ASCEND_POLLING_NOP` | `OFF` | 真实机器 polling NOP selector。Driver 25.6 已验证默认关闭无卡死；开启仅用于旧 driver 对照，不是性能优化推荐 |
 
 `DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY=ON` 只跳过最终 direct Dispatch/Combine

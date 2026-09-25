@@ -175,6 +175,21 @@ AICore/VF 分离提交和 transport service 顺序执行带来的固定调度成
 - 合并后端到端 mean 至少改善 0.3 ms；
 - 不改变输出布局、generation、错误协议和 buffer 复用语义。
 
+2026-09-25 首个保留项：
+
+- 在包含 D1 的当前代码上重测
+  `DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP=1`，非 profile direct Dispatch 的
+  acquire/validate redundant AICore kernel 被跳过；profile 模式仍保留该
+  stage 计时。
+- 三次 30-iteration 8-rank 结果：Dispatch mean 6.847、6.893、6.691 ms
+  （均值 6.810 ms），对比 D1 三次均值 6.969 ms 有稳定小幅改善；
+  Expanded Dispatch 均值 20.180 ms，对比 20.291 ms 也略好。
+- 代表 correctness 集（normal、previous-event、async、async+bias2）通过，
+  `4 cases passed`。结果归档于 NPU8P
+  `/home/pyptouser/yuqitao/deepep-d2-noop/results/d2-noop-{run1,run2,run3,regress}.json`。
+- 结论：按“稳定复现即保留”标准，该宏改为默认开启；不改变 stage 语义和
+  profile 输出。
+
 ### D3. Release payload/control 拆分
 
 优先级：P1。
