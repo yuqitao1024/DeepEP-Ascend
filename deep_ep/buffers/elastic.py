@@ -587,13 +587,13 @@ class ElasticBuffer:
         descriptor = getattr(handle, 'token_metadata_at_forward', None)
         if not isinstance(descriptor, torch.Tensor):
             return False
-        generation = self.runtime.get_dispatch_handle_generation(descriptor)
+        generation, observed = self.runtime.get_dispatch_handle_snapshot(descriptor)
         if (not isinstance(generation, int) or generation <= 0 or
                 generation < self._ascend_handle_generation):
             return False
-        fingerprint = _ascend_descriptor_fingerprint(descriptor)
-        if fingerprint is None:
-            return False
+        # Reuse the bytes read and validated by the generation query. Subsequent
+        # cached/combine preflight still checks the descriptor at its use boundary.
+        fingerprint = tuple(observed)
         known_generation = getattr(handle, '_ascend_generation', None)
         known_fingerprint = getattr(
             handle, '_ascend_descriptor_fingerprint', None)

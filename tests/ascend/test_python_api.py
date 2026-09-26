@@ -395,6 +395,10 @@ def _install_fake_extension(platform, events):
                 return 0
             return self.last_dispatch_generation
 
+        def get_dispatch_handle_snapshot(self, tensor):
+            generation = self.get_dispatch_handle_generation(tensor)
+            return generation, tuple(tensor._values) if generation else ()
+
         def reset_stage_profile(self):
             events.append("runtime.reset_stage_profile")
 
@@ -2206,6 +2210,23 @@ def _new_ascend_publication_fixture():
     return buffer, extension.runtime_instances[-1], x, handle
 
 
+def _scenario_ascend_completion_uses_one_descriptor_snapshot():
+    buffer, runtime, x, handle = _new_ascend_publication_fixture()
+    descriptor = handle.token_metadata_at_forward
+    assert runtime.dispatch_generation_queries == 1
+    assert descriptor.cpu_calls == 0, "completion performed a second descriptor D2H"
+    assert handle._ascend_descriptor_fingerprint == tuple(descriptor._values)
+
+    fingerprint = handle._ascend_descriptor_fingerprint
+    descriptor._values[-1] ^= 1
+    assert not buffer._reconcile_ascend_handle(handle)
+    assert handle._ascend_descriptor_fingerprint == fingerprint
+    descriptor._values[-1] ^= 1
+    assert buffer._reconcile_ascend_handle(handle)
+    assert descriptor.cpu_calls == 0
+    buffer.destroy()
+
+
 def _scenario_ascend_copied_event_publication():
     buffer, runtime, x, handle = _new_ascend_publication_fixture()
     initial_generation = handle._ascend_generation
@@ -2743,6 +2764,8 @@ SCENARIOS = {
     "ascend_dispatch_optimized": _scenario_ascend_dispatch_optimized,
     "ascend_copied_event_publication":
         _scenario_ascend_copied_event_publication,
+    "ascend_completion_uses_one_descriptor_snapshot":
+        _scenario_ascend_completion_uses_one_descriptor_snapshot,
     "ascend_dropped_event_publication":
         _scenario_ascend_dropped_event_publication,
     "ascend_failed_event_does_not_publish":
@@ -2865,6 +2888,9 @@ class PythonApiIsolationTest(unittest.TestCase):
 
     def test_copied_raw_event_wait_publishes_cached_handle(self):
         self.run_scenario("ascend_copied_event_publication")
+
+    def test_completion_uses_one_descriptor_snapshot(self):
+        self.run_scenario("ascend_completion_uses_one_descriptor_snapshot")
 
     def test_dropped_event_publishes_cached_handle_before_reuse(self):
         self.run_scenario("ascend_dropped_event_publication")

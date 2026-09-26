@@ -275,7 +275,7 @@ public:
         committed_dispatch_bytes_ = std::move(descriptor_bytes);
     }
 
-    std::uint64_t dispatch_handle_generation(
+    std::pair<std::uint64_t, std::vector<std::uint8_t>> dispatch_handle_snapshot(
         const torch::Tensor& descriptor_tensor) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (resources_ == nullptr ||
@@ -284,19 +284,21 @@ public:
             descriptor_tensor.scalar_type() != torch::kByte ||
             descriptor_tensor.data_ptr() !=
                 committed_dispatch_tensor_->data_ptr())
-            return 0;
+            return {};
         const auto observed_size = static_cast<std::size_t>(
             descriptor_tensor.numel());
         if (observed_size != committed_dispatch_bytes_.size())
-            return 0;
+            return {};
         std::vector<std::uint8_t> observed(observed_size);
         const auto status = resources_->copy_to_host(
             observed.data(), descriptor_tensor.data_ptr(), observed.size());
         if (!status.ok() || std::memcmp(
                 observed.data(), committed_dispatch_bytes_.data(),
                 observed.size()) != 0)
-            return 0;
-        return last_dispatch_generation_;
+            return {};
+        // Share this verified observation with the Python handle fingerprint.
+        // Returning the expected bytes instead would hide descriptor mutation.
+        return {last_dispatch_generation_, std::move(observed)};
     }
 
     void stage_combine_completion(
@@ -1115,10 +1117,15 @@ public:
 
     std::uint64_t get_dispatch_handle_generation(
         const torch::Tensor& descriptor_tensor) const {
+        return get_dispatch_handle_snapshot(descriptor_tensor).first;
+    }
+
+    std::pair<std::uint64_t, std::vector<std::uint8_t>> get_dispatch_handle_snapshot(
+        const torch::Tensor& descriptor_tensor) const {
         std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
         if (completion_resources_ == nullptr)
-            return 0;
-        return completion_resources_->dispatch_handle_generation(
+            return {};
+        return completion_resources_->dispatch_handle_snapshot(
             descriptor_tensor);
     }
 

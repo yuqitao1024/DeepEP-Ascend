@@ -26,6 +26,8 @@ inline void register_apis(pybind11::module_& m) {
     cls.def("is_destroyed", &deep_ep::ascend::ElasticBuffer::is_destroyed)
        .def("get_dispatch_handle_generation",
             &deep_ep::ascend::ElasticBuffer::get_dispatch_handle_generation)
+       .def("get_dispatch_handle_snapshot",
+            &deep_ep::ascend::ElasticBuffer::get_dispatch_handle_snapshot)
        .def("reset_stage_profile",
             &deep_ep::ascend::ElasticBuffer::reset_stage_profile)
        .def("get_stage_profile",

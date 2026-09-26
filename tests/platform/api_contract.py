@@ -20,6 +20,7 @@ CUDA_ONLY_BUFFER_METHODS = {
 }
 ASCEND_ONLY_BUFFER_METHODS = {
     "is_destroyed", "get_dispatch_handle_generation",
+    "get_dispatch_handle_snapshot",
     "reset_stage_profile", "get_stage_profile",
 }
 
