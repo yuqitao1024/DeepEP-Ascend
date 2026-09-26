@@ -2,6 +2,11 @@
 
 日期：2026-09-21
 
+2026-09-26 的实际接口核对、宏控制接入及同用例 ABBA 见
+[官方 SIMT 通信执行器实验](official-simt-backend-abba-zh.md)。下文的性能数值
+和实现比较保留当时快照；当前自研路径已采用 scalar CQ 轮询，
+`TransportCommand` 为 128B，普通 facade 的命令追加由 lane 0 执行。
+
 ## 结论摘要
 
 官方仓 [asc-comm](https://gitcode.com/cann/asc-comm) 已经提供了真正可从

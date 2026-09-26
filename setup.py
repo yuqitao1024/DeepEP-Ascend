@@ -44,6 +44,13 @@ def get_ascend_polling_nop(environ=os.environ):
     return value
 
 
+def get_ascend_official_simt(environ=os.environ):
+    value = environ.get('DEEP_EP_ASCEND_OFFICIAL_SIMT', '0')
+    if value not in ('0', '1'):
+        raise ValueError('DEEP_EP_ASCEND_OFFICIAL_SIMT must be 0 or 1')
+    return value
+
+
 def get_torch_npu_root():
     torch_npu_module = sys.modules.get('torch_npu')
     if torch_npu_module is not None and getattr(torch_npu_module, '__file__', None):
@@ -182,6 +189,7 @@ class CMakeBuild(build_ext):
         acquire_diagnostics = get_ascend_acquire_diagnostics()
         skip_epilogue_noop = get_ascend_skip_epilogue_noop()
         polling_nop = get_ascend_polling_nop()
+        official_simt = get_ascend_official_simt()
 
         configure = [
             'cmake', extension.cmake_source_dir,
@@ -191,6 +199,7 @@ class CMakeBuild(build_ext):
             f'-DDEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS={acquire_diagnostics}',
             f'-DDEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP={skip_epilogue_noop}',
             f'-DDEEP_EP_ASCEND_POLLING_NOP={polling_nop}',
+            f'-DDEEP_EP_ASCEND_OFFICIAL_SIMT={official_simt}',
             f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={output_directory}',
             f'-DPYTHON_EXECUTABLE={sys.executable}',
             f'-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}',
