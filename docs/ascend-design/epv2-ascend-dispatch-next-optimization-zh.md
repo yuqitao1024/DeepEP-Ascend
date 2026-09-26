@@ -956,7 +956,7 @@ kernel 优先级是约 330 μs 的专家计数；producer prefix 仍余约 132 �
 | 顺序 | 项 | 当前量级 | 状态与边界 |
 | ---: | --- | ---: | --- |
 | 1 | `epilogue_count_experts` | ~330 μs | 已完成并保留（2026-09-26）。32 线程 subgroup 内 4 record/lane 并行扫描 + u64 GM 原子计数，3 组 ABBA Normal Dispatch 分别提升 3.786%/2.120%/2.829%。 |
-| 2 | `epilogue_parallel_prefix` | ~175 μs | 待做。先拆串行错误扫描、tile 计数读写和 rank 汇总，再选单变量。 |
+| 2 | `epilogue_parallel_prefix` | ~175 μs | 已实验并撤回（2026-09-26）。warp 分片 tile 链可正确，但 kernel 仅约 175→167.6-168.7 μs；3 组 ABBA mean 收益 2.137%/-0.381%/1.398%，方向不稳定，不保留。 |
 | 3 | `epilogue_metadata` | ~170 μs | 待做。需确认 metadata 写入是否可按 lane/record 并行化，不能弱化输出校验。 |
 | 4 | `producer_prefix` 剩余部分 | ~132 μs | 待做。错误扫描已优化；候选为 tile counts 两级前缀读写和每 rank chunk 汇总。 |
 | 5 | `producer_release` | ~166 μs | 已保留 D3 CQ scalar poll 优化；是否继续需重新采集当前基线 trace。 |
@@ -1037,6 +1037,39 @@ Normal Dispatch 收益稳定复现，五操作功能校验通过。Expanded Disp
 结论：收益方向和幅度均稳定复现，保留该实现；后续继续第 2 项 `epilogue_parallel_prefix`。
 
 ## 明确不做
+
+### 第 2 项 epilogue_parallel_prefix 实验（已撤回）
+
+候选设计与结果：
+
+1. 每个本地 expert 使用一个 32-lane warp；warp id 对应 local expert，
+   lane id 对应该 expert 的 tile 链分片。
+2. 每个 lane 先对自己负责的连续 tile 计算局部 exclusive prefix，并把
+   tile count 原地改写为局部前缀。
+3. 使用 `asc_shfl_up` 做 warp 内 inclusive scan，得到所有前序 lane 的
+   chunk 总和；lane 0 的扫描结果即为该 expert 的未对齐总量。
+4. 后续 lane 把扫描出的前序总量加回本 chunk 首个 tile 的前缀，保证输出
+   与原串行扫描完全一致。
+5. 原线程 0 的 rank 汇总、全局 expert prefix、对齐和容量溢出逻辑保持
+   不变，作为单变量候选的边界。
+6. 8-rank production launcher 边界回归通过：每 rank 105 个 case，覆盖
+   world 1/3/8/32、threads 32/128/512、tiles 0/1/31/32/33/128/129/6250、
+   alignment 1/8/128、experts 8/32/128/256、capacity overflow 和 prior status。
+7. BF16 sync 与 FP8 async/allocate 功能用例通过（3 cases passed）。
+8. 20-sample trace：各 rank median 为 167.603-168.746 μs，原基线约
+   175.490 μs，绝对降幅仅约 6.7-7.9 μs。
+9. 3 组无 profiling A1/B1/B2/A2 的 Normal Dispatch mean 收益：
+   2.137%、-0.381%、1.398%；p50 收益为 3.245%、0.932%、1.607%。
+
+结论：correctness 和补充功能用例通过，但端到端收益不能稳定复现，且
+kernel 绝对降幅太小。按“稳定复现才保留”的规则撤回实现；保留 production
+launcher 边界回归作为后续重构该 kernel 的测试资产。
+
+边界回归通过 production launcher 直接调用设备 kernel，CPU oracle 精确比较：
+exclusive tile prefix、rank/expert/unaligned 输出、guard/padding、prior
+status 保留和容量溢出。覆盖 world 1/3/8/32，threads 32/128/512，
+tiles 0/1/31/32/33/128/129/6250，以及 experts、alignment、overflow 和
+prior status。
 
 1. 继续优化 `producer_record` 作为第一优先级：当前约 0.17 ms，已不是瓶颈。
 2. 继续优化最终 `release_barrier` 作为第一优先级：signal-only 后约 0.04 ms。
