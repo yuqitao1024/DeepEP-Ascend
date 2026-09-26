@@ -1604,7 +1604,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "vector_hidden_bytes", function[vector_begin:])
 
     def test_dispatch_producer_prefix_parallelizes_large_tile_scans(self):
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (ELASTIC / "dispatch_producer_prefix.asc").read_text()
         begin = source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_producer_prefix_vf")
@@ -1615,14 +1615,26 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "const std::uint32_t chunks_per_rank",
                 "tile_errors[rank * group_width + lane]",
                 "asc_syncthreads();",
-                "tile_counts[index] += chunk_base"):
+                "tile_prefix + chunk_base"):
             self.assertIn(marker, prefix)
         self.assertIn("tile_count_u32 >= world_size * group_width", prefix)
         self.assertIn("destination_counts[rank] = rank_prefix", prefix)
         branch_index = prefix.index("\n    if (use_parallel_prefix)")
         first_barrier = prefix.index("asc_syncthreads();")
         self.assertLess(first_barrier, branch_index)
+        for marker in (
+                "__ubuf__ std::uint32_t first_error_tile[1]",
+                "asc_atomic_min(&first_error_tile[0], tile)",
+                "first_error_tile[0] < tile_count_u32"):
+            self.assertIn(marker, prefix)
+        # The selected error must be loaded before tile_errors is overwritten.
+        selected_error_index = prefix.index(
+            "first_error_tile[0] < tile_count_u32")
+        scratch_write_index = prefix.index(
+            "tile_errors[rank * group_width + lane] = prefix")
+        self.assertLess(selected_error_index, scratch_write_index)
 
+        source = (ELASTIC / "dispatch.asc").read_text()
         copy_kernel_begin = source.index(
             "__global__ __vector__ void dispatch_copy_kernel")
         copy_kernel_end = source.index("\n}", copy_kernel_begin)
@@ -1638,27 +1650,25 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "arguments.consumer_tile_bytes, arguments.parallel_prefix, "
             "tiling", epilogue_launcher)
 
-        store_begin = source.index(
-            "direct_dispatch_store_scale_factor_pack")
-        store_end = source.index("\n}", store_begin)
-        self.assertIn("std::uint32_t", source[store_begin:store_end])
-        load_begin = source.index(
-            "direct_dispatch_load_scale_factor_pack")
-        load_end = source.index("\n}", load_begin)
-        self.assertIn("std::uint32_t", source[load_begin:load_end])
 
-        self.assertIn("direct_dispatch_producer_record_vf", source)
-        self.assertIn("direct_dispatch_epilogue_copy_outputs_vf", source)
+        record_source = (ELASTIC / "direct_dispatch_producer_record.asc").read_text()
+        copy_output_source = (
+            ELASTIC / "direct_dispatch_epilogue_copy_outputs.asc").read_text()
+        self.assertIn("direct_dispatch_producer_record_vf", record_source)
+        self.assertIn(
+            "direct_dispatch_epilogue_copy_outputs_vf", copy_output_source)
         self.assertIn("stage == DirectDispatchStage::kFull", source)
         self.assertNotIn("AscendC::SyncAll()", source)
 
-        record_call_begin = source.index(
+        device_source = (ELASTIC / "dispatch_device_common.hpp").read_text()
+        record_call_begin = record_source.index(
             "asc_vf_call<direct_dispatch_producer_record_vf>")
-        payload_call_begin = source.index(
-            "direct_dispatch_producer_vector_payload_impl(",
-            record_call_begin)
-        record_payload_boundary = source[
-            record_call_begin:payload_call_begin]
+        payload_call_begin = device_source.index(
+            "direct_dispatch_producer_vector_payload_impl(")
+        boundary_begin = source.index("asc_sync_vec();")
+        boundary_end = source.index(
+            "direct_dispatch_producer_vector_payload_impl(", boundary_begin)
+        record_payload_boundary = source[boundary_begin:boundary_end]
         self.assertIn("asc_sync_vec();", record_payload_boundary)
         self.assertIn(
             "asc_sync_data_barrier(mem_dsb_t::DSB_DDR);",
@@ -1668,18 +1678,19 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             record_payload_boundary.index(
                 "asc_sync_data_barrier(mem_dsb_t::DSB_DDR);"))
 
-        writer_begin = source.index(
+        writer_begin = device_source.index(
             "DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_write_record")
-        writer_body = source.index("{", writer_begin)
-        writer_signature = source[writer_begin:writer_body]
+        writer_body = device_source.index("{", writer_begin)
+        writer_signature = device_source[writer_begin:writer_body]
         self.assertIn(
             "std::uint64_t hidden_copy_begin", writer_signature)
 
-        hybrid_begin = source.index(
+        hybrid_source = (ELASTIC / "dispatch_producer.asc").read_text()
+        hybrid_begin = hybrid_source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "dispatch_producer_vf")
-        hybrid_body = source.index("{", hybrid_begin)
-        hybrid_signature = source[hybrid_begin:hybrid_body]
+        hybrid_body = hybrid_source.index("{", hybrid_begin)
+        hybrid_signature = hybrid_source[hybrid_begin:hybrid_body]
         self.assertNotIn("hidden_copy_begin", hybrid_signature)
 
     def test_dispatch_release_split_preserves_service_drain(self):

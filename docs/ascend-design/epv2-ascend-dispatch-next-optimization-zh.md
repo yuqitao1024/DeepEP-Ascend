@@ -804,6 +804,149 @@ Cached/Combine/Reduced Combine 各组方向不一致，未观察到稳定变化�
 脚本归档于 `/home/pyptouser/yuqitao/dispatch-validate-20260926.MEgemf/`。
 生产源码不含本轮临时诊断，新增的 adapter/runner 仅作为可复跑设备回归保留。
 
+### 普通 Dispatch producer prefix 错误扫描并行化（2026-09-26）
+
+本轮在接收校验优化 `ce54e17` 上继续，只修改 producer prefix 的首个错误
+扫描。典型 case 不变：NPU8P device 0-7、8192 tokens/rank、hidden 7168、
+top-k 8、256 experts、FP8、64 AIV，使用
+`/data/disk2/cann_version/0916/use_cann/cann-9.3.0` 与树内配套 HCOMM。
+基线 A 二进制为 `38a0b3f211d8d43c25aea814ba40a28ea4487bbe96570e87693a2b9387cfd25d`，
+候选 B 为 `673bc59e40bfa8ad8f45da19cb7c2b42d4c4414ee9c2aa9093c335f5d83769f8`。
+
+#### 假设与实现
+
+按优先级检查：thread 0 串行扫描全部 tile errors；tile counts 的前缀读写；
+每 rank 汇总 chunk partial sums。此次仅验证第一项。
+
+每个 grouping tile 包含 4 个 token，因此典型输入有 2048 个 tile。
+原实现先由 thread 0 串行读取 2048 个错误槽位，再进入已有的两级前缀计算。
+改为 block 内线程按 grid-stride 分摊扫描，每线程遇到自己的首个错误后，
+对一个 UB uint32 槽位执行 atomic-min，选择最小的**出错 tile 下标**。
+无错误时不执行 atomic-min；thread 0 最终读取选中 tile 的完整 packed error。
+
+以下语义保持不变：
+
+- 最早出错 tile 优先，不能用最小 packed error 代替；只有 thread 0
+  将该错误带入 rank-0 发布，其他 rank 不因此额外写错误。
+- rank count 超出 capacity 时，该 rank 的 capacity overflow 仍覆盖当前错误。
+- UB 初始化后、错误下标归并后分别同步；thread 0 读取完整错误后保留
+  原有同步，之后才允许将 tile_errors 前部复用为 chunk partial sums。
+- 前缀算法、launch、参数 ABI、workspace 布局、generation、route staging
+  与后续协议均未变化，无新增性能开关。
+
+#### 功能回归
+
+新增 `tests/ascend/core_ops/dispatch_prefix_adapter.cpp` 和
+`tests/ascend/production/run_dispatch_prefix.py`。host adapter 构造真实
+C++ POD，调用已加载生产 `_C` 中的 prefix launcher；runner 用合成 grouping
+输出与独立串行 CPU oracle 比较 counts、exclusive prefixes、错误、status、
+early-route staging 和输出保护区。仅允许 parallel path 的 tile_errors
+前部作为临时 scratch 改写，其余 workspace 字节必须符合预期。
+
+原版与候选各在八张卡上通过每卡 94 个场景（各 752 项）：虚拟 world
+1/3/8/32，32/128/512 threads，0/1/threads-1/threads/2049 tiles；首尾、
+跨 lane、同 lane 和多个错误；全 tile 错误；容量溢出优先级；已有 status
+及已有 rank error；不整除 world 的串行回退；early-route 输出。
+该测试不执行 transport，跨 rank 输出及同步仍由完整五操作用例验证。
+
+复跑命令（按主机规定分别提交 CPU/NPU 队列）：
+
+```bash
+c++ -std=c++17 -shared -fPIC -I. \
+  tests/ascend/core_ops/dispatch_prefix_adapter.cpp \
+  -o build/dispatch-prefix-adapter.so
+
+python -m torch.distributed.run --standalone --nproc-per-node=8 \
+  tests/ascend/production/run_dispatch_prefix.py \
+  --adapter "$PWD/build/dispatch-prefix-adapter.so" \
+  --output "$PWD/results/dispatch-prefix"
+```
+
+#### Kernel 归因
+
+与上一轮相同，在入口 HCCL 完成后采集 20 次普通 Dispatch，去掉首轮，
+两版各 152 个样本。每次仍包含 28 个 DeepEP kernel。
+
+| Kernel | A median / μs | B median / μs |
+| --- | ---: | ---: |
+| producer prefix | 435.750 | 132.507 |
+| receive validate | 46.121 | 46.094 |
+| count experts | 329.833 | 329.976 |
+| epilogue parallel prefix | 175.596 | 175.491 |
+| metadata | 170.434 | 170.513 |
+
+producer prefix 减少 303.243 μs（约 69.6%）；B p95 为 133.051 μs，
+范围 131.766-134.149 μs。数据支持串行错误扫描是主要固定开销的假设。
+acquire 等待和调用尾部耗时随 rank 到达时间波动，不把其差值全部归因于
+这次修改；是否保留仍以无 profiling 的端到端重复对照为准。
+
+#### 端到端 ABBA：保留
+
+先补测两个非典型调用场景，均为五操作通过：BF16 同步
+`prefix-bf16.json`，以及 FP8 previous-event + async +
+allocate-on-comm-stream `prefix-async.json`。随后执行三组无 profiling 的
+A1/B1/B2/A2，每组 2 warmups / 30 iterations，并核对 workload fingerprint、
+64 AIV、30 个采样、五操作结果和二进制哈希。
+
+| 组 | A Dispatch mean / ms | B mean / ms | mean 收益 | A p95 / ms | B p95 / ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 5.919067 | 5.361466 | 9.420% | 6.379939 | 5.712232 |
+| 2 | 5.809218 | 5.458504 | 6.037% | 6.247656 | 5.874960 |
+| 3 | 5.887448 | 5.588990 | 5.069% | 6.405610 | 6.127460 |
+
+六个等长 run 合并：
+
+| 操作 | A mean / ms | B mean / ms | B logical GB/s |
+| --- | ---: | ---: | ---: |
+| Dispatch | 5.871911 | 5.469653 | 1423.507 |
+| Expanded Dispatch | 16.681919 | 16.400436 | 564.100 |
+| Cached Dispatch | 65.171538 | 65.198233 | 119.422 |
+| Combine | 14.598520 | 14.521632 | 750.687 |
+| Reduced Combine | 14.965438 | 14.970332 | 728.187 |
+
+Normal Dispatch 合并 mean 改善 **6.851%**，logical bandwidth 从
+**1325.989 → 1423.507 GB/s**；仍是八 rank 聚合逻辑带宽。Expanded Dispatch
+三组 mean 改善 2.275%/1.619%/1.168%，与该 kernel 同时服务 expanded 输出
+相符。Cached Dispatch、Combine 和 Reduced Combine 方向不一致，认为无稳定
+变化。
+
+验证完成情况：
+
+- 原版与候选的 8 × 94 个 prefix 边界场景全部通过；
+- 候选完整 CANN 编译通过；本地 production dispatch state/layout 与
+  C++ layout/tiling 检查通过；host adapter 通过
+  `-Wall -Wextra -Werror` 编译；
+- BF16 同步与 FP8 异步补充 case 均五操作通过；
+- 三组 ABBA 共 12 次 run，每次五操作通过；
+- 一次 B run 在所有结果已写出且五操作全部通过后出现既知的 teardown
+  SIGSEGV，严格检查脚本确认 `KNOWN_TEARDOWN_SIGSEGV_AFTER_VALID_RESULT`，
+  整个队列任务仍退出 0，未出现结果前失败、卡死或协议错误；
+- 不是完整 144-case 矩阵验收，此前 D4 记录的小规模 weight 边界问题仍
+  未修复。
+
+结论：保留 producer prefix 错误扫描并行化，无需新增性能开关。下一个固定
+kernel 优先级是约 330 μs 的专家计数；producer prefix 仍余约 132 μs，
+其中 tile counts 的两级前缀读写和 rank chunk 汇总是后续候选。
+
+原始数据：
+
+- A：`/home/pyptouser/yuqitao/deepep-dispatch-validate/results/prefix-abba{1,2,3}-{A1,A2}.json`；
+- B：`/home/pyptouser/yuqitao/deepep-dispatch-prefix/results/` 下的
+  `prefix-abba{1,2,3}-{B1,B2}.json`、`prefix-bf16.json`、
+  `prefix-async.json`、`prefix-parallel-trace.json` 与对应 `.log`；
+- 相同 B 目录内的 `prefix-{serial,parallel}-errors.rank{0..7}.json`
+  保存两版 94-case 结果，`prefix-parallel-traces/rank{0..7}.json` 保存
+  trace；
+- adapter 编译 task `task_20260926_063045_16195003386`；原版边界 task
+  `task_20260926_063100_16200348206`；候选编译 task
+  `task_20260926_063150_16234383643`；候选边界与 trace task
+  `task_20260926_063340_16348406207`；补充 case 与 ABBA task
+  `task_20260926_063455_16433221367`。所有任务均退出 0。
+
+临时脚本与原始采样已归档到本地
+`/tmp/deepep-dispatch-prefix-20260926.URXmHM/scratch/`；生产源码不含
+临时诊断，adapter/runner 仅作为可复跑设备回归保留。
+
 ### D5. Cached Dispatch 专项（暂停）
 
 优先级：暂停；2026-09-26 按用户要求，先集中优化普通 Dispatch。
