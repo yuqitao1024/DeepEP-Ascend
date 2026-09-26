@@ -290,7 +290,7 @@ public:
         if (observed_size != committed_dispatch_bytes_.size())
             return {};
         std::vector<std::uint8_t> observed(observed_size);
-        const auto status = resources_->copy_to_host(
+        const auto status = resources_->copy_to_host_on_current_stream(
             observed.data(), descriptor_tensor.data_ptr(), observed.size());
         if (!status.ok() || std::memcmp(
                 observed.data(), committed_dispatch_bytes_.data(),
@@ -2640,7 +2640,12 @@ public:
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         transport::DeviceTransportDiagnostic diagnostic{};
-        status = host_transport()->read_diagnostic(&diagnostic);
+        status = host_transport()->read_diagnostic(
+            &diagnostic, [this, raw_stream = stream.raw](
+                void* destination, const void* source, std::uint64_t bytes) {
+                return resources_->copy_to_host_on_stream(
+                    destination, source, bytes, raw_stream);
+            });
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
 #if DEEP_EP_ASCEND_TESTING
@@ -2664,10 +2669,10 @@ public:
                 runtime::host_timestamp_ns();
         if (!cached_mode && !device_public_count_publication) {
             host_phase_start_ns = host_profile_start();
-            status = resources_->copy_to_host(
+            status = resources_->copy_to_host_on_stream(
                 host_kernel_count_bridge.data(),
                 kernel_count_bridge.data_ptr(),
-                host_kernel_count_bridge.size() * sizeof(std::int32_t));
+                host_kernel_count_bridge.size() * sizeof(std::int32_t), stream.raw);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
             std::memcpy(
@@ -2757,10 +2762,10 @@ public:
                 host_phase_start_ns);
         } else if (device_public_count_publication) {
             host_phase_start_ns = host_profile_start();
-            status = resources_->copy_to_host(
+            status = resources_->copy_to_host_on_stream(
                 host_kernel_count_bridge.data(),
                 kernel_count_bridge.data_ptr(),
-                host_kernel_count_bridge.size() * sizeof(std::int32_t));
+                host_kernel_count_bridge.size() * sizeof(std::int32_t), stream.raw);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
             std::memcpy(
@@ -3002,9 +3007,9 @@ public:
                     host_phase_start_ns);
             }
         } else {
-            status = resources_->copy_from_host(
+            status = resources_->copy_from_host_on_stream(
                 descriptor_tensor.data_ptr(), &committed_descriptor,
-                sizeof(committed_descriptor));
+                sizeof(committed_descriptor), stream.raw);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
             completion_resources_->commit_dispatch_descriptor(

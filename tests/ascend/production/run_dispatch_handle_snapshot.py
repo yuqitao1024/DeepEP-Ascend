@@ -56,12 +56,11 @@ def main():
 
         saved = descriptor.clone()
         descriptor[0].bitwise_xor_(1)
-        torch.npu.synchronize()
+        # Snapshot must observe writes already queued on the current stream.
         assert snapshot(descriptor) == (0, ())
         assert not buffer._reconcile_ascend_handle(handle)
         assert handle._ascend_descriptor_fingerprint == verified[1]
         descriptor.copy_(saved)
-        torch.npu.synchronize()
         assert snapshot(descriptor) == verified
 
         result2 = launch()

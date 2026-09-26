@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -12,6 +13,8 @@ namespace deep_ep::ascend::transport {
 
 class HostTransport {
 public:
+    using DiagnosticReadback = std::function<TransportStatus(
+        void*, const void*, std::uint64_t)>;
     virtual ~HostTransport() = default;
     virtual TransportCapabilities capabilities() const noexcept = 0;
 
@@ -39,6 +42,10 @@ public:
         DeviceTransportContext* context) = 0;
     virtual TransportStatus read_diagnostic(
         DeviceTransportDiagnostic* diagnostic) = 0;
+    virtual TransportStatus read_diagnostic(
+        DeviceTransportDiagnostic* diagnostic, const DiagnosticReadback&) {
+        return read_diagnostic(diagnostic);
+    }
     virtual TransportStatus reset_stage_profile() = 0;
     virtual TransportStatus read_stage_profile(
         TransportStageProfile* profile) = 0;

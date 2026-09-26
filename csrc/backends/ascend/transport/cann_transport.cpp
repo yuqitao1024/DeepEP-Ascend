@@ -189,10 +189,17 @@ public:
     }
 
     TransportStatus read_diagnostic(DeviceTransportDiagnostic* diagnostic) override {
+        return read_diagnostic(diagnostic, {});
+    }
+
+    TransportStatus read_diagnostic(
+        DeviceTransportDiagnostic* diagnostic, const DiagnosticReadback& readback) override {
         if (diagnostic == nullptr)
             return TransportStatus::invalid("read_diagnostic", "diagnostic must not be null");
         if (teardown_started_ || diagnostic_ == nullptr)
             return TransportStatus::invalid("read_diagnostic", "transport diagnostic is unavailable");
+        if (readback)
+            return readback(diagnostic, diagnostic_, sizeof(*diagnostic));
         const int result = api_.copy_from_device(api_.user_data, diagnostic, diagnostic_, sizeof(*diagnostic));
         return result == 0 ? TransportStatus::success() : backend_failure("read_diagnostic", result);
     }

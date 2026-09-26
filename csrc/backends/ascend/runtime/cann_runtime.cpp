@@ -128,6 +128,23 @@ int runtime_copy_to_host(
         static_cast<std::size_t>(bytes), ACL_MEMCPY_DEVICE_TO_HOST);
 }
 
+int runtime_allocate_host(void*, void** pointer, std::uint64_t bytes) {
+    return aclrtMallocHost(pointer, static_cast<std::size_t>(bytes));
+}
+
+int runtime_free_host(void*, void* pointer) {
+    return aclrtFreeHost(pointer);
+}
+
+int runtime_copy_async(
+    void*, void* destination, const void* source, std::uint64_t bytes,
+    bool to_host, void* stream) {
+    return aclrtMemcpyAsync(destination, static_cast<std::size_t>(bytes),
+        source, static_cast<std::size_t>(bytes),
+        to_host ? ACL_MEMCPY_DEVICE_TO_HOST : ACL_MEMCPY_HOST_TO_DEVICE,
+        static_cast<aclrtStream>(stream));
+}
+
 #endif
 
 }  // namespace
@@ -137,7 +154,9 @@ CannRuntimeApi make_cann_runtime_api() {
     return {nullptr, runtime_allocate, runtime_zero, runtime_free,
             runtime_synchronize_stream, runtime_synchronize_device,
             runtime_copy_from_host, runtime_copy_to_host,
-            runtime_allocate_symmetric, runtime_free_symmetric};
+            runtime_allocate_symmetric, runtime_free_symmetric,
+            {nullptr, runtime_allocate_host, runtime_free_host,
+             runtime_copy_async, runtime_synchronize_stream}};
 #else
     return {};
 #endif
@@ -191,6 +210,7 @@ TransportStatus CannRuntimeResources::initialize_impl(
             "initialize_runtime", "invalid scale-up production configuration");
 
     runtime_api_ = runtime_api;
+    small_host_transfer_.configure(runtime_api.small_host_transfer);
     stream_event_api_ = stream_event_api;
     owns_resources_ = true;
     TransportStatus status = TransportStatus::success();
@@ -330,6 +350,9 @@ TransportStatus CannRuntimeResources::destroy() {
         return TransportStatus::success();
 
     initialized_ = false;
+    const auto transfer_status = small_host_transfer_.destroy();
+    if (!transfer_status.ok())
+        return transfer_status;
     device_context_ = {};
     TransportStatus first_error = TransportStatus::success();
     free_allocation(workspace_, "free_workspace", first_error);
@@ -455,6 +478,52 @@ TransportStatus CannRuntimeResources::copy_to_host(
         runtime_api_.user_data, destination, source, bytes);
     return result == 0 ? TransportStatus::success()
                        : backend_failure("copy_to_host", result);
+}
+
+TransportStatus CannRuntimeResources::copy_to_host_on_stream(
+    void* destination, const void* source, std::uint64_t bytes, void* stream) {
+    if (!initialized_ || stream == nullptr || destination == nullptr ||
+        source == nullptr || bytes == 0)
+        return TransportStatus::invalid("copy_to_host_on_stream", "invalid runtime stream");
+    if (!small_host_transfer_.supported() || bytes > SmallHostTransfer::kCapacity) {
+        const auto status = synchronize_stream(stream);
+        if (!status.ok()) return status;
+        return copy_to_host(destination, source, bytes);
+    }
+    return small_host_transfer_.copy(destination, source, bytes, true, stream);
+}
+
+TransportStatus CannRuntimeResources::copy_to_host_on_current_stream(
+    void* destination, const void* source, std::uint64_t bytes) {
+    StreamIdentity stream;
+    const auto status = current_stream(&stream);
+    if (!status.ok()) return status;
+#if DEEP_EP_ASCEND_HAS_CANN_RUNTIME
+    try {
+        // Torch-NPU may still hold descriptor mutations in its host task queue.
+        // stream() submits those tasks before our direct ACL copy is enqueued.
+        stream.raw = c10_npu::NPUStream::unpack3(
+            stream.stream_id, stream.device_index,
+            static_cast<c10::DeviceType>(stream.device_type)).stream();
+    } catch (const std::exception& error) {
+        return TransportStatus::runtime_failure(
+            "copy_to_host_on_current_stream", 0, error.what());
+    }
+#endif
+    return copy_to_host_on_stream(destination, source, bytes, stream.raw);
+}
+
+TransportStatus CannRuntimeResources::copy_from_host_on_stream(
+    void* destination, const void* source, std::uint64_t bytes, void* stream) {
+    if (!initialized_ || stream == nullptr || destination == nullptr ||
+        source == nullptr || bytes == 0)
+        return TransportStatus::invalid("copy_from_host_on_stream", "invalid runtime stream");
+    if (!small_host_transfer_.supported() || bytes > SmallHostTransfer::kCapacity) {
+        const auto status = synchronize_stream(stream);
+        if (!status.ok()) return status;
+        return copy_from_host(destination, source, bytes);
+    }
+    return small_host_transfer_.copy(destination, source, bytes, false, stream);
 }
 
 }  // namespace deep_ep::ascend::runtime

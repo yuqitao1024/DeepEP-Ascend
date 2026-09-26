@@ -445,6 +445,37 @@ void check_stream_sync_failure_preserves_resources() {
     CHECK(resources.destroy().ok());
 }
 
+void check_stream_copy_fallback_orders_and_propagates_failure() {
+    Trace trace;
+    runtime::CannRuntimeResources resources;
+    CHECK(resources.initialize(config(), 4096, runtime_api(trace), host_api(trace), stream_api(trace)).ok());
+    auto* stream = reinterpret_cast<void*>(0x6161);
+    std::uint64_t value = 3;
+    trace.events.clear();
+    CHECK(resources.copy_to_host_on_stream(&value, resources.workspace(), sizeof(value), stream).ok());
+    CHECK(trace.first("synchronize_stream") < trace.first("runtime_copy_to_host"));
+    CHECK(trace.synchronized_stream == 0x6161);
+    trace.events.clear();
+    trace.runtime_sync_failures_remaining = 1;
+    CHECK(!resources.copy_from_host_on_stream(resources.workspace(), &value, sizeof(value), stream).ok());
+    CHECK(trace.count("runtime_copy_from_host") == 0);
+    trace.events.clear();
+    CHECK(!resources.copy_to_host_on_stream(nullptr, resources.workspace(), sizeof(value), stream).ok());
+    CHECK(trace.events.empty());
+    transport::DeviceTransportDiagnostic diagnostic{};
+    int readbacks = 0;
+    const auto status = resources.transport()->read_diagnostic(
+        &diagnostic, [&](void* destination, const void* source, std::uint64_t bytes) {
+            ++readbacks;
+            CHECK(destination == &diagnostic && source != nullptr);
+            CHECK(bytes == sizeof(diagnostic));
+            return transport::TransportStatus::runtime_failure(
+                "test_readback", 71, "injected readback failure");
+        });
+    CHECK(readbacks == 1 && !status.ok() && status.backend_code == 71);
+    CHECK(resources.destroy().ok());
+}
+
 void check_runtime_failures_cleanup() {
     for (int fail_call = 0; fail_call < 4; ++fail_call) {
         Trace trace;
@@ -601,5 +632,6 @@ int main() {
     check_copy_failure_preserves_resources_for_retry();
     check_invalid_copy_requests_do_not_call_backend();
     check_stream_sync_failure_preserves_resources();
+    check_stream_copy_fallback_orders_and_propagates_failure();
     return failures == 0 ? 0 : 1;
 }

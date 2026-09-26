@@ -6,6 +6,7 @@
 #include "../elastic/layout.hpp"
 #include "../transport/cann_transport.hpp"
 #include "stream_event.hpp"
+#include "small_host_transfer.hpp"
 
 #if __has_include(<torch/extension.h>)
 #include <torch/extension.h>
@@ -28,6 +29,7 @@ struct CannRuntimeApi {
     int (*copy_to_host)(void*, void*, const void*, std::uint64_t) = nullptr;
     int (*allocate_symmetric_device)(void*, std::uint64_t, void**) = nullptr;
     int (*free_symmetric_device)(void*, void*) = nullptr;
+    SmallHostTransferApi small_host_transfer{};
 };
 
 CannRuntimeApi make_cann_runtime_api();
@@ -82,6 +84,12 @@ public:
         void* destination, const void* source, std::uint64_t bytes);
     transport::TransportStatus copy_to_host(
         void* destination, const void* source, std::uint64_t bytes);
+    transport::TransportStatus copy_to_host_on_stream(
+        void* destination, const void* source, std::uint64_t bytes, void* stream);
+    transport::TransportStatus copy_from_host_on_stream(
+        void* destination, const void* source, std::uint64_t bytes, void* stream);
+    transport::TransportStatus copy_to_host_on_current_stream(
+        void* destination, const void* source, std::uint64_t bytes);
 
 private:
     transport::TransportStatus initialize_impl(
@@ -107,6 +115,7 @@ private:
     int owning_device_ = -1;
     bool owns_resources_ = false;
     bool initialized_ = false;
+    SmallHostTransfer small_host_transfer_;
 };
 
 }  // namespace deep_ep::ascend::runtime
