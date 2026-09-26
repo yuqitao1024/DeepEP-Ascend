@@ -955,7 +955,7 @@ kernel 优先级是约 330 μs 的专家计数；producer prefix 仍余约 132 �
 
 | 顺序 | 项 | 当前量级 | 状态与边界 |
 | ---: | --- | ---: | --- |
-| 1 | `epilogue_count_experts` | ~330 μs | 待做。线程内 private histogram 已因无稳定端到端收益回退；新候选需先改变并行粒度或存储布局。 |
+| 1 | `epilogue_count_experts` | ~330 μs | 已完成并保留（2026-09-26）。32 线程 subgroup 内 4 record/lane 并行扫描 + u64 GM 原子计数，3 组 ABBA Normal Dispatch 分别提升 3.786%/2.120%/2.829%。 |
 | 2 | `epilogue_parallel_prefix` | ~175 μs | 待做。先拆串行错误扫描、tile 计数读写和 rank 汇总，再选单变量。 |
 | 3 | `epilogue_metadata` | ~170 μs | 待做。需确认 metadata 写入是否可按 lane/record 并行化，不能弱化输出校验。 |
 | 4 | `producer_prefix` 剩余部分 | ~132 μs | 待做。错误扫描已优化；候选为 tile counts 两级前缀读写和每 rank chunk 汇总。 |
@@ -999,6 +999,42 @@ Normal Dispatch 收益稳定复现，五操作功能校验通过。Expanded Disp
 - Cached Dispatch mean 的改善可通过重复对照稳定复现，不设置百分比门槛；
 - cached handle reuse、two-generation 和 expanded cached correctness 通过；
 - Normal/Expanded Dispatch 不因共享代码改动回归。
+
+### 普通 Dispatch `epilogue_count_experts` 并行化（2026-09-26）
+
+背景：原实现一个线程串行扫描一个 128-record tile 的所有 top-k lane，典型 8-rank FP8 case 中 kernel 中位耗时约 330 μs。此前每线程 private histogram 实验因 kernel 变慢且端到端收益不稳定而回退。
+
+保留方案：只改变 record 级并行度，不改变 GM histogram 布局：
+
+- 当 VF 线程数可整除 32 时，一个 32-lane subgroup 拥有一个 tile；
+- 每个 lane 负责连续 4 个 record，tile 内 record 扫描并行化；
+- subgroup lane 0 先清空自己负责的所有 tile counters，随后一次 `asc_syncthreads()` 保证所有清零可见；
+- 多个 lane 可能命中同一 `(tile, local_expert)` counter，计数使用 `asc_atomic_add(..., 1ULL)`；
+- `local_experts == 0` 时直接返回，避免无效除零/越界路径。
+
+验证：
+
+- 设备回归：新增 `dispatch_count_adapter.cpp` 与 `run_dispatch_count.py`，通过 production launcher 直接调用该 kernel；8 rank 均通过 82 个 case，覆盖 world/thread/capacity/top-k/experts、partial/full count、多 block 和空输入边界。
+- kernel trace：8 rank、20 次采样，median 从基线约 328.610-330.522 μs 降至约 80.898-85.535 μs，单 kernel 约 4x 改善。
+- 无 profiling ABBA：A 为 `deepep-dispatch-prefix` 基线，B 为候选；3 组 A1/B1/B2/A2 全部五操作通过。Normal Dispatch：
+  - batch 1：A 5.435788 ms，B 5.230000 ms，提升 3.786%；
+  - batch 2：A 5.518028 ms，B 5.401043 ms，提升 2.120%；
+  - batch 3：A 5.599688 ms，B 5.441301 ms，提升 2.829%。
+  Expanded Dispatch 同方向小幅正向；Cached/Combine 方向波动，不作为收益依据。
+- 补充场景：BF16 sync 与 FP8 previous-event + async + allocate-on-comm-stream 各 1 次，case summary 均 failed=0/passed=1。
+
+原始数据：
+
+- 候选目录：`/home/pyptouser/yuqitao/deepep-dispatch-count/results/` 下
+  `count-candidate*`、`count-trace*`、`count-abba*`、`count-bf16.json`、
+  `count-async.json` 与对应 `.log`；
+- 基线 trace：`/home/pyptouser/yuqitao/deepep-dispatch-prefix/results/prefix-parallel-traces/`；
+- 边界 task：`task_20260926_091001_207456028665`；trace task：
+  `task_20260926_091111_207874514702`；ABBA task：
+  `task_20260926_091300_208698617005`；补充场景 task：
+  `task_20260926_092023_213258110558`。所有任务均达到预期结果。
+
+结论：收益方向和幅度均稳定复现，保留该实现；后续继续第 2 项 `epilogue_parallel_prefix`。
 
 ## 明确不做
 
