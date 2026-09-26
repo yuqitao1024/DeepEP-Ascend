@@ -959,9 +959,9 @@ kernel 优先级是约 330 μs 的专家计数；producer prefix 仍余约 132 �
 | 2 | `epilogue_parallel_prefix` | ~175 μs | 已实验并撤回（2026-09-26）。warp 分片 tile 链可正确，但 kernel 仅约 175→167.6-168.7 μs；3 组 ABBA mean 收益 2.137%/-0.381%/1.398%，方向不稳定，不保留。 |
 | 3 | `epilogue_metadata` | ~170 μs | 已实验并撤回（2026-09-26）。top-k lane 分组可将 kernel median 降至约 104.3 μs，但 3 组 ABBA Normal Dispatch mean 变化为 -0.603%/-0.509%/+6.163%，方向不稳定，不保留。 |
 | 4 | `producer_prefix` 剩余部分 | ~132 μs | 已完成并保留（2026-09-26）。small chunk 的 tile prefix 线程内缓存，3 组 ABBA Normal Dispatch 分别提升 2.716%/2.949%/5.565%。 |
-| 5 | `producer_release` | ~166 μs | 已保留 D3 CQ scalar poll 优化；是否继续需重新采集当前基线 trace。 |
-| 6 | `epilogue_copy_outputs` | ~165 μs | 已保留 D4 双缓冲；除非当前 trace 显示新瓶颈，否则不再重复开发。 |
-| 7 | 调用尾部 / host 收尾 | >1 ms | 待归因。不能把入口 HCCL 等待、跨 rank 等待或未覆盖 runtime API 全部标成 host 开销。 |
+| 5 | `producer_release` | ~169 μs | 已完成并撤回（2026-09-26）。新 5-sample trace 后尝试删除 `transport::detail::append()` 末尾同值 generation read/write；功能 3 case 通过，但 3 组 ABBA Normal Dispatch 分别 -1.631%/-3.959%/-1.337%，不保留。 |
+| 6 | `epilogue_copy_outputs` | ~165 μs | 已确认闭环（2026-09-26）。当前 trace p50 约 165.5 μs，与 D4 双缓冲后的既有结果一致；该修改无新动作，继续保留 D4。 |
+| 7 | 调用尾部 / host 收尾 | ~1.3 ms | 已完成归因（2026-09-26）。explicit entry sync 后，最后一个 Dispatch kernel 到 record function 结束的 tail 为 min 0.388 / p50 1.323 / p95 2.376 / max 2.480 ms（8 rank × 5 capture）。其中 PyTorch host op 仅约 0.13-0.33 ms（narrow/slice/as_strided/detach/to/copy/reshape/view 等），aten::to 内 copy_ 约 0.02-0.65 ms；剩余主要是未被 profiler 命名事件覆盖的 runtime/record 收尾与 capture 结束前等待，不应全部标成 DeepEP host 开销。当前无明确可修改点，关闭该项。 |
 | 8 | D5 Cached Dispatch | ~65 ms | 暂停；恢复时先单独采集 cached stage/host profile，不与 Normal Dispatch 混比。 |
 
 通用验收规则：先补真实 launcher/kernel 的边界回归，再在 NPU8P 使用典型
