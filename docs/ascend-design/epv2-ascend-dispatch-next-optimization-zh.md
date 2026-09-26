@@ -947,6 +947,29 @@ kernel 优先级是约 330 μs 的专家计数；producer prefix 仍余约 132 �
 `/tmp/deepep-dispatch-prefix-20260926.URXmHM/scratch/`；生产源码不含
 临时诊断，adapter/runner 仅作为可复跑设备回归保留。
 
+### 普通 Dispatch 剩余优化项（当前执行清单）
+
+2026-09-26 起，D1-D4 已按原计划闭环，D5 Cached Dispatch 继续暂停。
+普通 Dispatch 按固定 kernel 和调用尾部分开推进，顺序如下；每项必须独立
+开发、独立验收，收益能稳定复现才保留。
+
+| 顺序 | 项 | 当前量级 | 状态与边界 |
+| ---: | --- | ---: | --- |
+| 1 | `epilogue_count_experts` | ~330 μs | 待做。线程内 private histogram 已因无稳定端到端收益回退；新候选需先改变并行粒度或存储布局。 |
+| 2 | `epilogue_parallel_prefix` | ~175 μs | 待做。先拆串行错误扫描、tile 计数读写和 rank 汇总，再选单变量。 |
+| 3 | `epilogue_metadata` | ~170 μs | 待做。需确认 metadata 写入是否可按 lane/record 并行化，不能弱化输出校验。 |
+| 4 | `producer_prefix` 剩余部分 | ~132 μs | 待做。错误扫描已优化；候选为 tile counts 两级前缀读写和每 rank chunk 汇总。 |
+| 5 | `producer_release` | ~166 μs | 已保留 D3 CQ scalar poll 优化；是否继续需重新采集当前基线 trace。 |
+| 6 | `epilogue_copy_outputs` | ~165 μs | 已保留 D4 双缓冲；除非当前 trace 显示新瓶颈，否则不再重复开发。 |
+| 7 | 调用尾部 / host 收尾 | >1 ms | 待归因。不能把入口 HCCL 等待、跨 rank 等待或未覆盖 runtime API 全部标成 host 开销。 |
+| 8 | D5 Cached Dispatch | ~65 ms | 暂停；恢复时先单独采集 cached stage/host profile，不与 Normal Dispatch 混比。 |
+
+通用验收规则：先补真实 launcher/kernel 的边界回归，再在 NPU8P 使用典型
+case 采集 trace；最终保留依据是至少三组无 profiling 的 A1/B1/B2/A2，
+Normal Dispatch 收益稳定复现，五操作功能校验通过。Expanded Dispatch 若
+持续正向可记录并作为附带收益；Cached/Combine 若方向不一致，不视为优化
+效果。
+
 ### D5. Cached Dispatch 专项（暂停）
 
 优先级：暂停；2026-09-26 按用户要求，先集中优化普通 Dispatch。
