@@ -1797,9 +1797,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         signature = (
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_epilogue_parallel_prefix_vf")
-        begin = source.index(signature)
-        end = source.index("\n}\n", begin)
-        candidate = source[begin:end]
+        prefix_source = (
+            ELASTIC / "direct_dispatch_epilogue_parallel_prefix.asc"
+        ).read_text()
+        begin = prefix_source.index(signature)
+        end = prefix_source.index("\n}\n", begin)
+        candidate = prefix_source[begin:end]
         for marker in (
                 "dispatch_simt_expert_prefix_worker_plan(",
                 "const std::uint32_t local_expert = threadIdx.x",
@@ -1815,19 +1818,19 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("return;", candidate[:barrier_end])
         self.assertIn("if (threadIdx.x != 0)", candidate[barrier_end:])
 
-        self.assertIn("direct_dispatch_epilogue_prefix_vf", source)
-        prefix_launch = source[source.index(
-            "(STAGE) == DirectDispatchStage::kEpilogueExpertPrefix"):]
-        prefix_launch = prefix_launch[:prefix_launch.index(
-            "(STAGE) == DirectDispatchStage::kEpilogueMetadata")]
-        self.assertIn("parallel_prefix != 0", prefix_launch)
         self.assertIn(
-            "asc_vf_call<direct_dispatch_epilogue_parallel_prefix_vf>",
-            prefix_launch,
+            "direct_dispatch_epilogue_prefix_vf",
+            (ELASTIC / "direct_dispatch_epilogue_prefix.asc").read_text())
+        self.assertIn("parallel_prefix != 0", source)
+        launch_source = (
+            ELASTIC / "dispatch_vf_host_calls.hpp").read_text()
+        self.assertIn(
+            "launch_direct_dispatch_epilogue_parallel_prefix_variant_0",
+            launch_source,
         )
         self.assertIn(
-            "asc_vf_call<direct_dispatch_epilogue_prefix_vf>",
-            prefix_launch,
+            "launch_direct_dispatch_epilogue_prefix_variant_0",
+            launch_source,
         )
 
     def test_dispatch_output_copy_uses_compact_receive_domain(self):
