@@ -1063,13 +1063,21 @@ case 中该 kernel median 约 170 μs。
   104.314 μs，各 rank median 103.323-104.900 μs；对照基线约 170.4-170.9 μs。
 - 功能用例 BF16 sync、FP8 async、FP8 allocate 均 passed（3 cases passed）。
   结果写完后的 teardown SIGSEGV 仍为已知问题，不作为功能失败。
-- 3 组无 profiling A1/B1/B2/A2：A 为 accepted baseline
+- 6 组无 profiling A1/B1/B2/A2：A 为 accepted baseline
   `bed897d4d04ca0194708ab13c76e3fea5a4f62005634f134860e2b19d7dee089`，
   B 为候选 `577e648a820d4085621680cd71e20513796b9d97a6cc253bdca3d84e74a8dc9c`。
   Normal Dispatch mean 变化：
-  - batch 1：A 5.3055 ms，B 5.3375 ms，劣化 0.603%；
-  - batch 2：A 5.2090 ms，B 5.2355 ms，劣化 0.509%；
-  - batch 3：A 5.4035 ms，B 5.0705 ms，提升 6.163%。
+  - batch 1：A 5.305 ms，B 5.338 ms，劣化 0.608%；
+  - batch 2：A 5.209 ms，B 5.236 ms，劣化 0.514%；
+  - batch 3：A 5.404 ms，B 5.071 ms，提升 6.161%；
+  - batch 4：A 5.384 ms，B 5.214 ms，提升 3.157%；
+  - batch 5：A 5.239 ms，B 5.352 ms，劣化 2.147%；
+  - batch 6：A 5.205 ms，B 5.377 ms，劣化 3.296%。
+
+  追加批次 4-6 为 2026-09-26 复测，仍使用同一两个二进制、相同 workload
+  与 30 iterations。6 组中仅 2 组为正；mean 收益中位数 -0.608%，累计
+  平均 +0.459% 主要由 batch 3 的 +6.161% 离群批次拉高。对应 p50 收益为
+  -0.392%、-0.954%、+4.957%、+3.402%、-3.290%、-3.388%，方向同样不稳定。
 
 结论：correctness 通过且单 kernel 收益明显，但端到端收益方向不稳定，不满足
 “稳定复现才保留”的规则。撤回候选 kernel；保留 production launcher 边界回归
@@ -1080,14 +1088,15 @@ case 中该 kernel median 约 170 μs。
 - 候选目录：`/home/pyptouser/yuqitao/deepep-dispatch-metadata/results/` 下
   `dispatch-metadata-boundary.*`、`dispatch-metadata-trace.json`、
   `dispatch-metadata-traces/`、`metadata-functional.*`、
-  `metadata-abba{1,2,3}-{A1,B1,B2,A2}.json` 与对应 `.log`；
+  `metadata-abba{1..6}-{B1,B2}.json` 与对应 `.log`；
 - A 侧 ABBA 数据：`/home/pyptouser/yuqitao/deepep-dispatch-count/results/`
-  下的 `metadata-abba{1,2,3}-{A1,A2}.json`；
+  下的 `metadata-abba{1..6}-{A1,A2}.json`；
 - 构建任务 `task_20260926_114227_25286606871`，边界任务
   `task_20260926_114516_253483027942`，trace 任务
   `task_20260926_114618_25382408081`，功能任务
   `task_20260926_114837_25475314852`，ABBA 任务
-  `task_20260926_114949_255208913346`。
+  `task_20260926_114949_255208913346`，追加复测任务
+  `task_20260926_120356_260866519290`。
 
 ## 明确不做
 
