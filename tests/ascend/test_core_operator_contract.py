@@ -1634,6 +1634,24 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "tile_errors[rank * group_width + lane] = prefix")
         self.assertLess(selected_error_index, scratch_write_index)
 
+    def test_dispatch_producer_prefix_caches_small_tile_chunks(self):
+        source = (ELASTIC / "dispatch_producer_prefix.asc").read_text()
+        begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_prefix_vf")
+        end = source.index("\n}\n", begin)
+        prefix = source[begin:end]
+        self.assertIn(
+            "kDispatchProducerPrefixCachedTiles", source)
+        self.assertIn("cache_tile_prefixes =", prefix)
+        self.assertIn(
+            "cached_tile_prefixes[tile - chunk_begin] = prefix", prefix)
+        self.assertIn(
+            "cached_tile_prefixes[tile - chunk_begin] :", prefix)
+        self.assertIn(
+            "transport::simt::load_observed(&tile_counts[index])",
+            prefix)
+
         source = (ELASTIC / "dispatch.asc").read_text()
         copy_kernel_begin = source.index(
             "__global__ __vector__ void dispatch_copy_kernel")

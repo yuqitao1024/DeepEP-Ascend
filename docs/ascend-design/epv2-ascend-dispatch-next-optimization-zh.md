@@ -958,7 +958,7 @@ kernel 优先级是约 330 μs 的专家计数；producer prefix 仍余约 132 �
 | 1 | `epilogue_count_experts` | ~330 μs | 已完成并保留（2026-09-26）。32 线程 subgroup 内 4 record/lane 并行扫描 + u64 GM 原子计数，3 组 ABBA Normal Dispatch 分别提升 3.786%/2.120%/2.829%。 |
 | 2 | `epilogue_parallel_prefix` | ~175 μs | 已实验并撤回（2026-09-26）。warp 分片 tile 链可正确，但 kernel 仅约 175→167.6-168.7 μs；3 组 ABBA mean 收益 2.137%/-0.381%/1.398%，方向不稳定，不保留。 |
 | 3 | `epilogue_metadata` | ~170 μs | 已实验并撤回（2026-09-26）。top-k lane 分组可将 kernel median 降至约 104.3 μs，但 3 组 ABBA Normal Dispatch mean 变化为 -0.603%/-0.509%/+6.163%，方向不稳定，不保留。 |
-| 4 | `producer_prefix` 剩余部分 | ~132 μs | 待做。错误扫描已优化；候选为 tile counts 两级前缀读写和每 rank chunk 汇总。 |
+| 4 | `producer_prefix` 剩余部分 | ~132 μs | 已完成并保留（2026-09-26）。small chunk 的 tile prefix 线程内缓存，3 组 ABBA Normal Dispatch 分别提升 2.716%/2.949%/5.565%。 |
 | 5 | `producer_release` | ~166 μs | 已保留 D3 CQ scalar poll 优化；是否继续需重新采集当前基线 trace。 |
 | 6 | `epilogue_copy_outputs` | ~165 μs | 已保留 D4 双缓冲；除非当前 trace 显示新瓶颈，否则不再重复开发。 |
 | 7 | 调用尾部 / host 收尾 | >1 ms | 待归因。不能把入口 HCCL 等待、跨 rank 等待或未覆盖 runtime API 全部标成 host 开销。 |
@@ -1097,6 +1097,52 @@ case 中该 kernel median 约 170 μs。
   `task_20260926_114837_25475314852`，ABBA 任务
   `task_20260926_114949_255208913346`，追加复测任务
   `task_20260926_120356_260866519290`。
+
+### 第 4 项 producer_prefix small chunk 前缀缓存（保留）
+
+背景：错误扫描并行化后，`producer_prefix` 仍约 132.5 μs。两级前缀的
+每个 tile 原本执行两次 GM 读和两次 GM 写：第一轮读 count、写局部
+exclusive prefix；第二轮读回该 prefix、加 chunk base 后写最终 prefix。
+
+保留方案：
+
+- 当 `chunks_per_rank <= 32` 时，第一轮不把局部 prefix 写回 GM，而是
+  保存到线程内 `uint64_t cached_tile_prefixes[32]`；
+- 第二轮直接使用缓存值加 chunk base，只写最终 prefix，将小 chunk 的
+  tile counts 访问从 2 读 2 写降为 1 读 1 写；
+- 超过 32 个 tile 的 chunk 保留原有写回/读回路径；错误扫描、rank
+  汇总、route staging、错误优先级、workspace 布局和 ABI 均不变。
+
+验证：
+
+- 8-rank production launcher 边界回归通过，每 rank 94 个 case；覆盖
+  world 1/3/8/32、threads 32/128/512、tiles 0/1/threads-1/threads/2049、
+  多种错误位置、全错误、容量溢出、已有错误/status、fallback 和
+  early-route。
+- 功能用例 BF16 sync、FP8 async、FP8 allocate 共 3 case 全部 passed。
+- 本轮两次 profiler trace 均在导出/teardown 后的 HCCL all-reduce 超时，
+  未能得到有效 trace；这不是 kernel 校验失败。基线同一 accepted 二进制的
+  历史数据为 160 个样本、median 132.514 μs。
+- 3 组无 profiling A1/B1/B2/A2，A 为 accepted baseline
+  `bed897d4d04ca0194708ab13c76e3fea5a4f62005634f134860e2b19d7dee089`，
+  B 为候选 `15143513f17b2c01a296de86dcaa3693e6f2242b58cf1969b9dd99359c8d886f`。
+  Normal Dispatch mean 收益：
+  - batch 1：A 5.314 ms，B 5.170 ms，提升 2.716%；
+  - batch 2：A 5.445 ms，B 5.285 ms，提升 2.949%；
+  - batch 3：A 5.575 ms，B 5.265 ms，提升 5.565%。
+  对应 p50 收益为 2.364%、3.807%、5.578%，方向和幅度均可复现。
+
+原始数据：
+
+- 候选目录：`/home/pyptouser/yuqitao/deepep-dispatch-producer-cache/results/`
+  下 `dispatch-producer-cache-boundary.*`、`producer-cache-functional.*`、
+  `producer-cache-abba{1,2,3}-{B1,B2}.json` 与对应 `.log`；
+- A 侧数据：`/home/pyptouser/yuqitao/deepep-dispatch-count/results/` 下的
+  `producer-cache-abba{1,2,3}-{A1,A2}.json`；
+- 构建任务 `task_20260926_122332_354609925114`，边界任务
+  `task_20260926_122443_35554549622`，功能任务
+  `task_20260926_124403_113270719722`，ABBA 任务
+  `task_20260926_124627_115524225301`。
 
 ## 明确不做
 
