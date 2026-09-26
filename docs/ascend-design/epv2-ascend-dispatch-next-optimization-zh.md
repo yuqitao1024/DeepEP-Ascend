@@ -957,7 +957,7 @@ kernel 优先级是约 330 μs 的专家计数；producer prefix 仍余约 132 �
 | ---: | --- | ---: | --- |
 | 1 | `epilogue_count_experts` | ~330 μs | 已完成并保留（2026-09-26）。32 线程 subgroup 内 4 record/lane 并行扫描 + u64 GM 原子计数，3 组 ABBA Normal Dispatch 分别提升 3.786%/2.120%/2.829%。 |
 | 2 | `epilogue_parallel_prefix` | ~175 μs | 已实验并撤回（2026-09-26）。warp 分片 tile 链可正确，但 kernel 仅约 175→167.6-168.7 μs；3 组 ABBA mean 收益 2.137%/-0.381%/1.398%，方向不稳定，不保留。 |
-| 3 | `epilogue_metadata` | ~170 μs | 待做。需确认 metadata 写入是否可按 lane/record 并行化，不能弱化输出校验。 |
+| 3 | `epilogue_metadata` | ~170 μs | 已实验并撤回（2026-09-26）。top-k lane 分组可将 kernel median 降至约 104.3 μs，但 3 组 ABBA Normal Dispatch mean 变化为 -0.603%/-0.509%/+6.163%，方向不稳定，不保留。 |
 | 4 | `producer_prefix` 剩余部分 | ~132 μs | 待做。错误扫描已优化；候选为 tile counts 两级前缀读写和每 rank chunk 汇总。 |
 | 5 | `producer_release` | ~166 μs | 已保留 D3 CQ scalar poll 优化；是否继续需重新采集当前基线 trace。 |
 | 6 | `epilogue_copy_outputs` | ~165 μs | 已保留 D4 双缓冲；除非当前 trace 显示新瓶颈，否则不再重复开发。 |
@@ -1035,6 +1035,59 @@ Normal Dispatch 收益稳定复现，五操作功能校验通过。Expanded Disp
   `task_20260926_092023_213258110558`。所有任务均达到预期结果。
 
 结论：收益方向和幅度均稳定复现，保留该实现；后续继续第 2 项 `epilogue_parallel_prefix`。
+
+### 第 3 项 epilogue_metadata 实验（已撤回）
+
+背景：原实现由一个 VF 线程串行处理一个 128-record tile，并对每个有效
+record 串行写入 top-k 的 localized expert 与 metadata。典型 8-rank FP8
+case 中该 kernel median 约 170 μs。
+
+候选设计：
+
+1. 当 `num_topk <= 32` 且 VF 线程数可整除 32 时，启用 32-lane subgroup。
+2. 一个 subgroup 拥有一个 record：lane 0 写 `output_metadata[0:2]`，
+   `lane < num_topk` 并行写 `output_metadata[2 + lane]` 与
+   `recv_topk_indices[...]`；典型 top-k 8 时一个 warp 同时处理 4 个 record。
+3. 不满足条件时保留原 per-thread 串行路径；cached 模式只跳过 metadata
+   写入，localization 语义不变。
+
+验证：
+
+- 新增 `dispatch_metadata_adapter.cpp` 与 `run_dispatch_metadata.py`，通过
+  production launcher 直接调用设备 kernel，CPU oracle 精确比较
+  `recv_topk_indices`、`source_metadata`、workspace guard 和 prior status。
+- 8-rank 边界回归全部通过，每 rank 83 个 case，覆盖 world 1/3/8/32、
+  threads 32/128/512、capacity 0/1/17/128/129/8193、top-k 1/2/8/32、
+  experts 8/32/128/256、multi-block、cached mode 和 prior status。
+- 20-sample trace：8 rank 共 160 个样本，候选 kernel 全体 median 为
+  104.314 μs，各 rank median 103.323-104.900 μs；对照基线约 170.4-170.9 μs。
+- 功能用例 BF16 sync、FP8 async、FP8 allocate 均 passed（3 cases passed）。
+  结果写完后的 teardown SIGSEGV 仍为已知问题，不作为功能失败。
+- 3 组无 profiling A1/B1/B2/A2：A 为 accepted baseline
+  `bed897d4d04ca0194708ab13c76e3fea5a4f62005634f134860e2b19d7dee089`，
+  B 为候选 `577e648a820d4085621680cd71e20513796b9d97a6cc253bdca3d84e74a8dc9c`。
+  Normal Dispatch mean 变化：
+  - batch 1：A 5.3055 ms，B 5.3375 ms，劣化 0.603%；
+  - batch 2：A 5.2090 ms，B 5.2355 ms，劣化 0.509%；
+  - batch 3：A 5.4035 ms，B 5.0705 ms，提升 6.163%。
+
+结论：correctness 通过且单 kernel 收益明显，但端到端收益方向不稳定，不满足
+“稳定复现才保留”的规则。撤回候选 kernel；保留 production launcher 边界回归
+作为后续重构该 kernel 的测试资产。
+
+原始数据：
+
+- 候选目录：`/home/pyptouser/yuqitao/deepep-dispatch-metadata/results/` 下
+  `dispatch-metadata-boundary.*`、`dispatch-metadata-trace.json`、
+  `dispatch-metadata-traces/`、`metadata-functional.*`、
+  `metadata-abba{1,2,3}-{A1,B1,B2,A2}.json` 与对应 `.log`；
+- A 侧 ABBA 数据：`/home/pyptouser/yuqitao/deepep-dispatch-count/results/`
+  下的 `metadata-abba{1,2,3}-{A1,A2}.json`；
+- 构建任务 `task_20260926_114227_25286606871`，边界任务
+  `task_20260926_114516_253483027942`，trace 任务
+  `task_20260926_114618_25382408081`，功能任务
+  `task_20260926_114837_25475314852`，ABBA 任务
+  `task_20260926_114949_255208913346`。
 
 ## 明确不做
 
