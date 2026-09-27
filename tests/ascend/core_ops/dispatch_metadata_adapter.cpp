@@ -13,7 +13,11 @@ extern "C" int probe_dispatch_metadata(
     std::uint64_t topk_offset, std::uint64_t metadata_offset,
     std::uint32_t blocks, std::uint32_t threads, void* stream,
     std::uint64_t status_offset, std::uint64_t rank_counts_offset,
-    std::uint64_t rank_values_offset) {
+    std::uint64_t rank_values_offset,
+    std::uint8_t* recv_scale_factors, float* recv_topk_weights,
+    std::uint64_t sf_offset, std::uint64_t sf_bytes,
+    std::uint64_t sf_token_stride, std::uint64_t sf_pack_stride,
+    std::uint64_t weight_offset) {
     using namespace deep_ep::ascend;
     elastic::CoreLaunchShape launch{};
     launch.num_blocks = blocks;
@@ -26,5 +30,7 @@ extern "C" int probe_dispatch_metadata(
         reinterpret_cast<std::uintptr_t>(records), rank, world, mode,
         experts, topk, capacity, 0, capacity * stride, status_offset,
         rank_counts_offset, rank_values_offset, stride, topk_offset,
-        metadata_offset, stream, launch, threads);
+        metadata_offset, recv_scale_factors, recv_topk_weights,
+        sf_offset, sf_bytes, sf_token_stride, sf_pack_stride, weight_offset,
+        stream, launch, threads);
 }

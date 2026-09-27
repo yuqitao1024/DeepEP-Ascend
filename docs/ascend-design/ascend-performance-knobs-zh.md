@@ -20,6 +20,7 @@ selector 在满足条件时默认启用。显式设置成下表推荐值，通�
 | Dispatch | `DEEP_EP_ASCEND_DISPATCH_PARALLEL_PREFIX` | eligible 时开启 |
 | Dispatch | `DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES` | eligible 时 8192 |
 | Dispatch | `DEEP_EP_ASCEND_DISPATCH_TOKEN_FANOUT` | eligible 时开启 |
+| Dispatch | `DEEP_EP_ASCEND_DISPATCH_FUSED_METADATA_COPY` | eligible 时开启 |
 | Combine | `DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY` | eligible 时 32768 |
 | Combine | `DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT` | eligible 时开启 |
 | Combine | `DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE` | eligible 时 512 |
@@ -71,6 +72,20 @@ selector 在满足条件时默认启用。显式设置成下表推荐值，通�
 - 约束：top-k `<= 8`，world size `<= 8`，hidden aligned body 必须是当前支持的
   7168-byte plan；目的 slot pipeline 开启时不适用。实验性的有限 source-chunk
   调度保留 fan-out，参见 [source overlap 验证](dispatch-source-chunk-overlap-zh.md)。
+
+### `DEEP_EP_ASCEND_DISPATCH_FUSED_METADATA_COPY`
+
+- 取值：`0`、`1`，或未设置；未设置默认开启。
+- 生效于普通非 cached、非 expanded、非 hybrid、非 stream Dispatch。
+- 在同一次 record 遍历中输出 metadata、top-k、SF 和 weights；保留向量
+  hidden 搬运，非 32-byte 对齐 hidden 的尾部仍走原标量路径。
+- 不绑定特定 token 数、hidden 或 top-k；支持 SF 连续与转置布局。
+- NPU8P 8-rank / 8192 / hidden 7168 / top-k 8，三组 30/30 ABBA 的
+  Dispatch 平均耗时分别缩短 4.95%、5.05%、4.41%；合并 4.011→3.818 ms。
+  原始结果、正确性边界及后续实验见 [3 TB/s 实验](dispatch-3tb-optimization-zh.md)。
+- 非 cached、非 hybrid 的多 rank Dispatch 在输出消费完成后参加 barrier，
+  全设备 epilogue 与 CPU-count split/异步 epilogue 使用同一跨代边界。
+  这是接收区复用的正确性要求，A/B 两边均保留，不能关闭同步换取性能。
 
 ## 运行时 Combine selector
 

@@ -305,6 +305,14 @@ inline int launch_direct_dispatch_epilogue_metadata_variant_0(
         tiling.token_layout.stride_bytes,
         tiling.token_layout.topk_index_offset,
         tiling.token_layout.source_metadata_offset,
+        arguments.fused_metadata_copy != 0 ?
+            static_cast<std::uint8_t*>(arguments.recv_scale_factors) : nullptr,
+        arguments.fused_metadata_copy != 0 ? arguments.recv_topk_weights : nullptr,
+        tiling.token_layout.scale_factor_offset,
+        tiling.token_layout.scale_factor_bytes,
+        arguments.recv_scale_factor_token_stride,
+        arguments.recv_scale_factor_pack_stride,
+        tiling.token_layout.topk_weight_offset,
         stream, launch, tiling.launch.num_threads);
 }
 
@@ -414,8 +422,9 @@ inline int launch_direct_dispatch_epilogue_copy_outputs_variant_0(
         static_cast<std::uint8_t*>(arguments.communication_buffer),
         static_cast<std::uint8_t*>(arguments.workspace),
         static_cast<std::uint8_t*>(arguments.recv_x),
-        static_cast<std::uint8_t*>(arguments.recv_scale_factors),
-        arguments.recv_topk_weights,
+        arguments.fused_metadata_copy != 0 ? nullptr :
+            static_cast<std::uint8_t*>(arguments.recv_scale_factors),
+        arguments.fused_metadata_copy != 0 ? nullptr : arguments.recv_topk_weights,
         arguments.source_metadata,
         tiling.transport_context.local_window_base,
         tiling.transport_context.topology.world_size,

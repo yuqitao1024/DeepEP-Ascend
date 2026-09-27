@@ -205,6 +205,13 @@ extern "C" int deep_ep_ascend_launch_direct_dispatch_epilogue_metadata(
     std::uint64_t token_stride_bytes,
     std::uint64_t token_topk_index_offset,
     std::uint64_t token_source_metadata_offset,
+    std::uint8_t* recv_scale_factors,
+    float* recv_topk_weights,
+    std::uint64_t token_scale_factor_offset,
+    std::uint64_t token_scale_factor_bytes,
+    std::uint64_t recv_scale_factor_token_stride,
+    std::uint64_t recv_scale_factor_pack_stride,
+    std::uint64_t token_topk_weight_offset,
     void* stream, CoreLaunchShape launch,
     std::uint32_t vf_num_threads);
 

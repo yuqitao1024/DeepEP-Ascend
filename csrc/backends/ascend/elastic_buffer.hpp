@@ -1748,6 +1748,13 @@ public:
                     "DeepEP Ascend backend: dispatch does not support "
                     "cumulative expert stats");
         const bool cached_mode = cached_num_recv_tokens.has_value();
+        const char* fused_metadata_setting =
+            std::getenv("DEEP_EP_ASCEND_DISPATCH_FUSED_METADATA_COPY");
+        TORCH_CHECK(!fused_metadata_setting ||
+                        ((fused_metadata_setting[0] == '0' ||
+                          fused_metadata_setting[0] == '1') &&
+                         fused_metadata_setting[1] == '\0'),
+                    "DEEP_EP_ASCEND_DISPATCH_FUSED_METADATA_COPY must be 0 or 1");
         TORCH_CHECK(!previous_event_before_epilogue.has_value(),
                     "DeepEP Ascend backend: dispatch does not support "
                     "previous_event_before_epilogue");
@@ -2517,7 +2524,15 @@ public:
         arguments.pipeline_chunk_tiles = source_pipeline_config.chunk_tiles;
         arguments.source_completion_fence =
             source_pipeline_config.completion_fence ? 1U : 0U;
+        // A following dispatch can reuse a peer's receive window as soon as
+        // its own output is ready. Join after all ranks have consumed this
+        // generation, independently of the local number of tokens.
+        if (!cached_mode && !allow_hybrid_mode_ && num_ranks_ > 1)
+            arguments.source_completion_fence = 1U;
         arguments.consumer_tile_bytes = consumer_tile_config.tile_bytes;
+        arguments.fused_metadata_copy = !cached_mode && !do_expand &&
+            !allow_hybrid_mode_ && !stream_mode &&
+            (!fused_metadata_setting || fused_metadata_setting[0] == '1') ? 1U : 0U;
         arguments.parallel_prefix =
             parallel_prefix_config.enabled ? 1U : 0U;
         arguments.token_fanout =
