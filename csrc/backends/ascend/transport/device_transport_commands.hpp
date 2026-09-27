@@ -232,11 +232,14 @@ DEEP_EP_ASCEND_SIMT_CALLEE std::uint32_t channel_count(const DeviceTransportCont
         return 0;
     auto* table = reinterpret_cast<__gm__ DeviceChannelTable*>(context.channel_table);
     const auto member_count = simt::load_observed(&table->member_count);
+    // Direct VF contexts omit channel_count; the device table retains the host configuration.
+    const auto configured_channels = context.channel_count != 0 ? context.channel_count :
+        simt::load_observed(&table->channel_count);
     if (world_peer < 0 || static_cast<std::uint32_t>(world_peer) >= member_count ||
         static_cast<std::uint32_t>(world_peer) == simt::load_observed(&table->self_member) || simt::load_observed(&table->channels) == 0 ||
-        context.channel_count == 0)
+        configured_channels == 0)
         return 0;
-    return context.channel_count;
+    return configured_channels;
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t get_symmetric_offset(const DeviceTransportContext& context, DeviceAddress local_address) {
