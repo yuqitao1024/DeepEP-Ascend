@@ -522,3 +522,54 @@ rendezvous 与等待均位于 Event 区间外，操作、逻辑字节、rank 聚
 进入受版本管理的 benchmark，默认关闭，并将值写入 `timing_protocol`；原始
 wrapper 仍随实验归档保留。生产源码不包含 host collective、busy-wait 或
 额外入口 barrier。
+
+### 对齐后的 stage profile 与剩余瓶颈
+
+使用最终源码产物 SHA256
+`033b1ffb40a71a05348e0438194debf5eaddbe58aeb127e3b90005d748b15fdc`，
+在同一 8-rank 工作负载上同时启用 `--rank-launch-deadline-us 2000` 和
+`--profile-stages`。任务 `task_20260928_020200_36699167978` 完成 30 次
+warmup 和 30 次 Event 采样，Dispatch mean 为 3.633996 ms、logical
+bandwidth 为 2142.570 GB/s。stage profile 会增加探针开销，并且为了归因
+保留独立 consumed barrier，因此该吞吐不能替代无探针的正式结果。
+
+与未对齐的 `task_20260927_185539_15248406634` 相比，profile Event mean
+从 4.104241 ms 降至 3.633996 ms，改善 11.458%；host anchor spread 从
+0.276 ms 降至 0.165 ms。与此同时，主要阶段耗时基本不变：
+
+| 指标 | 未对齐 | 对齐后 |
+| --- | ---: | ---: |
+| measured stage active | 1.788 ms | 1.795 ms |
+| producer record | 0.172 ms | 0.171 ms |
+| release payload | 0.917 ms | 0.928 ms |
+| release control | 0.283 ms | 0.282 ms |
+| release barrier | 0.045 ms | 0.045 ms |
+| epilogue copy | 0.320 ms | 0.320 ms |
+| service active | 1.481 ms | 1.531 ms |
+
+这证明对齐主要去除了启动偏斜，没有加速 transport 或本地 kernel。对齐后
+剩余瓶颈按当前证据排序如下：
+
+1. **kernel/queue 阶段间空洞。** 排除 rank 5/7 单次 profile 中额外的
+   1.29--1.35 ms 长尾后，各 rank 稳定阶段间 gap 的中位数合计仍约
+   1.109 ms。其中 `epilogue_expert_prefix -> epilogue_metadata` 为
+   0.238 ms，`epilogue_metadata -> epilogue_copy` 为 0.244 ms，
+   `producer_prefix -> producer_record` 为 0.124 ms。这些 gap 比相邻的小
+   kernel 本体更大，下一轮应优先验证 epilogue kernel 合并或连续下发，
+   并用多次 capture 判断 rank 5/7 长尾是否稳定复现。
+2. **transport release/completion。** release payload/control/barrier 的可见
+   串行 span 分别为 0.928/0.282/0.045 ms；service 内部 flush 为
+   0.900 ms、CQ drain/wait 为 0.814 ms、service active 为 1.531 ms。
+   这些内部指标彼此重叠，不能相加，但仍表明主要时间花在 flush 和完成
+   等待，而不是约 0.073 ms 的 payload 命令生成。已撤回的双 stream overlap
+   不应原样重试，后续方向是减少 completion 边界或合并 command/flush。
+3. **接收侧输出搬运。** `epilogue_copy` 为 0.320 ms，是最大的本地计算段；
+   producer record 为 0.171 ms，优先级次之。
+4. **残余 barrier 到达差异。** 最慢 rank 的 barrier poll 为 0.157 ms，其他
+   rank 为约 0.003--0.099 ms。它已远小于未对齐时的毫秒级错位，应在前三项
+   之后处理。
+
+无探针对齐诊断的 3.260960 ms 对应 2387.668 GB/s。相同 logical bytes 达到
+3 TB/s 需要 2.595363 ms，仍需减少约 0.665597 ms，即当前时延的 20.411%。
+因此下一项先验证阶段间 gap 能否通过 epilogue 合并回收；它是当前唯一在
+量级上足以覆盖大部分 3 TB/s 缺口、且未被已有负向 ABBA 否定的方向。
