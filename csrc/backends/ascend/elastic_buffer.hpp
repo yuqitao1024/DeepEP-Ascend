@@ -1929,7 +1929,10 @@ public:
             elastic::select_dispatch_source_pipeline_config(
                 std::getenv(
                     "DEEP_EP_ASCEND_DISPATCH_PIPELINE_CHUNK_TILES"),
-                device_prefix_config.enabled, cached_mode, do_cpu_sync,
+                device_prefix_config.enabled && fp8_dispatch &&
+                    num_topk <= elastic::kDispatchTokenFanoutMaximumTopk &&
+                    num_ranks_ <= elastic::kDispatchTokenFanoutMaximumWorldSize,
+                cached_mode, do_cpu_sync,
                 do_expand, allow_hybrid_mode_, stream_mode, num_ranks_,
                 num_tokens, &source_pipeline_config);
         TORCH_CHECK(
@@ -1959,7 +1962,7 @@ public:
                     tiling.data_launch.num_blocks > 1,
                 fp8_dispatch, cached_mode, do_expand, allow_hybrid_mode_,
                 stream_mode,
-                pipeline_config.enabled || source_pipeline_config.enabled,
+                pipeline_config.enabled,
                 num_topk, num_ranks_,
                 tiling.token_layout.hidden_bytes, &token_fanout_config);
         TORCH_CHECK(
@@ -2512,6 +2515,8 @@ public:
         arguments.timeout_cycles = barrier_timeout_cycles_;
         arguments.pipeline_chunk_slots = pipeline_config.chunk_slots;
         arguments.pipeline_chunk_tiles = source_pipeline_config.chunk_tiles;
+        arguments.source_completion_fence =
+            source_pipeline_config.completion_fence ? 1U : 0U;
         arguments.consumer_tile_bytes = consumer_tile_config.tile_bytes;
         arguments.parallel_prefix =
             parallel_prefix_config.enabled ? 1U : 0U;

@@ -690,6 +690,7 @@ struct DispatchArguments {
     std::uint64_t pipeline_chunk_slots = 0;
     std::uint32_t pipeline_chunk_tiles = 0;
     std::uint32_t pipeline_source_chunk = 0;
+    std::uint32_t source_completion_fence = 0;
     std::uint32_t consumer_tile_bytes = 512;
     std::uint32_t parallel_prefix = 0;
     std::uint32_t token_fanout = 0;
@@ -727,6 +728,9 @@ struct CombineArguments {
 
 extern "C" int deep_ep_ascend_launch_barrier(
     deep_ep::ascend::elastic::BarrierArguments arguments,
+    deep_ep::ascend::elastic::CoreTiling tiling, void* stream);
+extern "C" int deep_ep_ascend_launch_dispatch_consumed_barrier(
+    deep_ep::ascend::elastic::DispatchArguments arguments,
     deep_ep::ascend::elastic::CoreTiling tiling, void* stream);
 extern "C" int deep_ep_ascend_launch_dispatch(
     deep_ep::ascend::elastic::DispatchArguments arguments,

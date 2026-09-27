@@ -64,12 +64,13 @@ selector 在满足条件时默认启用。显式设置成下表推荐值，通�
 
 - 取值：`0`、`1`，或未设置。
 - 未设置：FP8、direct、uncached、non-expanded、non-hybrid、non-stream、
-  grouping-eligible 且无 pipeline 的调用默认开启。
+  grouping-eligible 且无 destination-slot pipeline 的调用默认开启。
 - 作用：P7.0 hidden vector fan-out：每个 source token 一次加载 aligned body，
   再 fan out 到 top-k destination records，减少重复 GM 读。
 - 对照：`0` 回到 retained P6 path。
 - 约束：top-k `<= 8`，world size `<= 8`，hidden aligned body 必须是当前支持的
-  7168-byte plan；目的 slot pipeline 或 source pipeline 开启时不适用。
+  7168-byte plan；目的 slot pipeline 开启时不适用。实验性的有限 source-chunk
+  调度保留 fan-out，参见 [source overlap 验证](dispatch-source-chunk-overlap-zh.md)。
 
 ## 运行时 Combine selector
 
@@ -146,7 +147,14 @@ consecutive-generation 和 buffer-reuse 验收后保留的生产默认。
     路径变化影响，不再作为默认推荐；只在明确要复现历史实验时使用。
 - `DEEP_EP_ASCEND_DISPATCH_PIPELINE_CHUNK_TILES`
   - source-token pipeline。2026-09-20 快照中多 chunk 配置在 prefix/count
-    correctness 上失败，不能作为可用性能 knob。
+    correctness 上失败；VF 拆分后的旧 persistent 调度也存在停滞。
+    2026-09-27 实验改为有限 chunk kernel、设备事件及消费完成确认，
+    已通过典型和部分边界用例。但 8-rank 三组 ABBA 的 2 分块耗时均增加，
+    合并 3.896 → 4.106 ms（慢 5.41%），未通过性能验收。默认关闭，不作为
+    推荐性能 knob；完整状态见 [source overlap 验证](dispatch-source-chunk-overlap-zh.md)。
+    补测 2048/4096/10240 tokens、top-k 8 和 8192 tokens、top-k 4 的单组
+    ABBA 也未见平均性能收益；16384 tokens 则在基线被既有 4 MiB workspace
+    容量限制拒绝，不能计作性能结果。
 - `DEEP_EP_ASCEND_DISPATCH_EARLY_ROUTE_PLAN=1`
   - isolated candidate 已被拒绝，不应与 token fan-out 或其他 pipeline 混用。
 - `DEEP_EP_ASCEND_COMBINE_RELEASE_FLUSH_BARRIER=1`

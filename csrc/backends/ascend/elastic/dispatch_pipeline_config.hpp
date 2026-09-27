@@ -146,6 +146,9 @@ enum class DispatchSourcePipelineConfigStatus : std::uint8_t {
 
 struct DispatchSourcePipelineConfig {
     bool enabled = false;
+    // Independent of local token count: ranks that fall back to an unchunked
+    // launch must still join the same receive-window completion boundary.
+    bool completion_fence = false;
     std::uint32_t chunk_tiles = 0;
     std::uint32_t chunk_count = 0;
 };
@@ -179,6 +182,8 @@ select_dispatch_source_pipeline_config(
     if (!device_prefix_enabled || cached_mode || !cpu_sync || expanded ||
         hybrid_mode || stream_mode || world_size < 2)
         return DispatchSourcePipelineConfigStatus::kDisabled;
+
+    output->completion_fence = true;
 
     DispatchSourceChunkPlan plan{};
     if (!build_dispatch_source_chunk_plan(

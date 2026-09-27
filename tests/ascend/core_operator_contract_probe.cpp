@@ -802,6 +802,16 @@ int main() {
             source_chunk_plan, 4, 0, 0, 0, nullptr, nullptr))
         return 170;
     DispatchSourcePipelineConfig source_pipeline_config{};
+    // All ranks join the receive-window completion boundary, including a
+    // small rank whose local token count needs only one chunk (or none).
+    for (std::uint64_t tokens : {0ULL, 1ULL, 64ULL, 65ULL, 257ULL}) {
+        select_dispatch_source_pipeline_config(
+            "16", true, false, true, false, false, false, 8,
+            tokens, &source_pipeline_config);
+        if (!source_pipeline_config.completion_fence ||
+            source_pipeline_config.enabled != (tokens > 64))
+            return 190;
+    }
     if (select_dispatch_source_pipeline_config(
             "512", true, false, true, false, false, false, 2,
             8192, &source_pipeline_config) !=
