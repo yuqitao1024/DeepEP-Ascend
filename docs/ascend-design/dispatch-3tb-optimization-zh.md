@@ -547,16 +547,18 @@ bandwidth 为 2142.570 GB/s。stage profile 会增加探针开销，并且为了
 | epilogue copy | 0.320 ms | 0.320 ms |
 | service active | 1.481 ms | 1.531 ms |
 
-这证明对齐主要去除了启动偏斜，没有加速 transport 或本地 kernel。对齐后
-剩余瓶颈按当前证据排序如下：
+这证明对齐主要去除了启动偏斜，没有加速 transport 或本地 kernel。这里的
+stage marker 只覆盖通用 stage kernel；相邻 marker 之间还包含专用 VF kernel，
+不能把 1.109 ms 未覆盖区间全部叫作 kernel/queue idle。完整 kernel trace 已
+确认 `producer_prefix -> producer_record`、`expert_prefix -> metadata` 等区间
+主要包含真实 prefix/metadata 工作。对齐后剩余瓶颈按当前证据排序如下：
 
-1. **kernel/queue 阶段间空洞。** 排除 rank 5/7 单次 profile 中额外的
-   1.29--1.35 ms 长尾后，各 rank 稳定阶段间 gap 的中位数合计仍约
-   1.109 ms。其中 `epilogue_expert_prefix -> epilogue_metadata` 为
-   0.238 ms，`epilogue_metadata -> epilogue_copy` 为 0.244 ms，
-   `producer_prefix -> producer_record` 为 0.124 ms。这些 gap 比相邻的小
-   kernel 本体更大，下一轮应优先验证 epilogue kernel 合并或连续下发，
-   并用多次 capture 判断 rank 5/7 长尾是否稳定复现。
+1. **未覆盖的 epilogue kernel 序列。** `epilogue_metadata -> epilogue_copy`
+   marker 中位间隔为 0.244 ms，里面依次包含 metadata、assign destinations、
+   reduce errors 和 clear padding 专用 kernel。普通非 expanded Dispatch 只需
+   metadata；后三个 kernel 分别立即返回或扫描空错误区，可以压缩提交序列。
+   `epilogue_expert_prefix -> epilogue_metadata` 的 0.238 ms 则包含真实 prefix
+   工作，不能用同样方式直接删除。
 2. **transport release/completion。** release payload/control/barrier 的可见
    串行 span 分别为 0.928/0.282/0.045 ms；service 内部 flush 为
    0.900 ms、CQ drain/wait 为 0.814 ms、service active 为 1.531 ms。
@@ -571,5 +573,43 @@ bandwidth 为 2142.570 GB/s。stage profile 会增加探针开销，并且为了
 
 无探针对齐诊断的 3.260960 ms 对应 2387.668 GB/s。相同 logical bytes 达到
 3 TB/s 需要 2.595363 ms，仍需减少约 0.665597 ms，即当前时延的 20.411%。
-因此下一项先验证阶段间 gap 能否通过 epilogue 合并回收；它是当前唯一在
-量级上足以覆盖大部分 3 TB/s 缺口、且未被已有负向 ABBA 否定的方向。
+
+### 普通 Dispatch compact epilogue
+
+`DEEP_EP_ASCEND_DISPATCH_COMPACT_EPILOGUE=0/1` 控制上述 metadata 提交序列。
+普通非 cached、非 expanded、非 hybrid、非 stream Dispatch 默认开启：保留
+metadata kernel，跳过只服务 expanded destination/padding 的 assign、error
+reduce 和 clear-padding kernel。其他模式及显式 `0` 保留原四 kernel 序列。
+
+候选二进制 SHA256：
+`585a0d0e63b90c93426498157f77c1ce9d657d743a648af2a5630fbb844f2503`。
+2-rank BF16、4-rank FP8 hidden 7184、8-rank 典型输入、2-rank 1024 experts、
+20 次接收区复用和 snapshot 边界均通过；构建任务
+`task_20260928_021447_36933608144`，正确性任务
+`task_20260928_021537_37018435718` 和 `task_20260928_021711_3708572273`。
+
+普通未对齐 ABBA 的三组 mean 变化为 -0.209%、+6.342%、-1.885%，方向不
+一致；pooled 仅 +1.453%，再次显示 host launch skew 会淹没约几十微秒的
+设备收益。使用正式 `--rank-launch-deadline-us 2000` 后，同一二进制、同一
+操作的三组 30/30 ABBA 为：
+
+| ABBA 组 | A 原序列 / ms | B compact / ms | 耗时缩短 |
+| --- | ---: | ---: | ---: |
+| 1 | 3.360750 | 3.227261 | 3.972% |
+| 2 | 3.276328 | 3.250821 | 0.779% |
+| 3 | 3.208559 | 3.169993 | 1.202% |
+| 合并 | 3.281879 | 3.216025 | 2.007% |
+
+合并 logical bandwidth 为 2372.449→2421.029 GB/s，p50 改善 2.523%，p95
+改善 0.189%。ABBA 任务 `task_20260928_022719_374916121917`。这是 Event
+区间内的稳定设备收益；共同启动等待仍在 Event 外，不能当作应用端总延迟。
+
+对齐 stage profile 进一步验证机制：`metadata -> copy` marker 间隔中位数
+从 0.243603 ms 降至 0.192007 ms，回收约 0.051596 ms；主要 stage active
+为 1.791 ms，未通过隐藏有效计算制造收益。profile Event 为 3.515015 ms、
+2215.095 GB/s，仅用于归因；任务 `task_20260928_023551_378406830239`。
+
+compact 后的对齐 ABBA mean 为 3.216025 ms。达到 3 TB/s 仍需降至
+2.595363 ms，还差 0.620662 ms（19.299%）。下一步应转向 release
+flush/CQ completion 和 0.320 ms output copy；继续删除普通路径空 kernel
+无法覆盖剩余缺口。

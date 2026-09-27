@@ -1755,6 +1755,13 @@ public:
                           fused_metadata_setting[0] == '1') &&
                          fused_metadata_setting[1] == '\0'),
                     "DEEP_EP_ASCEND_DISPATCH_FUSED_METADATA_COPY must be 0 or 1");
+        const char* compact_epilogue_setting =
+            std::getenv("DEEP_EP_ASCEND_DISPATCH_COMPACT_EPILOGUE");
+        TORCH_CHECK(!compact_epilogue_setting ||
+                        ((compact_epilogue_setting[0] == '0' ||
+                          compact_epilogue_setting[0] == '1') &&
+                         compact_epilogue_setting[1] == '\0'),
+                    "DEEP_EP_ASCEND_DISPATCH_COMPACT_EPILOGUE must be 0 or 1");
         const char* fused_barrier_setting =
             std::getenv("DEEP_EP_ASCEND_DISPATCH_FUSED_CONSUMED_BARRIER");
         TORCH_CHECK(!fused_barrier_setting ||
@@ -2540,6 +2547,15 @@ public:
         arguments.fused_metadata_copy = !cached_mode && !do_expand &&
             !allow_hybrid_mode_ && !stream_mode &&
             (!fused_metadata_setting || fused_metadata_setting[0] == '1') ? 1U : 0U;
+        // Normal Dispatch does not assign expanded destinations, reduce
+        // destination errors, or clear expanded padding. Collapse that
+        // metadata stage to its only productive kernel. Keep an environment
+        // switch so the legacy sequence remains available for same-binary
+        // correctness and performance comparisons.
+        arguments.compact_epilogue = !cached_mode && !do_expand &&
+            !allow_hybrid_mode_ && !stream_mode &&
+            (!compact_epilogue_setting ||
+             compact_epilogue_setting[0] == '1') ? 1U : 0U;
         arguments.parallel_prefix =
             parallel_prefix_config.enabled ? 1U : 0U;
         arguments.token_fanout =

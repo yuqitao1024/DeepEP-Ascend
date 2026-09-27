@@ -100,6 +100,19 @@ selector 在满足条件时默认启用。显式设置成下表推荐值，通�
 - NPU8P 典型用例三组 30/30 ABBA 的 Dispatch mean 分别缩短 2.71%、
   2.72%、1.52%，合并 3.936→3.845 ms（2.32%）。
 
+### `DEEP_EP_ASCEND_DISPATCH_COMPACT_EPILOGUE`
+
+- 取值：`0`、`1`，或未设置；未设置默认开启。
+- 生效于普通非 cached、非 expanded、非 hybrid、非 stream Dispatch。
+- 普通路径的 metadata stage 只提交 metadata kernel；跳过仅用于 expanded
+  destination/error/padding 的三个空 kernel。其他模式保留原提交序列。
+- 对照：`0` 恢复 metadata、assign destinations、reduce errors、clear padding
+  四 kernel 序列。
+- NPU8P 对齐启动的三组 30/30 ABBA mean 分别缩短 3.97%、0.78%、1.20%，
+  合并 3.282→3.216 ms（2.01%），logical bandwidth 为
+  2372.449→2421.029 GB/s。未对齐 ABBA 仍受 host launch skew 干扰，不能用
+  pooled 正值掩盖组间方向不一致。
+
 ## 运行时 Combine selector
 
 ### `DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT`

@@ -1766,7 +1766,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         end = kernels.index("\n}\n", begin)
         pipeline = kernels[begin:end]
         self.assertNotIn("DirectDispatchStage::kProducerReleaseBarrier", pipeline)
-        self.assertIn("}, cpu_sync ? 10U : 13U};", pipeline)
+        self.assertIn("}, cpu_sync ? 9U : 12U};", pipeline)
         begin = kernels.index("direct_dispatch_profile_pipeline(")
         end = kernels.index("\n}\n", begin)
         pipeline = kernels[begin:end]
@@ -1775,7 +1775,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         epilogue_index = pipeline.index(
             "DirectDispatchStage::kEpilogueAcquire")
         self.assertLess(barrier_index, epilogue_index)
-        self.assertIn("}, cpu_sync ? 12U : 15U};", pipeline)
+        self.assertIn("}, cpu_sync ? 11U : 14U};", pipeline)
         self.assertIn(
             "if (stage == DirectDispatchStage::kProducerRelease)\n"
             "        return profile_enabled ? DirectReleaseSegment::kPayload :\n"
@@ -1846,6 +1846,37 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "launch_direct_dispatch_epilogue_prefix_variant_0",
             launch_source,
         )
+
+    def test_normal_dispatch_compacts_expanded_only_epilogue_kernels(self):
+        """Normal Dispatch skips work that only expanded output consumes."""
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        source = (ELASTIC / "dispatch.asc").read_text()
+        buffer = (
+            ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        dispatch = buffer[
+            buffer.index("    dispatch(const torch::Tensor& x"):
+            buffer.index("    combine(const torch::Tensor& x")
+        ]
+
+        self.assertIn("std::uint32_t compact_epilogue = 0;", kernels)
+        self.assertIn(
+            '"DEEP_EP_ASCEND_DISPATCH_COMPACT_EPILOGUE"', dispatch)
+        self.assertRegex(
+            dispatch,
+            r"arguments\.compact_epilogue = !cached_mode && !do_expand &&"
+            r"[\s\S]*?compact_epilogue_setting\[0\] == '1'\) \? 1U : 0U;",
+        )
+        metadata_begin = source.index(
+            "stage == DirectDispatchStage::kEpilogueMetadata")
+        metadata_end = source.index(
+            "if (copy_outputs != 0 &&", metadata_begin)
+        metadata = source[metadata_begin:metadata_end]
+        self.assertIn("if (arguments.compact_epilogue == 0)", metadata)
+        for launcher in (
+                "launch_direct_dispatch_epilogue_assign_destinations_variant_0",
+                "launch_direct_dispatch_reduce_errors_variant_1",
+                "launch_direct_dispatch_epilogue_clear_padding_variant_0"):
+            self.assertIn(launcher, metadata)
 
     def test_dispatch_output_copy_uses_compact_receive_domain(self):
         source = (ELASTIC / "dispatch.asc").read_text()
