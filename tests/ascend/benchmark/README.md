@@ -212,6 +212,14 @@ phase accounting, transport command counters, and an optimistic pipeline
 ceiling. Such a report records `stage_profile: 1` and is intentionally not
 comparable with a normal latency report.
 
+To diagnose cross-rank host launch skew, add
+`--rank-launch-deadline-us 2000`. Before every timed launch, all ranks exchange
+their host timestamp and wait until 2 ms after the latest timestamp. The
+rendezvous and wait happen before the NPU start event, and the report records
+the setting in `timing_protocol`. This mode isolates launch skew in Event
+measurements; it does not measure application end-to-end latency and must not
+be used as a production speedup.
+
 Render the captured profile as a validated P5 parity timeline:
 
 ```bash

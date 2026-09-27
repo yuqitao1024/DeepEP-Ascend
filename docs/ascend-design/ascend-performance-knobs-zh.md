@@ -21,6 +21,7 @@ selector 在满足条件时默认启用。显式设置成下表推荐值，通�
 | Dispatch | `DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES` | eligible 时 8192 |
 | Dispatch | `DEEP_EP_ASCEND_DISPATCH_TOKEN_FANOUT` | eligible 时开启 |
 | Dispatch | `DEEP_EP_ASCEND_DISPATCH_FUSED_METADATA_COPY` | eligible 时开启 |
+| Dispatch | `DEEP_EP_ASCEND_DISPATCH_FUSED_CONSUMED_BARRIER` | eligible 时开启 |
 | Combine | `DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY` | eligible 时 32768 |
 | Combine | `DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT` | eligible 时开启 |
 | Combine | `DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE` | eligible 时 512 |
@@ -86,6 +87,18 @@ selector 在满足条件时默认启用。显式设置成下表推荐值，通�
 - 非 cached、非 hybrid 的多 rank Dispatch 在输出消费完成后参加 barrier，
   全设备 epilogue 与 CPU-count split/异步 epilogue 使用同一跨代边界。
   这是接收区复用的正确性要求，A/B 两边均保留，不能关闭同步换取性能。
+
+### `DEEP_EP_ASCEND_DISPATCH_FUSED_CONSUMED_BARRIER`
+
+- 取值：`0`、`1`，或未设置；未设置默认开启。
+- 生效于多 rank、普通非 cached、非 expanded、非 hybrid、非 stream、非
+  pipeline、非 CPU-sync Dispatch；stage profile 时保持独立 barrier，便于归因。
+- 作用：在 epilogue-complete kernel 中完成 queue reset、generation 发布、
+  system fence、world barrier 和 service execute，省去独立 consumed-barrier
+  kernel launch；跨代接收区保护语义保持不变。
+- 对照：`0` 使用原独立 barrier kernel。
+- NPU8P 典型用例三组 30/30 ABBA 的 Dispatch mean 分别缩短 2.71%、
+  2.72%、1.52%，合并 3.936→3.845 ms（2.32%）。
 
 ## 运行时 Combine selector
 

@@ -43,6 +43,19 @@ class NpuEventTimer:
         )
 
 
+def wait_for_common_deadline(
+    exchange_max_ns: Callable[[int], int],
+    slack_ns: int,
+    clock_ns: Callable[[], int] = time.perf_counter_ns,
+) -> int:
+    if slack_ns <= 0:
+        raise ValueError("deadline slack must be positive")
+    deadline = int(exchange_max_ns(clock_ns())) + slack_ns
+    while clock_ns() < deadline:
+        pass
+    return deadline
+
+
 def _percentile(sorted_samples: tuple[float, ...], quantile: float) -> float:
     position = (len(sorted_samples) - 1) * quantile
     lower = math.floor(position)

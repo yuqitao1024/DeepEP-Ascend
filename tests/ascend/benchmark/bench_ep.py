@@ -19,6 +19,13 @@ def _data_blocks(value: str) -> int:
     return blocks
 
 
+def _nonnegative_microseconds(value: str) -> int:
+    microseconds = int(value)
+    if microseconds < 0:
+        raise argparse.ArgumentTypeError("must be nonnegative")
+    return microseconds
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Benchmark the supported Ascend EPv2 kernel matrix",
@@ -55,6 +62,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cases")
     parser.add_argument("--skip-check", action="store_true")
     parser.add_argument("--profile-stages", action="store_true")
+    parser.add_argument(
+        "--rank-launch-deadline-us",
+        type=_nonnegative_microseconds,
+        default=0,
+        help=(
+            "diagnostic only: rendezvous ranks before each timed launch and "
+            "wait this many microseconds beyond the latest host timestamp"
+        ),
+    )
     return parser
 
 

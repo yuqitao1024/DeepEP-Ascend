@@ -1755,6 +1755,13 @@ public:
                           fused_metadata_setting[0] == '1') &&
                          fused_metadata_setting[1] == '\0'),
                     "DEEP_EP_ASCEND_DISPATCH_FUSED_METADATA_COPY must be 0 or 1");
+        const char* fused_barrier_setting =
+            std::getenv("DEEP_EP_ASCEND_DISPATCH_FUSED_CONSUMED_BARRIER");
+        TORCH_CHECK(!fused_barrier_setting ||
+                        ((fused_barrier_setting[0] == '0' ||
+                          fused_barrier_setting[0] == '1') &&
+                         fused_barrier_setting[1] == '\0'),
+                    "DEEP_EP_ASCEND_DISPATCH_FUSED_CONSUMED_BARRIER must be 0 or 1");
         TORCH_CHECK(!previous_event_before_epilogue.has_value(),
                     "DeepEP Ascend backend: dispatch does not support "
                     "previous_event_before_epilogue");
@@ -2539,6 +2546,13 @@ public:
             token_fanout_config.enabled ? 1U : 0U;
         arguments.early_route_plan =
             early_route_plan_config.enabled ? 1U : 0U;
+        arguments.fused_consumed_barrier =
+            (!fused_barrier_setting || fused_barrier_setting[0] == '1') &&
+            !cached_mode && !do_expand && !allow_hybrid_mode_ && !stream_mode &&
+            num_ranks_ > 1 && !source_pipeline_config.enabled &&
+            !pipeline_config.enabled && !stage_profile_enabled_ &&
+            !elastic::has_mode(tiling.mode_flags, elastic::CoreMode::kCpuSync) ?
+            1U : 0U;
         runtime::StreamIdentity stream = dispatch_stream;
         if (!use_comm_stream) {
             status = resources_->current_stream(&stream);

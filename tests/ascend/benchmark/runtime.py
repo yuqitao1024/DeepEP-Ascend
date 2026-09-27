@@ -14,6 +14,7 @@ from tests.ascend.benchmark.timing import (
     NpuEventTimer,
     logical_gbps,
     summarize_samples,
+    wait_for_common_deadline,
 )
 from tests.ascend.benchmark.timeline import stage_semantic
 from tests.ascend.benchmark.workloads import classify_ascend_case
@@ -799,6 +800,27 @@ class AscendRuntime:
         self.num_qps = num_qps
         self.buffer = None
         self.timer = NpuEventTimer(TorchNpuEventBackend(torch_module))
+        self._rank_launch_clock = None
+
+    def align_rank_launch(self) -> None:
+        slack_us = self.args.rank_launch_deadline_us
+        if slack_us == 0:
+            return
+        if self._rank_launch_clock is None:
+            self._rank_launch_clock = self.torch.empty(
+                1, dtype=self.torch.int64, device=self.device
+            )
+
+        def exchange_max_ns(local_now_ns: int) -> int:
+            self._rank_launch_clock.fill_(local_now_ns)
+            self.dist.all_reduce(
+                self._rank_launch_clock,
+                op=self.dist.ReduceOp.MAX,
+                group=self.group,
+            )
+            return int(self._rank_launch_clock.item())
+
+        wait_for_common_deadline(exchange_max_ns, slack_us * 1000)
 
     def synchronized_step(self, operation: Callable[[], Any], label: str) -> Any:
         local_error = None
@@ -1422,6 +1444,7 @@ class AscendRuntime:
             wall_samples = []
             for _ in range(self.args.iterations):
                 self.buffer.barrier(with_cpu_sync=True, sequential=True)
+                self.align_rank_launch()
                 sample = self.timer.measure(operation)
                 device_samples.append(sample.device_seconds)
                 wall_samples.append(sample.wall_seconds)
@@ -1582,6 +1605,10 @@ def run_benchmark(args: Any, selected_case_ids: tuple[str, ...]) -> int:
             "rank_aggregation": "maximum_latency",
             "logical_byte_aggregation": "sum",
         }
+        if args.rank_launch_deadline_us != 0:
+            report.timing_protocol["rank_launch_deadline_us"] = (
+                args.rank_launch_deadline_us
+            )
         report.device = {
             "name": torch.npu.get_device_name(local_rank),
             "local_rank": local_rank,

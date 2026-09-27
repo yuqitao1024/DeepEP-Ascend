@@ -696,6 +696,7 @@ struct DispatchArguments {
     std::uint32_t token_fanout = 0;
     std::uint32_t early_route_plan = 0;
     std::uint32_t fused_metadata_copy = 0;
+    std::uint32_t fused_consumed_barrier = 0;
 };
 
 struct CombineArguments {

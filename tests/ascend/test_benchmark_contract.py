@@ -31,7 +31,7 @@ from tests.ascend.benchmark.runtime import (
     _payload_rows,
 )
 from tests.ascend.benchmark.timing import logical_gbps, summarize_samples
-from tests.ascend.benchmark.timing import NpuEventTimer
+from tests.ascend.benchmark.timing import NpuEventTimer, wait_for_common_deadline
 from tests.ascend.benchmark.timeline import (
     operation_stage_semantics,
     stage_semantic,
@@ -664,12 +664,23 @@ def test_benchmark_parser_preserves_production_size_defaults():
     assert args.allow_multiple_reduction == 1
     assert args.num_sms is None
     assert args.profile_stages is False
+    assert args.rank_launch_deadline_us == 0
 
 
 def test_benchmark_parser_enables_stage_profile_explicitly():
     args = build_parser().parse_args(["--profile-stages"])
 
     assert args.profile_stages is True
+
+
+def test_benchmark_parser_accepts_rank_launch_deadline():
+    parser = build_parser()
+
+    assert parser.parse_args([
+        "--rank-launch-deadline-us", "2000"
+    ]).rank_launch_deadline_us == 2000
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--rank-launch-deadline-us", "-1"])
 
 
 def test_stage_profile_environment_is_enabled_only_on_request(monkeypatch):
@@ -814,6 +825,20 @@ def test_npu_timer_synchronizes_and_returns_seconds():
         "end.record",
         "synchronize",
     ]
+
+
+def test_common_deadline_uses_exchanged_max_and_waits_outside_timer():
+    readings = iter((100, 140, 149, 150))
+    exchanged = []
+
+    deadline = wait_for_common_deadline(
+        lambda now: exchanged.append(now) or 130,
+        20,
+        lambda: next(readings),
+    )
+
+    assert exchanged == [100]
+    assert deadline == 150
 
 
 def test_runtime_source_pins_supported_ascend_contract():

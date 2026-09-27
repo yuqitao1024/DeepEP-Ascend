@@ -10,6 +10,15 @@ oracle 和三组完整 ABBA，保留并默认开启；第三项完成三组 ABBA
 收益方向不稳定，已撤回生产改动，实验源码和结果留在 `.scratch`。
 另确认普通路径存在跨代接收区覆盖，作为正确性修复单独处理，不算性能收益。
 
+上一轮第二项已提交为 `6626795`，三组 ABBA 合计缩短 Dispatch 耗时
+4.804%。这不是当前新一轮的完成项。当前新一轮针对 stage profile 的
+三个方向是：隐藏 flush/CQ 等待、合并或复用 completion 边界、处理跨 rank
+启动偏斜。截至 2026-09-28，新一轮三项均已完成：第一项三组收益方向
+不一致并撤回；第二项三组稳定正向，保留并默认开启；第三项证明共同 host
+截止时刻可消除 Event 指标中的启动偏斜，但 rendezvous 位于计时区间外，
+只保留为诊断工具，不作为生产提速。最终记录见文末。
+下文第一至第三项指上一轮实验；新一轮进度见文末续接记录。
+
 用户授权按顺序实施三个方向，每项独立正确性和三组 30/30 ABBA 验收，
 稳定正向才保留；不要求最低百分比。其他形状与 BF16、2/4/8 rank 做功能
 及适当性能对照，不把典型用例收益泛化成所有路径收益。
@@ -260,3 +269,256 @@ descriptor snapshot 的篡改、旧 generation、异步 event 复制与销毁边
 本地 small-host-transfer、runtime 生命周期、纯 C++ runtime、SIMT VF ABI
 相关回归共 5 项通过；`git diff --check` 通过。前述 HEAD 已存在的旧结构
 检查失败不计为设备验证通过，本轮没有修改该无关测试。
+
+## 2026-09-27 下一阶段：Producer 路径定位
+
+当前普通 Dispatch 的最大单点是 producer 侧。最终代码的 profiler 中，
+`dispatch_kernel<false>` 合计约 1.45 ms，占关键路径设备 kernel 总量的
+约 50%；acquire 约 0.36 ms，metadata 约 0.19 ms，barrier 约 0.07 ms。
+下一阶段先做定位，不做投机性优化。
+
+### 反馈回路与验收
+
+1. 以 8-rank / 8192 tokens / hidden 7168 / top-k 8 / 256 experts 的
+   representative case 为固定 workload，使用现有五操作 profiler 采集
+   8 rank × 11 capture，丢弃首个 capture。
+2. 解析 `dispatch_kernel<false>` 的每次调用：调用次数、顺序、stream、
+   grid/block、耗时分布，并与 producer control/group/prefix/record/release
+   及 epilogue stage 对齐，确认 1.45 ms 是单个 kernel、重复调用还是聚合误差。
+3. 只对可独立开关的候选做同二进制 ABBA；每个候选至少 3 组
+   30 warmups / 30 iterations，mean 方向一致才保留。正确性门禁包含
+   2/4/8 rank 功能、metadata oracle、接收区复用和 snapshot 边界。
+4. 不得删除跨代 consumed barrier；不得为了 profiling 或性能改变逻辑字节、
+   rank 聚合或计时公式。
+
+### 候选优先级
+
+1. **Producer record/release 遍历合并**：检查 grouping、record 构造和
+   release 命令生成是否重复扫描 token/top-k；若存在可合并的重复遍历，
+   先量化扫描次数和内存访问量，再实现。
+2. **边界与状态更新下沉**：检查 producer kernel 中的 expert 归属计算、
+   capacity 校验、workspace 状态写和 command queue 更新是否被重复执行；
+   只下沉到正确边界，不能把错误检查延迟到数据被覆盖之后。
+3. **命令生成与 payload 服务边界**：区分记录扫描、命令 materialization
+   和实际 URMA service。第三项 overlap 已证明服务可与 epilogue 并发约
+   0.95 ms，但简单双 stream 端到端不稳定；后续只考虑事件/队列复用或
+   细粒度 source-ready，不重启同一候选。
+4. **acquire/barrier 成本**：二者是必要同步边界，只研究降低实现成本或
+   与已有边界合并，不通过移除等待换性能。
+
+若 producer 拆解后没有可稳定复现的通用收益，再评估 cached/expanded
+Dispatch 的独立路径；不把普通 Dispatch 的结论外推到其他操作。以下数据
+仅作为下一轮诊断输入，不作为新优化收益。
+
+### 首次拆解结果
+
+重新分析最终代码的关闭 overlap trace（8 rank × 11 capture，共 88 个
+rank/capture）后，此前“`dispatch_kernel` 合计 1.45 ms”不是单个 producer
+kernel，而是同一符号在多个 stage 的 service wrapper 聚合。按 stage 顺序：
+
+| Stage | kernel / wrapper | mean µs | p50 µs |
+| ---: | --- | ---: | ---: |
+| 7 | producer release 前的 service wrapper | 166.26 | 165.88 |
+| 8 | producer release | 169.28 | 167.51 |
+| 9 | release 后完整 payload/control service | 942.54 | 942.31 |
+| 11 | acquire | 314.64 | 179.71 |
+| 17 | parallel prefix | 233.06 | 235.00 |
+| 20 | fused metadata | 188.88 | 188.87 |
+| 24 | hidden vector copy | 317.03 | 316.86 |
+| 27 | consumed barrier | 71.60 | 71.94 |
+
+同符号还有多次 1–4 µs 的轻量 wrapper。rank0 单个 capture 的完整顺序显示：
+producer record 119.43 µs、release 169.28 µs、随后 stage 9 service
+935.01 µs；acquire 在该 capture 中 340.11 µs。因此下一阶段的第一优先级
+修正为 stage 9 的 command/service 拆分，而不是泛称 producer kernel。
+
+初步假设（待用独立开关验证）：
+
+1. stage 9 同时执行 payload 写、control/barrier command 和 transport
+   service，942 µs 中至少一部分可与本地 epilogue 并发；但第三项已证明
+   简单双 stream 端到端不稳定，需要先拆出 command 数量与各类命令耗时。
+2. stage 7 与 stage 8 分别执行 service wrapper 和 release，二者相邻且合计
+   约 336 µs，可能存在重复状态 reset/queue flush；若 command queue 可复用或
+   可合并 flush，才有优化空间。
+3. hidden vector copy 317 µs 与 fused metadata 189 µs 是接收侧最大计算段；
+   除非重新设计 copy lane，否则它们与通信 service 的 overlap 是主要方向。
+4. acquire p50 179.71 µs、max 1410.57 µs，均值受慢 rank 拖动，说明跨 rank
+   到达不均是重要长尾来源；先做 rank 粒度到达分布，再决定是否做
+   source-ready 细粒度处理。
+
+下一步先给 stage 9 增加可选 profile 拆分，区分 payload/control/barrier 与
+实际 transport service；同时统计每 rank 的 acquire 等待区间和接收 source
+数量。该诊断必须能用现有 trace 复现，并在功能测试中不改变默认行为。
+
+### Stage profile 复测
+
+使用最终保留二进制（SHA256 `740d7e...bdac10`）在 NPU8P 设备 0–7 运行
+`bench_ep --profile-stages`，任务
+`task_20260927_185539_15248406634` 正常完成。该运行是诊断采样，不代表
+正式 Event 性能。Dispatch max-rank Event 为 4.104 ms；主要 stage：
+
+| Stage | max-rank span |
+| --- | ---: |
+| producer record | 0.172 ms |
+| release payload | 0.917 ms |
+| release control | 0.283 ms |
+| release barrier | 0.045 ms |
+| epilogue copy | 0.320 ms |
+| consumed barrier | 0.072 ms |
+
+Service 内部归因（按 1 GHz cycle 近似为 µs）：
+
+| 指标 | 值 |
+| --- | ---: |
+| payload command cycles | 0.072 ms |
+| control command cycles | 0.205 ms |
+| flush command cycles | 0.891 ms |
+| CQ drain/wait cycles | 0.803 ms |
+| barrier command cycles | 0.253 ms |
+| service active cycles | 1.481 ms |
+
+这说明 0.917 ms 的 release payload 不是“生成 payload 命令”慢，而是
+Flush/CQ completion 等待占主导。生产 payload 命令本身只有约 72 µs。
+因此下一轮优化不应泛化成“减少 producer 计算”，而应聚焦：
+
+1. 减少 flush/CQ 等待的暴露时间，特别是与本地 epilogue 的 overlap；
+2. 合并或复用必要的 completion 边界，避免重复 drain；
+3. 处理跨 rank 启动偏斜。该 stage-profile run 中 rank 7 的 host entry
+   比多数 rank 早约 1.1–1.9 ms，device envelope 达 4.65 ms；其他 rank
+   多为 2.8–3.1 ms。这个偏斜是测量/启动同步问题，不能直接算作 kernel
+   计算差异。
+
+## 2026-09-27 20:30 会话续接：新一轮 overlap/事件复用正确性门禁
+
+从 provider `mycodex` 的会话 `01a0a2a5-e655-7413-bbf0-6a8dcd1780f6`
+恢复实验进度。会话已完成 v10 一次性事件对照，随后尝试缓存事件、reset
+和 `aclrtCreateEventExWithFlag`；最后停在 v14 构建完成、未跑设备回归。
+本节数据是正确性验证，不是性能 ABBA，不能用来计算优化收益。
+
+### 本轮结果
+
+| 候选/检查 | 结果 |
+| --- | --- |
+| v14：Ex 缓存事件、不 reset，普通复用 | 失败：首次准备阶段 normal/cached payload 不一致，rank 0 有 6873/7040 个元素不匹配 |
+| v10：一次性事件，2-rank BF16 小输入 | 通过五操作校验 |
+| v10：4-rank FP8 hidden 7184 尾部 | 通过五操作校验 |
+| v10：8-rank 8192/7168/top-k 8/256 experts | 通过五操作校验 |
+| v10：2-rank 1024 experts | 通过五操作校验 |
+| v10：metadata oracle | 120 项通过 |
+| v10：snapshot 边界 | 两 rank 通过 |
+| v10：首次 overlap 开启、混合 stream 复用 | 失败：combine 输出 2040/4096 个元素不匹配 |
+| v10：随后 overlap 关闭/开启各一次混合复用 | 均通过，每次两 rank 各 20 次 |
+| v10：再做三组关闭/开启配对混合复用 | 六次均通过，每次两 rank 各 20 次 |
+
+后续通过没有消除首次失败，不能将 v10 标记为正确性验收通过，也不能
+将混合 stream 故障直接归因于缓存事件：v10 使用一次性事件。当前还没有
+确定首次 combine 输出错误的根因，不以一次开关对照证明因果。
+另发现首次混合 stream 检查与误以无设备任务提交的 metadata oracle 有时间
+重叠，因此该次失败还有实验隔离方面的干扰因素，不能据此认定 overlap
+引入了 combine 错误。后续三组配对为独占设备运行。
+因此本轮未启动性能 ABBA，未启用第三项为默认路径。
+
+v10 二进制 SHA256：
+`308abf8194f2d9909edccfd747019e0a385f42308a65823d72dd7c1054f48e32`。
+v14 二进制 SHA256：
+`a9cb0debd9fb47bb6a00c86ea49d7543619e516c9faa335dd96852faa8030f40`。
+这些是已有实验快照，不是本轮本地接口修复后的构建产物。
+
+设备任务：v14 `task_20260927_202309_205802018673`；v10 多形状
+`task_20260927_202401_206044714448`；首次混合复用
+`task_20260927_202520_206754632041`；关闭对照及 snapshot
+`task_20260927_202602_207096027219`；开启复测
+`task_20260927_202703_20742176472`；三组配对
+`task_20260927_202748_207630411375`。metadata oracle 首次误以无设备任务
+`task_20260927_202532_206871023051` 提交；检查脚本确认它实际使用 NPU，
+因此该次结果不作为隔离验证依据，另按设备队列独占 device 0 复测。
+独占复测任务 `task_20260927_203111_208682428668` 的 120 项全部通过。
+
+原始 JSON 和日志（含失败）已取回
+`.scratch/dispatch-3tb/handoff-20260927/results/dispatch-3tb/`，归档为同目录上层
+`device-results.tgz`。远端任务已结束，测试安装的扩展已由脚本恢复。
+
+### 修复候选事件 API 对已有 host 回归的影响
+
+续接时 `create_event_ex` 被插入 `StreamEventApi` 聚合字段中间，并被普通
+`valid_api` 强制要求，导致原有 callback table 初始化无法编译。
+将该可选回调移到末尾，普通事件路径继续接受旧表；只有显式创建 Ex
+事件时校验该回调。新增回归覆盖缺少扩展回调、设备不匹配、后端失败、
+空句柄和成功创建/销毁。普通事件测试仍使用原有 callback table。
+
+异步事件（testing=0/1）、runtime 生命周期、纯 C++ runtime 和小传输回归
+通过。扩大检查时还遇到已有测试夹具缺失 `pybind11/pytypes.h`，以及
+combine 源码结构检查寻找已拆走符号的失败；这些不计为通过。
+本地修复尚未设备重建，不将已有 v10/v14 的设备结果归给它。
+
+下一步应先定位 mixed-stream 首次 combine 错误的跨操作数据所有权边界，
+保留全部失败记录；不能仅因后续复跑通过便进入“稳定性能收益”的结论。
+
+## 2026-09-28 新一轮三项结论
+
+本轮固定 8-rank / 8192 tokens / hidden 7168 / top-k 8 / 256 experts，
+每项使用同二进制三组 30 warmups / 30 iterations ABBA。mean 三组方向一致
+才保留。所有百分比均由每组两次 A 与两次 B 的 60 个 max-rank Event 样本
+计算，不与其他时段采样拼接。
+
+### 1. 隐藏 flush/CQ 暴露时间：撤回
+
+receiver overlap 使用独立 service stream，把 producer release 后的 transport
+service 与本地 epilogue 并发；可复用 CANN timeline event 的普通与混合
+stream 接收区复用各 20 次通过，snapshot、2/4/8-rank 和 1024 experts
+边界通过。产物 `receiver-v15` SHA256：
+`8c598e5cb86f8028a27b1a42bd89824f4cc32e31ac845291ff3e47825d3849d4`。
+
+三组 Dispatch mean 收益分别为 -7.112%、+1.155%、+5.954%，合并仅
++0.117%。方向不一致，按门槛撤回双 stream、event cache 和扩展 event API；
+不能因设备 trace 中存在并发就宣称端到端提速。ABBA 任务
+`task_20260927_204021_231693827352`。
+
+### 2. 融合 completion 边界：保留并默认开启
+
+`DEEP_EP_ASCEND_DISPATCH_FUSED_CONSUMED_BARRIER=0/1` 把原独立
+consumed-barrier kernel 合入 epilogue-complete kernel。融合路径仍执行
+diagnostic/scratch 检查、queue reset、dispatch generation 发布、barrier
+generation 发布、system fence、world barrier 和 service execute；没有删除
+跨代接收区保护。只在多 rank 普通非 cached、非 expanded、非 hybrid、
+非 stream、非 pipeline、非 CPU-sync、非 stage-profile 路径生效，未设置时
+默认开启。
+
+v18 三组结果：
+
+| ABBA 组 | A 关闭 ms | B 开启 ms | 耗时缩短 |
+| --- | ---: | ---: | ---: |
+| 1 | 3.938236 | 3.831452 | 2.711% |
+| 2 | 3.937021 | 3.829758 | 2.724% |
+| 3 | 3.933472 | 3.873716 | 1.519% |
+| 合并 | 3.936243 | 3.844975 | 2.319% |
+
+合并 logical bandwidth 1978.051→2025.004 GB/s，p50 改善 2.456%，p95
+改善 3.219%。ABBA 任务 `task_20260928_012617_351864118233`；v18 产物
+SHA256 `883b98bd13b1e89d6afe348a4d5b7f2bacf7da0e1dbcbc7336ac2949c782c3fc`。
+普通/混合接收区复用、snapshot、2-rank BF16、4-rank FP8 hidden 7184
+尾部、8-rank 典型输入和 2-rank 1024 experts 全部通过。
+
+清除第一项代码后的最终源码由任务 `task_20260928_014621_362429426534`
+构建成功，产物 SHA256：
+`033b1ffb40a71a05348e0438194debf5eaddbe58aeb127e3b90005d748b15fdc`。
+最终设备任务 `task_20260928_014711_363254718627` 在默认开启状态重复通过
+上述正确性边界。最终一次 30/30 确认采样 Dispatch 为 3.576366 ms、
+2177.095 GB/s；这是单次状态确认，稳定收益依据仍是三组 ABBA。当前仍未
+达到 3 TB/s。
+
+### 3. 处理跨 rank 启动偏斜：诊断完成，不并入生产
+
+正式 benchmark 参数 `--rank-launch-deadline-us 2000` 在每个 NPU Event
+start 前用 all-reduce 取得共同 host 时钟上界，再等待到未来 2 ms 的共同截止时刻。
+rendezvous 与等待均位于 Event 区间外，操作、逻辑字节、rank 聚合和计时
+公式不变。第二项固定开启时，三组 Dispatch Event mean 分别改善 7.763%、
+13.122%、16.476%，合并 3.730373→3.260960 ms（12.584%）；任务
+`task_20260928_013529_357153030449`。
+
+该结果证明当前 Event 数字显著受 host launch skew 影响，也说明单次 3.576 ms
+不能完全归因于设备 kernel。但方案把同步成本移到计时外，应用端总延迟没有
+得到同等改善，不能计为生产性能收益，也不用于声称达到 3 TB/s。该能力已
+进入受版本管理的 benchmark，默认关闭，并将值写入 `timing_protocol`；原始
+wrapper 仍随实验归档保留。生产源码不包含 host collective、busy-wait 或
+额外入口 barrier。
