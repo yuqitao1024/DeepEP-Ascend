@@ -1665,3 +1665,41 @@ ABBA（30 warmup / 30 iterations，0/1 各 3 次）：
 4. 早期手动实验的约 0.3-0.5 ms mean 收益未被 controlled ABBA 复现；
 5. 保留 `DEEP_EP_ASCEND_POLLING_NOP=1` 作为旧 driver 或归因对照，不作为
    性能优化推荐。
+
+### 2026-09-28 weight-boundary consumer metadata visibility fix
+
+独立定位继续沿最小闭环推进：不改 producer 协议、record layout、flush 或
+completion barrier，只把 Normal Dispatch epilogue metadata 的接收 record
+读取改为非缓存可观察读。`direct_dispatch_epilogue_metadata_vf` 中
+`record_metadata[0:2]`、每个 `record_topk[lane]`，以及每个 BF16
+`record_weights[lane]`（以 `uint32_t` 位形读取后还原为 `float`）改用
+`transport::simt::load_observed`。该候选不覆盖 Expanded/Cached 的 vector
+payload 路径，也不改变 D3/D4 的 profile 或 tile 行为。
+
+构建与验证：
+
+- NPU8P-ALT，devices 0-7，CANN/HCOMM 9.3.0，Python 3.10；
+- 使用独立 `build/B`，`DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS=OFF`；
+- 候选 `_C` SHA256
+  `232e1a1cd48f8d4242d6fe91c13e5b611097d1a8663b5354e0e3f8aef669bb5b`；
+- `DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES=512`；
+- task `task_20260928_183218_301898829566`。
+
+Correctness matrix：
+
+| Workload | Repeats | Valid JSON results | Result |
+| --- | ---: | ---: | --- |
+| 8 rank / 17 tokens / hidden 4865 / BF16 / top-k 2 / 16 experts / masked 0.5 | 8 | 8 | 8 passed, 0 failed |
+| 8 rank / 32 tokens / hidden 128 / BF16 / top-k 2 / 16 experts / masked 0.5 | 5 | 5 | 5 passed, 0 failed |
+| 8 rank / 4096 tokens / hidden 7168 / BF16 / top-k 2 / 16 experts / masked 0.5 | 3 | 3 | 3 passed, 0 failed |
+
+hidden 128 的第 1/4 次在 benchmark 写出完整 JSON 并报告 1 case passed 后，
+退出阶段出现既有 rank SIGSEGV；对应 JSON 均可解析且为
+`passed=1/failed=0`。这不是 weight/assert 失败，沿用本文档既定的 teardown
+核验规则。远端源码和 `_C` 在任务 trap 后恢复，恢复 SHA 为
+`d08352909619bc12e95ec2fc2d03ff4dfaef78ccb7b5b08dfae7350593bd1cad`。
+
+结论：该最小 consumer-side visibility 修复在已知复现和两个补充边界上通过，
+可以作为独立 correctness fix 保留；不声称 producer-side ordering 已被
+排除，后续如再次出现非零错误值或 index/metadata 异常，再按 producer
+visibility/ordering 分支继续定位。
