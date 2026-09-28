@@ -1309,6 +1309,20 @@ public:
         release_attribution["launch_gap_cycles"] = attribution.launch_gap_cycles;
         release_attribution["other_active_cycles"] = attribution.other_active_cycles;
         raw_service["release_attribution"] = release_attribution;
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+        pybind11::dict release_phase_cycles;
+        release_phase_cycles["payload_construct"] =
+            profile.release_payload_construct_cycles;
+        release_phase_cycles["payload_flush"] =
+            profile.release_payload_flush_cycles;
+        release_phase_cycles["local_control"] =
+            profile.release_local_control_cycles;
+        release_phase_cycles["peer_control"] =
+            profile.release_peer_control_cycles;
+        release_phase_cycles["barrier_flush"] =
+            profile.release_barrier_flush_cycles;
+        raw_service["release_phase_cycles"] = release_phase_cycles;
+#endif
         pybind11::dict barrier_diagnostics;
         barrier_diagnostics["issue_cycles"] = profile.barrier_issue_cycles;
         barrier_diagnostics["drain_cycles"] = profile.barrier_drain_cycles;

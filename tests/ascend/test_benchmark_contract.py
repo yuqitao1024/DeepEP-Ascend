@@ -1693,6 +1693,29 @@ def test_stage_profile_aggregates_epilogue_copy_attribution():
         "vector_tile_count": 1,
         "aggregation": "max_per_rank_for_cycles_and_work",
     }
+
+
+def test_stage_profile_aggregates_release_phase_cycles():
+    profiles = [_literal_stage_profile(0), _literal_stage_profile(1)]
+    for rank, profile in enumerate(profiles):
+        profile["service"]["release_phase_cycles"] = {
+            "payload_construct": 20 + rank,
+            "payload_flush": 70,
+            "local_control": 3,
+            "peer_control": 15 + rank * 4,
+            "barrier_flush": 40,
+        }
+    aggregated = _aggregate_stage_profiles("dispatch", profiles)
+    assert aggregated["release_phase_cycles"] == {
+        "payload_construct": 21,
+        "payload_flush": 70,
+        "local_control": 3,
+        "peer_control": 19,
+        "barrier_flush": 40,
+        "aggregation": "max_per_rank_not_additive",
+    }
+
+
 def test_stage_profile_rank_aggregation_reports_barrier_diagnostics():
     profiles = [_literal_stage_profile(0), _literal_stage_profile(1)]
     for rank, profile in enumerate(profiles):

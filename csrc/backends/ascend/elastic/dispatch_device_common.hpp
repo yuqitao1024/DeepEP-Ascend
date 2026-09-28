@@ -1010,6 +1010,10 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
     auto* control_slots = reinterpret_cast<__gm__ DispatchControlSlot*>(
         transport_local_window_base + dispatch_control_offset);
     if (release_payload) {
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+        const std::uint64_t release_payload_construct_start =
+            release_profile != nullptr ? __asc_simt_vf::clock() : 0;
+#endif
         for (int destination_rank = 0;
              destination_rank < transport_world_size; ++destination_rank) {
             const std::uint64_t total_count =
@@ -1069,6 +1073,16 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
                     token_stride_bytes);
             }
         }
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+        if (release_profile != nullptr) {
+            release_profile->release_payload_construct_cycles =
+                __asc_simt_vf::clock() - release_payload_construct_start;
+        }
+#endif
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+        const std::uint64_t release_payload_flush_start =
+            release_profile != nullptr ? __asc_simt_vf::clock() : 0;
+#endif
         if (pipeline_slot == nullptr) {
             release_protocol::flush_payload(transport);
         } else {
@@ -1077,9 +1091,19 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
                 transport::CooperationScope::kDevice,
                 &pipeline_slot->request);
         }
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+        if (release_profile != nullptr) {
+            release_profile->release_payload_flush_cycles =
+                __asc_simt_vf::clock() - release_payload_flush_start;
+        }
+#endif
     }
     if (release_payload && pipeline_final_chunk == 0)
         return;
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+    const std::uint64_t release_local_control_start =
+        release_profile != nullptr ? __asc_simt_vf::clock() : 0;
+#endif
     if (release_control && !release_all) {
         transport.store_release(
             reinterpret_cast<transport::DeviceAddress>(
@@ -1090,6 +1114,16 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
                 &control_slots[transport_world_rank].generation),
             generation);
     }
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+    if (release_profile != nullptr) {
+        release_profile->release_local_control_cycles =
+            __asc_simt_vf::clock() - release_local_control_start;
+    }
+#endif
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+    const std::uint64_t release_peer_control_start =
+        release_profile != nullptr ? __asc_simt_vf::clock() : 0;
+#endif
     if (release_control) {
         for (int destination_rank = 0;
              destination_rank < transport_world_size; ++destination_rank) {
@@ -1128,6 +1162,16 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
 #endif
         }
     }
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+    if (release_profile != nullptr) {
+        release_profile->release_peer_control_cycles =
+            __asc_simt_vf::clock() - release_peer_control_start;
+    }
+#endif
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+    const std::uint64_t release_barrier_flush_start =
+        release_profile != nullptr ? __asc_simt_vf::clock() : 0;
+#endif
     if (release_barrier) {
         if (DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY) {
             // Complete the generation's ordered count/generation/signal WQEs
@@ -1143,6 +1187,12 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
                 timeout_cycles);
         }
     }
+#if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
+    if (release_profile != nullptr) {
+        release_profile->release_barrier_flush_cycles =
+            __asc_simt_vf::clock() - release_barrier_flush_start;
+    }
+#endif
 }
 
 #define DEEP_EP_ASCEND_DISPATCH_RELEASE_ARGUMENTS \

@@ -1242,6 +1242,11 @@ __aicore__ inline void begin_profile(const DeviceTransportContext& context, Tran
     profile->validate_vf_end_cycles = 0;
     profile->acquire_peer_count = 0;
     profile->release_peer_publish_count = 0;
+    profile->release_payload_construct_cycles = 0;
+    profile->release_payload_flush_cycles = 0;
+    profile->release_local_control_cycles = 0;
+    profile->release_peer_control_cycles = 0;
+    profile->release_barrier_flush_cycles = 0;
 #endif
     aicore::system_fence();
     aicore::flush_stage_profile_header(profile);

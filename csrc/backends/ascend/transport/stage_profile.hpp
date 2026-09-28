@@ -16,7 +16,7 @@ namespace deep_ep::ascend::transport {
 #define DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP 0
 #endif
 
-inline constexpr std::uint32_t kTransportStageProfileAbiVersion = 6;
+inline constexpr std::uint32_t kTransportStageProfileAbiVersion = 7;
 inline constexpr std::uint32_t kTransportProfileStageCount = 16;
 inline constexpr std::uint32_t kTransportProfileMaxBlocks = 72;
 inline constexpr std::uint32_t kTransportProfileBarrierPhaseCount = 2;
@@ -158,6 +158,13 @@ struct alignas(64) TransportStageProfile {
         kTransportProfileMaxBlocks]{};
     TransportEpilogueVectorBlockProfile epilogue_vector_blocks[
         kTransportProfileMaxBlocks]{};
+    // Release VF phase intervals are diagnostic-only and are measured by the
+    // producer release SIMT VF. They do not alter command publication order.
+    std::uint64_t release_payload_construct_cycles = 0;
+    std::uint64_t release_payload_flush_cycles = 0;
+    std::uint64_t release_local_control_cycles = 0;
+    std::uint64_t release_peer_control_cycles = 0;
+    std::uint64_t release_barrier_flush_cycles = 0;
 };
 
 struct TransportQueueDepthSnapshot {

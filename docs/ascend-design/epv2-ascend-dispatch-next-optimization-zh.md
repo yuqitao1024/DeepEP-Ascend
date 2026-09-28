@@ -414,6 +414,63 @@ D3 本轮完成 service 归因及一个有重复收益的优化；release VF 内
 命令构造、逐 peer 发布细分仍待补齐。分批 payload 和 control/completion
 重叠尚未实施，后续仍须按 two-generation reuse 和错误注入要求验证。
 
+#### D3.3 release VF 分段 profile（2026-09-28）
+
+本轮先做 measurement-only，不改命令顺序、不改协议、不加性能开关。
+`TransportStageProfile` ABI 从 6 升至 7，在结构尾部新增 release VF 的
+五个分段字段：
+
+| 字段 | 覆盖范围 |
+| --- | --- |
+| `release_payload_construct_cycles` | payload put command 构造与追加 |
+| `release_payload_flush_cycles` | 显式 payload flush command 追加 |
+| `release_local_control_cycles` | 本地 count/generation store |
+| `release_peer_control_cycles` | 逐 peer count/generation/signal command 构造与追加 |
+| `release_barrier_flush_cycles` | release barrier/flush 边界 |
+
+host 将其导出为 `service.release_phase_cycles`；benchmark 聚合使用
+每 rank max，明确标记为不可跨 rank 相加。默认构建下诊断宏关闭，字段
+不读 clock、不导出 JSON。本地 benchmark contract、transport contract
+和 `git diff --check` 通过。
+
+诊断构建任务 `task_20260928_163738_197374516389`：
+NPU8P、CANN 9.3.0、同树 HCOMM，`ACQUIRE_DIAGNOSTICS=ON`，二进制 SHA256
+`876563db202efea09250deb568efff14e3745ee7b05e9cb8cf7b120b0e026270`。
+8-rank profile 任务 `task_20260928_163832_20123116791` 使用设备 0–7、
+8192 tokens / hidden 7168 / top-k 8 / experts 256 / FP8 / num_sms 64，
+2 warmups / 2 iterations。完整 JSON 和 correctness 通过；结果写出后
+rank 1 发生已知 teardown SIGSEGV，因此任务 exit=1。原始结果归档于
+远端 `.scratch/release-phase-profile/results/release-phase-profile-20260928-r1.json`；
+本地副本已同步到同路径，JSON SHA256
+`a683b9d24aff7f55374df731272be0f72c192830371c95a53b2b01b43113fc86`。
+
+Normal Dispatch 的每 rank 分段非常稳定：
+
+| rank | payload construct | payload flush | local control | peer control | barrier flush |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 105,278 | 6,723 | 66 | 80 | 6,488 |
+| 1 | 105,224 | 6,402 | 66 | 80 | 6,768 |
+| 2 | 108,470 | 7,045 | 66 | 80 | 6,885 |
+| 3 | 109,444 | 6,954 | 66 | 80 | 7,236 |
+| 4 | 103,776 | 6,323 | 66 | 80 | 6,727 |
+| 5 | 105,688 | 6,705 | 66 | 80 | 6,307 |
+| 6 | 105,652 | 6,391 | 66 | 80 | 6,296 |
+| 7 | 103,982 | 6,194 | 66 | 80 | 6,441 |
+
+这澄清了一个关键口径：control command 在 payload flush 之后已经在
+command queue 中完成“构造/追加”，本地 control 仅 66 cycles，全部远端
+peer 的 control command 构造合计也仅 80 cycles。既有的
+`control_command_cycles` 约 180k–203k，指的是 transport service 在 payload
+flush 后执行 put_value/signal WQE 的时间，不是 release VF 构造 command
+的时间。因此“在 payload completion 等待期间准备 control command”这个
+字面方案没有可隐藏空间，不能作为候选继续实现。
+
+剩余可探索点是把 WQE 构造与 SQ 写入从 service 执行期前移到 flush 等待
+期间，但这是另一层协议候选：它必须在 payload completion 成功后再
+发布 SQ head/doorbell，且仍要过 two-generation reuse、错误注入、
+payload-before-control 顺序和 8-rank 无 profile ABBA。D3.3 本身只保留
+profile，不保留任何协议优化。
+
 ### D4. D8 epilogue copy 优化
 
 优先级：P1。
@@ -719,6 +776,42 @@ worktree 的源码抽取/签名迁移分歧；本节只以两个目标契约测�
 `79717520a449efa86ab9f3534c15633dfde77e2e81ba57512d4279a87fb2e1e3`。第 2 组
 8-rank 重复 ABBA 已在用户决策后取消，未执行；本节候选代码已按默认路径
 保留。
+
+##### 保留后 8-rank canonical profile 与 arrival-driven 结论（2026-09-28）
+
+使用 D3.3 的诊断二进制（包含 8192 selector 与 release VF 分段字段）在
+NPU8P device 0–7 完成一次典型 case profile。workload 为 8192 tokens、
+hidden 7168、top-k 8、256 experts、FP8、num_sms 64，30 warmups /
+30 iterations、`--profile-stages`。任务
+`task_20260928_165313_26458195307` 完整写出 JSON，五操作 correctness
+通过；结果后 rank 7 发生已知 teardown SIGSEGV，任务 exit=1。结果归档于
+远端和本地
+`.scratch/epilogue-profile/results/epilogue-8192-canonical-profile-20260928-r1.json`，
+JSON SHA256
+`77694149080e86078f434aa1e8f4d548d1a7e7f171a0fc497c1ef9b0697dc496`。
+
+开启 profile 的 device event 均值为：Normal Dispatch 4.327 ms、
+Expanded Dispatch 14.088 ms、Cached Dispatch 62.491 ms。该值只用于归因，
+不与无 profile 的 8-rank ABBA 或 3TB 正式口径混算。
+
+| Operation | vector records | tiles/record | MTE2 wait max | reuse wait max | lookup max | local copy max | remote copy max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Normal Dispatch | 43,579 | 1 | 212,330 | 1,400 | 41,228 | 35,077 | 222,025 |
+| Expanded Dispatch | 65,987 | 1 | 691 | 710 | 321,790 | 84,446 | 520,209 |
+| Cached Dispatch | 43,579 | 1 | 212,107 | 1,531 | 41,060 | 35,489 | 221,581 |
+
+Expanded 的 vector 等待已经接近零，arrival-driven copy 对其没有可消除的
+稳定空洞。Normal/Cached 仍有约 212k 的 MTE2 wait，但该字段位于
+`WaitFlag<MTE2_MTE3>`，表示 GM→UB copy 完成等待，不能直接解释为 payload
+到达等待。同一 rank 的 acquire peer ready 最大值与 MTE2 wait 没有稳定
+对应关系；例如 Normal rank 1 的 acquire max 仅 29,904 cycles，仍有
+211,860 cycles MTE2 wait。当前证据更支持 MTE2/带宽流水瓶颈或 profile
+计时方式，而不是按 source 提前发布能够隐藏的 arrival gap。
+
+结论：关闭 arrival-driven copy 方向，不进入实现。8192 selector 和双缓冲
+保持现状。若后续要继续压缩 Normal/Cached 的 epilogue copy，应优先研究
+更深的 MTE 双缓冲/批量提交或 profile 中逐 tile 的 MTE2 wait 分布；
+这需要新的 measurement-only 插桩，不能沿用本节聚合字段直接推导。
 
 ```bash
 python -m torch.distributed.run --standalone --nproc-per-node=8 \
