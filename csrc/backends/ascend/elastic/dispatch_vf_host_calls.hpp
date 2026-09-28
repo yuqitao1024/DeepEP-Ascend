@@ -862,6 +862,7 @@ inline int launch_direct_dispatch_producer_release_variant_1(
         arguments.generation,
         arguments.timeout_cycles,
         tiling.symmetric_window_layout.dispatch_control_offset,
+        tiling.symmetric_window_layout.reserve_offset,
         tiling.symmetric_window_layout.dispatch_receive_offset,
         tiling.symmetric_window_layout.dispatch_receive_shard_bytes,
         tiling.symmetric_window_layout.dispatch_staging_offset,

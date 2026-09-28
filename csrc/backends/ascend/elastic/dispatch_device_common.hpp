@@ -873,6 +873,7 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
     std::uintptr_t transport_backend_context,
     std::uint64_t generation, std::uint64_t timeout_cycles,
     std::uint64_t dispatch_control_offset,
+    std::uint64_t dispatch_control_source_offset,
     std::uint64_t dispatch_receive_offset,
     std::uint64_t dispatch_receive_shard_bytes,
     std::uint64_t dispatch_staging_offset,
@@ -1144,9 +1145,22 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
                 transport_local_window_base + dispatch_control_offset +
                 static_cast<std::uint64_t>(transport_world_rank) *
                     sizeof(DispatchControlSlot));
-            release_protocol::publish_control_and_release(
-                transport, route, remote_slot + sizeof(std::uint64_t), count,
-                remote_slot, generation,
+            // Reserve has two 16-byte source slots per destination, selected by
+            // generation parity.  Peer slots prevent publication for the next
+            // destination from overwriting a pending WQE's source.  Generation
+            // slots additionally prevent the next dispatch invocation from
+            // reusing a source before the previous generation's WQE completes.
+            const auto staged_control = static_cast<
+                transport::DeviceAddress>(
+                    transport_local_window_base +
+                    dispatch_control_source_offset +
+                    ((generation & 1ULL) * transport_world_size +
+                     static_cast<std::uint64_t>(destination_rank)) *
+                        sizeof(DispatchControlSlot));
+            release_protocol::publish_control_slot_and_release(
+                transport, route, remote_slot,
+                staged_control,
+                generation, count,
                 transport::sync_layout::kDispatchReleaseSignalIndex);
 #if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
             if (release_profile != nullptr &&
@@ -1206,7 +1220,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
     transport_scale_out_size, transport_scale_up_direct, \
     transport_topology_kind, transport_topology_epoch, \
     transport_backend_context, generation, timeout_cycles, \
-    dispatch_control_offset, dispatch_receive_offset, \
+    dispatch_control_offset, dispatch_control_source_offset, \
+    dispatch_receive_offset, \
     dispatch_receive_shard_bytes, dispatch_staging_offset, \
     dispatch_staging_shard_bytes, workspace_status_offset, \
     workspace_local_count_offset, workspace_rank_counts_offset, \

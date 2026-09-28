@@ -1622,6 +1622,34 @@ def test_stage_profile_aggregates_optional_cq_drain_attribution():
     }
 
 
+def test_stage_profile_aggregates_optional_send_path_attribution():
+    profiles = [_literal_stage_profile(0), _literal_stage_profile(1)]
+    for rank, profile in enumerate(profiles):
+        profile["service"]["release_attribution"][
+            "send_path_attribution"] = {
+            "post_sq_snapshot_cycles": 11 + rank,
+            "post_queue_check_cycles": 12,
+            "post_sq_copy_cycles": 13 + rank,
+            "post_sq_publish_cycles": 14,
+            "drain_head_tail_load_cycles": 15,
+            "drain_cqe_poll_cycles": 16 + rank,
+            "drain_cqe_status_cycles": 17,
+            "drain_tail_doorbell_cycles": 18,
+        }
+    aggregated = _aggregate_stage_profiles("dispatch", profiles)
+    assert aggregated["send_path_attribution"] == {
+        "post_sq_snapshot_cycles": 12,
+        "post_queue_check_cycles": 12,
+        "post_sq_copy_cycles": 14,
+        "post_sq_publish_cycles": 14,
+        "drain_head_tail_load_cycles": 15,
+        "drain_cqe_poll_cycles": 17,
+        "drain_cqe_status_cycles": 17,
+        "drain_tail_doorbell_cycles": 18,
+        "aggregation": "max_per_rank_not_additive",
+    }
+
+
 def test_stage_profile_aggregates_epilogue_copy_attribution():
     profiles = [_literal_stage_profile(0), _literal_stage_profile(1)]
     for rank, profile in enumerate(profiles):

@@ -56,6 +56,10 @@ DEEP_EP_ASCEND_SIMT_CALLEE void put_value(
     const DeviceTransportContext&, DeviceChannel, TransportTeam, int,
     DeviceAddress, std::uint64_t, std::uint32_t, DeviceOptions) {}
 
+DEEP_EP_ASCEND_SIMT_CALLEE void put_control_slot(
+    const DeviceTransportContext&, DeviceChannel, TransportTeam, int,
+    DeviceAddress, DeviceAddress, DeviceOptions) {}
+
 DEEP_EP_ASCEND_SIMT_CALLEE void remote_add_release(
     const DeviceTransportContext&, DeviceChannel, TransportTeam, int,
     DeviceAddress, std::int64_t) {}

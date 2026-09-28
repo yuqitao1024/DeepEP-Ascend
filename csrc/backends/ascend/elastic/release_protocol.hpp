@@ -102,6 +102,28 @@ DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void publish_control_and_release(
 }
 
 template <typename Transport>
+DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void publish_control_slot_and_release(
+    Transport& facade, const transport::TeamPeer& route,
+    transport::DeviceAddress control_slot_address,
+    transport::DeviceAddress staged_control_address,
+    std::uint64_t generation, std::uint64_t count,
+    std::uint32_t signal_index) {
+    facade.store_release(staged_control_address, generation);
+    facade.store_release(
+        staged_control_address + sizeof(std::uint64_t), count);
+    // A non-inline WQE contains the source address, not the source bytes.  The
+    // transport service may append and execute this command later, so the two
+    // control words must be globally visible before command publication.
+    facade.system_fence();
+    facade.put_control_slot(
+        route.team, route.peer, control_slot_address, staged_control_address,
+        transport::kDefaultOptions);
+    facade.signal(
+        route.team, route.peer,
+        transport::RemoteAction::signal_set(signal_index, generation));
+}
+
+template <typename Transport>
 DEEP_EP_ASCEND_RELEASE_PROTOCOL_CALLEE void publish_local_control(
     Transport& facade, transport::DeviceAddress count_address,
     std::uint64_t count, transport::DeviceAddress generation_address,

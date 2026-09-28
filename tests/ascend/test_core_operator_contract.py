@@ -2697,19 +2697,23 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
     def test_remote_operator_commands_reuse_checked_team_peer(self):
         release = (ELASTIC / "release_protocol.hpp").read_text()
         for source_name, signal_name, barrier_calls in (
-                ("dispatch.asc", "kDispatchReleaseSignalIndex", 4),
-                ("combine.asc", "kCombineReleaseSignalIndex", 3)):
+                ("dispatch_device_common.hpp",
+                 "kDispatchReleaseSignalIndex", 1),
+                ("combine_producer.asc",
+                 "kCombineReleaseSignalIndex", 1)):
             source = (ELASTIC / source_name).read_text()
             self.assertIn("checked_device_team_peer_for_world_rank(", source,
                           source_name)
             self.assertIn("route.team", source + release, source_name)
             self.assertIn("route.peer", source + release, source_name)
-            self.assertIn(
-                "release_protocol::publish_control_and_release(",
-                source, source_name)
-            self.assertIn(
-                "release_protocol::observe_release_control(",
-                source, source_name)
+            if source_name == "dispatch_device_common.hpp":
+                self.assertIn(
+                    "release_protocol::publish_control_slot_and_release(",
+                    source, source_name)
+            else:
+                self.assertIn(
+                    "release_protocol::publish_control_and_release(",
+                    source, source_name)
             self.assertNotIn(
                 "TransportTeam::kScaleUp, destination_rank", source,
                 source_name)
@@ -2717,7 +2721,20 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertEqual(source.count("transport.device_barrier("),
                              barrier_calls,
                              source_name)
-        barrier = (ELASTIC / "barrier.asc").read_text()
+        barrier = (ELASTIC / "barrier_producer.asc").read_text()
+        dispatch_common = (
+            ELASTIC / "dispatch_device_common.hpp").read_text()
+        self.assertIn(
+            "release_protocol::observe_release_control(",
+            (ELASTIC / "direct_dispatch_epilogue_acquire.asc").read_text())
+        self.assertIn("transport.device_barrier(", dispatch_common)
+        self.assertEqual(
+            dispatch_common.count("transport.device_barrier("), 1)
+        for marker in (
+                "checked_device_team_peer_for_world_rank(",
+                "release_protocol::flush_payload(",
+                "transport.device_barrier("):
+            self.assertIn(marker, dispatch_common, marker)
         self.assertEqual(barrier.count("transport.device_barrier("), 1)
         for marker in (
                 "checked_device_team_peer_for_world_rank(", "route.team",
@@ -4078,17 +4095,19 @@ int main() {
     def test_kernels_schedule_transport_through_the_facade(self):
         required = {
             "barrier.asc": ("DeviceTransportFacade", "store_release(",
-                            "device_barrier"),
+                            "DeviceTransportFacade"),
             "dispatch.asc": (
+                "release_protocol.hpp", "dispatch_device_common.hpp",
+                "dispatch_vf_host_calls.hpp"),
+            "direct_dispatch_epilogue_acquire.asc": (
+                "release_protocol::observe_release_control("),
+            "combine_producer.asc": (
                 "DeviceTransportFacade", "put(",
                 "release_protocol::publish_control_and_release(",
-                "release_protocol::observe_release_control(",
                 "device_barrier("),
-            "combine.asc": (
-                "DeviceTransportFacade", "put(",
-                "release_protocol::publish_control_and_release(",
-                "release_protocol::observe_release_control(",
-                "device_barrier("),
+            "combine_epilogue.asc": (
+                "DeviceTransportFacade",
+                "release_protocol::observe_release_control("),
         }
         forbidden = ("nccl", "nvshmem", "cuda", "ain", "hcomm", "hccl",
                      "urma")
@@ -4413,10 +4432,13 @@ int main() {
     def test_direct_release_batches_all_payloads_before_controls(self):
         """Catches per-peer flushes that serialize independent publications."""
         functions = (
-            ("dispatch.asc", "direct_dispatch_producer_release_body",
+            ("dispatch_device_common.hpp",
+             "direct_dispatch_producer_release_body",
              "#define DEEP_EP_ASCEND_DISPATCH_RELEASE_ARGUMENTS"),
-            ("combine.asc", "direct_combine_producer_release_vf",
-             "hybrid_combine_return_vf"),
+            ("direct_combine_producer_release.asc",
+             "direct_combine_producer_release_vf",
+             "__global__ __vector__ void "
+             "direct_combine_producer_release_kernel"),
         )
         for filename, function_name, next_function in functions:
             source = (ELASTIC / filename).read_text()
@@ -4460,10 +4482,11 @@ int main() {
             self.assertLess(control, terminal_flush)
             self.assertLess(terminal_flush, barrier)
 
-        combine = (ELASTIC / "combine.asc").read_text()
+        combine = (ELASTIC / "combine_producer.asc").read_text()
         fallback = combine[
             combine.index("combine_producer_vf"):
-            combine.index("make_hybrid_combine_context")]
+            combine.index("__global__ __vector__ void "
+                          "combine_producer_kernel")]
         flush = fallback.index("release_protocol::flush_payload(transport);")
         second_peer_loop = fallback.index(
             "for (int destination_rank = 0;", flush)

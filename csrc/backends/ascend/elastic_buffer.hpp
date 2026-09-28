@@ -1308,6 +1308,25 @@ public:
         release_attribution["cq_drain_cycles"] = profile.wait_cycles;
         release_attribution["launch_gap_cycles"] = attribution.launch_gap_cycles;
         release_attribution["other_active_cycles"] = attribution.other_active_cycles;
+        pybind11::dict send_path_attribution;
+        send_path_attribution["post_sq_snapshot_cycles"] =
+            profile.post_sq_snapshot_cycles;
+        send_path_attribution["post_queue_check_cycles"] =
+            profile.post_queue_check_cycles;
+        send_path_attribution["post_sq_copy_cycles"] =
+            profile.post_sq_copy_cycles;
+        send_path_attribution["post_sq_publish_cycles"] =
+            profile.post_sq_publish_cycles;
+        send_path_attribution["drain_head_tail_load_cycles"] =
+            profile.drain_head_tail_load_cycles;
+        send_path_attribution["drain_cqe_poll_cycles"] =
+            profile.drain_cqe_poll_cycles;
+        send_path_attribution["drain_cqe_status_cycles"] =
+            profile.drain_cqe_status_cycles;
+        send_path_attribution["drain_tail_doorbell_cycles"] =
+            profile.drain_tail_doorbell_cycles;
+        release_attribution["send_path_attribution"] =
+            send_path_attribution;
         raw_service["release_attribution"] = release_attribution;
 #if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
         pybind11::dict release_phase_cycles;

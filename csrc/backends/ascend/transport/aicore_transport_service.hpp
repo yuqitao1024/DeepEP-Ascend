@@ -231,6 +231,7 @@ __aicore__ inline DeviceTransportError validate_command(const DeviceTransportCon
         return DeviceTransportError::kInvalidChannel;
 
     if (current->opcode == TransportCommandOpcode::kPut || current->opcode == TransportCommandOpcode::kPutValue64 ||
+        current->opcode == TransportCommandOpcode::kPutControlSlot ||
         current->opcode == TransportCommandOpcode::kRemoteAdd64 || current->opcode == TransportCommandOpcode::kSignal) {
         if (!valid_command_route(context, current))
             return DeviceTransportError::kInvalidRank;
@@ -248,6 +249,13 @@ __aicore__ inline DeviceTransportError validate_command(const DeviceTransportCon
             if (current->destination == kNullDeviceAddress)
                 return DeviceTransportError::kInvalidAddress;
             if (current->value_bytes != sizeof(std::uint64_t) || current->options != kDefaultOptions)
+                return DeviceTransportError::kInvalidProtocol;
+            return DeviceTransportError::kNone;
+        case TransportCommandOpcode::kPutControlSlot:
+            if (current->destination == kNullDeviceAddress ||
+                current->source == kNullDeviceAddress)
+                return DeviceTransportError::kInvalidAddress;
+            if (current->value_bytes != 2 * sizeof(std::uint64_t) || current->options != kDefaultOptions)
                 return DeviceTransportError::kInvalidProtocol;
             return DeviceTransportError::kNone;
         case TransportCommandOpcode::kRemoteAdd64:
@@ -580,6 +588,7 @@ __aicore__ inline DeviceTransportError preflight_command_channels(const DeviceTr
     }
 
     if (current->opcode == TransportCommandOpcode::kPut || current->opcode == TransportCommandOpcode::kPutValue64 ||
+        current->opcode == TransportCommandOpcode::kPutControlSlot ||
         current->opcode == TransportCommandOpcode::kRemoteAdd64 || current->opcode == TransportCommandOpcode::kSignal)
         return channel_error(context, static_cast<std::uint32_t>(current->world_peer), current->channel);
     return DeviceTransportError::kNone;
@@ -607,14 +616,36 @@ __aicore__ inline bool drain_channel(const DeviceTransportContext& context,
         if (profile != nullptr)
             wait_start = static_cast<std::uint64_t>(AscendC::GetSystemCycle());
     }
+    std::uint64_t phase_start = 0;
+    if constexpr (ProfileEnabled) {
+        if (profile != nullptr)
+            phase_start = static_cast<std::uint64_t>(
+                AscendC::GetSystemCycle());
+    }
     const auto head_value = aicore::load_device(reinterpret_cast<__gm__ std::uint64_t*>(peer.sq->head));
     const std::uint32_t expected = urma::sq_request_count(head_value);
     std::uint32_t tail = aicore::load_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->tail));
+    if constexpr (ProfileEnabled) {
+        if (profile != nullptr) {
+            profile->drain_head_tail_load_cycles =
+                accumulate_transport_service_counter(
+                    profile->drain_head_tail_load_cycles, phase_start,
+                    static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+            phase_start = static_cast<std::uint64_t>(
+                AscendC::GetSystemCycle());
+        }
+    }
     while (tail != expected) {
         auto* cqe = reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->base +
                                                             static_cast<std::uint64_t>(tail % peer.cq->depth) * peer.cq->entry_bytes);
         std::uint64_t retry = 0;
         std::uint32_t word0 = 0;
+        std::uint64_t cqe_poll_start = 0;
+        if constexpr (ProfileEnabled) {
+            if (profile != nullptr)
+                cqe_poll_start = static_cast<std::uint64_t>(
+                    AscendC::GetSystemCycle());
+        }
         do {
             aicore::poll_nop();
             // Owner and status share one word. Bypass DCache to observe the
@@ -624,6 +655,17 @@ __aicore__ inline bool drain_channel(const DeviceTransportContext& context,
                 break;
             ++retry;
         } while (retry < retry_limit);
+        if constexpr (ProfileEnabled) {
+            if (profile != nullptr) {
+                profile->drain_cqe_poll_cycles =
+                    accumulate_transport_service_counter(
+                        profile->drain_cqe_poll_cycles, cqe_poll_start,
+                        static_cast<std::uint64_t>(
+                            AscendC::GetSystemCycle()));
+                phase_start = static_cast<std::uint64_t>(
+                    AscendC::GetSystemCycle());
+            }
+        }
         if (retry >= retry_limit) {
             auto* output = diagnostic(queue);
             if (output != nullptr) {
@@ -654,10 +696,37 @@ __aicore__ inline bool drain_channel(const DeviceTransportContext& context,
             return false;
         }
         ++tail;
+        if constexpr (ProfileEnabled) {
+            if (profile != nullptr) {
+                profile->drain_cqe_status_cycles =
+                    accumulate_transport_service_counter(
+                        profile->drain_cqe_status_cycles, phase_start,
+                        static_cast<std::uint64_t>(
+                            AscendC::GetSystemCycle()));
+            }
+        }
     }
-    aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->tail), tail);
-    aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->doorbell), tail & 0x00ffffffU);
-    aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->tail), tail);
+    if constexpr (ProfileEnabled) {
+        if (profile != nullptr) {
+            const std::uint64_t tail_start =
+                static_cast<std::uint64_t>(AscendC::GetSystemCycle());
+            aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->tail), tail);
+            aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->doorbell), tail & 0x00ffffffU);
+            aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->tail), tail);
+            profile->drain_tail_doorbell_cycles =
+                accumulate_transport_service_counter(
+                    profile->drain_tail_doorbell_cycles, tail_start,
+                    static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+        } else {
+            aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->tail), tail);
+            aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->doorbell), tail & 0x00ffffffU);
+            aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->tail), tail);
+        }
+    } else {
+        aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->tail), tail);
+        aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->doorbell), tail & 0x00ffffffU);
+        aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->tail), tail);
+    }
     finish_drain_profile<ProfileEnabled>(context, profile, wait_start, reason);
     return true;
 }
@@ -739,6 +808,12 @@ __aicore__ inline bool post_request(const DeviceTransportContext& context,
                                     __gm__ TransportStageProfile* profile,
                                     const AscendC::LocalTensor<std::uint32_t>& wqe_scratch) {
     constexpr std::uint32_t blocks = sizeof(Request) / 64;
+    std::uint64_t phase_start = 0;
+    if constexpr (ProfileEnabled) {
+        if (profile != nullptr)
+            phase_start = static_cast<std::uint64_t>(
+                AscendC::GetSystemCycle());
+    }
     if (peer.channel == nullptr || peer.sq == nullptr || peer.cq == nullptr || peer.sq->entry_bytes != 64 || peer.sq->depth == 0 ||
         peer.sq->head == 0 || peer.sq->tail == 0 || peer.cq->entry_bytes != sizeof(cann_abi::UrmaCqe) || peer.cq->depth == 0 ||
         peer.cq->tail == 0) {
@@ -750,6 +825,16 @@ __aicore__ inline bool post_request(const DeviceTransportContext& context,
     auto request_count = urma::sq_request_count(head_value);
     const auto completed = aicore::load_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->tail));
     update_queue_profile<ProfileEnabled>(context, profile);
+    if constexpr (ProfileEnabled) {
+        if (profile != nullptr) {
+            profile->post_sq_snapshot_cycles =
+                accumulate_transport_service_counter(
+                    profile->post_sq_snapshot_cycles, phase_start,
+                    static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+            phase_start = static_cast<std::uint64_t>(
+                AscendC::GetSystemCycle());
+        }
+    }
     if (request_count - completed + 1 >= peer.cq->depth) {
         if (!drain_channel<ProfileEnabled>(context, queue, peer, command_index, opcode, retry_limit, profile, wqe_scratch,
                                            TransportDrainReason::kQueueFull))
@@ -758,15 +843,43 @@ __aicore__ inline bool post_request(const DeviceTransportContext& context,
         position = urma::sq_position(head_value);
         request_count = urma::sq_request_count(head_value);
     }
+    if constexpr (ProfileEnabled) {
+        if (profile != nullptr) {
+            profile->post_queue_check_cycles =
+                accumulate_transport_service_counter(
+                    profile->post_queue_check_cycles, phase_start,
+                    static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+            phase_start = static_cast<std::uint64_t>(
+                AscendC::GetSystemCycle());
+        }
+    }
     request.sqe.word0 = (request.sqe.word0 & 0x7fff0000U) | (urma::sq_slot(position, peer.sq->depth) & 0xffffU) |
         (urma::owner_for(position, peer.sq->depth) << 31U);
     copy_request(
         reinterpret_cast<__gm__ std::uint8_t*>(peer.sq->base), peer.sq->depth, peer.sq->entry_bytes, position, request, wqe_scratch);
+    if constexpr (ProfileEnabled) {
+        if (profile != nullptr) {
+            profile->post_sq_copy_cycles =
+                accumulate_transport_service_counter(
+                    profile->post_sq_copy_cycles, phase_start,
+                    static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+            phase_start = static_cast<std::uint64_t>(
+                AscendC::GetSystemCycle());
+        }
+    }
     position += blocks;
     ++request_count;
     aicore::store_device(reinterpret_cast<__gm__ std::uint64_t*>(peer.sq->head), urma::pack_sq_head(position, request_count));
     aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->doorbell), position);
     update_queue_profile<ProfileEnabled>(context, profile);
+    if constexpr (ProfileEnabled) {
+        if (profile != nullptr) {
+            profile->post_sq_publish_cycles =
+                accumulate_transport_service_counter(
+                    profile->post_sq_publish_cycles, phase_start,
+                    static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+        }
+    }
     return true;
 }
 
@@ -1541,7 +1654,10 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
         } else {
             auto peer = detail::resolve_context(context, static_cast<std::uint32_t>(current->world_peer), current->channel);
             std::uint64_t remote_address = 0;
-            const std::uint64_t bytes = current->opcode == TransportCommandOpcode::kPut ? current->bytes : sizeof(std::uint64_t);
+            const std::uint64_t bytes =
+                current->opcode == TransportCommandOpcode::kPut ? current->bytes :
+                current->opcode == TransportCommandOpcode::kPutControlSlot ?
+                    2 * sizeof(std::uint64_t) : sizeof(std::uint64_t);
             if (peer.channel == nullptr ||
                 !detail::resolve_remote_target(
                     context, static_cast<std::uint32_t>(current->world_peer), current->destination, bytes, remote_address)) {
@@ -1609,6 +1725,55 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
                         detail::record_transport_command_cycles<ProfileEnabled>(
                             profile, current->opcode, command_start_cycles,
                             static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+                    }
+                }
+            } else if (current->opcode == TransportCommandOpcode::kPutControlSlot) {
+                auto* remote = detail::resolve_buffer(
+                    peer.channel->remote_buffers, peer.channel->remote_buffer_count, remote_address,
+                    2 * sizeof(std::uint64_t));
+                if (remote == nullptr) {
+                    detail::record_error(queue,
+                                         DeviceTransportError::kInvalidAddress,
+                                         index,
+                                         current->opcode,
+                                         current->team,
+                                         current->peer,
+                                         current->world_peer,
+                                         current->channel);
+                    success = false;
+                } else {
+                    const std::uint64_t command_start_cycles =
+                        detail::command_profile_clock<ProfileEnabled>();
+                    auto* local = detail::resolve_buffer(
+                        peer.channel->local_buffers,
+                        peer.channel->local_buffer_count, current->source,
+                        2 * sizeof(std::uint64_t));
+                    if (local == nullptr) {
+                        detail::record_error(queue,
+                                             DeviceTransportError::kInvalidAddress,
+                                             index,
+                                             current->opcode,
+                                             current->team,
+                                             current->peer,
+                                             current->world_peer,
+                                             current->channel);
+                        success = false;
+                    } else {
+                        const auto sq = detail::snapshot_sq(peer.sq);
+                        const auto remote_buffer = detail::snapshot_buffer(remote);
+                        const auto request = urma::make_write(
+                            sq, remote_buffer, 0, remote_address,
+                            current->source, 2 * sizeof(std::uint64_t),
+                            local->token_id);
+                        success = detail::post_request<ProfileEnabled>(
+                            context, queue, peer, request, index,
+                            current->opcode, retry_limit, profile,
+                            wqe_scratch);
+                        if constexpr (ProfileEnabled) {
+                            detail::record_transport_command_cycles<ProfileEnabled>(
+                                profile, current->opcode, command_start_cycles,
+                                static_cast<std::uint64_t>(AscendC::GetSystemCycle()));
+                        }
                     }
                 }
             } else if (current->opcode == TransportCommandOpcode::kRemoteAdd64) {

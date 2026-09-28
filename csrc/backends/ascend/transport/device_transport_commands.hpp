@@ -353,6 +353,44 @@ DEEP_EP_ASCEND_SIMT_CALLEE void put_value(const DeviceTransportContext& context,
     detail::append(queue, command);
 }
 
+DEEP_EP_ASCEND_SIMT_CALLEE void put_control_slot(
+    const DeviceTransportContext& context,
+    DeviceChannel channel,
+    TransportTeam team,
+    int destination_rank,
+    DeviceAddress destination,
+    DeviceAddress source,
+    DeviceOptions options) {
+    if (threadIdx.x != 0)
+        return;
+    int world_peer = -1;
+    auto* queue = detail::prepare(
+        context, channel, team, destination_rank,
+        TransportCommandOpcode::kPutControlSlot, &world_peer);
+    if (queue == nullptr)
+        return;
+    if (destination == kNullDeviceAddress ||
+        source == kNullDeviceAddress || options != kDefaultOptions) {
+        detail::record_error(
+            queue, DeviceTransportError::kInvalidAddress,
+            TransportCommandOpcode::kPutControlSlot, team,
+            destination_rank, world_peer, channel);
+        return;
+    }
+
+    TransportCommand command{};
+    command.opcode = TransportCommandOpcode::kPutControlSlot;
+    command.team = team;
+    command.peer = destination_rank;
+    command.world_peer = world_peer;
+    command.channel = channel;
+    command.options = options;
+    command.value_bytes = 2 * sizeof(std::uint64_t);
+    command.destination = destination;
+    command.source = source;
+    detail::append(queue, command);
+}
+
 DEEP_EP_ASCEND_SIMT_CALLEE void remote_add_release(const DeviceTransportContext& context,
                                                    DeviceChannel channel,
                                                    TransportTeam team,

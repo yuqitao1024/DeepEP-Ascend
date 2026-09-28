@@ -16,7 +16,7 @@ namespace deep_ep::ascend::transport {
 #define DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP 0
 #endif
 
-inline constexpr std::uint32_t kTransportStageProfileAbiVersion = 7;
+inline constexpr std::uint32_t kTransportStageProfileAbiVersion = 8;
 inline constexpr std::uint32_t kTransportProfileStageCount = 16;
 inline constexpr std::uint32_t kTransportProfileMaxBlocks = 72;
 inline constexpr std::uint32_t kTransportProfileBarrierPhaseCount = 2;
@@ -165,6 +165,17 @@ struct alignas(64) TransportStageProfile {
     std::uint64_t release_local_control_cycles = 0;
     std::uint64_t release_peer_control_cycles = 0;
     std::uint64_t release_barrier_flush_cycles = 0;
+    // Native send-path attribution. Post buckets are subsets of payload or
+    // control command time; drain buckets are subsets of wait_cycles. They are
+    // accumulated across requests and must not be summed with their parents.
+    std::uint64_t post_sq_snapshot_cycles = 0;
+    std::uint64_t post_queue_check_cycles = 0;
+    std::uint64_t post_sq_copy_cycles = 0;
+    std::uint64_t post_sq_publish_cycles = 0;
+    std::uint64_t drain_head_tail_load_cycles = 0;
+    std::uint64_t drain_cqe_poll_cycles = 0;
+    std::uint64_t drain_cqe_status_cycles = 0;
+    std::uint64_t drain_tail_doorbell_cycles = 0;
 };
 
 struct TransportQueueDepthSnapshot {

@@ -164,7 +164,10 @@ public:
         const auto handle = channel_handle(peer, channel);
         if (handle == 0)
             return fail(DeviceTransportError::kInvalidChannel, peer, channel);
-        const auto bytes = current->opcode == TransportCommandOpcode::kPut ? current->bytes : sizeof(std::uint64_t);
+        const auto bytes =
+            current->opcode == TransportCommandOpcode::kPut ? current->bytes :
+            current->opcode == TransportCommandOpcode::kPutControlSlot ?
+                2 * sizeof(std::uint64_t) : sizeof(std::uint64_t);
         std::uint64_t target = 0;
         if (current->opcode == TransportCommandOpcode::kSignal && current->action_kind != RemoteActionKind::kSignalAdd) {
             if (current->signal_index >= sync_layout::kLogicalSignalCount)
@@ -193,6 +196,11 @@ public:
             (current->opcode == TransportCommandOpcode::kSignal && current->action_kind == RemoteActionKind::kSignalSet))
             return checked_result(
                 hcomm_.WriteValueNbi<std::uint64_t>(handle, reinterpret_cast<__gm__ void*>(target), current->value), peer, channel);
+        if (current->opcode == TransportCommandOpcode::kPutControlSlot)
+            return checked_result(
+                hcomm_.WriteNbi(handle, reinterpret_cast<__gm__ void*>(target),
+                                reinterpret_cast<__gm__ void*>(current->source), bytes),
+                peer, channel);
         if (current->opcode == TransportCommandOpcode::kRemoteAdd64 || current->opcode == TransportCommandOpcode::kSignal)
             return add(peer, target, current->value);
         return fail(DeviceTransportError::kUnsupportedOperation, peer, channel);

@@ -382,6 +382,12 @@ def _aggregate_stage_profiles(
         "cq_drain_flush_cycles", "cq_drain_barrier_cycles",
         "cq_drain_final_cycles",
     )
+    send_path_attribution_names = (
+        "post_sq_snapshot_cycles", "post_queue_check_cycles",
+        "post_sq_copy_cycles", "post_sq_publish_cycles",
+        "drain_head_tail_load_cycles", "drain_cqe_poll_cycles",
+        "drain_cqe_status_cycles", "drain_tail_doorbell_cycles",
+    )
     release_phase_names = (
         "payload_construct", "payload_flush", "local_control",
         "peer_control", "barrier_flush",
@@ -404,6 +410,9 @@ def _aggregate_stage_profiles(
     release_attribution_available = True
     drain_attribution = {name: 0 for name in drain_attribution_names}
     drain_attribution_seen = False
+    send_path_attribution = {
+        name: 0 for name in send_path_attribution_names}
+    send_path_attribution_seen = False
     release_phase_cycles = {name: 0 for name in release_phase_names}
     release_phase_cycles_seen = False
     barrier_diagnostics = {name: 0 for name in barrier_diagnostic_names}
@@ -548,8 +557,24 @@ def _aggregate_stage_profiles(
                     if type(value) is not int or value < 0:
                         raise ValueError(
                             f"stage profile drain attribution.{name}")
-                    drain_attribution[name] = max(drain_attribution[name], value)
+                    if name in rank_release_attribution:
+                        drain_attribution[name] = max(
+                            drain_attribution[name], value)
                 drain_attribution_seen = True
+            rank_send_path = rank_release_attribution.get(
+                "send_path_attribution")
+            if rank_send_path is not None:
+                if not isinstance(rank_send_path, dict):
+                    raise ValueError(
+                        "stage profile send path attribution")
+                for name in send_path_attribution_names:
+                    value = rank_send_path.get(name)
+                    if type(value) is not int or value < 0:
+                        raise ValueError(
+                            f"stage profile send path attribution.{name}")
+                    send_path_attribution[name] = max(
+                        send_path_attribution[name], value)
+                send_path_attribution_seen = True
         rank_release_phase_cycles = rank_service.get("release_phase_cycles")
         if rank_release_phase_cycles is not None:
             if not isinstance(rank_release_phase_cycles, dict):
@@ -787,6 +812,11 @@ def _aggregate_stage_profiles(
     }
     if drain_attribution_seen:
         result["cq_drain_attribution"] = drain_attribution
+    if send_path_attribution_seen:
+        result["send_path_attribution"] = dict(
+            send_path_attribution,
+            aggregation="max_per_rank_not_additive",
+        )
     if release_phase_cycles_seen:
         result["release_phase_cycles"] = dict(
             release_phase_cycles,

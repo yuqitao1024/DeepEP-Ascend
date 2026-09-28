@@ -70,6 +70,14 @@ public:
                           destination, value, value_bytes, options);
     }
 
+    DEEP_EP_ASCEND_SIMT_CALLEE void put_control_slot(
+        TransportTeam team, int destination_rank, DeviceAddress destination,
+        DeviceAddress source, DeviceOptions options) const {
+        device::put_control_slot(
+            context_, channel_, team, destination_rank, destination,
+            source, options);
+    }
+
     DEEP_EP_ASCEND_SIMT_CALLEE void remote_add_release(
         TransportTeam team, int destination_rank, DeviceAddress destination,
         std::int64_t value) const {

@@ -10,7 +10,9 @@ namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kAscendElasticAlignment = 32;
 inline constexpr std::uint64_t kPublicElasticBufferAlignment = 2ULL << 20U;
-inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 8;
+inline constexpr std::uint32_t kSymmetricWindowAbiVersion = 9;
+inline constexpr std::uint64_t kDispatchControlSourceSlotBytes = 16;
+inline constexpr std::uint64_t kDispatchControlSourceGenerationCount = 2;
 inline constexpr std::uint64_t kDispatchRoutePlanMaximumExperts = 256;
 inline constexpr std::uint64_t kHybridRouteRecordBytes = 64;
 inline constexpr std::uint64_t kCombineControlSlotBytes =
@@ -674,7 +676,22 @@ inline LayoutStatus build_symmetric_window_layout(
         layout.combine_staging_shard_count = input.world_size;
     }
 
-    layout.reserve_bytes = kAscendElasticAlignment;
+    // Keep two generations of one 16-byte source slot per destination rank for
+    // Normal Dispatch's consolidated control publication.  A normal URMA WQE
+    // stores a source address and may read it after command publication, so
+    // both peer and generation slots must remain disjoint.
+    std::uint64_t dispatch_control_source_slots = 0;
+    if (!checked_multiply(
+            input.world_size, kDispatchControlSourceGenerationCount,
+            &dispatch_control_source_slots) ||
+        !checked_multiply(
+            dispatch_control_source_slots, kDispatchControlSourceSlotBytes,
+            &layout.reserve_bytes))
+        return LayoutStatus::overflow("reserve region size overflow");
+    if (!checked_align(
+            layout.reserve_bytes, kAscendElasticAlignment,
+            &layout.reserve_bytes))
+        return LayoutStatus::overflow("reserve region alignment overflow");
     if (input.hybrid) {
         std::uint64_t hybrid_stage_capacity = 0;
         if (!checked_multiply(input.num_max_tokens_per_rank, input.world_size,

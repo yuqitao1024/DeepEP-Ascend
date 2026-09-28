@@ -8,6 +8,7 @@
 
 namespace transport = deep_ep::ascend::transport;
 
+static_assert(transport::kTransportCommandAbiVersion == 3);
 namespace {
 
 int failures = 0;
@@ -271,6 +272,18 @@ void check_factories() {
     CHECK(put_value.value_bytes == 8);
     CHECK(put_value.destination == 0x3330);
     CHECK(put_value.value == 0xa5a5a5a55a5a5a5aULL);
+
+    const auto put_control_slot =
+        transport::command::make_put_control_slot(
+            transport::TransportTeam::kScaleUp, 1, 3, 0, 0x5550, 0x6660,
+            transport::kDefaultOptions);
+    CHECK(put_control_slot.opcode ==
+          transport::TransportCommandOpcode::kPutControlSlot);
+    CHECK(put_control_slot.world_peer == 3);
+    CHECK(put_control_slot.value_bytes == 16);
+    CHECK(put_control_slot.source == 0x6660);
+    CHECK(put_control_slot.destination == 0x5550);
+    CHECK(put_control_slot.options == transport::kDefaultOptions);
 
     const auto faa = transport::command::make_remote_add64(
         transport::TransportTeam::kWorld, 1, 1, 0, 0x4440, -7);
@@ -540,12 +553,17 @@ void check_profile_payload_bytes() {
     const auto value = transport::command::make_put_value64(
         transport::TransportTeam::kWorld, 1, 1, 0, 0x1000, 7,
         transport::kDefaultOptions);
+    const auto control_slot = transport::command::make_put_control_slot(
+        transport::TransportTeam::kWorld, 1, 1, 0, 0x1000, 0x2000,
+        transport::kDefaultOptions);
     const auto flush = transport::command::make_flush(
         0, transport::CooperationScope::kParticipant);
     CHECK(transport::command::profile_payload_bytes(
               put.opcode, put.bytes) == 4096);
     CHECK(transport::command::profile_payload_bytes(
               value.opcode, value.bytes) == 8);
+    CHECK(transport::command::profile_payload_bytes(
+              control_slot.opcode, control_slot.bytes) == 16);
     CHECK(transport::command::profile_payload_bytes(
               flush.opcode, flush.bytes) == 0);
 }

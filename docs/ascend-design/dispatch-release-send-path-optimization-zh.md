@@ -1,0 +1,473 @@
++# Dispatch release send-path optimization
+
+## Status
+
+- Date: 2026-09-29
+- Scope: native AICore URMA transport service used by Normal Dispatch.
+- Baseline: commit `1cc2655`, diagnostic build with profile ABI 7.
+- Current priority: P2, safe non-inline 16-byte control-slot publication.
+- P1 status: complete and validated remotely; it is measurement-only and has
+  no performance claim.
+- Current protocol changes: `kPutControlSlot`, symmetric-window reserve
+  geometry/ABI v9, and per-peer two-generation control-source slots.
+
+## Baseline evidence
+
+The 8-rank canonical profile used 8192 tokens, hidden 7168, top-k 8, 256
+experts, FP8, 64 AIV, 30 warmups and 30 iterations. It is attribution data,
+not a formal no-profile performance number.
+
+| Metric | Cycles | Approximate time |
+| --- | ---: | ---: |
+| `release_payload` stage | 930,259 | 930 µs |
+| `epilogue_copy` stage | 319,053 | 319 µs |
+| `release_control` stage | 278,089 | 278 µs |
+| `producer_record` stage | 172,615 | 173 µs |
+| service active | 1,527,900 | 1,528 µs |
+| flush command | 899,979 | 900 µs |
+| CQ drain | 808,773 | 809 µs |
+| explicit payload-flush drain | 798,129 | 798 µs |
+| control command | 201,992 | 202 µs |
+| payload command | 73,710 | 74 µs |
+| release VF payload command construction | 107,592 | 108 µs |
+| release VF peer-control command construction | 212 | 0.2 µs |
+
+The stage values are per-rank maxima and are not additive across rows. The
+dominant attributable stage is the release payload flush/CQ completion path.
+
+## Send path
+
+The path crosses two execution domains:
+
+1. The producer release VF is a SIMT vector function.
+2. The native URMA executor is AICore code and uses MTE for SQ writes.
+
+### Phase A: SIMT release VF
+
+`direct_dispatch_persistent_release_vf` lets lane zero wait for a ready
+pipeline slot and invokes `direct_dispatch_producer_release_body`.
+
+The release body:
+
+1. Walks destination ranks.
+2. Computes the staging source and receive-window destination.
+3. Calls `release_protocol::put_staged_records_striped`.
+4. That helper splits records over available channels.
+5. Each `put_on_channel` appends a high-level `TransportCommand` to the GM
+   command queue.
+6. `flush_payload` appends a flush command.
+7. Control publication appends count, generation, and signal commands.
+
+This phase constructs transport commands. It does not construct URMA WQEs.
+
+Measured release-VF command construction is already small for control:
+local control is 66 cycles, all peer control command construction is 212
+cycles. Therefore preparing the existing transport commands earlier has no
+remaining hiding space.
+
+### Phase B: AICore transport service
+
+`execute_body` validates commands and executes them in queue order.
+
+For a payload `Put` command:
+
+1. Resolve peer, channel, local buffer, and remote buffer.
+2. Snapshot the SQ and remote buffer descriptors.
+3. Build a URMA write request with `urma::make_write`.
+4. `post_request` checks queue capacity.
+5. `copy_request` stages the request into UB and uses `AscendC::DataCopy` to
+   write 64-byte blocks into the SQ ring.
+6. `post_request` updates SQ head and writes the SQ doorbell.
+
+For a `Flush` command:
+
+1. `drain_all` visits every peer and channel.
+2. `drain_channel` reads SQ head and CQ tail.
+3. It polls the CQE owner/status word with a cache-bypassing scalar load.
+4. It validates status and advances its local CQ tail.
+5. After all expected completions are observed, it writes CQ tail, CQ
+   doorbell, and SQ tail.
+
+Control commands use the same WQE/SQ/doorbell path with inline-write or
+signal requests.
+
+## Decision: four ordered work items
+
+### P1. Sub-stage attribution for WQE/SQ and CQ drain
+
+Add measurement-only fields for:
+
+- SQ snapshot and WQE construction.
+- Queue-capacity check.
+- UB staging and SQ `DataCopy`.
+- SQ head and doorbell publication.
+- SQ head and CQ tail reads.
+- CQE owner polling.
+- CQE status validation.
+- CQ/SQ tail and CQ doorbell stores.
+
+No protocol, command order, queue depth, or reuse rule changes.
+
+Exit criterion: quantify how much of the approximately 798 µs explicit
+flush drain is true completion wait versus software bookkeeping.
+
+### P2. Evaluate control WQE consolidation
+
+Only start after P1 shows that WQE construction or SQ publication is a
+material part of the approximately 202 µs control command time.
+
+Candidate directions:
+
+- Combine count and generation into one control-slot write.
+- Pre-pack the control slot and issue one write per peer.
+- Reduce the current three control commands per peer.
+
+Constraints: preserve payload-before-control ordering, remote layout
+compatibility, error reporting, and two-generation buffer reuse.
+
+### P3. Prepare control WQEs during payload completion wait
+
+Only start if P1 shows a stable software interval that can be hidden without
+moving control visibility.
+
+Candidate protocol:
+
+1. Build control WQEs and write their SQ entries while payload completion is
+   pending.
+2. Do not publish their SQ head/doorbell.
+3. After payload completion succeeds, publish control SQ entries.
+4. Preserve payload-before-control visibility.
+
+Required validation: two-generation reuse, error injection, failed-payload
+rollback, SQ capacity safety, and 8-rank no-profile ABBA.
+
+### P4. Evaluate doorbell batching
+
+Only start if P1 shows that per-request SQ head/doorbell publication is
+material. Candidate: write several SQ entries and publish one doorbell.
+
+This is lower priority because there are only about seven payload requests per
+rank and current payload command time is approximately 74 µs.
+
+## Measurement contract
+
+- Profile fields are diagnostic only and compiled out in normal builds.
+- Cycle buckets must state whether they are disjoint, nested, or sampled.
+- Per-rank maxima are not additive.
+- Profile-on device timings must not be mixed with formal no-profile
+  benchmark results.
+- Any retained optimization requires repeated no-profile A/B or ABBA runs and
+  full functional validation.
+
+## P1 remote result (2026-09-28)
+
+The 8-rank diagnostic build was task `task_20260928_194350_15735403956` on
+devices 0-7. Correctness passed one canonical case. The remote artifact
+SHA-256 was `93604f704db13a8d211f8305e3f63cbd7e0934116b2044aa41fd6f72d288abed`.
+Profile-on dispatch mean was 3.500319 ms. This timing is attribution-only and
+is not comparable with the formal no-profile baseline.
+
+| Metric | Cycles |
+| --- | ---: |
+| `release_payload` | 605,865 |
+| `epilogue_copy` | 198,799 |
+| `release_control` | 294,620 |
+| `producer_record` | 137,666 |
+| service active | 1,191,007 |
+| flush command | 574,932 |
+| CQ drain | 482,607 |
+| explicit payload-flush drain | 471,136 |
+| control command | 214,756 |
+| payload command | 75,675 |
+
+Send-path per-rank maxima:
+
+| Field | Cycles |
+| --- | ---: |
+| `post_sq_snapshot_cycles` | 173,307 |
+| `post_queue_check_cycles` | 1,869 |
+| `post_sq_copy_cycles` | 19,224 |
+| `post_sq_publish_cycles` | 157,636 |
+| `drain_head_tail_load_cycles` | 2,494 |
+| `drain_cqe_poll_cycles` | 475,736 |
+| `drain_cqe_status_cycles` | 643 |
+| `drain_tail_doorbell_cycles` | 578 |
+
+On rank 0, CQE owner polling was about 98.4% of CQ drain, while SQ snapshot
+and SQ publication were about 59.5% and 54.5% of payload-plus-control command
+time, respectively. The queue check, CQ bookkeeping, CQE status parsing, and
+tail/doorbell stores were negligible. There were 31 commands, seven payload
+writes, and about 174 MB of profiled payload bytes; SQ/CQ high watermark was
+three and both final depths were zero.
+
+Conclusions:
+
+1. CQ drain is dominated by real completion wait, not software bookkeeping.
+2. SQ snapshot and publication have material software overhead, so P2 is
+   justified.
+3. P3 remains plausible but must be re-evaluated after P2.
+4. P4 remains low priority: request count is small and queue checking is tiny.
+
+Reporting anomaly: the remote report contained send-path attribution in every
+per-rank service record, but the top-level dispatch aggregation omitted it.
+The aggregator code is contract-tested locally. The likely cause is that the
+captured profile came from the report slot named `expanded_dispatch` rather
+than the direct `dispatch` slot. This is a reporting-path issue, not an
+instrumentation failure, and will be checked on the next profile run.
+
+## P1 implementation record (2026-09-28)
+
+P1 is implemented as a measurement-only change:
+
+- Profile ABI is upgraded from 7 to 8.
+- Eight send-path counters are appended to the profile structure:
+  - `post_sq_snapshot_cycles`
+  - `post_queue_check_cycles`
+  - `post_sq_copy_cycles`
+  - `post_sq_publish_cycles`
+  - `drain_head_tail_load_cycles`
+  - `drain_cqe_poll_cycles`
+  - `drain_cqe_status_cycles`
+  - `drain_tail_doorbell_cycles`
+- Host export adds `service.release_attribution.send_path_attribution`.
+- Benchmark aggregation uses per-rank max and marks the result as
+  `max_per_rank_not_additive`.
+- No command order, WQE format, SQ/CQ ownership, doorbell update, error check,
+  or buffer reuse rule is changed.
+
+Buckets are nested subsets:
+
+- Post buckets are subsets of payload or control command execution time.
+- Drain buckets are subsets of CQ drain time.
+- The post buckets must not be summed with their parent command buckets, and
+  drain buckets must not be summed with CQ drain.
+
+Local validation:
+
+- `PYTHONPATH=. pytest -q tests/ascend/test_benchmark_contract.py
+  -k 'send_path or release_phase or cq_drain or epilogue_copy'`
+  passed 5 tests.
+- `pytest -q tests/ascend/test_transport_contract.py` passed 3 tests.
+- `git diff --check` passed.
+
+## P2 rejected candidate: 16-byte inline WQE (2026-09-28)
+
+The first P2 candidate changed Normal Dispatch control publication from two
+peer writes to one 16-byte inline WQE:
+
+1. `kPutControlSlot` is appended to the opcode enum to preserve existing
+   numeric opcode values.
+2. The command carried generation and count in two adjacent inline words and
+   validated `value_bytes == 16`.
+3. The native service posted an `InlineWrite128Request`; the WQE remained a
+   64-byte SQ entry and wrote 16 inline bytes.
+4. `release_protocol::publish_control_slot_and_release` issues the combined
+   write followed by the unchanged release signal.
+5. Direct Normal Dispatch uses the new helper. Combine, hybrid, expanded, and
+   cached paths keep the original two-write helper.
+6. The stub backend accepted the call as a no-op.
+
+This candidate is rejected. The known-good inline encoding covers only the
+existing 8-byte request. The candidate extrapolated the inline-length field in
+`word1` from 8 to 16 bytes, but that value has no official semantic contract
+in the available URMA ABI material. A malformed or unsupported value can make
+the device reject the WQE before the remote write is observable.
+
+The two retries failed deterministically in the same first dispatch execution,
+with an error CQE and NPU device error type 4 / UB LINK ERROR 507056 on rank 1.
+The peer changed from device 3 to device 4, which is inconsistent with a fixed
+link failure and consistent with malformed or unsupported WQE encoding. No
+result JSON was produced, so neither run is a correctness or performance pass.
+
+The current code contains no 16-byte inline request type. `make_sqe` is
+restored to the known-good 8-byte inline encoding, and Normal Dispatch does
+not extrapolate that field. Do not retry this candidate through the full
+DeepEP dispatch path.
+
+## P2 safe candidate: non-inline 16-byte control-slot write
+
+### Design
+
+The retained design still combines the two 8-byte control words into one
+16-byte remote write, but uses the known-good non-inline URMA write request:
+
+1. For each destination, the release VF writes `generation` and `count` into
+   a 16-byte source slot in the symmetric-window reserve region.
+2. It executes `system_fence()` so both source words are globally visible
+   before the transport command is published.
+3. It appends one `kPutControlSlot` command carrying the remote control-slot
+   destination and local source-slot address.
+4. The AICore service resolves both addresses through the registered local and
+   remote buffer tables.
+5. It builds `urma::make_write(..., bytes = 16)`, which is the same WQE family
+   already used by payload writes.
+6. The separate release signal remains after the control write.
+
+The official SIMT backend maps the command to one 16-byte `WriteNbi`, and the
+stub backend remains a no-op for host-only probes.
+
+### Expected cost model
+
+The candidate removes one of the two per-peer control WQEs. Its main expected
+benefit is therefore lower SQ snapshot and SQ publication work, along with one
+fewer command and CQE. It adds one local-buffer lookup and a 16-byte source
+read. That added work is small, but it is not assumed to be free.
+
+The candidate is useful only if the no-profile A/B shows an end-to-end Normal
+Dispatch improvement while correctness passes. If control command time remains
+dominated by completion or the added source lookup erases the WQE reduction,
+the candidate should be rejected.
+
+### Source-slot ownership
+
+The local rank's own `DispatchControlSlot` is not a valid source. Remote
+control slots are indexed by sender rank, while the count being published is
+the number of records sent to each destination rank. One local slot cannot
+represent the different counts for all peers.
+
+A shared staging slot is also unsafe. A non-inline WQE stores a source address
+and may read the source after command publication; writing the next peer's
+control words into the same location could change bytes that a pending WQE has
+not yet read.
+
+The safe layout is therefore:
+
+```text
+slot_index = (generation & 1) * world_size + destination_rank
+slot_bytes = 16
+reserve_bytes = align(2 * world_size * 16, 32)
+```
+
+Separate destination slots prevent same-generation publication from overwriting
+a pending source. The generation parity matches the existing two-generation
+reuse contract: generation `g+2` must not begin while generation `g` is still
+outstanding. This invariant is part of the correctness validation.
+
+### Layout and ABI
+
+`kSymmetricWindowAbiVersion` is upgraded from 8 to 9 because the reserve
+region changes from a fixed 32 bytes to the two-generation per-peer source-slot
+area. The public struct layout and field offsets do not change.
+
+For world size 4, reserve bytes become 128. The direct reserve offset remains
+45408 because preceding regions are unchanged. In the hybrid probe layout, all
+regions after reserve shift by the 96-byte growth over the old 32-byte reserve.
+
+`TransportCommand` remains ABI 3: the existing `source` field is unused by
+`kPut` and is now interpreted only by `kPutControlSlot`. The opcode is
+appended after all existing values. The P1 profile ABI remains 8.
+
+### Validation plan
+
+1. Build the production-shape candidate with diagnostics off.
+2. Run the 8-rank canonical correctness case.
+3. Run the weight-boundary regression: 8 ranks, 17 tokens, hidden 4865, BF16,
+   top-k 2, 16 experts, masked ratio 0.5, and consumer tile 512.
+4. Run the 8-rank no-profile ABBA benchmark.
+5. Retain the change only if correctness passes and the end-to-end A/B shows a
+   reproducible improvement. Do not use profile-on timing as the performance
+   result.
+
+### 16-byte inline probe trigger
+
+The inline variant may be reconsidered only if all of the following hold:
+
+1. The non-inline candidate passes correctness and shows an end-to-end gain.
+2. Control command time remains material in the no-profile A/B.
+3. The added local source lookup/read is shown to limit the gain.
+
+If triggered, the next step is a standalone minimal URMA probe, not a DeepEP
+dispatch run. It must establish the official 16-byte inline `word1` encoding,
+verify CQE behavior across two devices, and only then propose a main-path
+change.
+
+### Invariants retained by the safe candidate
+
+- Payload commands remain before control commands.
+- The release signal remains separate.
+- Remote control-slot layout and generation/count semantics are unchanged.
+- Two-generation reuse rules are unchanged.
+- Profile payload accounting counts a control-slot write as 16 bytes.
+
+### Remote validation of the rejected inline candidate (2026-09-28)
+
+The diagnostic candidate built successfully in task
+`task_20260928_201213_40677695296`. The candidate extension SHA-256 is
+`876563db202efea09250deb568efff14e3745ee7b05e9cb8cf7b120b0e026270`.
+Build A used diagnostics ON. The source snapshot and production extension
+were restored after the build.
+
+The first 8-rank profile validation, task
+`task_20260928_201307_408079722809`, reached the profiled canonical case
+after queueing for eight devices. Rank 1 then reported an NPU device error
+type 4, UB LINK ERROR 507056, with an error CQE between devices 1 and 3. No
+result JSON was produced. The task wrapper reported exit 0 because the
+launcher's terminal state was mishandled; the run itself is failed and must
+not be interpreted as a pass.
+
+Interpretation of the rejected inline candidate:
+
+1. This is a device-level CQE failure, not a Python assertion or host-side
+   protocol validation failure.
+2. The 16-byte inline WQE remains the primary suspect because the failure
+   appeared during the first profiled dispatch execution after the candidate
+   was loaded.
+3. A clean retry is useful to distinguish a transient host/link fault from a
+   deterministic WQE encoding problem. If the same error reproduces, P2 should
+   be rejected or redesigned rather than measured for performance.
+
+### Inline-candidate rejection (2026-09-28)
+
+A second clean 8-rank run, task `task_20260928_202304_19833421052`, reproduced
+the same failure in the same profiled dispatch phase. Rank 1 again reported
+NPU device error type 4, UB LINK ERROR 507056 and an error CQE; the peer
+changed from device 3 to device 4, while the first run used peer device 3.
+The corrected wrapper propagated `RUN_RC=1`, and no result JSON was produced.
+The production extension was restored to SHA-256
+`d08352909619bc12e95ec2fc2d03ff4dfaef78ccb7b5b08dfae7350593bd1cad`.
+
+Decision: reject the 16-byte inline-write P2 candidate. The error is
+deterministic at the same execution point across retries, with the peer rank
+changing, which points to malformed or unsupported inline WQE encoding rather
+than a stable 1-3 or 1-4 link fault. Do not run performance measurements with
+this candidate.
+
+### Safe P2 remote validation (2026-09-29)
+
+The retained candidate is the non-inline 16-byte control-slot write. The
+candidate extension SHA-256 is
+12983dadae4e83dd0bed9b696e0252f13772685049fb123a68e29786f921fba8; the
+baseline extension SHA-256 is
+d08352909619bc12e95ec2fc2d03ff4dfaef78ccb7b5b08dfae7350593bd1cad.
+
+Correctness results:
+
+| Case | Result | Exit behavior |
+| --- | --- | --- |
+| 2-rank small | failed=0, passed=1, pending=0 | Rank 1 SIGSEGV after the complete JSON and passing summary; accepted under the agreed teardown-only policy |
+| 4-rank tail | failed=0, passed=1, pending=0 | Exit 0 |
+| 8-rank canonical | failed=0, passed=1, pending=0 | Exit 0 |
+| 8-rank weight boundary (17 tokens, hidden 4865, BF16, top-k 2, 16 experts, masked ratio 0.5, consumer tile 512) | failed=0, passed=1, pending=0 | Exit 0 |
+
+The installed extension was restored to the baseline SHA after every run,
+including the final ABBA run.
+
+No-profile canonical ABBA used 8 ranks, 8192 tokens, hidden 7168, top-k 8,
+256 experts, FP8, 30 warmups, 30 iterations, and a 2000-us rank-launch
+deadline. A is the baseline extension and B is the safe P2 candidate.
+
+| Group | A mean (ms) | B mean (ms) | B gain |
+| --- | ---: | ---: | ---: |
+| 1 | 3.199198 | 3.183852 | 0.480% |
+| 2 | 3.254363 | 3.174189 | 2.464% |
+| 3 | 3.227211 | 3.177750 | 1.533% |
+| Overall step mean | 3.226924 | 3.178597 | 1.498% |
+
+All 12 ABBA steps passed correctness. The overall dispatch mean improves by
+48.327 us. Logical bandwidth rises from 2412.983 GB/s to 2451.098 GB/s. The
+remaining gap to the 3 TB/s target time of 2.595363 ms is 0.583234 ms.
+
+Decision: retain safe P2. The benefit is positive in all three interleaved
+groups and is not measured under profile-on timing. The magnitude is modest,
+so it should not be described as closing the remaining 3 TB/s gap; it reduces
+that gap by about 1.5% of the current Normal Dispatch mean.

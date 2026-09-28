@@ -138,6 +138,8 @@ __aicore__ bool aicore_execution_helpers_probe() {
            command::aicore_profile_payload_bytes(
                transport::TransportCommandOpcode::kPutValue64, 0) == 8 &&
            command::aicore_profile_payload_bytes(
+               transport::TransportCommandOpcode::kPutControlSlot, 0) == 16 &&
+           command::aicore_profile_payload_bytes(
                transport::TransportCommandOpcode::kFlush, 0) == 0 &&
            command::aicore_transport_service_cycle_class(
                transport::TransportCommandOpcode::kPut) ==

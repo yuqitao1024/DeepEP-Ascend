@@ -23,6 +23,8 @@ enum class TransportCommandOpcode : std::uint32_t {
     kSignal,
     kFlush,
     kBarrier,
+    // Preserve existing opcode numeric values; append protocol extensions.
+    kPutControlSlot,
 };
 
 struct alignas(64) TransportCommand {
@@ -210,6 +212,8 @@ inline constexpr std::uint64_t profile_payload_bytes(
         case TransportCommandOpcode::kPutValue64:
         case TransportCommandOpcode::kRemoteAdd64:
             return sizeof(std::uint64_t);
+        case TransportCommandOpcode::kPutControlSlot:
+            return 2 * sizeof(std::uint64_t);
         default:
             return 0;
     }
@@ -279,6 +283,7 @@ inline constexpr bool checked_world_peer(
 inline constexpr bool is_remote_operation(TransportCommandOpcode opcode) {
     return opcode == TransportCommandOpcode::kPut ||
            opcode == TransportCommandOpcode::kPutValue64 ||
+           opcode == TransportCommandOpcode::kPutControlSlot ||
            opcode == TransportCommandOpcode::kRemoteAdd64 ||
            opcode == TransportCommandOpcode::kSignal;
 }
@@ -341,6 +346,14 @@ inline constexpr DeviceTransportError validate_for_dispatch(
             if (transport_command.destination == kNullDeviceAddress)
                 return DeviceTransportError::kInvalidAddress;
             if (transport_command.value_bytes != sizeof(std::uint64_t) ||
+                transport_command.options != kDefaultOptions)
+                return DeviceTransportError::kInvalidProtocol;
+            return DeviceTransportError::kNone;
+        case TransportCommandOpcode::kPutControlSlot:
+            if (transport_command.destination == kNullDeviceAddress ||
+                transport_command.source == kNullDeviceAddress)
+                return DeviceTransportError::kInvalidAddress;
+            if (transport_command.value_bytes != 2 * sizeof(std::uint64_t) ||
                 transport_command.options != kDefaultOptions)
                 return DeviceTransportError::kInvalidProtocol;
             return DeviceTransportError::kNone;
@@ -426,6 +439,23 @@ inline TransportCommand make_put_value64(
     result.value_bytes = sizeof(std::uint64_t);
     result.destination = destination;
     result.value = value;
+    return result;
+}
+
+inline TransportCommand make_put_control_slot(
+    TransportTeam team, int peer, int translated_world_peer,
+    std::uint32_t channel, DeviceAddress destination,
+    DeviceAddress source, DeviceOptions options) {
+    TransportCommand result;
+    result.opcode = TransportCommandOpcode::kPutControlSlot;
+    result.team = team;
+    result.peer = peer;
+    result.world_peer = translated_world_peer;
+    result.channel = channel;
+    result.options = options;
+    result.value_bytes = 2 * sizeof(std::uint64_t);
+    result.destination = destination;
+    result.source = source;
     return result;
 }
 

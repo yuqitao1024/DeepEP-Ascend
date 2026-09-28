@@ -40,6 +40,8 @@ aicore_profile_payload_bytes(
         case TransportCommandOpcode::kPutValue64:
         case TransportCommandOpcode::kRemoteAdd64:
             return sizeof(std::uint64_t);
+        case TransportCommandOpcode::kPutControlSlot:
+            return 2 * sizeof(std::uint64_t);
         default:
             return 0;
     }
@@ -51,6 +53,7 @@ aicore_transport_service_cycle_class(TransportCommandOpcode opcode) {
         case TransportCommandOpcode::kPut:
             return TransportServiceCycleClass::kPayload;
         case TransportCommandOpcode::kPutValue64:
+        case TransportCommandOpcode::kPutControlSlot:
         case TransportCommandOpcode::kRemoteAdd64:
         case TransportCommandOpcode::kSignal:
             return TransportServiceCycleClass::kControl;
