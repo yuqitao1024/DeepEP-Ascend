@@ -471,3 +471,166 @@ Decision: retain safe P2. The benefit is positive in all three interleaved
 groups and is not measured under profile-on timing. The magnitude is modest,
 so it should not be described as closing the remaining 3 TB/s gap; it reduces
 that gap by about 1.5% of the current Normal Dispatch mean.
+
+### D3.3 re-profile after safe P2 (2026-09-29)
+
+The D3.3 diagnostic build was repeated on the retained safe-P2 tree
+2516f6b in a fresh source snapshot. The diagnostic extension SHA-256 is
+3f921344f748d83ba58d7e562e5453e679a38d0141ea7a4d31cccc871c215f91. The
+8-rank profile task was task_20260929_024653_362689812552; its correctness
+summary was failed=0, passed=1, pending=0. The result SHA-256 is
+fc9922813bfb4f5dd900d55723c4ebf06c5521d6e173030d84a0cfed88bf24cd.
+
+Compared with the pre-P2 D3.3 run, the per-rank means changed as follows:
+
+| Metric | Pre-P2 | Safe P2 | Change |
+| --- | ---: | ---: | ---: |
+| control_command_cycles | 191,610 | 138,595 | -53,015 |
+| flush_command_cycles | 893,924 | 894,276 | +352 |
+| payload_command_cycles | 70,376 | 69,901 | -475 |
+| barrier_command_cycles | 218,524 | 199,278 | -19,246 |
+| service_active_cycles | 1,460,976 | 1,388,600 | -72,376 |
+
+The profile-on dispatch mean in this diagnostic run was 4.245499 ms; this is
+attribution-only and is not a no-profile performance result. Explicit
+payload-flush CQ drain was about 803,565 cycles and queue-full drain remained
+zero, so the available hiding window remains large. Send-path per-rank maxima
+were:
+
+| Field | Cycles |
+| --- | ---: |
+| post_sq_snapshot_cycles | 138,682 |
+| post_queue_check_cycles | 1,518 |
+| post_sq_copy_cycles | 11,704 |
+| post_sq_publish_cycles | 124,371 |
+| drain_head_tail_load_cycles | 2,360 |
+| drain_cqe_poll_cycles | 806,291 |
+| drain_cqe_status_cycles | 396 |
+| drain_tail_doorbell_cycles | 914 |
+
+Interpretation:
+
+1. Safe P2 reduced control command work by about 53k cycles, but SQ snapshot
+   and SQ publication remain material software costs.
+2. CQ drain is still dominated by true completion polling; queue bookkeeping
+   and queue-full drains are negligible.
+3. The remaining P3 direction is therefore still open, but it must be a
+   prebuild experiment rather than an early control publication.
+
+The minimal P3 candidate is:
+
+1. While the explicit payload flush is waiting, pre-resolve the peer, buffers,
+   SQ context, and SQ slot for control requests, and pre-stage WQE bytes.
+2. Do not update SQ head or doorbell until the payload flush has completed
+   successfully.
+3. On payload completion, publish only the already prepared SQ entries.
+4. Preserve payload-before-control order, two-generation reuse, error
+   handling, and the release signal.
+
+Acceptance gates for P3 remain: source contracts, two-generation/error
+injection, 2/4/8-rank correctness, and at least three no-profile ABBA groups.
+If the prebuilt SQ state is invalidated by completion or a peer update, the
+candidate must fall back to the normal post path rather than publish stale
+ownership bits.
+
+## P3a experiment: conservative prebuild, not retained (2026-09-29)
+
+P3a was implemented and measured, then removed from production after the
+performance gate failed. The experiment was confined to the native AICore
+service and only to a command sequence that exactly matches Normal Dispatch's
+retained release shape:
+
+1. payload writes;
+2. explicit flush;
+3. alternating control-slot write and signal-set commands, optionally ending
+   at a barrier.
+
+Any other sequence disabled prebuilding. The implementation did not alter the
+SIMT command producer, command ABI, WQE encoding, control-slot layout, or
+two-generation source-slot ownership.
+
+Before the explicit flush waited for completion, the service resolved each peer,
+registered buffer, remote control slot, and remote signal destination; took
+one SQ head snapshot per peer; checked CQ capacity for the pair of control
+requests; constructed the known-good non-inline 16-byte control write WQE and
+the known-good inline 8-byte signal-set WQE; and wrote both WQE bytes into
+their SQ slots through the existing MTE3 path.
+
+It did not update SQ head or SQ doorbell before the flush succeeded. If flush
+failed, the batch was marked unusable and no prebuilt request was published.
+
+When the original command was reached, the service re-resolved the peer and
+compared channel pointers, CQ pointers, SQ pointers, world peer, channel index,
+and the full SQ head value against the prebuild snapshot. On any mismatch it
+invalidated that request and executed the original post path. This prevents
+publishing stale slot or owner bits after a queue-full drain or peer
+reconfiguration.
+
+The experiment still published the two prebuilt entries one at a time:
+each publication updated SQ head and wrote one doorbell. Batch doorbell
+publication remains P3b and is intentionally not enabled without an
+independent URMA semantic probe.
+
+The optimization moved resolution, one SQ snapshot, WQE construction, and SQ
+copy into the payload-completion wait. It did not move remote control
+visibility: a remote peer cannot observe the control write or release signal
+until the service published the corresponding doorbell after the payload flush
+has succeeded.
+
+For validation, the experiment added a dedicated two-rank
+`prebuild-control-order` case. It drove the exact P3a command shape: payload
+put, explicit flush,
+visible 16-byte control source, control-slot write, signal-set, and barrier,
+then verified payload, control generation, control count, and signal for each
+generation. The default sequence repeated 1,000 generations, covering
+two-generation source reuse and queue-slot wrap. The case is
+synchronization-sensitive and used the same stream barrier protocol as the
+existing route-order cases. Failed-payload/error-injection coverage remained
+through the native invalid-queue/address checks and the prebuild invalidation
+checks; no production error path was bypassed.
+
+Remote two-rank validation on devices 0-1 used the rebuilt runner SHA-256
+`2de8bdadaead33a9d483415d6462c27ce863e25b33400710890b0f182cdfbbc2`.
+Both `prebuild-control-order` and teardown passed for 1,000 generations
+with no transport diagnostic. The task was
+`task_20260929_034305_182775418013`. The installed extension was restored to
+the baseline SHA `d08352909619bc12e95ec2fc2d03ff4dfaef78ccb7b5b08dfae7350593bd1cad`
+after the run.
+
+Additional correctness used the P3a candidate extension SHA-256
+`d0bab90f33f8cd25b30d81f748a14f20e64b1c1d235d2a9e8c909ab81c245047`:
+
+| Gate | Task | Result |
+| --- | --- | --- |
+| 2-rank small | `task_20260929_031441_137873116833` | passed |
+| 4-rank tail | `task_20260929_031522_138286916118` | passed |
+| 8-rank canonical | `task_20260929_031733_14172872969` | passed |
+| 8-rank weight boundary (17 tokens, hidden 4865, BF16) | `task_20260929_034427_183425826075` | passed |
+| 2-rank `prebuild-control-order`, 1,000 generations | `task_20260929_034305_182775418013` | passed |
+
+No-profile 8-rank ABBA used 8192 tokens, hidden 7168, top-k 8, 256 experts,
+FP8 canonical, 30 warmups / 30 iterations,
+`DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES=8192`, and
+`rank-launch-deadline-us=2000`. A was the baseline extension SHA
+`d08352909619bc12e95ec2fc2d03ff4dfaef78ccb7b5b08dfae7350593bd1cad`; B was the
+P3a candidate SHA above.
+
+| Group | A mean (ms) | B mean (ms) | B gain |
+| --- | ---: | ---: | ---: |
+| 1 | 3.198414 | 3.149501 | +1.529% |
+| 2 | 3.171345 | 3.277469 | -3.346% |
+| 3 | 3.198997 | 3.190938 | +0.252% |
+| Pooled | 3.189585 | 3.205969 | -0.514% |
+
+All 12 ABBA JSON reports passed their single benchmark case. Two runs ended
+with the pre-existing teardown-only SIGSEGV after the complete JSON and
+`1 cases passed` line; the established acceptance policy allows this. The
+queue restored the baseline extension SHA after each group.
+
+Decision: reject P3a and retain the safe P2 baseline. The measured benefit is
+within run-to-run noise, the pooled result is negative, and group 2 shows a
+material regression. The source changes and the experiment-only probe were
+removed; the design record and remote artifacts preserve the validation path.
+P3 should not be retried in the same conservative form. A future version needs
+a materially different publication mechanism, such as an independently proven
+batch doorbell, before it justifies re-opening this path.
