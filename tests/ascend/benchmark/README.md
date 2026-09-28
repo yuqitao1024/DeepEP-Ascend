@@ -220,6 +220,14 @@ the setting in `timing_protocol`. This mode isolates launch skew in Event
 measurements; it does not measure application end-to-end latency and must not
 be used as a production speedup.
 
+For attribution without changing timing, use `--profile-launch-skew`. Each
+rank records the host timestamp immediately after the NPU start-event record
+and after the operation submission. Rank 0 then reports per-sample cross-rank
+spreads for start recording, launch completion, and a conservative upper bound
+on device-time exposure not explained by start-record skew. This is
+diagnostic-only; normal reports remain unchanged and the report records
+`timing_protocol.profile_launch_skew: true`.
+
 Render the captured profile as a validated P5 parity timeline:
 
 ```bash

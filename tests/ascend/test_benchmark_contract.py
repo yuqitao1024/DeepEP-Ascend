@@ -664,6 +664,7 @@ def test_benchmark_parser_preserves_production_size_defaults():
     assert args.allow_multiple_reduction == 1
     assert args.num_sms is None
     assert args.profile_stages is False
+    assert args.profile_launch_skew is False
     assert args.rank_launch_deadline_us == 0
 
 
@@ -681,6 +682,13 @@ def test_benchmark_parser_accepts_rank_launch_deadline():
     ]).rank_launch_deadline_us == 2000
     with pytest.raises(SystemExit):
         parser.parse_args(["--rank-launch-deadline-us", "-1"])
+
+
+def test_benchmark_parser_enables_launch_skew_profile_explicitly():
+    parser = build_parser()
+
+    assert parser.parse_args([]).profile_launch_skew is False
+    assert parser.parse_args(["--profile-launch-skew"]).profile_launch_skew is True
 
 
 def test_stage_profile_environment_is_enabled_only_on_request(monkeypatch):
@@ -924,7 +932,8 @@ def test_timed_handle_operations_prepare_current_handles_outside_measurement():
     runtime = AscendRuntime.__new__(AscendRuntime)
     runtime.buffer = Buffer()
     runtime.args = SimpleNamespace(
-        warmups=0, iterations=1, profile_stages=False)
+        warmups=0, iterations=1, profile_stages=False,
+        profile_launch_skew=False, rank_launch_deadline_us=0)
     runtime._prepare_case = lambda _case: prepared
     runtime.synchronized_step = lambda operation, _label: operation()
     runtime.timer = SimpleNamespace(
@@ -997,7 +1006,8 @@ def test_stage_profile_capture_runs_outside_event_timing():
     runtime = AscendRuntime.__new__(AscendRuntime)
     runtime.buffer = Buffer()
     runtime.args = SimpleNamespace(
-        warmups=0, iterations=1, profile_stages=True)
+        warmups=0, iterations=1, profile_stages=True,
+        profile_launch_skew=False, rank_launch_deadline_us=0)
     runtime._prepare_case = lambda _case: prepared
     runtime.synchronized_step = lambda operation, _label: operation()
     runtime.timer = SimpleNamespace(measure=measure)
@@ -1114,7 +1124,8 @@ def test_stage_profile_capture_tolerates_completed_service_outstanding_requests(
     runtime = AscendRuntime.__new__(AscendRuntime)
     runtime.buffer = Buffer()
     runtime.args = SimpleNamespace(
-        warmups=0, iterations=1, profile_stages=True)
+        warmups=0, iterations=1, profile_stages=True,
+        profile_launch_skew=False, rank_launch_deadline_us=0)
     runtime._prepare_case = lambda _case: prepared
     runtime.synchronized_step = lambda operation, _label: operation()
     runtime.timer = SimpleNamespace(measure=measure)
@@ -1169,6 +1180,50 @@ def test_work_counts_and_logical_components_use_rank_max_and_byte_sum():
     assert operations[0]["per_rank"][0]["work_counts"] == (
         _literal_work_counts(7)
     )
+
+
+def test_launch_skew_profile_aggregates_cross_rank_host_timestamps():
+    ranks = []
+    for rank, (start_ns, complete_ns, device_ms) in enumerate((
+        (100_000, 145_000, 3.000),
+        (210_000, 300_000, 3.100),
+    )):
+        ranks.append([
+            {
+                "operation_id": operation_id,
+                "device_samples": [device_ms / 1000],
+                "wall_samples": [0.004],
+                "launch_skew_samples": [{
+                    "start_record_ns": start_ns,
+                    "launch_complete_ns": complete_ns,
+                }],
+                "logical_bytes": {"scaleup": 100 + rank},
+                "logical_byte_components": {"scaleup": 100 + rank},
+                "work_counts": _literal_work_counts(7 + rank),
+            }
+            for operation_id in (
+                "dispatch", "expanded_dispatch", "cached_dispatch", "combine",
+                "reduced_combine",
+            )
+        ])
+
+    operations = _aggregate_rank_operations(ranks)
+
+    profile = operations[0]["launch_skew_profile"]
+    assert profile["sample_count"] == 1
+    assert profile["start_record_spread_seconds"]["mean"] == (
+        pytest.approx(0.00011)
+    )
+    assert profile["launch_complete_spread_seconds"]["mean"] == (
+        pytest.approx(0.000155)
+    )
+    assert profile["device_exposed_skew_upper_bound_seconds"]["mean"] == (
+        pytest.approx(0.0, abs=1e-12)
+    )
+    assert profile["per_rank_start_record_ns"] == [[100_000], [210_000]]
+    assert profile["per_rank_launch_complete_ns"] == [
+        [145_000], [300_000],
+    ]
 
 
 def test_operation_work_counts_describe_literal_dispatch_and_combine_rows():

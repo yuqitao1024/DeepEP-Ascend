@@ -634,3 +634,65 @@ removed; the design record and remote artifacts preserve the validation path.
 P3 should not be retried in the same conservative form. A future version needs
 a materially different publication mechanism, such as an independently proven
 batch doorbell, before it justifies re-opening this path.
+
+## Launch-skew attribution plan (2026-09-29)
+
+The aligned Event mode intentionally moves rendezvous outside the measured
+interval. It answers kernel-implementation A/B questions, but it is not an
+application end-to-end result. A one-run no-deadline sample on the retained
+safe-P2 extension measured Dispatch at 3.697083 ms / 2106.009 GB/s, while the
+three-group aligned baseline pooled at 3.189585 ms / 2441 GB/s-class. The
+difference is measurement exposure, not evidence of a device-speedup feature.
+
+The follow-up is a diagnostic-only benchmark switch, `--profile-launch-skew`,
+that does not alter launch order or add synchronization:
+
+1. after each NPU start-event record, capture the host timestamp;
+2. after operation submission, capture a launch-complete timestamp;
+3. gather the existing per-rank Event samples;
+4. report cross-rank start-record spread, launch-complete spread, and a
+   conservative Event exposure bound not explained by start-record spread;
+5. mark the report with `timing_protocol.profile_launch_skew: true`.
+
+The target question is how the roughly 0.51 ms aligned-versus-unaligned delta
+splits among host entry skew, Python submission duration, stream queuing, and
+device-side arrival differences. Only after that attribution should the next
+production candidate be selected. Host-entry alignment or busy waiting will not
+make the latest rank launch earlier; persistent or launch-ahead service must be
+justified by the measured component it actually removes.
+
+### First launch-skew attribution result
+
+The diagnostic benchmark ran as task
+`task_20260929_073055_58585620454` on devices 0-3 using the retained safe-P2
+extension SHA `d083529...`. It completed 30 warmups and 30 iterations with
+`failed=0, passed=1, pending=0`. The report is
+`results/p2/p2-r8-launch-skew-20260929.json`.
+
+The observed Dispatch mean was 3.878437 ms / 2007.533 GB/s. Cross-rank
+start-record spread averaged 0.817509 ms (p95 1.069919 ms, max 2.252970 ms).
+Launch-complete spread averaged only 0.213777 ms. More importantly, each rank's
+host operation submission took roughly 2.9-5.3 ms; the slowest-rank submission
+correlated with the max-rank Event time at 0.985, while start-record spread
+alone correlated at 0.957.
+
+This identifies the main issue as the Python/PyBind/C++ launch path, not merely
+the moment at which ranks enter the benchmark. The benchmark's host-side
+deadline rendezvous removes this cost from the Event interval but does not make
+the application faster. It must remain diagnostic-only.
+
+The preferred follow-up is therefore a C++ persistent or launch-ahead dispatch
+service:
+
+1. pre-stage stable descriptors, buffers, tiling, and launch arguments;
+2. enqueue the dispatch/epilogue work before all Python-side per-call work is
+   finished;
+3. let device-side generation/ready flags gate peer-visible work;
+4. retain the existing completion, error, generation, and two-generation
+   ownership checks;
+5. keep dynamic count-dependent output allocation and CPU count publication
+   outside the initial launch-ahead window.
+
+This changes when host work occurs rather than hiding it from the timer. Host
+alignment, busy waiting, or a measurement-only barrier is not an acceptable
+production solution.

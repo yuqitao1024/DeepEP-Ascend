@@ -948,6 +948,56 @@ def _aggregate_rank_operations(
                     for rank, route_plan in enumerate(route_plans)
                 ],
             }
+        launch_skew_profiles = [
+            record.get("launch_skew_samples") for record in rank_records
+        ]
+        if any(samples is not None for samples in launch_skew_profiles):
+            if any(samples is None for samples in launch_skew_profiles):
+                raise ValueError("launch skew samples missing from one rank")
+            sample_count = len(launch_skew_profiles[0])
+            if any(
+                    len(samples) != sample_count
+                    for samples in launch_skew_profiles):
+                raise ValueError("launch skew sample count mismatch")
+            start_spreads = []
+            complete_spreads = []
+            exposed_skews = []
+            for sample_index in range(sample_count):
+                starts = [
+                    samples[sample_index]["start_record_ns"]
+                    for samples in launch_skew_profiles
+                ]
+                completes = [
+                    samples[sample_index]["launch_complete_ns"]
+                    for samples in launch_skew_profiles
+                ]
+                devices = [
+                    record["device_samples"][sample_index]
+                    for record in rank_records
+                ]
+                start_spread = (max(starts) - min(starts)) / 1e9
+                complete_spread = (max(completes) - min(completes)) / 1e9
+                start_spreads.append(start_spread)
+                complete_spreads.append(complete_spread)
+                exposed_skews.append(
+                    max(1e-12, max(devices) - min(devices) - start_spread)
+                )
+            operations[-1]["launch_skew_profile"] = {
+                "sample_count": sample_count,
+                "start_record_spread_seconds": _summary_dict(start_spreads),
+                "launch_complete_spread_seconds": _summary_dict(
+                    complete_spreads),
+                "device_exposed_skew_upper_bound_seconds": _summary_dict(
+                    exposed_skews),
+                "per_rank_start_record_ns": [
+                    [sample["start_record_ns"] for sample in samples]
+                    for samples in launch_skew_profiles
+                ],
+                "per_rank_launch_complete_ns": [
+                    [sample["launch_complete_ns"] for sample in samples]
+                    for samples in launch_skew_profiles
+                ],
+            }
     return operations
 
 
@@ -1619,12 +1669,18 @@ class AscendRuntime:
                 operation()
             device_samples = []
             wall_samples = []
+            launch_skew_samples = []
             for _ in range(self.args.iterations):
                 self.buffer.barrier(with_cpu_sync=True, sequential=True)
                 self.align_rank_launch()
                 sample = self.timer.measure(operation)
                 device_samples.append(sample.device_seconds)
                 wall_samples.append(sample.wall_seconds)
+                if self.args.profile_launch_skew:
+                    launch_skew_samples.append({
+                        "start_record_ns": sample.start_record_ns,
+                        "launch_complete_ns": sample.launch_complete_ns,
+                    })
             record = {
                 "operation_id": operation_id,
                 "device_samples": device_samples,
@@ -1633,6 +1689,8 @@ class AscendRuntime:
                 "logical_byte_components": prepared.traffic[operation_id],
                 "work_counts": prepared.work_counts[operation_id],
             }
+            if self.args.profile_launch_skew:
+                record["launch_skew_samples"] = launch_skew_samples
             if operation_id == "dispatch" and hasattr(self, "manifest"):
                 selector_enabled = (
                     os.environ.get(
@@ -1786,6 +1844,8 @@ def run_benchmark(args: Any, selected_case_ids: tuple[str, ...]) -> int:
             report.timing_protocol["rank_launch_deadline_us"] = (
                 args.rank_launch_deadline_us
             )
+        if args.profile_launch_skew:
+            report.timing_protocol["profile_launch_skew"] = True
         report.device = {
             "name": torch.npu.get_device_name(local_rank),
             "local_rank": local_rank,

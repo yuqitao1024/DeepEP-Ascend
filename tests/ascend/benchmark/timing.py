@@ -21,6 +21,8 @@ class TimingSummary:
 class TimingSample:
     device_seconds: float
     wall_seconds: float
+    start_record_ns: int = 0
+    launch_complete_ns: int = 0
 
 
 class NpuEventTimer:
@@ -32,14 +34,18 @@ class NpuEventTimer:
         end = self.backend.new_event("end")
         self.backend.synchronize()
         start.record()
+        start_record_ns = time.perf_counter_ns()
         wall_start = time.perf_counter()
         operation()
+        launch_complete_ns = time.perf_counter_ns()
         end.record()
         self.backend.synchronize()
         wall_seconds = time.perf_counter() - wall_start
         return TimingSample(
             device_seconds=start.elapsed_time(end) / 1e3,
             wall_seconds=wall_seconds,
+            start_record_ns=start_record_ns,
+            launch_complete_ns=launch_complete_ns,
         )
 
 

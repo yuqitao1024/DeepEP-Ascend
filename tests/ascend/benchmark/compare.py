@@ -87,6 +87,7 @@ def compare_reports(
             "iterations",
             "rank_aggregation",
             "logical_byte_aggregation",
+            "profile_launch_skew",
         ),
         namespace="timing_protocol",
     )

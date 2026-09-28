@@ -63,6 +63,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-check", action="store_true")
     parser.add_argument("--profile-stages", action="store_true")
     parser.add_argument(
+        "--profile-launch-skew",
+        action="store_true",
+        help=(
+            "diagnostic only: record host launch timestamps and cross-rank "
+            "skew without changing event timing"
+        ),
+    )
+    parser.add_argument(
         "--rank-launch-deadline-us",
         type=_nonnegative_microseconds,
         default=0,
