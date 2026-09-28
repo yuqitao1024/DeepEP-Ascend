@@ -268,6 +268,47 @@ high watermark 均为 3，说明当前没有证据表明队列深度或 channel 
 带宽公式及 benchmark event 计时边界保持原样。历史表中的
 `service_submit` 是旧 envelope 口径，不能直接作为当前 active 提交耗时。
 
+#### D3.1 CQ drain 原因拆分（2026-09-28）
+
+在不改变 drain 条件和命令顺序的前提下，profile ABI 升至 5。每次
+`drain_channel` 记录触发原因和耗时，原因分为：
+
+- `queue_full`：提交新 WQE 前因 SQ/CQ 深度触发的隐式 drain；
+- `flush`：显式 Flush command 的 drain；
+- `barrier`：barrier phase 中的 completion drain；
+- `final`：没有显式 Flush/Barrier 时，service 末尾的隐式 final drain。
+
+新增计数和周期字段只写入 profile，不参与协议判断。各原因周期之和应与
+原有 `wait_cycles` 对齐；`wait_cycles` 仍包含 CQE 轮询、CQE 状态处理和
+队列指针更新，不能解释成纯网络等待。host 侧将这些字段作为
+`cq_drain_attribution` 导出，后续用于判断是否存在重复 drain 或可安全批量化
+completion 的证据。本轮没有删除 drain、改变 payload-before-control 顺序，
+也没有新增性能开关。
+
+#### D3.2 首次 CQ drain 归因 session（2026-09-28）
+
+任务 `task_20260928_104050_22737683753` 使用 NPU8P 设备 4--7、CANN
+9.3.0，五操作 profile correctness 通过。结果归档于本地
+`.scratch/release-drain-profile/drain-profile-20260928-r3.json`。
+
+对于每个 operation，以下取 `wait_cycles` 最大的同一个 rank；各列是该
+rank 的值，不能把不同 rank 的 max 再相加：
+
+| Operation | max-wait rank | CQ drain | flush drain | final drain | barrier drain | queue-full drain |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 4 | 800,491 | 788,757 | 8,066 | 3,668 | 0 |
+| Expanded Dispatch | 6 | 818,374 | 805,995 | 7,810 | 4,569 | 0 |
+| Cached Dispatch | 4 | 794,071 | 786,234 | 7,837 | 0 | 0 |
+| Combine | 6 | 1,613,172 | 1,605,764 | 7,408 | 0 | 0 |
+| Reduced Combine | 6 | 1,615,931 | 1,608,517 | 7,414 | 0 | 0 |
+
+Normal Dispatch 中约 98.5% 的 CQ wait 属于显式 payload flush；每个最慢
+rank 的 drain 计数为 14 次 flush、7 次 final、7 次 barrier，未出现
+queue-full drain。由此暂不启动队列深度、SQ/CQ high-watermark 或扩 channel
+优化。下一候选应是在 payload completion 等待期间准备 control command，
+但 control/generation 仍必须等 payload completion 成功后发布；需要单独的
+小范围实验和 two-generation 错误注入验证，不可直接重排现有 release 协议。
+
 上一轮任务 `task_20260925_234411_233712123803` 在结果输出前超时，
 不是已知的 teardown SIGSEGV；旧 `d3-smoke.json` 是此前成功任务遗留。
 本轮使用唯一输出文件名，并分别验证退出状态、correctness 和全部 rank
@@ -498,6 +539,186 @@ Expanded 中跳过的 lane 不消耗 buffer/event。
 结论：保留 D4 双缓冲；其典型性能和独立 payload 边界验证已完成。
 weight 问题仍是独立待办。复跑 payload 回归时，在相同 CANN/HCOMM/Python
 环境和队列分配下执行：
+
+#### D4.1 epilogue copy 归因插桩（2026-09-28）
+
+本轮先做 measurement-only，不改变 output layout、validate 条件或 UB reuse
+顺序。profile ABI 升至 6，并为每个 active block 增加两类原始槽位：
+
+- scalar VF：记录 hidden 尾部、scale、top-k weight 的 lane-0 采样周期，及
+  scalar kernel 的 block span 和采样字节量；
+- AICore vector：记录 source-rank lookup、MTE3→MTE2 reuse wait、MTE2→MTE3
+  completion wait、GM→UB/UB→GM 提交周期，以及 local/remote record、tile
+  和 vector bytes。
+
+scalar 采样周期是单 lane 的 component clock，不应与并行 block 求和后当作
+端到端 wall time；vector wait 同样按 block 保留，host 聚合只对关键路径 span
+和最大 wait 取 max，对 record/byte/tile 做工作量汇总。profile 未开启时这些
+字段通过模板或分支裁剪，不进入正常 binary 的控制流。
+
+本轮 NPU 结果需回答：
+
+1. scalar tail/scale/weight 是否形成稳定的独立空洞；
+2. vector 的 reuse 或 MTE2 wait 是否占最慢 block 的主要比例；
+3. source-rank lookup 是否随 expanded workload 放大；
+4. local/remote 仅表示 receive shard 来源，不将其解释为 P2P 网络传输。
+
+只有出现稳定等待空洞，才继续设计 arrival-driven copy；否则保持 D4 双缓冲，
+不继续单纯扩大 tile。
+
+##### 实测结果与 tile selector 跟进（2026-09-28）
+
+NPU8P device 4–7、4 rank、CANN/HCOMM 9.3.0 上完成一次五操作 profile
+correctness。workload 为 8192 tokens/rank、hidden 7168、top-k 8、256
+experts、64 AIV，2 warmups / 2 iterations；五操作全部通过。profile binary
+SHA256 为 `62f86b8b1dc1ef4f090c934fe85d7712d04e2cc4343eb1d0910b525844491f24`，
+任务为 `task_20260928_121032_251149324222`，原始结果本地归档为
+`.scratch/epilogue-profile/epilogue-profile-20260928-r3.json`，SHA256 为
+`6181f73330f60925ecc12ad66cb9e634c985c0a14a0d3cfd5ddd32d3f6859caa`。
+
+| 操作 | vector records | tiles | tiles/record | MTE2 wait cycles | reuse wait cycles | scalar block-local max cycles |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dispatch | 29653 | 29653 | 1 | 157163 | 1595 | 0 |
+| Expanded Dispatch | 65646 | 919044 | 14 | 1829320 | 506877 | 219914 |
+| Cached Dispatch | 29653 | 415142 | 14 | 1624118 | 231358 | 121743 |
+
+Normal Dispatch 使用 8192-byte tile，一条 7168-byte hidden record 只需一个
+tile；Expanded/Cached 因 selector 不 eligible 而回退 512-byte tile，每条
+record 需要 14 tiles。Expanded 的 local/remote record 为 16645/49169，
+Cached 为 7443/22210；这是本卡 receive shard 的来源归类，不是当前发生的
+P2P 传输。Expanded scalar scale lane-0 采样最大 107312 cycles，Cached 为
+118482 cycles；这些采样不能与 vector block max 相加形成端到端关键路径。
+
+SIMT block 的绝对 `clock()` 值不在共享时钟域。最初 host 聚合使用
+`max(end) - min(start)`，产生约 `1.84e19` 的伪 span；已改为先对每个 block
+计算 `end - start`，再取 block/rank 最大值。设备原始数据仍有效，不需重跑。
+
+基于 14 tiles/record 的结果，曾临时放开显式 8192 配置对 Expanded/Cached
+的 selector，未改变未设置环境变量时的默认值。candidate binary SHA256 为
+`9f66eba3b8f6281989a3e05b5710159d5eb52c63ab319d5368fa2b62d553b9b1`：
+
+- `task_20260928_122804_34309093472` 的 payload 边界矩阵完成全部 8 个场景；
+  每个场景都覆盖 Normal、Cached、Expanded、Cached Expanded，随后在结果
+  JSON 完整写出后出现已有记录的 teardown SIGSEGV，因此任务进程退出 1；
+- `task_20260928_122944_346068925057` 的五操作 stage-profile 运行在 240 秒
+  内未完成，退出 124，没有生成结果 JSON；原 `_C` 已由 trap 恢复；
+- 两次用于区分 512 control 与 8192 candidate 的最小 probe 均因 device 4–7
+  在 600 秒内未同时空闲而被队列自动取消，未实际占卡或执行。
+
+因此当前只能确认“大 tile 的非 profile payload correctness 通过”，不能确认
+profile 超时由 tile 引起，也没有端到端性能收益证据。selector 放开已撤回，
+Expanded/Cached 继续保持 512-byte tile。下一次设备窗口应先完成同 binary
+的 512/8192 最小 profile 对照；只有 8192 correctness/profile 都稳定后，才
+进入无 profile ABBA。arrival-driven copy 暂不推进，避免在 tile fallback
+尚未排除前增加协议复杂度。
+
+##### 同 binary 512/8192 复验与 4-rank ABBA（2026-09-28）
+
+设备窗口恢复后，重新构建同一 candidate binary
+`9f66eba3b8f6281989a3e05b5710159d5eb52c63ab319d5368fa2b62d553b9b1`。
+selector 语义保持实验开关：未设置环境变量时默认行为不变；只有显式设置
+`DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES=8192` 时，Expanded/Cached 才使用
+大 tile。构建后本地与远端 selector 均已恢复基线
+`5bfb8fb707be66df0b8b7a9e4e1c6dd43503529d6b98465dec294c20b308f056`，运行目录
+`_C` 恢复为 `d08352909619bc12e95ec2fc2d03ff4dfaef78ccb7b5b08dfae7350593bd1cad`。
+
+512 control 与 8192 candidate 均在 90 秒内完成，且五操作全部通过：
+
+- 512 control task `task_20260928_151404_150580925737`；
+- 8192 candidate task `task_20260928_151500_151404632573`。
+
+同 binary profile 对照显示，8192 将 Expanded/Cached 的 vector tile 数量从
+14 tiles/record 降为 1 tile/record。典型 4-rank profile 中，Expanded 的
+MTE2/reuse wait 最大值从 1832461/505356 cycles 降至 676/687 cycles；Cached
+从 1616777/229369 cycles 降至 156488/1889 cycles。此前“8192 stage profile
+必然超时”的判断未被复现，不能作为撤回依据。
+
+随后在同一 candidate binary 上完成三组无 stage profile ABBA，固定 NPU8P
+device 4–7、4 rank、8192 tokens/rank、hidden 7168、top-k 8、256 experts、
+64 AIV，2 warmups / 30 iterations，顺序 A1/B1/B2/A2。A 显式设置 512，B 显式
+设置 8192；两者均启用既有 device/parallel prefix 与 token fanout。每组表值
+为两个 A/B run 的均值：
+
+| ABBA 组 | 操作 | A 512 / ms | B 8192 / ms | mean 缩短 |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | Normal Dispatch | 5.093907 | 3.193435 | 37.309% |
+| 1 | Expanded Dispatch | 12.806477 | 10.761854 | 15.966% |
+| 1 | Cached Dispatch | 61.593079 | 59.912690 | 2.728% |
+| 2 | Normal Dispatch | 4.989918 | 3.212696 | 35.616% |
+| 2 | Expanded Dispatch | 12.836613 | 11.051450 | 13.907% |
+| 2 | Cached Dispatch | 62.960628 | 60.273923 | 4.267% |
+| 3 | Normal Dispatch | 4.906112 | 3.164094 | 35.507% |
+| 3 | Expanded Dispatch | 12.892957 | 10.772480 | 16.447% |
+| 3 | Cached Dispatch | 61.679043 | 60.077890 | 2.596% |
+
+六 run 合并后，Normal Dispatch 从 4.996646 ms 降至 3.190075 ms，缩短
+36.156%；Expanded Dispatch 从 12.845349 ms 降至 10.861928 ms，缩短
+15.441%；Cached Dispatch 从 62.077583 ms 降至 60.088168 ms，缩短 3.205%。
+
+注意：Normal Dispatch 的 A 侧显式 512 是人为 control，不是当前生产默认；
+当前默认已经是 8192。因此 36.156% 只说明 tile 机制对该 workload 的敏感性，
+不能算作本次 selector 候选相对生产默认的新增收益。Expanded/Cached 的
+512→8192 才是候选带来的实际变化。
+
+ABBA tasks 分别为 `task_20260928_152437_20805686111`、
+`task_20260928_152657_210381112587`、`task_20260928_153548_23671039905`。
+12 个 run 均写出完整 JSON，五操作功能校验通过。第 2 组 A1 在结果完整写出
+且校验通过后出现已知 teardown SIGSEGV，按既定规则接受；第 3 组第一次尝试
+的 B2 在结果写出前因 HCCL stream 资源耗尽失败，已删除该次不完整产物并整组
+重跑，重跑全部通过。
+
+本节 4-rank 结论是：显式 8192 对 Normal/Expanded/Cached 均方向稳定，且
+Normal/Expanded 收益显著；Cached 受 CQ flush 主导，端到端收益约 3%。原始
+JSON 已下载到本地
+`.scratch/epilogue-profile/abba-results/epilogue-tile-abba-g{1,2,3}-{A1,B1,B2,A2}.json`。
+由于既有主验收 workload 是 8 rank，本节仍标记为“4-rank 候选已复验”，不是
+最终默认路径变更。下一步应在 8 rank 上复验同样的同 binary ABBA，并确认
+Normal Dispatch 无回归后，才允许修改默认 selector。
+
+##### 8-rank 复验与保留决策（2026-09-28）
+
+同 binary 8-rank ABBA 在 NPU8P device 0–7、8 rank、8192 tokens/rank、
+hidden 7168、top-k 8、256 experts、64 AIV 上完成一组 A1/B1/B2/A2。A 仍为
+显式 512 control，B 为 8192；不开 stage profiling，2 warmups / 30
+iterations。任务为 `task_20260928_154645_301671527004`，四个 run 全部完整
+写出 JSON，五操作功能校验通过，无 teardown SIGSEGV 或资源错误。
+
+| 操作 | A 512 / ms | B 8192 / ms | mean 缩短 |
+| --- | ---: | ---: | ---: |
+| Normal Dispatch | 6.366515 | 3.673394 | 42.301% |
+| Expanded Dispatch | 15.181553 | 13.298286 | 12.405% |
+| Cached Dispatch | 64.945250 | 62.221213 | 4.194% |
+
+原始 JSON 归档于本地
+`.scratch/epilogue-profile/abba8-results/epilogue-tile-abba8-g1-{A1,B1,B2,A2}.json`。
+结合 4-rank 三组 ABBA、512/8192 profile 对照、8 个 payload 边界场景和
+8-rank 复验，用户决定收益已足够明确，不再要求 8-rank 三组重复验证。
+
+保留实现：`select_dispatch_consumer_tile_config` 的默认 eligibility 改为
+`!hybrid_mode && !stream_mode && ((device_prefix_enabled && cpu_sync) ||
+cached_mode)`；显式配置仍接受 512/1024/2048/4096/8192，其中 512 表示关闭
+vector tile，继续用于对照实验。默认值仍为 8192。本地与远端 selector 源码
+SHA256 为 `a8c94b29d4d1803751febcb8e6317c25e0bf376451cf7f60f48cca9eb4b309cb`。
+契约 probe 增加默认 Expanded/Cached/Expanded-Cached 均选择 8192 的断言，
+并从 disabled case 中移除已变为 eligible 的 Cached 与 Expanded；源码 SHA256
+为 `03131a151c2befba886ac82fd5aac05f6a8064f33f0daa2d89bd16636b6d7814`。
+
+本地目标测试结果：
+
+- `test_dispatch_consumer_tile_specializations`：1 passed；
+- `test_pure_cpp_layout_and_tiling_contract`：1 passed；
+- `tests/ascend/test_transport_contract.py`：3 passed；
+- `git diff --check`：通过。
+
+全量 `test_core_operator_contract.py` 当前仍有 60 个既有失败，主要来自当前
+worktree 的源码抽取/签名迁移分歧；本节只以两个目标契约测试作为该 selector
+变更的有效验证。`test_benchmark_contract.py` 仍保持 111 passed / 3 failed，
+3 个失败为已知 fixture 缺 `rank_launch_deadline_us`，与本变更无关。
+
+远端生产 `_C` 已重新构建并安装，SHA256 为
+`79717520a449efa86ab9f3534c15633dfde77e2e81ba57512d4279a87fb2e1e3`。第 2 组
+8-rank 重复 ABBA 已在用户决策后取消，未执行；本节候选代码已按默认路径
+保留。
 
 ```bash
 python -m torch.distributed.run --standalone --nproc-per-node=8 \

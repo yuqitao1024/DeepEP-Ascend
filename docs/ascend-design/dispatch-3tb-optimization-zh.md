@@ -613,3 +613,45 @@ compact 后的对齐 ABBA mean 为 3.216025 ms。达到 3 TB/s 仍需降至
 2.595363 ms，还差 0.620662 ms（19.299%）。下一步应转向 release
 flush/CQ completion 和 0.320 ms output copy；继续删除普通路径空 kernel
 无法覆盖剩余缺口。
+
+### 剩余两个 stage 边界的保守合并
+
+`DEEP_EP_ASCEND_DISPATCH_COMPACT_STAGE_BOUNDARIES=0/1` 控制两个剩余
+kernel 提交边界。普通非 cached、非 expanded、非 hybrid、非 stream 且非
+pipeline 的 Dispatch 可显式开启，默认关闭；stage profile 模式强制保留原
+边界。候选不把
+两个真实 VF kernel 融合进前一个 kernel，只在 stream 顺序上把下一 stage 的
+VF 提交提前：
+
+1. producer prefix marker 与错误处理后提交 record packing VF，原
+   producer-record stage 从 pipeline 跳过；
+2. epilogue expert-prefix marker、count publication 与 compact epilogue
+   扩展处理后提交 metadata VF，原 metadata stage 从 pipeline 跳过。
+
+因此跨 kernel 数据依赖、VF 内同步、错误路径和 profile stage 语义均保持不变。
+
+显式开关版本的完整候选二进制 SHA256：
+`4df0e7049e35483274bce78427bb3e5fde8428cb8e2a902521a5c7531208a0ea`，
+构建任务 `task_20260928_054650_208377325250`。8-rank 8192 tokens、hidden
+7168、256 experts 的 correctness smoke 任务
+`task_20260928_053209_20243211051` 通过，结果写入
+`boundary-v1-smoke.json`。
+
+同一二进制、`--rank-launch-deadline-us 2000`、三组 30/30 A1/B1/B2/A2
+ABBA 任务 `task_20260928_053334_202961522290` 全部通过：
+
+| ABBA 组 | A 原边界 / ms | B compact boundaries / ms | 耗时缩短 |
+| --- | ---: | ---: | ---: |
+| 1 | 3.360639 | 3.335320 | 0.753% |
+| 2 | 3.342520 | 3.301330 | 1.232% |
+| 3 | 3.290889 | 3.350477 | -1.811% |
+| 合并 | 3.331349 | 3.329042 | 0.069% |
+
+三组方向不一致，合并收益仅 0.069%，未达到保留为生产性能优化的证据标准。
+对齐 profile 任务 `task_20260928_054220_2065991260` 也显示两个边界不是
+此前 profile 归因中的空闲空洞：producer prefix -> producer record marker
+间隔约 0.124 ms，expert prefix -> metadata marker 间隔约 0.237 ms，其中
+是真实 record packing、metadata、publication 与依赖等待，而不是可删除的空
+kernel 提交。该候选已在源码中保留为可显式开关的实验路径，但不作为默认性能
+收益合并；后续如果继续这条线，应先减少两个 VF kernel 本身的计算量，而不是
+只移动提交边界。

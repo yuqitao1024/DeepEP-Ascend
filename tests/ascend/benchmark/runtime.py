@@ -375,6 +375,13 @@ def _aggregate_stage_profiles(
         "barrier_poll_cycles", "service_active_cycles", "cq_drain_cycles",
         "launch_gap_cycles", "other_active_cycles",
     )
+    drain_attribution_names = (
+        "cq_drain_call_count", "cq_drain_queue_full_count",
+        "cq_drain_flush_count", "cq_drain_barrier_count",
+        "cq_drain_final_count", "cq_drain_queue_full_cycles",
+        "cq_drain_flush_cycles", "cq_drain_barrier_cycles",
+        "cq_drain_final_cycles",
+    )
     barrier_diagnostic_names = (
         "issue_cycles", "drain_cycles", "poll_iterations", "peer_count",
         "first_observation_cycles", "completion_cycles",
@@ -391,10 +398,36 @@ def _aggregate_stage_profiles(
     service_cycles = {name: 0 for name in service_cycle_names}
     release_attribution = {name: 0 for name in release_attribution_names}
     release_attribution_available = True
+    drain_attribution = {name: 0 for name in drain_attribution_names}
+    drain_attribution_seen = False
     barrier_diagnostics = {name: 0 for name in barrier_diagnostic_names}
     barrier_diagnostics_seen = False
     barrier_peer_diagnostics = []
     barrier_peer_diagnostics_seen = False
+    epilogue_copy_seen = False
+    epilogue_copy_attribution = {
+        "scalar_span_cycles": 0,
+        "scalar_hidden_cycles": 0,
+        "scalar_scale_cycles": 0,
+        "scalar_weight_cycles": 0,
+        "scalar_sample_records": 0,
+        "scalar_hidden_bytes": 0,
+        "scalar_scale_bytes": 0,
+        "scalar_weight_elements": 0,
+        "vector_lookup_cycles": 0,
+        "vector_metadata_cycles": 0,
+        "vector_reuse_wait_cycles": 0,
+        "vector_mte2_wait_cycles": 0,
+        "vector_gm_to_ub_cycles": 0,
+        "vector_ub_to_gm_cycles": 0,
+        "vector_record_count": 0,
+        "vector_local_record_count": 0,
+        "vector_remote_record_count": 0,
+        "vector_local_copy_cycles": 0,
+        "vector_remote_copy_cycles": 0,
+        "vector_bytes": 0,
+        "vector_tile_count": 0,
+    }
     acquire_peer_diagnostics = []
     acquire_peer_diagnostics_seen = False
     release_peer_publish_diagnostics = []
@@ -500,6 +533,17 @@ def _aggregate_stage_profiles(
                         f"stage profile release attribution.{name}")
                 release_attribution[name] = max(
                     release_attribution[name], value)
+            rank_has_drain_attribution = any(
+                name in rank_release_attribution
+                for name in drain_attribution_names)
+            if rank_has_drain_attribution:
+                for name in drain_attribution_names:
+                    value = rank_release_attribution.get(name)
+                    if type(value) is not int or value < 0:
+                        raise ValueError(
+                            f"stage profile drain attribution.{name}")
+                    drain_attribution[name] = max(drain_attribution[name], value)
+                drain_attribution_seen = True
         rank_barrier_diagnostics = rank_service.get("barrier_diagnostics")
         if rank_barrier_diagnostics is not None:
             if not isinstance(rank_barrier_diagnostics, dict):
@@ -583,6 +627,79 @@ def _aggregate_stage_profiles(
             if type(rank_acquire_probe) is not int or rank_acquire_probe < 0:
                 raise ValueError("stage profile acquire probe")
             acquire_probe_seen = True
+        rank_epilogue_copy = profile.get("service", {}).get("epilogue_copy")
+        if rank_epilogue_copy is not None:
+            if not isinstance(rank_epilogue_copy, dict):
+                raise ValueError("stage profile epilogue copy attribution")
+            scalar_blocks = rank_epilogue_copy.get("scalar_blocks")
+            vector_blocks = rank_epilogue_copy.get("vector_blocks")
+            if not isinstance(scalar_blocks, list) or not isinstance(
+                vector_blocks, list):
+                raise ValueError("stage profile epilogue copy blocks")
+            scalar_values = {
+                name: 0 for name in (
+                    "hidden_cycles", "scale_cycles", "weight_cycles",
+                    "sample_records", "hidden_bytes", "scale_bytes",
+                    "weight_elements",
+                )
+            }
+            scalar_elapsed = []
+            for block in scalar_blocks:
+                if not isinstance(block, dict):
+                    raise ValueError("stage profile scalar block")
+                start, end = block.get("start"), block.get("end")
+                if (type(start) is not int or type(end) is not int or
+                        start <= 0 or end < start):
+                    raise ValueError("stage profile scalar block cycles")
+                scalar_elapsed.append(end - start)
+                for name in scalar_values:
+                    value = block.get(name)
+                    if type(value) is not int or value < 0:
+                        raise ValueError(
+                            f"stage profile scalar block.{name}")
+                    scalar_values[name] = max(scalar_values[name], value)
+            vector_values = {
+                name: 0 for name in (
+                    "lookup_cycles", "metadata_cycles", "reuse_wait_cycles",
+                    "mte2_wait_cycles",
+                    "gm_to_ub_cycles", "ub_to_gm_cycles", "record_count",
+                    "local_record_count", "remote_record_count",
+                    "local_copy_cycles", "remote_copy_cycles",
+                    "vector_bytes", "tile_count",
+                )
+            }
+            for block in vector_blocks:
+                if not isinstance(block, dict):
+                    raise ValueError("stage profile vector block")
+                for name in vector_values:
+                    value = block.get(name)
+                    if type(value) is not int or value < 0:
+                        raise ValueError(
+                            f"stage profile vector block.{name}")
+                    vector_values[name] += value if name in {
+                        "record_count", "local_record_count",
+                        "remote_record_count", "vector_bytes", "tile_count"
+                    } else 0
+                    if name in {
+                        "lookup_cycles", "metadata_cycles", "reuse_wait_cycles",
+                        "mte2_wait_cycles", "gm_to_ub_cycles",
+                        "ub_to_gm_cycles", "local_copy_cycles",
+                        "remote_copy_cycles"
+                    }:
+                        vector_values[name] = max(vector_values[name], value)
+            rank_copy = {
+                "scalar_span_cycles": (
+                    max(scalar_elapsed) if scalar_elapsed else 0
+                ),
+                **{f"scalar_{name}": value
+                   for name, value in scalar_values.items()},
+                    **{(name if name == "vector_bytes" else f"vector_{name}"): value
+                       for name, value in vector_values.items()},
+            }
+            for name, value in rank_copy.items():
+                epilogue_copy_attribution[name] = max(
+                    epilogue_copy_attribution[name], value)
+            epilogue_copy_seen = True
         vf_cycle_names = (
             "acquire_vf_start_cycles", "acquire_vf_end_cycles",
             "validate_vf_start_cycles", "validate_vf_end_cycles",
@@ -650,6 +767,13 @@ def _aggregate_stage_profiles(
         "optimistic_speedup_ceiling": ceiling,
         "per_rank": per_rank,
     }
+    if drain_attribution_seen:
+        result["cq_drain_attribution"] = drain_attribution
+    if epilogue_copy_seen:
+        result["epilogue_copy_attribution"] = dict(
+            epilogue_copy_attribution,
+            aggregation="max_per_rank_for_cycles_and_work",
+        )
     if host_timeline_ns is not None:
         result["host_timeline_ns"] = host_timeline_ns
     if barrier_diagnostics_seen:

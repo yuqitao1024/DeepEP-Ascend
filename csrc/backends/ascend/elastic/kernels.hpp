@@ -697,6 +697,7 @@ struct DispatchArguments {
     std::uint32_t early_route_plan = 0;
     std::uint32_t fused_metadata_copy = 0;
     std::uint32_t compact_epilogue = 0;
+    std::uint32_t compact_stage_boundaries = 0;
     std::uint32_t fused_consumed_barrier = 0;
 };
 

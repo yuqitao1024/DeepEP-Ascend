@@ -167,6 +167,13 @@ inline std::uint64_t fetch_result_offset(std::uint32_t peer) {
 
 namespace detail {
 
+enum class TransportDrainReason : std::uint32_t {
+    kQueueFull,
+    kFlush,
+    kBarrier,
+    kFinal,
+};
+
 inline constexpr std::uint64_t kDefaultRetryLimit = 1000000;
 inline constexpr std::uint32_t kServiceScratchBytes = 512;
 
@@ -509,12 +516,33 @@ __aicore__ inline void update_queue_profile(const DeviceTransportContext& contex
 template <bool ProfileEnabled = true>
 __aicore__ inline void finish_drain_profile(const DeviceTransportContext& context,
                                             __gm__ TransportStageProfile* profile,
-                                            std::uint64_t wait_start) {
+                                            std::uint64_t wait_start,
+                                            TransportDrainReason reason) {
     if constexpr (!ProfileEnabled)
         return;
     if (profile == nullptr)
         return;
-    profile->wait_cycles += static_cast<std::uint64_t>(AscendC::GetSystemCycle()) - wait_start;
+    const auto elapsed = static_cast<std::uint64_t>(AscendC::GetSystemCycle()) - wait_start;
+    profile->wait_cycles += elapsed;
+    ++profile->cq_drain_call_count;
+    switch (reason) {
+        case TransportDrainReason::kQueueFull:
+            ++profile->cq_drain_queue_full_count;
+            profile->cq_drain_queue_full_cycles += elapsed;
+            break;
+        case TransportDrainReason::kFlush:
+            ++profile->cq_drain_flush_count;
+            profile->cq_drain_flush_cycles += elapsed;
+            break;
+        case TransportDrainReason::kBarrier:
+            ++profile->cq_drain_barrier_count;
+            profile->cq_drain_barrier_cycles += elapsed;
+            break;
+        case TransportDrainReason::kFinal:
+            ++profile->cq_drain_final_count;
+            profile->cq_drain_final_cycles += elapsed;
+            break;
+    }
     update_queue_profile<ProfileEnabled>(context, profile);
 }
 
@@ -565,7 +593,8 @@ __aicore__ inline bool drain_channel(const DeviceTransportContext& context,
                                      TransportCommandOpcode opcode,
                                      std::uint64_t retry_limit,
                                      __gm__ TransportStageProfile* profile,
-                                     const AscendC::LocalTensor<std::uint32_t>& service_scratch) {
+                                     const AscendC::LocalTensor<std::uint32_t>& service_scratch,
+                                     TransportDrainReason reason) {
     if (peer.channel == nullptr || peer.sq == nullptr || peer.cq == nullptr || peer.sq->head == 0 || peer.sq->tail == 0 ||
         peer.cq->base == 0 || peer.cq->tail == 0 || peer.cq->doorbell == 0 || peer.cq->depth == 0 ||
         peer.cq->entry_bytes != sizeof(cann_abi::UrmaCqe)) {
@@ -608,7 +637,7 @@ __aicore__ inline bool drain_channel(const DeviceTransportContext& context,
                 }
             }
             record_error(queue, DeviceTransportError::kCompletionTimeout, command_index, opcode, static_cast<int>(peer.world_peer), 0);
-            finish_drain_profile<ProfileEnabled>(context, profile, wait_start);
+            finish_drain_profile<ProfileEnabled>(context, profile, wait_start, reason);
             return false;
         }
         const auto substatus = (word0 >> 16U) & 0xffU;
@@ -621,7 +650,7 @@ __aicore__ inline bool drain_channel(const DeviceTransportContext& context,
                          static_cast<int>(peer.world_peer),
                          0,
                          (status << 8U) | substatus);
-            finish_drain_profile<ProfileEnabled>(context, profile, wait_start);
+            finish_drain_profile<ProfileEnabled>(context, profile, wait_start, reason);
             return false;
         }
         ++tail;
@@ -629,7 +658,7 @@ __aicore__ inline bool drain_channel(const DeviceTransportContext& context,
     aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->tail), tail);
     aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.cq->doorbell), tail & 0x00ffffffU);
     aicore::store_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->tail), tail);
-    finish_drain_profile<ProfileEnabled>(context, profile, wait_start);
+    finish_drain_profile<ProfileEnabled>(context, profile, wait_start, reason);
     return true;
 }
 
@@ -722,7 +751,8 @@ __aicore__ inline bool post_request(const DeviceTransportContext& context,
     const auto completed = aicore::load_device(reinterpret_cast<__gm__ std::uint32_t*>(peer.sq->tail));
     update_queue_profile<ProfileEnabled>(context, profile);
     if (request_count - completed + 1 >= peer.cq->depth) {
-        if (!drain_channel<ProfileEnabled>(context, queue, peer, command_index, opcode, retry_limit, profile, wqe_scratch))
+        if (!drain_channel<ProfileEnabled>(context, queue, peer, command_index, opcode, retry_limit, profile, wqe_scratch,
+                                           TransportDrainReason::kQueueFull))
             return false;
         head_value = aicore::load_device(reinterpret_cast<__gm__ std::uint64_t*>(peer.sq->head));
         position = urma::sq_position(head_value);
@@ -767,6 +797,7 @@ __aicore__ inline bool drain_all(const DeviceTransportContext& context,
                                  std::uint64_t retry_limit,
                                  __gm__ TransportStageProfile* profile,
                                  const AscendC::LocalTensor<std::uint32_t>& service_scratch,
+                                 TransportDrainReason reason,
                                  TransportTeam barrier_phase_team = TransportTeam::kWorld,
                                  std::uint32_t barrier_phase_index = kTransportProfileBarrierPhaseCount) {
     if (context.topology.world_size <= 1)
@@ -789,7 +820,8 @@ __aicore__ inline bool drain_all(const DeviceTransportContext& context,
         bool drained = true;
         for (std::uint32_t channel = 0; channel < context.channel_count; ++channel) {
             auto resolved = resolve_context(context, peer, channel);
-            drained = drain_channel<ProfileEnabled>(context, queue, resolved, command_index, opcode, retry_limit, profile, service_scratch);
+            drained = drain_channel<ProfileEnabled>(context, queue, resolved, command_index, opcode, retry_limit, profile, service_scratch,
+                                                    reason);
             if (!drained)
                 break;
         }
@@ -1031,7 +1063,8 @@ __aicore__ inline bool execute_barrier(const DeviceTransportContext& context,
         if constexpr (ProfileEnabled)
             drain_start = static_cast<std::uint64_t>(AscendC::GetSystemCycle());
         if (!drain_all<ProfileEnabled>(
-                context, queue, command_index, current->opcode, retry_limit, profile, wqe_scratch, phase_team, phase_index))
+                context, queue, command_index, current->opcode, retry_limit, profile, wqe_scratch,
+                TransportDrainReason::kBarrier, phase_team, phase_index))
             return false;
         if constexpr (ProfileEnabled) {
             if (profile != nullptr) {
@@ -1182,6 +1215,15 @@ __aicore__ inline void begin_profile(const DeviceTransportContext& context, Tran
     profile->barrier_first_observation_cycles = 0;
     profile->barrier_completion_cycles = 0;
     profile->barrier_poll_elapsed_cycles = 0;
+    profile->cq_drain_call_count = 0;
+    profile->cq_drain_queue_full_count = 0;
+    profile->cq_drain_flush_count = 0;
+    profile->cq_drain_barrier_count = 0;
+    profile->cq_drain_final_count = 0;
+    profile->cq_drain_queue_full_cycles = 0;
+    profile->cq_drain_flush_cycles = 0;
+    profile->cq_drain_barrier_cycles = 0;
+    profile->cq_drain_final_cycles = 0;
 #if DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS
     for (std::uint32_t index = 0;
          index < sizeof(profile->acquire_peer_world_rank) /
@@ -1447,7 +1489,8 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
             // Validation is complete before any transport submission.
         } else if (current->opcode == TransportCommandOpcode::kFlush) {
             const auto command_start = detail::command_profile_clock<ProfileEnabled>();
-            success = detail::drain_all<ProfileEnabled>(context, queue, index, current->opcode, retry_limit, profile, wqe_scratch);
+            success = detail::drain_all<ProfileEnabled>(context, queue, index, current->opcode, retry_limit, profile, wqe_scratch,
+                                                        detail::TransportDrainReason::kFlush);
             detail::record_transport_command_cycles<ProfileEnabled>(
                 profile, current->opcode, command_start,
                 detail::command_profile_clock<ProfileEnabled>());
@@ -1606,7 +1649,8 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
     if (execution_success && !terminally_drained) {
         const auto command_start = detail::command_profile_clock<ProfileEnabled>();
         execution_success =
-            detail::drain_all<ProfileEnabled>(context, queue, count, TransportCommandOpcode::kFlush, retry_limit, profile, wqe_scratch);
+            detail::drain_all<ProfileEnabled>(context, queue, count, TransportCommandOpcode::kFlush, retry_limit, profile, wqe_scratch,
+                                              detail::TransportDrainReason::kFinal);
         // Include the implicit final drain even when no Flush was enqueued.
         detail::record_transport_command_cycles<ProfileEnabled>(
             profile, TransportCommandOpcode::kFlush, command_start,
@@ -1644,6 +1688,8 @@ __aicore__ static __attribute__((noinline)) void execute_profiled(const DeviceTr
         profile->service_active_cycles += end - begin;
         aicore::flush_stage_profile_header(profile);
         aicore::flush_cacheline(&profile->service_active_cycles);
+        aicore::flush_cacheline(&profile->cq_drain_call_count);
+        aicore::flush_cacheline(&profile->cq_drain_final_cycles);
     }
 }
 

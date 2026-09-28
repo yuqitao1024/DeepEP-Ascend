@@ -540,6 +540,22 @@ int main() {
                 DispatchConsumerTileConfigStatus::kEnabled ||
         consumer_tile_config.tile_bytes != 8192)
         return 100;
+    for (const auto expanded_default_mode : {
+             std::make_tuple(true, false, true, false, false, false),
+             std::make_tuple(true, false, true, true, false, false),
+             std::make_tuple(true, true, true, false, false, false)}) {
+        if (select_dispatch_consumer_tile_config(
+                nullptr, std::get<0>(expanded_default_mode),
+                std::get<1>(expanded_default_mode),
+                std::get<2>(expanded_default_mode),
+                std::get<3>(expanded_default_mode),
+                std::get<4>(expanded_default_mode),
+                std::get<5>(expanded_default_mode),
+                &consumer_tile_config) !=
+                    DispatchConsumerTileConfigStatus::kEnabled ||
+            consumer_tile_config.tile_bytes != 8192)
+            return 104;
+    }
     for (const auto baseline_value : {"512"}) {
         if (select_dispatch_consumer_tile_config(
                 baseline_value, true, false, true, false, false, false,
@@ -568,13 +584,7 @@ int main() {
             "1024", false, false, true, false, false, false,
             &consumer_tile_config),
         select_dispatch_consumer_tile_config(
-            "1024", true, true, true, false, false, false,
-            &consumer_tile_config),
-        select_dispatch_consumer_tile_config(
             "1024", true, false, false, false, false, false,
-            &consumer_tile_config),
-        select_dispatch_consumer_tile_config(
-            "1024", true, false, true, true, false, false,
             &consumer_tile_config),
         select_dispatch_consumer_tile_config(
             "1024", true, false, true, false, true, false,

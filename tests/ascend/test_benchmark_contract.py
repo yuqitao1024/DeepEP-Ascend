@@ -1593,6 +1593,106 @@ def test_stage_profile_rank_aggregation_derives_literal_block_span():
     }
 
 
+def test_stage_profile_aggregates_optional_cq_drain_attribution():
+    profiles = [_literal_stage_profile(0), _literal_stage_profile(1)]
+    for rank, profile in enumerate(profiles):
+        attribution = profile["service"]["release_attribution"]
+        attribution.update({
+            "cq_drain_call_count": 4 + rank,
+            "cq_drain_queue_full_count": 1,
+            "cq_drain_flush_count": 1,
+            "cq_drain_barrier_count": 1,
+            "cq_drain_final_count": 1,
+            "cq_drain_queue_full_cycles": 10 + rank,
+            "cq_drain_flush_cycles": 20,
+            "cq_drain_barrier_cycles": 30,
+            "cq_drain_final_cycles": 40,
+        })
+    aggregated = _aggregate_stage_profiles("dispatch", profiles)
+    assert aggregated["cq_drain_attribution"] == {
+        "cq_drain_call_count": 5,
+        "cq_drain_queue_full_count": 1,
+        "cq_drain_flush_count": 1,
+        "cq_drain_barrier_count": 1,
+        "cq_drain_final_count": 1,
+        "cq_drain_queue_full_cycles": 11,
+        "cq_drain_flush_cycles": 20,
+        "cq_drain_barrier_cycles": 30,
+        "cq_drain_final_cycles": 40,
+    }
+
+
+def test_stage_profile_aggregates_epilogue_copy_attribution():
+    profiles = [_literal_stage_profile(0), _literal_stage_profile(1)]
+    for rank, profile in enumerate(profiles):
+        profile["service"]["epilogue_copy"] = {
+            "scalar_blocks": [{
+                "block": 0,
+                "start": 100 + rank * 10,
+                "end": 180 + rank * 10,
+                "hidden_cycles": 20 + rank,
+                "scale_cycles": 7,
+                "weight_cycles": 9,
+                "sample_records": 2,
+                "hidden_bytes": 128,
+                "scale_bytes": 8,
+                "weight_elements": 4,
+            }, {
+                # SIMT blocks do not share an absolute clock domain. This
+                # block starts much later but has a shorter local elapsed time.
+                "block": 1,
+                "start": 10_000 + rank * 100,
+                "end": 10_060 + rank * 100,
+                "hidden_cycles": 10,
+                "scale_cycles": 3,
+                "weight_cycles": 4,
+                "sample_records": 1,
+                "hidden_bytes": 64,
+                "scale_bytes": 4,
+                "weight_elements": 2,
+            }],
+            "vector_blocks": [{
+                "block": 0,
+                "lookup_cycles": 11 + rank,
+                "metadata_cycles": 12,
+                "reuse_wait_cycles": 13,
+                "mte2_wait_cycles": 17,
+                "gm_to_ub_cycles": 19,
+                "ub_to_gm_cycles": 23,
+                "record_count": 5,
+                "local_record_count": 2,
+                "remote_record_count": 3,
+                "local_copy_cycles": 29,
+                "remote_copy_cycles": 31 + rank,
+                "vector_bytes": 4096,
+                "tile_count": 1,
+            }],
+        }
+    aggregated = _aggregate_stage_profiles("dispatch", profiles)
+    assert aggregated["epilogue_copy_attribution"] == {
+        "scalar_span_cycles": 80,
+        "scalar_hidden_cycles": 21,
+        "scalar_scale_cycles": 7,
+        "scalar_weight_cycles": 9,
+        "scalar_sample_records": 2,
+        "scalar_hidden_bytes": 128,
+        "scalar_scale_bytes": 8,
+        "scalar_weight_elements": 4,
+        "vector_lookup_cycles": 12,
+        "vector_metadata_cycles": 12,
+        "vector_reuse_wait_cycles": 13,
+        "vector_mte2_wait_cycles": 17,
+        "vector_gm_to_ub_cycles": 19,
+        "vector_ub_to_gm_cycles": 23,
+        "vector_record_count": 5,
+        "vector_local_record_count": 2,
+        "vector_remote_record_count": 3,
+        "vector_local_copy_cycles": 29,
+        "vector_remote_copy_cycles": 32,
+        "vector_bytes": 4096,
+        "vector_tile_count": 1,
+        "aggregation": "max_per_rank_for_cycles_and_work",
+    }
 def test_stage_profile_rank_aggregation_reports_barrier_diagnostics():
     profiles = [_literal_stage_profile(0), _literal_stage_profile(1)]
     for rank, profile in enumerate(profiles):

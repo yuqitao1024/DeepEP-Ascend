@@ -62,8 +62,9 @@ inline DispatchConsumerTileConfigStatus select_dispatch_consumer_tile_config(
     if (output == nullptr)
         return DispatchConsumerTileConfigStatus::kInvalid;
     *output = {};
-    const bool eligible = device_prefix_enabled && !cached_mode && cpu_sync &&
-        !expanded && !hybrid_mode && !stream_mode;
+    (void)expanded;
+    const bool eligible = !hybrid_mode && !stream_mode &&
+        ((device_prefix_enabled && cpu_sync) || cached_mode);
     if (value == nullptr) {
         if (!eligible)
             return DispatchConsumerTileConfigStatus::kDisabled;

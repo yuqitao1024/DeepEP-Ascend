@@ -417,7 +417,6 @@ inline int launch_direct_dispatch_epilogue_copy_outputs_variant_0(
     std::uint32_t copy_outputs, bool profile_enabled) {
     (void)stage;
     (void)copy_outputs;
-    (void)profile_enabled;
     return deep_ep_ascend_launch_direct_dispatch_epilogue_copy_outputs(
         static_cast<std::uint8_t*>(arguments.communication_buffer),
         static_cast<std::uint8_t*>(arguments.workspace),
@@ -426,9 +425,12 @@ inline int launch_direct_dispatch_epilogue_copy_outputs_variant_0(
             static_cast<std::uint8_t*>(arguments.recv_scale_factors),
         arguments.fused_metadata_copy != 0 ? nullptr : arguments.recv_topk_weights,
         arguments.source_metadata,
+        tiling.transport_context,
         tiling.transport_context.local_window_base,
         tiling.transport_context.topology.world_size,
         tiling.mode_flags,
+        arguments.generation,
+        profile_enabled ? 1U : 0U,
         tiling.num_topk,
         tiling.num_max_tokens_per_rank,
         tiling.symmetric_window_layout.dispatch_receive_offset,

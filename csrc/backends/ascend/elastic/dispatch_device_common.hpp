@@ -1166,14 +1166,15 @@ DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_producer_release_body(
 
 
 
-template <std::uint32_t TileBytes>
+template <bool ProfileEnabled = false, std::uint32_t TileBytes>
 __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
     __gm__ std::uint8_t* communication_buffer,
     __gm__ const std::uint8_t* workspace,
     __gm__ std::uint8_t* recv_x,
     __gm__ const std::int32_t* source_metadata,
+    const transport::DeviceTransportContext& context,
     std::uintptr_t transport_local_window_base,
-    int transport_world_size, bool expanded,
+    int transport_world_rank, int transport_world_size, bool expanded,
     std::uint64_t num_topk, std::uint64_t shard_capacity,
     std::uint64_t dispatch_receive_offset,
     std::uint64_t dispatch_receive_shard_bytes,
@@ -1192,6 +1193,24 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
         token_hidden_bytes, TileBytes, 32);
     if (!consumer_copy_plan.valid || consumer_copy_plan.vector_bytes == 0)
         return;
+
+    auto* profile = transport::service::detail::profile_buffer<ProfileEnabled>(
+        context);
+    const bool profile_block = ProfileEnabled && profile != nullptr &&
+        AscendC::GetBlockIdx() < transport::kTransportProfileMaxBlocks;
+    std::uint64_t lookup_cycles = 0;
+    std::uint64_t metadata_cycles = 0;
+    std::uint64_t reuse_wait_cycles = 0;
+    std::uint64_t mte2_wait_cycles = 0;
+    std::uint64_t gm_to_ub_cycles = 0;
+    std::uint64_t ub_to_gm_cycles = 0;
+    std::uint64_t record_count = 0;
+    std::uint64_t local_record_count = 0;
+    std::uint64_t remote_record_count = 0;
+    std::uint64_t local_copy_cycles = 0;
+    std::uint64_t remote_copy_cycles = 0;
+    std::uint64_t vector_bytes = 0;
+    std::uint64_t tile_count = 0;
 
     auto* payload_ub = dispatch_ub_payload();
     AscendC::GlobalTensor<std::uint64_t> source_counts_global;
@@ -1246,6 +1265,8 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
             logical / copies_per_record;
         const std::uint32_t lane =
             expanded ? logical % copies_per_record : 0;
+        const auto lookup_start = ProfileEnabled ?
+            static_cast<std::uint64_t>(AscendC::GetSystemCycle()) : 0;
         std::uint32_t source_rank = 0;
         std::uint32_t source_slot = 0;
         bool found_source = false;
@@ -1261,6 +1282,9 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
                 break;
             }
         }
+        if (ProfileEnabled)
+            lookup_cycles += static_cast<std::uint64_t>(
+                AscendC::GetSystemCycle()) - lookup_start;
         if (!found_source)
             continue;
         const std::uint64_t compact_slot = compact_record;
@@ -1273,17 +1297,34 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
         __gm__ std::uint8_t* record =
             source_shard + source_slot * token_stride_bytes;
         std::uint64_t destination = compact_slot;
+        const auto record_copy_start = ProfileEnabled ?
+            static_cast<std::uint64_t>(AscendC::GetSystemCycle()) : 0;
         if (expanded) {
+            const auto metadata_start = ProfileEnabled ?
+                static_cast<std::uint64_t>(AscendC::GetSystemCycle()) : 0;
             record_topk_global.SetGlobalBuffer(
                 reinterpret_cast<__gm__ std::int64_t*>(
                     record + token_topk_index_offset),
                 num_topk_u32);
             const std::int32_t mapped = source_metadata_global.GetValue(
                 compact_slot * (2 + num_topk_u32) + 2 + lane);
-            if (record_topk_global.GetValue(lane) < 0 || mapped < 0)
+            const bool valid = record_topk_global.GetValue(lane) >= 0 &&
+                mapped >= 0;
+            if (ProfileEnabled)
+                metadata_cycles += static_cast<std::uint64_t>(
+                    AscendC::GetSystemCycle()) - metadata_start;
+            if (!valid)
                 continue;
             destination = static_cast<std::uint64_t>(mapped);
         }
+        ++record_count;
+        if (source_rank == static_cast<std::uint32_t>(transport_world_rank))
+            ++local_record_count;
+        else
+            ++remote_record_count;
+        vector_bytes += consumer_copy_plan.vector_bytes;
+        tile_count += (consumer_copy_plan.vector_bytes + TileBytes - 1) /
+            TileBytes;
         for (std::uint64_t byte = 0;
              byte < consumer_copy_plan.vector_bytes; byte += TileBytes) {
             const std::uint32_t copy_bytes = static_cast<std::uint32_t>(
@@ -1291,30 +1332,87 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
                     consumer_copy_plan.vector_bytes - byte : TileBytes);
             const auto event_id = buffer_index == 0 ? EVENT_ID0 : EVENT_ID1;
             auto* tile_ub = payload_ub + buffer_index * TileBytes;
+            const auto reuse_start = ProfileEnabled ?
+                static_cast<std::uint64_t>(AscendC::GetSystemCycle()) : 0;
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
+            if (ProfileEnabled)
+                reuse_wait_cycles += static_cast<std::uint64_t>(
+                    AscendC::GetSystemCycle()) - reuse_start;
+            const auto gm_to_ub_start = ProfileEnabled ?
+                static_cast<std::uint64_t>(AscendC::GetSystemCycle()) : 0;
             dispatch_copy_gm_to_ub(
                 tile_ub, record + token_hidden_offset + byte, copy_bytes);
+            if (ProfileEnabled)
+                gm_to_ub_cycles += static_cast<std::uint64_t>(
+                    AscendC::GetSystemCycle()) - gm_to_ub_start;
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
+            const auto mte2_start = ProfileEnabled ?
+                static_cast<std::uint64_t>(AscendC::GetSystemCycle()) : 0;
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
+            if (ProfileEnabled)
+                mte2_wait_cycles += static_cast<std::uint64_t>(
+                    AscendC::GetSystemCycle()) - mte2_start;
+            const auto ub_to_gm_start = ProfileEnabled ?
+                static_cast<std::uint64_t>(AscendC::GetSystemCycle()) : 0;
             dispatch_copy_ub_to_gm(
                 recv_x + destination * token_hidden_bytes + byte,
                 tile_ub, copy_bytes);
+            if (ProfileEnabled)
+                ub_to_gm_cycles += static_cast<std::uint64_t>(
+                    AscendC::GetSystemCycle()) - ub_to_gm_start;
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
             buffer_index ^= 1;
         }
+        if (ProfileEnabled) {
+            const auto record_copy_cycles = static_cast<std::uint64_t>(
+                AscendC::GetSystemCycle()) - record_copy_start;
+            if (source_rank ==
+                static_cast<std::uint32_t>(transport_world_rank))
+                local_copy_cycles += record_copy_cycles;
+            else
+                remote_copy_cycles += record_copy_cycles;
+        }
     }
     // Also consume unused initial events for empty or one-tile workloads.
+    const auto final_reuse_start = ProfileEnabled ?
+        static_cast<std::uint64_t>(AscendC::GetSystemCycle()) : 0;
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+    if (ProfileEnabled)
+        reuse_wait_cycles += static_cast<std::uint64_t>(
+            AscendC::GetSystemCycle()) - final_reuse_start;
+    if (profile_block) {
+        auto* record = &profile->epilogue_vector_blocks[
+            AscendC::GetBlockIdx()];
+        record->lookup_cycles = lookup_cycles;
+        record->metadata_cycles = metadata_cycles;
+        record->reuse_wait_cycles = reuse_wait_cycles;
+        record->mte2_wait_cycles = mte2_wait_cycles;
+        record->gm_to_ub_cycles = gm_to_ub_cycles;
+        record->ub_to_gm_cycles = ub_to_gm_cycles;
+        record->record_count = record_count;
+        record->local_record_count = local_record_count;
+        record->remote_record_count = remote_record_count;
+        record->local_copy_cycles = local_copy_cycles;
+        record->remote_copy_cycles = remote_copy_cycles;
+        record->vector_bytes = vector_bytes;
+        record->tile_count = tile_count;
+        transport::aicore::system_fence();
+        transport::aicore::flush_cacheline(record);
+        transport::aicore::flush_cacheline(
+            reinterpret_cast<__gm__ std::uint8_t*>(record) + 64);
+    }
 }
 
+template <bool ProfileEnabled = false>
 __aicore__ inline void direct_dispatch_epilogue_vector_payload_select(
     __gm__ std::uint8_t* communication_buffer,
     __gm__ const std::uint8_t* workspace,
     __gm__ std::uint8_t* recv_x,
     __gm__ const std::int32_t* source_metadata,
+    const transport::DeviceTransportContext& context,
     std::uintptr_t transport_local_window_base,
-    int transport_world_size, bool expanded,
+    int transport_world_rank, int transport_world_size, bool expanded,
     std::uint64_t num_topk, std::uint64_t shard_capacity,
     std::uint64_t dispatch_receive_offset,
     std::uint64_t dispatch_receive_shard_bytes,
@@ -1328,9 +1426,10 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_select(
     std::uint32_t consumer_tile_bytes) {
     switch (consumer_tile_bytes) {
         case 1024:
-            direct_dispatch_epilogue_vector_payload_impl<1024>(
+            direct_dispatch_epilogue_vector_payload_impl<ProfileEnabled, 1024>(
                 communication_buffer, workspace, recv_x, source_metadata,
-                transport_local_window_base, transport_world_size, expanded,
+                context, transport_local_window_base, transport_world_rank,
+                transport_world_size, expanded,
                 num_topk, shard_capacity, dispatch_receive_offset,
                 dispatch_receive_shard_bytes, workspace_status_offset,
                 workspace_rank_counts_offset, workspace_rank_values_offset,
@@ -1338,9 +1437,10 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_select(
                 token_topk_index_offset);
             return;
         case 2048:
-            direct_dispatch_epilogue_vector_payload_impl<2048>(
+            direct_dispatch_epilogue_vector_payload_impl<ProfileEnabled, 2048>(
                 communication_buffer, workspace, recv_x, source_metadata,
-                transport_local_window_base, transport_world_size, expanded,
+                context, transport_local_window_base, transport_world_rank,
+                transport_world_size, expanded,
                 num_topk, shard_capacity, dispatch_receive_offset,
                 dispatch_receive_shard_bytes, workspace_status_offset,
                 workspace_rank_counts_offset, workspace_rank_values_offset,
@@ -1348,9 +1448,10 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_select(
                 token_topk_index_offset);
             return;
         case 4096:
-            direct_dispatch_epilogue_vector_payload_impl<4096>(
+            direct_dispatch_epilogue_vector_payload_impl<ProfileEnabled, 4096>(
                 communication_buffer, workspace, recv_x, source_metadata,
-                transport_local_window_base, transport_world_size, expanded,
+                context, transport_local_window_base, transport_world_rank,
+                transport_world_size, expanded,
                 num_topk, shard_capacity, dispatch_receive_offset,
                 dispatch_receive_shard_bytes, workspace_status_offset,
                 workspace_rank_counts_offset, workspace_rank_values_offset,
@@ -1358,9 +1459,10 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_select(
                 token_topk_index_offset);
             return;
         case 8192:
-            direct_dispatch_epilogue_vector_payload_impl<8192>(
+            direct_dispatch_epilogue_vector_payload_impl<ProfileEnabled, 8192>(
                 communication_buffer, workspace, recv_x, source_metadata,
-                transport_local_window_base, transport_world_size, expanded,
+                context, transport_local_window_base, transport_world_rank,
+                transport_world_size, expanded,
                 num_topk, shard_capacity, dispatch_receive_offset,
                 dispatch_receive_shard_bytes, workspace_status_offset,
                 workspace_rank_counts_offset, workspace_rank_values_offset,
@@ -1368,9 +1470,10 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_select(
                 token_topk_index_offset);
             return;
         default:
-            direct_dispatch_epilogue_vector_payload_impl<512>(
+            direct_dispatch_epilogue_vector_payload_impl<ProfileEnabled, 512>(
                 communication_buffer, workspace, recv_x, source_metadata,
-                transport_local_window_base, transport_world_size, expanded,
+                context, transport_local_window_base, transport_world_rank,
+                transport_world_size, expanded,
                 num_topk, shard_capacity, dispatch_receive_offset,
                 dispatch_receive_shard_bytes, workspace_status_offset,
                 workspace_rank_counts_offset, workspace_rank_values_offset,

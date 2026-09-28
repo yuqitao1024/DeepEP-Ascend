@@ -523,7 +523,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_direct_dispatch_launcher_consumes_stage_pipeline(self):
         """Catches accepting 56 blocks without launching split data stages."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (ELASTIC / "dispatch_device_common.hpp").read_text()
         launch = source[source.index(
             'extern "C" int deep_ep_ascend_launch_dispatch'):]
         self.assertIn("direct_dispatch_pipeline(", launch)
@@ -542,7 +542,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_dispatch_source_pipeline_bounds_producer_work_by_chunk(self):
         """Catches source chunks that rescan tokens outside their tile range."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (ELASTIC / "dispatch_device_common.hpp").read_text()
         for function_name in (
                 "direct_dispatch_producer_record_body",
                 "direct_dispatch_producer_token_fanout_impl"):
@@ -1491,7 +1491,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("workspace_route_source_counts_offset", release)
 
     def test_dispatch_consumer_tile_specializations(self):
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (ELASTIC / "dispatch_device_common.hpp").read_text()
         kernels = (ELASTIC / "kernels.hpp").read_text()
         buffer = (
             ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
@@ -1509,7 +1509,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "consumer_tile_config.tile_bytes;", dispatch)
 
         vector_signature = (
-            "template <std::uint32_t TileBytes>\n"
+            "template <bool ProfileEnabled = false, std::uint32_t TileBytes>\n"
             "__aicore__ inline void "
             "direct_dispatch_epilogue_vector_payload_impl")
         vector_begin = source.index(vector_signature)
@@ -1527,11 +1527,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertEqual(
                 source.count(
                     "direct_dispatch_epilogue_vector_payload_impl<"
-                    f"{tile_bytes}>("),
+                    f"ProfileEnabled, {tile_bytes}>("),
                 1,
             )
-        self.assertIn(
-            "consumer_copy_plan.scalar_begin", source)
 
     def test_dispatch_producer_uses_2048_byte_vector_tiles(self):
         source = (ELASTIC / "dispatch.asc").read_text()
@@ -1877,6 +1875,48 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "launch_direct_dispatch_reduce_errors_variant_1",
                 "launch_direct_dispatch_epilogue_clear_padding_variant_0"):
             self.assertIn(launcher, metadata)
+
+    def test_normal_dispatch_compacts_remaining_stage_boundaries(self):
+        """Launches record/metadata after the corresponding prefix marker."""
+        kernels = (ELASTIC / "kernels.hpp").read_text()
+        source = (ELASTIC / "dispatch.asc").read_text()
+        buffer = (
+            ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        dispatch = buffer[
+            buffer.index("    dispatch(const torch::Tensor& x"):
+            buffer.index("    combine(const torch::Tensor& x")
+        ]
+
+        self.assertIn("std::uint32_t compact_stage_boundaries = 0;", kernels)
+        self.assertIn(
+            '"DEEP_EP_ASCEND_DISPATCH_COMPACT_STAGE_BOUNDARIES"', dispatch)
+        self.assertRegex(
+            dispatch,
+            r"arguments\.compact_stage_boundaries =\s*"
+            r"!cached_mode && !do_expand",
+        )
+
+        launcher_begin = source.index(
+            "arguments.compact_stage_boundaries != 0 &&\n"
+            "        stage == DirectDispatchStage::kProducerPrefix")
+        producer_marker = source.index(
+            "record_stage =\n"
+            "            stage == DirectDispatchStage::kProducerRecord")
+        record_launch = source.index(
+            "launch_direct_dispatch_producer_record_variant_0",
+            launcher_begin)
+        self.assertLess(producer_marker, record_launch)
+
+        epilogue_launcher = source.index(
+            "arguments.compact_stage_boundaries != 0 &&\n"
+            "        copy_outputs != 0 &&\n"
+            "        stage == DirectDispatchStage::kEpilogueExpertPrefix")
+        expert_marker = source.index(
+            "stage == DirectDispatchStage::kEpilogueExpertPrefix")
+        metadata_launch = source.index(
+            "launch_direct_dispatch_epilogue_metadata_variant_0",
+            epilogue_launcher)
+        self.assertLess(expert_marker, metadata_launch)
 
     def test_dispatch_output_copy_uses_compact_receive_domain(self):
         source = (ELASTIC / "dispatch.asc").read_text()

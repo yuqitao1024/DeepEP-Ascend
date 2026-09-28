@@ -1209,6 +1209,70 @@ public:
         raw_service["barrier_command_cycles"] =
             profile.barrier_command_cycles;
         raw_service["barrier_poll_cycles"] = profile.barrier_poll_cycles;
+        raw_service["cq_drain_call_count"] = profile.cq_drain_call_count;
+        raw_service["cq_drain_queue_full_count"] =
+            profile.cq_drain_queue_full_count;
+        raw_service["cq_drain_flush_count"] = profile.cq_drain_flush_count;
+        raw_service["cq_drain_barrier_count"] =
+            profile.cq_drain_barrier_count;
+        raw_service["cq_drain_final_count"] = profile.cq_drain_final_count;
+        raw_service["cq_drain_queue_full_cycles"] =
+            profile.cq_drain_queue_full_cycles;
+        raw_service["cq_drain_flush_cycles"] =
+            profile.cq_drain_flush_cycles;
+        raw_service["cq_drain_barrier_cycles"] =
+            profile.cq_drain_barrier_cycles;
+        raw_service["cq_drain_final_cycles"] =
+            profile.cq_drain_final_cycles;
+        pybind11::dict epilogue_copy;
+        pybind11::list scalar_blocks;
+        for (std::uint32_t block = 0;
+             block < transport::kTransportProfileMaxBlocks; ++block) {
+            const auto& record = profile.epilogue_scalar_blocks[block];
+            if (record.start_cycles == 0 && record.end_cycles == 0)
+                continue;
+            pybind11::dict block_record;
+            block_record["block"] = block;
+            block_record["start"] = record.start_cycles;
+            block_record["end"] = record.end_cycles;
+            block_record["hidden_cycles"] = record.hidden_cycles;
+            block_record["scale_cycles"] = record.scale_cycles;
+            block_record["weight_cycles"] = record.weight_cycles;
+            block_record["sample_records"] = record.sample_records;
+            block_record["hidden_bytes"] = record.hidden_bytes;
+            block_record["scale_bytes"] = record.scale_bytes;
+            block_record["weight_elements"] = record.weight_elements;
+            scalar_blocks.append(block_record);
+        }
+        pybind11::list vector_blocks;
+        for (std::uint32_t block = 0;
+             block < transport::kTransportProfileMaxBlocks; ++block) {
+            const auto& record = profile.epilogue_vector_blocks[block];
+            if (record.lookup_cycles == 0 && record.metadata_cycles == 0 &&
+                record.reuse_wait_cycles == 0 &&
+                record.mte2_wait_cycles == 0 && record.record_count == 0)
+                continue;
+            pybind11::dict block_record;
+            block_record["block"] = block;
+            block_record["lookup_cycles"] = record.lookup_cycles;
+            block_record["metadata_cycles"] = record.metadata_cycles;
+            block_record["reuse_wait_cycles"] = record.reuse_wait_cycles;
+            block_record["mte2_wait_cycles"] = record.mte2_wait_cycles;
+            block_record["gm_to_ub_cycles"] = record.gm_to_ub_cycles;
+            block_record["ub_to_gm_cycles"] = record.ub_to_gm_cycles;
+            block_record["record_count"] = record.record_count;
+            block_record["local_record_count"] = record.local_record_count;
+            block_record["remote_record_count"] = record.remote_record_count;
+            block_record["local_copy_cycles"] = record.local_copy_cycles;
+            block_record["remote_copy_cycles"] = record.remote_copy_cycles;
+            block_record["vector_bytes"] = record.vector_bytes;
+            block_record["tile_count"] = record.tile_count;
+            vector_blocks.append(block_record);
+        }
+        epilogue_copy["scalar_blocks"] = scalar_blocks;
+        epilogue_copy["vector_blocks"] = vector_blocks;
+        if (!scalar_blocks.empty() || !vector_blocks.empty())
+            raw_service["epilogue_copy"] = epilogue_copy;
         pybind11::dict release_attribution;
         release_attribution["payload_command_cycles"] =
             profile.payload_command_cycles;
@@ -1220,6 +1284,24 @@ public:
             profile.barrier_command_cycles;
         release_attribution["barrier_poll_cycles"] =
             profile.barrier_poll_cycles;
+        release_attribution["cq_drain_call_count"] =
+            profile.cq_drain_call_count;
+        release_attribution["cq_drain_queue_full_count"] =
+            profile.cq_drain_queue_full_count;
+        release_attribution["cq_drain_flush_count"] =
+            profile.cq_drain_flush_count;
+        release_attribution["cq_drain_barrier_count"] =
+            profile.cq_drain_barrier_count;
+        release_attribution["cq_drain_final_count"] =
+            profile.cq_drain_final_count;
+        release_attribution["cq_drain_queue_full_cycles"] =
+            profile.cq_drain_queue_full_cycles;
+        release_attribution["cq_drain_flush_cycles"] =
+            profile.cq_drain_flush_cycles;
+        release_attribution["cq_drain_barrier_cycles"] =
+            profile.cq_drain_barrier_cycles;
+        release_attribution["cq_drain_final_cycles"] =
+            profile.cq_drain_final_cycles;
         const auto attribution = transport::derive_transport_service_attribution(profile);
         release_attribution["available"] = attribution.valid;
         release_attribution["service_active_cycles"] = profile.service_active_cycles;
@@ -1762,6 +1844,14 @@ public:
                           compact_epilogue_setting[0] == '1') &&
                          compact_epilogue_setting[1] == '\0'),
                     "DEEP_EP_ASCEND_DISPATCH_COMPACT_EPILOGUE must be 0 or 1");
+        const char* compact_boundaries_setting =
+            std::getenv("DEEP_EP_ASCEND_DISPATCH_COMPACT_STAGE_BOUNDARIES");
+        TORCH_CHECK(!compact_boundaries_setting ||
+                        ((compact_boundaries_setting[0] == '0' ||
+                          compact_boundaries_setting[0] == '1') &&
+                         compact_boundaries_setting[1] == '\0'),
+                    "DEEP_EP_ASCEND_DISPATCH_COMPACT_STAGE_BOUNDARIES must "
+                    "be 0 or 1");
         const char* fused_barrier_setting =
             std::getenv("DEEP_EP_ASCEND_DISPATCH_FUSED_CONSUMED_BARRIER");
         TORCH_CHECK(!fused_barrier_setting ||
@@ -2556,6 +2646,17 @@ public:
             !allow_hybrid_mode_ && !stream_mode &&
             (!compact_epilogue_setting ||
              compact_epilogue_setting[0] == '1') ? 1U : 0U;
+        // Compact the two remaining launch gaps without changing the VF
+        // sequence: record packing follows the producer-prefix marker, and
+        // epilogue metadata follows the expert-prefix marker.  The separate
+        // marker kernels preserve profile attribution and cross-rank release
+        // visibility while the next-stage VF waits on stream order.
+        arguments.compact_stage_boundaries =
+            !cached_mode && !do_expand && !allow_hybrid_mode_ &&
+            !stream_mode && !stage_profile_enabled_ &&
+            !pipeline_config.enabled && !source_pipeline_config.enabled &&
+            compact_boundaries_setting != nullptr &&
+                compact_boundaries_setting[0] == '1' ? 1U : 0U;
         arguments.parallel_prefix =
             parallel_prefix_config.enabled ? 1U : 0U;
         arguments.token_fanout =

@@ -16,7 +16,7 @@ namespace deep_ep::ascend::transport {
 #define DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP 0
 #endif
 
-inline constexpr std::uint32_t kTransportStageProfileAbiVersion = 4;
+inline constexpr std::uint32_t kTransportStageProfileAbiVersion = 6;
 inline constexpr std::uint32_t kTransportProfileStageCount = 16;
 inline constexpr std::uint32_t kTransportProfileMaxBlocks = 72;
 inline constexpr std::uint32_t kTransportProfileBarrierPhaseCount = 2;
@@ -62,6 +62,38 @@ struct alignas(64) TransportBarrierPeerCycles {
     std::uint32_t release_signal_flags = 0;
 };
 
+// These records are written only when the stage profile is enabled. The
+// scalar record includes sampled component clocks from lane zero; the vector
+// record includes block-local MTE waits and work counts. Neither record is
+// part of the transport protocol.
+struct alignas(64) TransportEpilogueScalarBlockProfile {
+    std::uint64_t start_cycles = 0;
+    std::uint64_t end_cycles = 0;
+    std::uint64_t hidden_cycles = 0;
+    std::uint64_t scale_cycles = 0;
+    std::uint64_t weight_cycles = 0;
+    std::uint64_t sample_records = 0;
+    std::uint64_t hidden_bytes = 0;
+    std::uint64_t scale_bytes = 0;
+    std::uint64_t weight_elements = 0;
+};
+
+struct alignas(64) TransportEpilogueVectorBlockProfile {
+    std::uint64_t lookup_cycles = 0;
+    std::uint64_t metadata_cycles = 0;
+    std::uint64_t reuse_wait_cycles = 0;
+    std::uint64_t mte2_wait_cycles = 0;
+    std::uint64_t gm_to_ub_cycles = 0;
+    std::uint64_t ub_to_gm_cycles = 0;
+    std::uint64_t record_count = 0;
+    std::uint64_t local_record_count = 0;
+    std::uint64_t remote_record_count = 0;
+    std::uint64_t local_copy_cycles = 0;
+    std::uint64_t remote_copy_cycles = 0;
+    std::uint64_t vector_bytes = 0;
+    std::uint64_t tile_count = 0;
+};
+
 struct alignas(64) TransportStageProfile {
     std::uint32_t abi_version = kTransportStageProfileAbiVersion;
     std::uint32_t struct_size = sizeof(TransportStageProfile);
@@ -85,8 +117,8 @@ struct alignas(64) TransportStageProfile {
     std::uint64_t flush_command_cycles = 0;
     std::uint64_t barrier_command_cycles = 0;
     std::uint64_t barrier_poll_cycles = 0;
-    // Barrier-only attribution counters. These reuse the original reserved
-    // words, so the profile ABI and allocation size remain unchanged.
+    // Barrier-only attribution counters occupy the original reserved words;
+    // later diagnostic fields are appended after the established profile body.
     std::uint64_t barrier_issue_cycles = 0;
     std::uint64_t barrier_drain_cycles = 0;
     std::uint64_t barrier_poll_iterations = 0;
@@ -111,6 +143,21 @@ struct alignas(64) TransportStageProfile {
     std::uint32_t release_peer_publish_count{};
     // Sum of execute_body intervals; excludes gaps between service launches.
     std::uint64_t service_active_cycles{};
+    // CQ drain attribution. Each drain_channel invocation is assigned the
+    // reason that caused it; the cycle buckets are subsets of wait_cycles.
+    alignas(64) std::uint64_t cq_drain_call_count = 0;
+    std::uint64_t cq_drain_queue_full_count = 0;
+    std::uint64_t cq_drain_flush_count = 0;
+    std::uint64_t cq_drain_barrier_count = 0;
+    std::uint64_t cq_drain_final_count = 0;
+    std::uint64_t cq_drain_queue_full_cycles = 0;
+    std::uint64_t cq_drain_flush_cycles = 0;
+    std::uint64_t cq_drain_barrier_cycles = 0;
+    std::uint64_t cq_drain_final_cycles = 0;
+    TransportEpilogueScalarBlockProfile epilogue_scalar_blocks[
+        kTransportProfileMaxBlocks]{};
+    TransportEpilogueVectorBlockProfile epilogue_vector_blocks[
+        kTransportProfileMaxBlocks]{};
 };
 
 struct TransportQueueDepthSnapshot {
@@ -555,6 +602,8 @@ static_assert(std::is_trivially_copyable_v<TransportStageBlockCycles>);
 static_assert(std::is_trivially_copyable_v<TransportStageCycles>);
 static_assert(sizeof(TransportBarrierPeerCycles) == 64);
 static_assert(std::is_trivially_copyable_v<TransportBarrierPeerCycles>);
+static_assert(std::is_trivially_copyable_v<TransportEpilogueScalarBlockProfile>);
+static_assert(std::is_trivially_copyable_v<TransportEpilogueVectorBlockProfile>);
 static_assert(std::is_trivially_copyable_v<TransportStageProfile>);
 static_assert(std::is_trivially_copyable_v<TransportQueueDepthSnapshot>);
 
