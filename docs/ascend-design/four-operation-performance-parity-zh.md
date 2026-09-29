@@ -178,6 +178,30 @@ The remaining planner bottleneck is accepted for this commit; a future C1
 follow-up must first reduce per-token subgroup work or atomic traffic before
 changing launch topology.
 
+#### C7 candidate: cached planner single-round grouping (2026-09-30)
+
+The retained profile still attributes 10.97-16.56 ms per planner launch to
+the plan kernel. Most of that per-token work is not the bitmap atomics: the
+generic top-k grouping helper iterates once per unique destination and
+computes owner ordinals that cached validation never uses.
+
+The first probe incorrectly used one globally active owner and was rejected
+by the development gate; the corrected candidate scans only lower active
+lanes to find this destination's first owner. For the common first-owner
+case the loop exits immediately. It preserves the first-lane owner,
+slot-broadcast consistency check, all cached-slot checks, the bitmap duplicate
+check, count/max accumulation, and the fallback path. It changes no launch
+shape or protocol semantics.
+
+Result: rejected. The first simplified owner selection failed the four-rank
+correctness gate. The corrected lower-lane owner scan passed correctness but
+returned Cached Dispatch at 26.690 ms mean / 27.166 ms p95, effectively
+unchanged from the retained 26.681 / 27.298 ms result; Reduced Combine also
+returned to 10.453 / 10.870 ms in that run. Validation records:
+task_20260930_015137_281824910211 and
+task_20260930_020318_288846122891. The source and focused contract were
+reverted; the planner bottleneck is not the generic owner-grouping loop.
+
 ### C2. Expanded Dispatch producer-record acceleration
 
 Priority: P1. Expanded Dispatch has the same shared transport service cost as
