@@ -216,6 +216,20 @@ Actions:
 Acceptance: reduce Expanded Dispatch epilogue-copy span while keeping output
 and metadata correctness. Target another 1-2 ms of the wall gap.
 
+#### C3 rejected experiment (2026-09-30)
+
+The first bounded candidate increased the epilogue-copy in-flight tile count
+from two to four. It used four independent MTE free-buffer events and four
+equal dynamic-UB slots, while preserving the per-slot event order and all
+expanded destination/metadata checks.
+
+The four-rank development gate passed correctness but did not improve the
+target operation. Compared with the retained C1+C4 result, Expanded Dispatch
+mean changed from 11.167 to 11.189 ms and p95 from 11.358 to 11.406 ms; both
+are within normal variation. Cached Dispatch and Normal Combine regressed in
+that single gate, so the candidate cannot be attributed a target-specific
+gain. The four-buffer version is therefore rejected and reverted.
+
 ### C4. Combine producer-record and release-wait reduction
 
 Priority: P1. Normal and Reduced Combine spend about 3.4-3.8 ms in producer
@@ -275,6 +289,17 @@ profile, and no launch deadline. Compared with the C1-only revert run:
 Normal Dispatch and Expanded Dispatch remain within normal variation. The
 planning/prefix change therefore has a clear four-rank benefit for both
 Combine variants and does not regress the other three operations.
+
+#### C4 rejected follow-up (2026-09-30)
+
+A second candidate made the producer-prefix kernel's deterministic tile/rank
+transform single-owner: block zero performed the scan while other blocks
+retired immediately. It passed correctness, but the four-rank development
+gate regressed Normal Combine mean from 10.293 to 11.473 ms and p95 from
+10.893 to 16.017 ms. Reduced Combine was unchanged. The likely cause is that
+retiring the additional AIV blocks does not compensate for losing the other
+blocks' overlap with the subsequent stage. This follow-up is rejected and
+reverted together with the grouped C3 probe.
 
 ### C5. Combine epilogue-reduce acceleration
 
