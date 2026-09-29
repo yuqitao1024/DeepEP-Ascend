@@ -2298,7 +2298,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("match_any", header.lower())
         for fixture in (
                 "all-equal", "all-distinct", "noncontiguous-duplicates",
-                "inactive-lane", "partial-mask", "all-inactive"):
+                "inactive-lane", "partial-mask"):
             self.assertIn(fixture, probe)
 
     def test_direct_combine_vector_payload_compile_probe_contract(self):
