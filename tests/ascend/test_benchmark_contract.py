@@ -1226,6 +1226,43 @@ def test_launch_skew_profile_aggregates_cross_rank_host_timestamps():
     ]
 
 
+def test_launch_skew_profile_aggregates_python_launch_phases():
+    ranks = []
+    for rank, phase_ns in enumerate((100_000, 250_000)):
+        ranks.append([
+            {
+                "operation_id": operation_id,
+                "device_samples": [0.003],
+                "wall_samples": [0.004],
+                "launch_skew_samples": [{
+                    "start_record_ns": 1_000 + rank,
+                    "launch_complete_ns": 2_000 + rank,
+                    "python_launch_phase": {
+                        "operation": "dispatch",
+                        "total_ns": phase_ns,
+                        "preflight_ns": phase_ns // 4,
+                        "preparation_ns": phase_ns // 4,
+                        "runtime_ns": phase_ns // 2,
+                        "result_ns": phase_ns // 8,
+                    },
+                }],
+                "logical_bytes": {"scaleup": 100 + rank},
+                "logical_byte_components": {"scaleup": 100 + rank},
+                "work_counts": _literal_work_counts(7 + rank),
+            }
+            for operation_id in (
+                "dispatch", "expanded_dispatch", "cached_dispatch", "combine",
+                "reduced_combine",
+            )
+        ])
+
+    operations = _aggregate_rank_operations(ranks)
+
+    phases = operations[0]["launch_skew_profile"]["python_launch_phases_ns"]
+    assert phases["total"] == [[100_000], [250_000]]
+    assert phases["preflight"] == [[25_000], [62_500]]
+
+
 def test_operation_work_counts_describe_literal_dispatch_and_combine_rows():
     counts = _build_operation_work_counts(
         SimpleNamespace(num_tokens=8, hidden=16, num_topk=2),

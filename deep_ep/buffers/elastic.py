@@ -1,4 +1,5 @@
 import functools
+import time
 import os
 import math
 import torch
@@ -388,6 +389,10 @@ class ElasticBuffer:
         self.deterministic = deterministic
         self._ascend_topology = None
         self._ascend_owner_device = None
+        self._ascend_last_launch_profile = None
+        self._ascend_profile_launch_phases = (
+            os.environ.get("DEEP_EP_ASCEND_PROFILE_LAUNCH_PHASES") == "1"
+        )
 
         if not is_cuda():
             self._ascend_topology = preflight_ascend_topology(group)
@@ -1514,7 +1519,14 @@ class ElasticBuffer:
             pass
 
         # Unpack SF
+        profile_launch_phases = self._ascend_profile_launch_phases
+        phase_started_ns = (
+            time.perf_counter_ns() if profile_launch_phases else 0
+        )
         x, sf = x if isinstance(x, tuple) else (x, None)
+        preflight_started_ns = (
+            time.perf_counter_ns() if profile_launch_phases else 0
+        )
 
         if not is_cuda():
             if num_sms == 0:
@@ -1528,6 +1540,10 @@ class ElasticBuffer:
                 async_with_compute_stream, allocate_on_comm_stream,
                 do_cpu_sync, do_expand, do_zero_padding,
                 use_tma_aligned_col_major_sf)
+        preflight_ns = (
+            time.perf_counter_ns() - preflight_started_ns
+            if profile_launch_phases else 0
+        )
 
         # Unpack handles
         # Reuse some values if possible
@@ -1556,8 +1572,15 @@ class ElasticBuffer:
         num_max_tokens_per_rank = value_or(num_max_tokens_per_rank, self.num_max_tokens_per_rank)
         expert_alignment = value_or(expert_alignment, 1)
         do_cpu_sync = value_or(do_cpu_sync, True)
+        preparation_ns = (
+            time.perf_counter_ns() - phase_started_ns
+            if profile_launch_phases else 0
+        )
 
         # Do dispatch
+        runtime_started_ns = (
+            time.perf_counter_ns() if profile_launch_phases else 0
+        )
         (recv_x, recv_sf,
          recv_topk_idx, recv_topk_weights,
          cloned_topk_idx,
@@ -1591,8 +1614,15 @@ class ElasticBuffer:
                                         do_handle_copy, do_cpu_sync, do_expand,
                                         do_zero_padding,
                                         use_tma_aligned_col_major_sf)
+        runtime_ns = (
+            time.perf_counter_ns() - runtime_started_ns
+            if profile_launch_phases else 0
+        )
 
         # Create handle
+        result_started_ns = (
+            time.perf_counter_ns() if profile_launch_phases else 0
+        )
         is_cached_dispatch = handle is not None
         if not is_cached_dispatch:
             handle = EPHandle(do_expand,
@@ -1644,6 +1674,19 @@ class ElasticBuffer:
         recv_x = (recv_x, recv_sf) if recv_sf is not None else recv_x
 
         # Return
+        result_ns = (
+            time.perf_counter_ns() - result_started_ns
+            if profile_launch_phases else 0
+        )
+        if profile_launch_phases:
+            self._ascend_last_launch_profile = {
+                "operation": "dispatch",
+                "total_ns": preflight_ns + preparation_ns + runtime_ns + result_ns,
+                "preflight_ns": preflight_ns,
+                "preparation_ns": preparation_ns - preflight_ns,
+                "runtime_ns": runtime_ns,
+                "result_ns": result_ns,
+            }
         return recv_x, recv_topk_idx, recv_topk_weights, handle, event_overlap
 
     @staticmethod

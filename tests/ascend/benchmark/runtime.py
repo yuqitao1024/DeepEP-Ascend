@@ -998,6 +998,32 @@ def _aggregate_rank_operations(
                     for samples in launch_skew_profiles
                 ],
             }
+            phase_names = (
+                "total", "preflight", "preparation", "runtime", "result"
+            )
+            per_rank_phases = {
+                phase_name: [
+                    [
+                        sample["python_launch_phase"][phase_name + "_ns"]
+                        for sample in samples
+                        if "python_launch_phase" in sample
+                    ]
+                    for samples in launch_skew_profiles
+                ]
+                for phase_name in phase_names
+            }
+            sample_count = sum(
+                len(samples) for samples in launch_skew_profiles
+            )
+            phase_sample_count = sum(
+                len(rank_samples)
+                for samples in per_rank_phases.values()
+                for rank_samples in samples
+            )
+            if phase_sample_count == sample_count * len(phase_names):
+                operations[-1]["launch_skew_profile"][
+                    "python_launch_phases_ns"
+                ] = per_rank_phases
     return operations
 
 
@@ -1028,6 +1054,9 @@ class AscendRuntime:
         self.buffer = None
         self.timer = NpuEventTimer(TorchNpuEventBackend(torch_module))
         self._rank_launch_clock = None
+        self._launch_profile_enabled = bool(
+            getattr(args, "profile_launch_skew", False)
+        )
 
     def align_rank_launch(self) -> None:
         slack_us = self.args.rank_launch_deadline_us
@@ -1086,6 +1115,14 @@ class AscendRuntime:
         if case.async_with_compute_stream:
             result[-1].current_stream_wait()
         return result
+
+    def _read_launch_profile(self) -> dict[str, int] | None:
+        if not self._launch_profile_enabled:
+            return None
+        profile = getattr(self.buffer, "_ascend_last_launch_profile", None)
+        if profile is None:
+            return None
+        return dict(profile)
 
     def construct_buffer(self) -> None:
         spec = self.manifest.spec
@@ -1677,10 +1714,16 @@ class AscendRuntime:
                 device_samples.append(sample.device_seconds)
                 wall_samples.append(sample.wall_seconds)
                 if self.args.profile_launch_skew:
-                    launch_skew_samples.append({
+                    launch_skew_sample = {
                         "start_record_ns": sample.start_record_ns,
                         "launch_complete_ns": sample.launch_complete_ns,
-                    })
+                    }
+                    python_launch_phase = self._read_launch_profile()
+                    if python_launch_phase is not None:
+                        launch_skew_sample["python_launch_phase"] = (
+                            python_launch_phase
+                        )
+                    launch_skew_samples.append(launch_skew_sample)
             record = {
                 "operation_id": operation_id,
                 "device_samples": device_samples,
@@ -1845,6 +1888,7 @@ def run_benchmark(args: Any, selected_case_ids: tuple[str, ...]) -> int:
                 args.rank_launch_deadline_us
             )
         if args.profile_launch_skew:
+            os.environ["DEEP_EP_ASCEND_PROFILE_LAUNCH_PHASES"] = "1"
             report.timing_protocol["profile_launch_skew"] = True
         report.device = {
             "name": torch.npu.get_device_name(local_rank),

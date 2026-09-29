@@ -796,3 +796,37 @@ provide a useful overlap upper bound. Reusing their current allocation/stream
 structure is not a candidate for launch-ahead; a future service must retain the
 Normal Dispatch stream and move only the independently attributed host
 preparation work.
+
+## Python launch-phase attribution (2026-09-29)
+
+The launch-skew diagnostic was extended to split the public Python
+`ElasticBuffer.dispatch` wrapper into four disjoint wall-clock phases:
+`preflight`, `preparation`, `runtime`, and `result`.
+The buckets are diagnostic-only, preserve execution order, and are exported
+only when `--profile-launch-skew` is explicitly requested.
+
+The 8-rank run was task
+`task_20260929_113730_416585724716` on devices 0-7, using the canonical
+8192-token FP8 Normal Dispatch workload, 30 warmups / 30 iterations, and the
+retained CANN/HCOMM environment. The Python source snapshot used the new
+diagnostic wrapper and the baseline extension SHA `d083529...`. It
+completed with `failed=0, passed=1, pending=0` and exit 0. The result is
+attribution-only and is not a no-profile performance result.
+
+| Python dispatch phase | Mean (ms) | p50 (ms) | p95 (ms) |
+| --- | ---: | ---: | ---: |
+| Preflight and contract construction | 0.099246 | 0.099015 | 0.113900 |
+| Handle unpacking and defaults | 0.002848 | 0.002790 | 0.003520 |
+| C++ runtime call | 3.105823 | 2.983215 | 3.766820 |
+| EPHandle/result construction | 0.038889 | 0.037885 | 0.046970 |
+| Total public Python wrapper | 3.346053 | 3.215840 | 3.986890 |
+
+The profile-on Dispatch mean was 3.781115 ms. The total Python wrapper is not
+pure host work: the runtime bucket contains C++ launch plus stream/device
+synchronization and therefore waits for the multi-rank critical path. The
+python-only portion is bounded by approximately 0.14 ms per call. This is
+consistent with the C++ prelaunch profile (roughly 0.1 ms) and rules out
+removing only Python preflight/argument assembly as a material launch-ahead
+optimization. The next attribution boundary is inside the C++ runtime call:
+separate C++ prelaunch, kernel submission, `synchronize_stream`, count
+readback, and descriptor publication before proposing another service design.

@@ -226,7 +226,11 @@ and after the operation submission. Rank 0 then reports per-sample cross-rank
 spreads for start recording, launch completion, and a conservative upper bound
 on device-time exposure not explained by start-record skew. This is
 diagnostic-only; normal reports remain unchanged and the report records
-`timing_protocol.profile_launch_skew: true`.
+`timing_protocol.profile_launch_skew: true`. The same diagnostic mode
+records Dispatch Python launch phases (`preflight`, `preparation`,
+`runtime`, and `result`) as raw per-rank nanosecond samples under
+`launch_skew_profile.python_launch_phases_ns`. The buckets are disjoint
+wall-clock intervals and are attribution-only; they do not change launch order.
 
 Render the captured profile as a validated P5 parity timeline:
 
