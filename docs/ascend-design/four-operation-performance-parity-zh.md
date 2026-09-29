@@ -545,6 +545,23 @@ The half-finished queue conversion was therefore reverted without a remote
 run. A future candidate must first establish a queue or event lifetime that
 covers the MTE3 read, rather than weakening that boundary for pipeline form.
 
+#### C14 candidate: single-pass combine contributor lookup (2026-09-30)
+
+The retained vector epilogue resolves each output token by scanning all
+top-k lanes once for every contributor rank. The candidate instead scans the
+top-k lanes once per token into a small rank-to-receive-slot map, then emits
+contributors in ascending rank order. This changes only lookup scheduling.
+
+The first lane that maps to a source rank is retained, invalid experts are
+ignored, and the emitted contributor order remains ascending rank order. The
+reduction order, bias order, tile order, queue depths, and output layout are
+unchanged.
+
+Acceptance: improve Normal and Reduced Combine wall mean/p95 materially
+without regressing the three Dispatch operations in the four-rank development
+gate. An isolated cycle reduction without end-to-end improvement is not
+sufficient.
+
 ### C6. Grouped validation gate
 
 Priority: P0, required after every grouped source batch.

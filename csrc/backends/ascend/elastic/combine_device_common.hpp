@@ -633,24 +633,27 @@ __aicore__ inline void direct_combine_epilogue_vector_reduce_impl(
          token += block_count) {
         std::int32_t contributor_ranks[kTopkSubgroupWidth];
         std::int32_t receive_slots[kTopkSubgroupWidth];
-        std::uint32_t contributor_count = 0;
+        std::int32_t rank_slots[kTopkSubgroupWidth];
         const std::uint64_t token_base =
             static_cast<std::uint64_t>(token) * num_topk_u32;
+        for (std::uint32_t rank = 0; rank < kTopkSubgroupWidth; ++rank)
+            rank_slots[rank] = -1;
+        for (std::uint32_t lane = 0; lane < num_topk_u32; ++lane) {
+            const std::int64_t expert = topk_global.GetValue(token_base + lane);
+            if (expert < 0 ||
+                static_cast<std::uint64_t>(expert) >= num_experts_u32)
+                continue;
+            const std::uint32_t rank = static_cast<std::uint32_t>(
+                static_cast<std::uint64_t>(expert) / local_experts);
+            if (rank >= static_cast<std::uint32_t>(world_size) ||
+                rank_slots[rank] >= 0)
+                continue;
+            rank_slots[rank] = slots_global.GetValue(token_base + lane);
+        }
+        std::uint32_t contributor_count = 0;
         for (int contributor_rank = 0;
              contributor_rank < world_size; ++contributor_rank) {
-            std::int32_t receive_slot = -1;
-            for (std::uint32_t lane = 0;
-                 lane < num_topk_u32; ++lane) {
-                const std::int64_t expert =
-                    topk_global.GetValue(token_base + lane);
-                if (expert >= 0 &&
-                    static_cast<std::uint64_t>(expert) < num_experts_u32 &&
-                    static_cast<std::uint64_t>(expert) / local_experts ==
-                        static_cast<std::uint64_t>(contributor_rank)) {
-                    receive_slot = slots_global.GetValue(token_base + lane);
-                    break;
-                }
-            }
+            const std::int32_t receive_slot = rank_slots[contributor_rank];
             if (receive_slot >= 0) {
                 contributor_ranks[contributor_count] = contributor_rank;
                 receive_slots[contributor_count] = receive_slot;
