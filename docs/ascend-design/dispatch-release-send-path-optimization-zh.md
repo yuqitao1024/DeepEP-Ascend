@@ -761,3 +761,38 @@ tiling subset is too small to overcome launch-path variance. The source changes
 were removed and only this design record remains. A future launch-ahead
 proposal should move a materially larger, independently attributable part of
 the host preparation path, not retry this cache alone.
+
+## Existing stream-overlap modes are not a launch-ahead upper bound
+(2026-09-29)
+
+Before designing a new persistent service, the zero-code mode probe asked
+whether the existing comm-stream and async-with-compute paths already provide a
+useful overlap upper bound. The runs used the canonical 8192-token FP8 Normal
+Dispatch workload, 30 warmups / 30 iterations, devices 0-7, the retained
+benchmark environment, and the baseline extension SHA
+`d083529...`. Profile stages were disabled.
+
+The first run was task
+`task_20260929_104400_45421131946`, and the confirmation run was
+`task_20260929_104858_5581328775`. The confirmation script was invoked with
+run number 2, but a path-suffix mistake made it read the completed first-run
+files as `r1` and then fail its summary step after all benchmark cases had
+finished. The two available outputs are therefore the first run's normal-mode
+result and the confirmation run's two stream-mode results. Both runs completed
+their used outputs with `failed=0, passed=1, pending=0`. One normal-mode
+process ended with the pre-existing teardown-only SIGSEGV only after writing
+the complete JSON and printing `1 cases passed`; the established acceptance
+policy applies. The installed extension SHA remained unchanged.
+
+| Dispatch mode | First run (ms) | Confirmation run (ms) |
+| --- | ---: | ---: |
+| Normal (current production path) | 3.862063 | 3.959054 |
+| `allocate_on_comm_stream` | 15.689018 | 15.176279 |
+| `allocate_on_comm_stream` + `async_with_compute_stream` | 15.655756 | 15.472624 |
+
+Cached Dispatch stayed around 63.5-64.0 ms in every mode. The stream modes are
+therefore about four times slower for this Normal Dispatch workload and do not
+provide a useful overlap upper bound. Reusing their current allocation/stream
+structure is not a candidate for launch-ahead; a future service must retain the
+Normal Dispatch stream and move only the independently attributed host
+preparation work.
