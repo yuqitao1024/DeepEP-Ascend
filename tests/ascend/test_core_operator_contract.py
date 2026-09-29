@@ -379,6 +379,75 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 dispatch.count(f"HostTimelinePhase::{phase}"), count, phase)
         self.assertIn("status = published.operation->finish(5000);", dispatch)
 
+    def test_cached_dispatch_producer_plan_is_subgroup_parallel(self):
+        """Parallelizes cached validation without deleting its safety checks."""
+        source = (
+            ELASTIC / "direct_dispatch_producer_plan.asc"
+        ).read_text()
+        begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_dispatch_producer_plan_vf(")
+        end = source.index(
+            "__simt_callee__ inline void "
+            "direct_dispatch_producer_plan_serial(",
+            begin,
+        )
+        plan = source[begin:end]
+        for marker in (
+                "direct_subgroup_grid_stride(",
+                "group_topk_subgroup(",
+                "topk_broadcast_owner_value(",
+                "asc_atomic_or(",
+                "decode_dispatch_source_rank(",
+                "decode_dispatch_local_index(",
+                "dispatch_simt_bitmap_location(",
+                "destination_counts[destination]",
+                "maximum_slots[destination]"):
+            self.assertIn(marker, plan)
+        self.assertIn("transport::simt::system_fence();", plan)
+        self.assertIn("asc_syncthreads();", plan)
+
+        fallback_call = plan.index(
+            "direct_dispatch_producer_plan_serial(")
+        guard = plan.index("!cached || num_topk > kTopkSubgroupWidth")
+        self.assertLess(guard, fallback_call)
+
+    def test_normal_combine_producer_plan_and_prefix_are_parallel(self):
+        """Catches restoring one-thread planning and rank-prefix scans."""
+        plan_source = (
+            ELASTIC / "direct_combine_producer_plan.asc"
+        ).read_text()
+        plan = plan_source[
+            plan_source.index(
+                "__simt_vf__ __launch_bounds__(512) inline void "
+                "direct_combine_producer_plan_vf"):
+            plan_source.index(
+                "__global__ __vector__ void "
+                "direct_combine_producer_plan_kernel"):
+        ]
+        self.assertIn("direct_subgroup_grid_stride(", plan)
+        self.assertIn("const int destination_rank =", plan)
+        self.assertIn("if (destination_rank >= world_size)", plan)
+        self.assertIn("is_valid_combine_source_identity(", plan)
+        self.assertIn("CombineProtocolError::kInvalidMetadata", plan)
+        self.assertIn("asc_syncthreads();", plan)
+
+        prefix_source = (
+            ELASTIC / "direct_combine_producer_plan_prefix.asc"
+        ).read_text()
+        prefix = prefix_source[
+            prefix_source.index(
+                "__simt_vf__ __launch_bounds__(512) inline void "
+                "direct_combine_producer_plan_prefix_vf"):
+            prefix_source.index(
+                "__global__ __vector__ void "
+                "direct_combine_producer_plan_prefix_kernel"):
+        ]
+        self.assertIn("const std::uint32_t rank = threadIdx.x", prefix)
+        self.assertIn("if (rank < rank_count_u32)", prefix)
+        self.assertIn("for (std::uint32_t tile = 0", prefix)
+
+
     def test_combine_stable_preflight_avoids_source_metadata_host_copy(self):
         """Keeps the Combine hot path local while retaining full diagnostics."""
         source = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()

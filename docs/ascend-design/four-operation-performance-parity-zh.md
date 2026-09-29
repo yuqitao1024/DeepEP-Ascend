@@ -86,6 +86,98 @@ Acceptance: reduce Cached Dispatch wall mean from roughly 63 ms toward the
 single-digit-ms range before comparing with the other operations. Correctness
 must pass the canonical case and cached-handle reuse.
 
+#### C1 diagnosis update (2026-09-29)
+
+The dedicated four-rank host/stage profile
+task_20260929_162712_290697414768 found the missing attribution. Cached
+Dispatch wall time was about 58-61 ms, and cached_dispatch_completion_wait
+was 54.5-56.2 ms per rank. Descriptor staging, event creation, publication,
+record, and submit were each only about 2-160 microseconds, and the prelaunch
+path was 0.5-1.2 ms. The device timeline had about 52.9 ms idle inside the
+envelope.
+
+The gap was between the profiled producer-control marker and producer-group:
+about 48.5 ms on every rank. That interval belongs to
+direct_dispatch_producer_plan, not to host completion or CANN event querying.
+The legacy cached planner assigns one thread per destination rank; with 8192
+tokens and top-k 8, each thread serially rescans all 65,536 route entries and
+repeatedly tests and sets a slot bitmap. This explains the earlier apparent
+operation->finish cost: completion was merely waiting for the planner to
+finish.
+
+The retained C1 implementation parallelizes only the qualified cached layout
+(top-k <= 32 and world size <= 32):
+
+1. Keep the existing serial implementation as an explicit fallback for
+   uncached, oversized, and rollback shapes.
+2. Use one 32-lane subgroup over grouping tiles, as the uncached grouping path
+   already does.
+3. Keep invalid-expert, encoded-rank, slot-range, inactive-lane, and
+   destination-group slot-consistency checks. An invalid lane reports its own
+   producer error even when it cannot participate in a valid destination
+   subgroup.
+4. Replace the serial bitmap test-and-set with an atomic OR on the same
+   per-destination bitmap word, then inspect the returned prior word. A set
+   target bit is the existing duplicate-slot protocol error; other bits in the
+   same 64-bit word may be set concurrently.
+5. Clear each destination's bitmap, count, and maximum-slot accumulator
+   before grouping, then aggregate successful groups with global atomic add
+   and atomic max. The epilogue's existing maximum_slot == count and
+   cached-prefix checks remain unchanged.
+
+This change does not weaken handle validity, generation checks, or
+two-generation reuse semantics.
+
+#### C1 development-gate result (2026-09-29)
+
+The first real remote build exposed a SIMT calling-convention constraint:
+the `simt_vf` planner entry could not call the old serial fallback marked as
+another `simt_vf`. The fallback is now an explicit `simt_callee`, and the
+contract test asserts that hierarchy. Task
+`task_20260929_230307_176006632758` rebuilt successfully; the extension
+SHA-256 is
+`9338245e86515949262365c4717672331eea7d08d1eefd4d82a03444e63b4793`.
+
+Task `task_20260929_230610_177603421237` then ran the four-rank development
+gate on devices 0-3 with the representative FP8 case, 30 warmups and 30
+iterations, 64 AIV blocks, retained host affinity, no stage profile, no
+launch-skew profile, and no launch deadline. The case passed correctness.
+
+| Operation | Wall mean | Wall p95 | Interpretation |
+| --- | ---: | ---: | --- |
+| Cached Dispatch | 26.973 ms | 27.628 ms | improved, but far below the sub-10-ms checkpoint |
+| Expanded Dispatch | 11.195 ms | 11.586 ms | gate context only |
+| Normal Combine | 10.885 ms | 11.118 ms | gate context only |
+| Reduced Combine | 12.362 ms | 12.654 ms | gate context only |
+
+The four-rank Cached Dispatch result improved from the earlier diagnostic
+envelope of roughly 58-61 ms to 26.973 ms, confirming that the planner was a
+major contributor, but the mechanism did not disappear. The next C1 action is
+an operation-level Cached Dispatch profile of the new build to determine
+whether the remaining time is still planner work, bitmap atomics, producer
+grouping, or the completion path. Do not commit C1 until that attribution and
+the final eight-rank gate are complete.
+
+The post-v2 profile task (task_20260929_233143_201896428583) attributed the
+remaining rank-0 kernel span almost entirely to the planner: 16.55-16.58 ms in
+`direct_dispatch_producer_plan_kernel`, followed by 2.67 ms producer record
+and about 2.03 ms transport service. Increasing the producer-plan block count
+was then tested as a bounded launch-shape probe. Two data blocks regressed
+Cached Dispatch to 128.861 ms mean / 129.921 ms p95, and four blocks regressed
+it to 74.051 ms mean / 76.515 ms p95. The launch-shape change is therefore
+rejected and must remain reverted; the remaining planner cost needs a
+different mechanism that reduces per-token work or atomic traffic without
+changing the control-stage topology.
+
+After reverting the launch-shape probe, the four-rank development gate on
+devices 4-7 passed correctness and returned 27.525 ms mean / 28.944 ms p95
+for Cached Dispatch, matching the retained 26.973 ms / 27.628 ms result within
+normal variation. The C1 retained delta is therefore limited to the qualified
+cached planner subgroup parallelization and the `simt_callee` fallback fix.
+The remaining planner bottleneck is accepted for this commit; a future C1
+follow-up must first reduce per-token subgroup work or atomic traffic before
+changing launch topology.
+
 ### C2. Expanded Dispatch producer-record acceleration
 
 Priority: P1. Expanded Dispatch has the same shared transport service cost as
@@ -142,6 +234,47 @@ Actions:
 
 Acceptance: improve both Combine variants together. Do not accept a Normal
 Combine gain that regresses Reduced Combine, or vice versa.
+
+#### C4 implementation start (2026-09-30)
+
+The retained profile shows Normal Combine spends about 1.13 ms in
+`direct_combine_producer_plan_kernel` and 0.76 ms in
+`direct_combine_producer_plan_prefix_kernel`. The plan assigned one thread
+to each 128-row tile and that thread scanned the tile once per destination
+rank; the prefix kernel used only thread zero and scanned every tile once per
+rank.
+
+The first C4 implementation changes only planning parallelism:
+
+1. Use the existing 32-lane subgroup decomposition for producer planning. One
+   lane handles one destination rank for each tile, so the metadata scan and
+   validation work is partitioned by destination instead of repeated by one
+   thread.
+2. Keep source identity, encoded source rank, master lane, expanded input-row
+   validation, tile counts, and tile error encoding unchanged.
+3. Clear tile errors once by lane zero, synchronize the block, and let each
+   destination lane publish its own tile count or error.
+4. Parallelize the prefix scan by rank: thread `rank` computes that rank's
+   tile-prefix scan and final count. Error discovery and capacity checks
+   remain unchanged.
+
+This intentionally does not change producer records, transport commands,
+release order, epilogue reduction, or output layouts.
+
+The grouped C1+C4 four-rank development gate on devices 4-7 passed
+correctness with the representative FP8 case, 30 warmups and 30 iterations,
+64 AIV blocks, retained host affinity, no stage profile, no launch-skew
+profile, and no launch deadline. Compared with the C1-only revert run:
+
+| Operation | Before mean / p95 | After mean / p95 | Change |
+| --- | ---: | ---: | ---: |
+| Cached Dispatch | 27.525 / 28.944 ms | 26.681 / 27.298 ms | -0.844 / -1.646 ms |
+| Normal Combine | 11.389 / 12.207 ms | 10.293 / 10.893 ms | -1.096 / -1.314 ms |
+| Reduced Combine | 12.402 / 12.728 ms | 11.761 / 12.051 ms | -0.641 / -0.677 ms |
+
+Normal Dispatch and Expanded Dispatch remain within normal variation. The
+planning/prefix change therefore has a clear four-rank benefit for both
+Combine variants and does not regress the other three operations.
 
 ### C5. Combine epilogue-reduce acceleration
 
