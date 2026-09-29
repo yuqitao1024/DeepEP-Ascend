@@ -162,6 +162,25 @@ allow-multiple-reduction setting.
 
 Priority: P0, required after every grouped source batch.
 
+Validation has two levels during this phase.
+
+#### Development gate: four ranks
+
+During implementation and quick iteration, run the same representative FP8
+case with four ranks on devices 0-3. Use the retained benchmark defaults, no
+stage profile, no launch deadline, and at least 30 warmups and 30 iterations.
+This gate checks correctness and large, obvious performance changes while
+avoiding long eight-card queue waits. Its latency and bandwidth are not the
+final target and must not replace the eight-rank record.
+
+A four-rank result is sufficient to advance a work item when the mechanism is
+local to the operation path (for example, a host completion wait or a producer
+or epilogue kernel) and the direction is large and unambiguous. If the
+mechanism depends on cross-rank arrival, CQ completion scaling, or HCCS
+topology, use an eight-rank diagnostic instead.
+
+#### Final gate: eight ranks
+
 Build and run on NPU8P through TaskQueue only. Use devices 0-7, the canonical
 FP8 case, 30 warmups and 30 iterations, and the retained benchmark defaults.
 
