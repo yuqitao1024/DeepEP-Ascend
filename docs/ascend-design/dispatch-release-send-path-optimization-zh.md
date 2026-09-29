@@ -696,3 +696,68 @@ service:
 This changes when host work occurs rather than hiding it from the timer. Host
 alignment, busy waiting, or a measurement-only barrier is not an acceptable
 production solution.
+
+## P3 first slice: stable Dispatch tiling cache, rejected (2026-09-29)
+
+The first launch-ahead slice tested the safest reusable part of the proposed
+preparation set: caching the Dispatch CoreTiling inside one ElasticBuffer
+generation. The launch key covered the full stable launch shape:
+
+1. token, hidden, expert, top-k, alignment, and capacity dimensions;
+2. mode flags, element kind, scale-factor packs, and data block count;
+3. the complete runtime topology: world rank/size, scale-up rank/size,
+   scale-out rank/size, topology kind, and topology epoch.
+
+A hit copied the cached tiling and refreshed the transport context from the
+current runtime context. A miss rebuilt the tiling through the existing
+core-tiling builder and stored it under the buffer lifecycle mutex. Buffer
+destroy invalidated the key, cache, and valid bit.
+
+The topology fields were part of the acceptance boundary before any device
+run: without them, a topology or epoch change inside the same object could
+reuse a stale tiling topology even though the transport context was refreshed.
+The probe also added a topology-epoch mismatch contract.
+
+### Validation and result
+
+Local contracts passed:
+
+| Gate | Result |
+| --- | --- |
+| focused tiling/cache contracts after the candidate edit (2 tests) | passed |
+| benchmark / transport / SIMT URM A contract suite | 144 passed, 3 skipped |
+| git diff whitespace check | passed |
+
+The rebuilt extension SHA was
+994480fb904fd13617d8a655712a566aeec043fcc8b67052995c651578a2a7b5.
+Two-rank production Dispatch correctness ran as task
+task_20260929_091346_31056359377: all 14 dispatch matrix cases passed,
+including expanded, aligned, cached reuse, 100 sequential generations,
+round-trip, and invalid-expert diagnostics. The queue script restored the
+baseline extension SHA
+d08352909619bc12e95ec2fc2d03ff4dfaef78ccb7b5b08dfae7350593bd1cad
+after the run.
+
+No-profile 8-rank ABBA used the same canonical 8192-token FP8 workload,
+30 warmups / 30 iterations, the retained benchmark environment, and no launch
+deadline. A was the baseline SHA above; B was the tiling-cache candidate.
+
+| Group | A mean (ms) | B mean (ms) | B gain | Task |
+| --- | ---: | ---: | ---: | --- |
+| 1 | 3.888685 | 3.907258 | -0.478% | task_20260929_092148_330615432627 |
+| 2 | 3.903342 | 3.679716 | +5.729% | task_20260929_093643_351880525823 |
+| 3 | 3.732774 | 3.833333 | -2.694% | task_20260929_095848_1205897569 |
+
+All 12 JSON reports passed their single case. Two complete runs again ended
+with the pre-existing teardown-only SIGSEGV after writing the report and
+printing 1 cases passed; the established acceptance policy applies. The
+installed extension was restored to the baseline SHA after each group.
+
+Decision: reject and remove this slice. The three-group direction is
+inconsistent (-0.478%, +5.729%, -2.694%), and the pooled mean is approximately
+neutral. This is consistent with the earlier profile bound: the complete
+Dispatch prelaunch setup was only about 0.089-0.149 ms, so saving only the
+tiling subset is too small to overcome launch-path variance. The source changes
+were removed and only this design record remains. A future launch-ahead
+proposal should move a materially larger, independently attributable part of
+the host preparation path, not retry this cache alone.
