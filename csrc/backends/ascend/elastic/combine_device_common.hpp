@@ -158,11 +158,11 @@ __aicore__ inline void direct_combine_producer_expanded_vector_reduce_impl(
         return;
 
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::QuePosition::VECIN, 1> input_queue;
+    AscendC::TQue<AscendC::QuePosition::VECIN, 2> input_queue;
     AscendC::TQue<AscendC::QuePosition::VECOUT, 1> output_queue;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> scratch_buffer;
     (void)pipe.InitBuffer(
-        input_queue, 1,
+        input_queue, 2,
         kCombineProducerVectorTileElements * sizeof(bfloat16_t));
     (void)pipe.InitBuffer(
         output_queue, 1,

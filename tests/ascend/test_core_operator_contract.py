@@ -1628,8 +1628,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "template <bool ProfileEnabled = false, std::uint32_t TileBytes>\n"
             "__aicore__ inline void "
             "direct_dispatch_epilogue_vector_payload_impl")
-        vector_begin = source.index(vector_signature)
-        vector_end = source.index("\n}\n", vector_begin)
+        vector_begin = common.index(vector_signature)
+        vector_end = common.index("\n}\n", vector_begin)
         vector_copy = source[vector_begin:vector_end]
         for marker in (
                 "dispatch_consumer_copy_plan(",
@@ -2091,12 +2091,15 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
     def test_direct_normal_combine_producer_uses_vector_payload_copy(self):
         """Catches restoring per-element BF16 conversion for normal records."""
         source = (ELASTIC / "combine.asc").read_text()
+        common = (ELASTIC / "combine_device_common.hpp").read_text()
+        record_source = (
+            ELASTIC / "direct_combine_producer_record.asc").read_text()
         vector_signature = (
             "__aicore__ inline void "
             "direct_combine_producer_vector_payload_impl")
-        vector_begin = source.index(vector_signature)
-        vector_end = source.index("\n}\n", vector_begin)
-        vector_copy = source[vector_begin:vector_end]
+        vector_begin = common.index(vector_signature)
+        vector_end = common.index("\n}\n", vector_begin)
+        vector_copy = common[vector_begin:vector_end]
         for marker in (
                 "AscendC::GetBlockIdx()", "AscendC::GetBlockNum()",
                 "AscendC::GlobalTensor<bfloat16_t>", "AscendC::DataCopy",
@@ -2104,28 +2107,54 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "combine_producer_tile_rank_count_offset"):
             self.assertIn(marker, vector_copy)
 
-        record_begin = source.index(
+        record_begin = record_source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_combine_producer_record_vf")
-        record_end = source.index("\n}\n", record_begin)
-        record = source[record_begin:record_end]
+        record_end = record_source.index("\n}\n", record_begin)
+        record = record_source[record_begin:record_end]
         self.assertIn("payload_plan.scalar_begin", record)
         self.assertIn("combine_reduce_expanded_lanes(", record)
 
+        record_kernel = record_source[record_source.index(
+            "__global__ __vector__ void direct_combine_producer_record_kernel"):]
+        self.assertIn(
+            "asc_vf_call<direct_combine_producer_record_vf>", record_kernel)
+
         kernel = source[source.index(
             "__global__ __vector__ void combine_kernel"):]
-        record_call = kernel.index(
-            "asc_vf_call<direct_combine_producer_record_vf>")
         vector_call = kernel.index(
-            "direct_combine_producer_vector_payload_impl(", record_call)
-        boundary = kernel[record_call:vector_call]
-        self.assertIn("asc_sync_vec();", boundary)
+            "direct_combine_producer_vector_payload_impl(")
+        vector_caller = source[source.index(
+            "inline int launch_combine_kernel("):]
+        record_launcher = vector_caller.index(
+            "run_vf(launch_direct_combine_producer_record)")
+        vector_boundary = kernel[
+            kernel.index(
+                "const auto payload_plan = aicore_combine_producer_payload_copy_plan("):
+            vector_call]
+        self.assertIn("asc_sync_vec();", vector_boundary)
         self.assertIn(
-            "asc_sync_data_barrier(mem_dsb_t::DSB_DDR);", boundary)
+            "asc_sync_data_barrier(mem_dsb_t::DSB_DDR);", vector_boundary)
+        self.assertLess(record_launcher, vector_call)
+
+        signature = (
+            "__aicore__ inline void "
+            "direct_combine_producer_vector_payload_impl")
+        vector_begin = common.index(signature)
+        vector_end = common.index("\n}\n", vector_begin)
+        producer_copy = common[vector_begin:vector_end]
+        self.assertIn(
+            "AscendC::TBuf<AscendC::QuePosition::VECCALC>", producer_copy)
+        self.assertIn(
+            "kCombineProducerVectorTileElements * sizeof(bfloat16_t)",
+            producer_copy)
 
     def test_reduced_combine_producer_uses_opt_in_vector_reduction(self):
         """Catches rescanning top-k once per hidden element in reduced combine."""
         source = (ELASTIC / "combine.asc").read_text()
+        common = (ELASTIC / "combine_device_common.hpp").read_text()
+        record_source = (
+            ELASTIC / "direct_combine_producer_record.asc").read_text()
         header = (ELASTIC / "kernels.hpp").read_text()
         host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
 
@@ -2140,9 +2169,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         signature = (
             "__aicore__ inline void "
             "direct_combine_producer_expanded_vector_reduce_impl")
-        vector_begin = source.index(signature)
-        vector_end = source.index("\n}\n", vector_begin)
-        vector_reduce = source[vector_begin:vector_end]
+        vector_begin = common.index(signature)
+        vector_end = common.index("\n}\n", vector_begin)
+        vector_reduce = common[vector_begin:vector_end]
         rows = vector_reduce.index("std::int32_t input_rows[32]")
         hidden = vector_reduce.index(
             "for (std::uint32_t hidden = 0;", rows)
@@ -2153,11 +2182,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
                 "AscendC::RoundMode::CAST_RINT"):
             self.assertIn(marker, vector_reduce)
 
-        record_begin = source.index(
+        record_begin = record_source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_combine_producer_record_vf")
-        record_end = source.index("\n}\n", record_begin)
-        record = source[record_begin:record_end]
+        record_end = record_source.index("\n}\n", record_begin)
+        record = record_source[record_begin:record_end]
         self.assertIn(
             "combine_expanded_producer_payload_plan(", record)
         self.assertIn("expanded_payload_plan.scalar_begin", record)
@@ -2167,6 +2196,17 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn(
             "direct_combine_producer_expanded_vector_reduce_impl(", kernel)
         self.assertIn("arguments.expanded_vector_reduce", kernel)
+
+        signature = (
+            "__aicore__ inline void "
+            "direct_combine_producer_expanded_vector_reduce_impl")
+        vector_begin = common.index(signature)
+        vector_end = common.index("\n}\n", vector_begin)
+        vector_reduce = common[vector_begin:vector_end]
+        self.assertIn(
+            "AscendC::TQue<AscendC::QuePosition::VECIN, 2>",
+            vector_reduce)
+        self.assertIn("input_queue, 2,", vector_reduce)
 
     def test_direct_combine_local_copy_uses_opt_in_datacopy_body(self):
         """Catches restoring a byte-at-a-time copy for the local rank shard."""

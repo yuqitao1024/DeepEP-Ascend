@@ -318,6 +318,41 @@ Acceptance: reduce the common 2.44 ms reduce span by at least one millisecond
 without changing numerical-order guarantees beyond the existing explicit
 allow-multiple-reduction setting.
 
+#### C5 candidate (2026-09-30)
+
+The retained Reduced/Expanded Combine vector producer already uses the
+vector pipeline, but its VECIN queue holds only one tile. Each input tile is
+therefore copied, consumed, and freed before the next GM load is issued,
+leaving the MTE pipeline idle during Cast and Add.
+
+The bounded candidate increases the VECIN queue depth from one to two equal
+tiles and changes no addresses, layouts, reduction lane order, or numerical
+accumulation order. It only lets the next GM load overlap with the current
+Cast and Add. This affects the qualified Reduced/Expanded Combine producer
+vector path; Normal Combine's plain payload copy is unchanged.
+
+Acceptance: improve Reduced Combine materially without regressing Normal
+Combine or the three Dispatch operations.
+
+#### C5 result (2026-09-30)
+
+The candidate compiled remotely with CANN 9.3.0 and the extension SHA-256 is
+`edd8b9d2bf7c12da35523bee8affeda3804c619a211e06fabe761efaadd1e8d9`. The
+four-rank development gate task
+`task_20260930_014401_278552721876` passed correctness with the retained
+benchmark identity.
+
+| Operation | Before mean / p95 | Candidate mean / p95 | Change |
+| --- | ---: | ---: | ---: |
+| Reduced Combine | 11.761 / 12.051 ms | 10.007 / 10.311 ms | -1.754 / -1.740 ms |
+| Normal Combine | 10.293 / 10.893 ms | 10.315 / 10.876 ms | +0.022 / -0.017 ms |
+| Expanded Dispatch | 11.167 / 11.358 ms | 11.204 / 11.467 ms | +0.037 / +0.109 ms |
+| Cached Dispatch | 26.681 / 27.298 ms | 26.810 / 27.289 ms | +0.129 / -0.009 ms |
+| Normal Dispatch | 3.551 / 3.905 ms | 3.469 / 3.577 ms | -0.082 / -0.328 ms |
+
+Reduced Combine improved materially while the other four operations stayed
+within normal variation. The change is retained.
+
 ### C6. Grouped validation gate
 
 Priority: P0, required after every grouped source batch.
