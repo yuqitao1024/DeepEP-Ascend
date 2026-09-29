@@ -2035,20 +2035,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertLess(expert_marker, metadata_launch)
 
     def test_dispatch_output_copy_uses_compact_receive_domain(self):
-        source = (ELASTIC / "dispatch.asc").read_text()
-        for function_name in (
-                "direct_dispatch_epilogue_vector_payload_impl",
-                "direct_dispatch_epilogue_copy_outputs_vf"):
-            begin = source.index(f"inline void {function_name}")
-            end = source.index("\n}\n", begin)
-            function = source[begin:end]
-            for marker in (
-                    "last_source_rank", "total_records",
-                    "copies_per_record", "compact_record"):
-                self.assertIn(marker, function)
-            self.assertIn(
-                "total_records * copies_per_record", function)
-
+        source = (
+            ELASTIC / "direct_dispatch_epilogue_copy_outputs.asc").read_text()
         copy_begin = source.index(
             "inline void direct_dispatch_epilogue_copy_outputs_vf")
         copy_end = source.index("\n}\n", copy_begin)

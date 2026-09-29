@@ -333,6 +333,31 @@ that single gate, so the candidate cannot be attributed a target-specific
 gain. The four-buffer version is therefore rejected and reverted.
 Validation record: task_20260930_012406_270542915522.
 
+#### C12 candidate: block-contiguous expanded copy scheduling (2026-09-30)
+
+The retained Expanded Dispatch stage profile shows the epilogue-copy stage at
+about 3.38M cycles in the tile-8192 probe. Lookup is only about 128k cycles;
+local and remote copy issue are about 0.76M and 2.20M cycles. This is a
+memory-locality problem, not a coordinate-lookup problem.
+
+The current scalar epilogue copy uses a data-wide grid stride: neighboring
+logical records are assigned round-robin across all 64 blocks. The candidate
+uses the existing block-distributed grid mapping so each block owns a
+contiguous logical interval. This preserves the exact record count, source and
+destination mappings, output layout, validation, scale-factor packing, and
+weight copy; it changes only which block executes a logical copy.
+
+Acceptance: improve Expanded Dispatch wall mean/p95 materially without
+regressing Normal Dispatch, Cached Dispatch, or either Combine variant in the
+four-rank development gate.
+
+Result: rejected. The candidate built and passed the four-rank development
+gate, but Expanded Dispatch changed from the retained C5 result of 11.204 /
+11.467 ms to 11.220 / 11.607 ms; Normal Dispatch, Cached Dispatch, and Reduced
+Combine also moved slightly worse. Contiguous block ownership does not improve
+the scalar epilogue copy in this case, so the source and contract change are
+reverted. Validation task: task_20260930_024005_305465044123.
+
 #### C9 candidate: expanded epilogue source-rank binary search (2026-09-30)
 
 The retained Expanded Dispatch epilogue profile attributes about 321,790
