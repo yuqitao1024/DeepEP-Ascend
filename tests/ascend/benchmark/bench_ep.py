@@ -6,6 +6,7 @@ import os
 import gc
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 
 if __package__ in (None, ""):
