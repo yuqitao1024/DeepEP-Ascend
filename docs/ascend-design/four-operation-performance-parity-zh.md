@@ -262,6 +262,24 @@ bounded directions remain:
 Do not retry a plain launch-topology change. The retained two- and four-block
 data probes regressed Cached Dispatch, and the planner is the bottleneck.
 
+#### C11 rejected probe: cached peer-mask specialization (2026-09-30)
+
+A second candidate preserved full lane visibility in the invalid-mask ballot
+and selected each destination owner with one active-peer ballot plus one
+broadcast. It retained the original owner bitmap test-and-set, duplicate
+detection, count/max atomics, and all error encodings; it removed only the
+generic helper's unique-owner loop and unused owner-ordinal computation.
+
+The build succeeded after correcting the local lane identifier, but the
+four-rank development gate task task_20260930_023505_30318798480 still failed
+with the same generation-2 invalid-protocol diagnostic as C10. This narrows
+the failure to the two-ballot peer/owner construction itself, most likely
+because the active-peer ballot is evaluated with a key-dependent predicate and
+produces a different convergence/participation set than the generic helper's
+key-independent active ballot on this SIMT dialect. The candidate is rejected
+and reverted; do not retry key-dependent ballot masks without first proving
+their participation semantics in an isolated probe.
+
 ### C2. Expanded Dispatch producer-record acceleration
 
 Priority: P1. Expanded Dispatch has the same shared transport service cost as
