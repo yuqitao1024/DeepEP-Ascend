@@ -526,6 +526,25 @@ benchmark identity.
 Reduced Combine improved materially while the other four operations stayed
 within normal variation. The change is retained.
 
+#### C13 rejected probe: normal producer queue-based payload copy (2026-09-30)
+
+A follow-up considered converting Normal Combine's plain GM-to-UB-to-GM
+payload copy from a `VECCALC` buffer to the depth-two `VECIN` queue used by
+the retained Reduced Combine producer. The intent was to overlap the next GM
+load with the current GM store.
+
+This reuse is not safe without a new hardware lifetime proof. In Reduced
+Combine, the queued input is consumed by Cast/Add and can be freed immediately
+after the vector reads. In Normal Combine, the same UB tensor is also the read
+source for MTE3; returning it through `FreeTensor` before an explicit MTE3
+completion boundary can recycle the tile while the GM store is still in
+flight. The original explicit `MTE2_MTE3` and `MTE3_MTE2` flags are the
+conservative lifetime mechanism.
+
+The half-finished queue conversion was therefore reverted without a remote
+run. A future candidate must first establish a queue or event lifetime that
+covers the MTE3 read, rather than weakening that boundary for pipeline form.
+
 ### C6. Grouped validation gate
 
 Priority: P0, required after every grouped source batch.
