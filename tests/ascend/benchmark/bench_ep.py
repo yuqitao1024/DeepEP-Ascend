@@ -1,6 +1,9 @@
 import argparse
 import json
+import gc
 import sys
+import os
+import gc
 from dataclasses import asdict
 from pathlib import Path
 
@@ -24,6 +27,21 @@ def _nonnegative_microseconds(value: str) -> int:
     if microseconds < 0:
         raise argparse.ArgumentTypeError("must be nonnegative")
     return microseconds
+
+
+def _configure_process(local_rank: int, torch_module: Any) -> None:
+    """Apply the retained host-launch environment before HCCL initializes."""
+    # Keep each rank on one physical NUMA0 core.  Siblings are 2n and 2n+1 on
+    # the validated Ascend host, so the even CPU numbers avoid cross-core
+    # migration during Python/PyBind launch.
+    os.sched_setaffinity(0, {16 + local_rank * 2})
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    torch_module.set_num_threads(1)
+    try:
+        torch_module.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+    gc.disable()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--iterations", type=int, default=30)
     parser.add_argument(
         "--num-sms", type=_data_blocks, default=None,
-        help="AIV count override; defaults to AICore count multiplied by 2")
+        help="AIV count override; defaults to 64 on supported devices")
     parser.add_argument("--cases")
     parser.add_argument("--skip-check", action="store_true")
     parser.add_argument("--profile-stages", action="store_true")

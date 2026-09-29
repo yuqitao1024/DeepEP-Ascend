@@ -668,6 +668,22 @@ def test_benchmark_parser_preserves_production_size_defaults():
     assert args.rank_launch_deadline_us == 0
 
 
+def test_benchmark_process_contract_and_default_aiv():
+    source = BENCH_EP.read_text()
+    runtime = RUNTIME.read_text()
+
+    assert "def _configure_process(local_rank: int, torch_module: Any)" in source
+    assert "os.sched_setaffinity(0, {16 + local_rank * 2})" in source
+    assert "torch_module.set_num_threads(1)" in source
+    assert "torch_module.set_num_interop_threads(1)" in source
+    assert "gc.disable()" in source
+    assert "_configure_process(local_rank, torch)" in runtime
+    assert runtime.index("_configure_process(local_rank, torch)") < runtime.index(
+        "dist.init_process_group"
+    )
+    assert "args.num_sms = min(64, device_aiv_count)" in runtime
+
+
 def test_benchmark_parser_enables_stage_profile_explicitly():
     args = build_parser().parse_args(["--profile-stages"])
 

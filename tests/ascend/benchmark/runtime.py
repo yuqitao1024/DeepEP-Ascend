@@ -1837,15 +1837,17 @@ def run_benchmark(args: Any, selected_case_ids: tuple[str, ...]) -> int:
     import torch.distributed as dist
     import torch_npu
 
+    from tests.ascend.benchmark.bench_ep import _configure_process
     import deep_ep
     from deep_ep.utils.envs import get_ascend_aiv_count, init_seed
 
     del torch_npu
     local_rank = int(os.environ["LOCAL_RANK"])
+    _configure_process(local_rank, torch)
     torch.npu.set_device(local_rank)
     device_aiv_count = get_ascend_aiv_count(local_rank)
     if args.num_sms is None:
-        args.num_sms = device_aiv_count
+        args.num_sms = min(64, device_aiv_count)
     elif args.num_sms > device_aiv_count:
         raise ValueError(
             f"--num-sms={args.num_sms} exceeds device AIV count "

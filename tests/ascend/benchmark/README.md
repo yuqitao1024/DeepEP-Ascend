@@ -15,9 +15,16 @@ The deterministic case enumeration is defined in
 Ascend direct EP resolves the device's AI Vector data-block count at runtime
 as `AICore * 2` through `aclrtGetDeviceInfo(AICORE_CORE_NUM)`. Pass
 `--num-sms N` only to override it for a controlled comparison; the override
-must not exceed the device's reported AIV count. `--num-sms 1` remains the
-compatibility baseline. The selected value is recorded as `device.num_sms` in
-`benchmark.json`.
+must not exceed the device's reported AIV count. The retained production
+default is `min(64, device AIV count)`; on the current Ascend 950DT host this
+selects 64. `--num-sms 1` remains the compatibility baseline. The selected
+value is recorded as `device.num_sms` in `benchmark.json`.
+
+The benchmark also applies the retained host-launch environment before HCCL
+initialization: one NUMA0 physical core per local rank, one Torch compute
+thread, one inter-op thread, and disabled Python cyclic GC. This setting is
+intentionally part of the benchmark identity and is not selected through the
+2-ms launch deadline.
 
 A short two-rank one-block-versus-device-AIV measurement uses the same
 workload manifest and case ID for both runs:

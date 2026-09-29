@@ -899,3 +899,24 @@ or cross-rank arrival/completion structure, including launch skew and the
 release/CQ completion path. The next optimization proposal must first identify a
 specific change to that critical path; merely moving Python/C++ preparation
 earlier is not a candidate.
+
+## Performance-metric boundaries (2026-09-29)
+
+Four numbers from the recent Normal Dispatch records are useful but use four
+different timing boundaries. They must not be pooled or compared directly.
+
+| Number | Boundary | Meaning and limitation |
+| ---: | --- | --- |
+| `2.1 TB/s` | No-deadline NPU Event | A one-run no-deadline sample reported `3.697083 ms / 2106.009 GB/s`. It excludes most host work before and after the Event interval, while still exposing some cross-rank launch skew. It is an Event diagnostic, not end-to-end latency. |
+| `2.4 TB/s` | 2-ms-aligned NPU Event | The three-group `--rank-launch-deadline-us 2000` record pooled at `3.216025 ms / 2421.029 GB/s`. The rendezvous and wait are outside the Event interval, so it is a device-path attribution number. It must not be called application throughput or a production speedup. |
+| `1.9 TB/s` | No-deadline wall time | The retained configuration measured `4.095875 ms`; dividing the unchanged logical bytes by wall time gives `1900.959 GB/s`. Wall includes Python/PyBind launch, stream synchronization, and teardown-adjacent host work, so it is the conservative end-to-end comparison for the 3 TB/s target. |
+| `11.76 TB/s` | Affinity-enabled NPU Event | With per-rank CPU affinity, the Event interval was only `0.662098 ms`, while wall time remained `4.095875 ms`. The Event no longer covers the host launch/synchronization path, so this bandwidth is not physically meaningful as end-to-end throughput. |
+
+The workload identity did not change: all records are the canonical eight-rank
+FP8 case `ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0`, 8192 tokens,
+hidden 7168, top-k 8, 256 experts, seed 0, 30 warmups, and 30 iterations.
+The retained benchmark environment is now part of the production default:
+one NUMA0 physical core per rank, one Torch compute thread, one inter-op
+thread, disabled Python cyclic GC, and `min(64, device AIV count)` data
+blocks. The 2-ms launch deadline remains diagnostic-only and disabled by
+default.
