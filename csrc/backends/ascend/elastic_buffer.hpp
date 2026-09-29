@@ -2756,6 +2756,7 @@ public:
                 dispatch_descriptor_snapshot(
                     committed_descriptor, host_route_records));
         }
+        auto dispatch_submit_start_ns = host_profile_start();
         const auto launch_status =
             (source_pipeline_config.enabled || pipeline_config.enabled) ?
             elastic::launch_internal_dispatch_pipeline(
@@ -2765,6 +2766,9 @@ public:
                 arguments, tiling, storage, stream.raw);
         if (!launch_status.ok())
             raise_launch_status(launch_status, rank_idx_);
+        host_profile_record(
+            runtime::HostTimelinePhase::kDispatchSubmit,
+            dispatch_submit_start_ns);
         if (cached_mode) {
             predecessor_guard.copy_to(predecessors.front());
             const auto completion_offset =
@@ -2823,7 +2827,11 @@ public:
         status = resources_->synchronize_stream(stream.raw);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
+        host_profile_record(
+            runtime::HostTimelinePhase::kDispatchSynchronize,
+            host_phase_start_ns);
         transport::DeviceTransportDiagnostic diagnostic{};
+        auto diagnostic_read_start_ns = host_profile_start();
         status = host_transport()->read_diagnostic(
             &diagnostic, [this, raw_stream = stream.raw](
                 void* destination, const void* source, std::uint64_t bytes) {
@@ -2846,8 +2854,8 @@ public:
             diagnostic.generation != generation)
             raise_dispatch_diagnostic(diagnostic, "reported failure");
         host_profile_record(
-            runtime::HostTimelinePhase::kDispatchSynchronize,
-            host_phase_start_ns);
+            runtime::HostTimelinePhase::kDispatchDiagnosticRead,
+            diagnostic_read_start_ns);
         if (stage_profile_enabled_)
             host_timeline_profile_.dispatch_synchronize_end_ns =
                 runtime::host_timestamp_ns();
@@ -3191,6 +3199,7 @@ public:
                     host_phase_start_ns);
             }
         } else {
+            auto descriptor_publication_start_ns = host_profile_start();
             status = resources_->copy_from_host_on_stream(
                 descriptor_tensor.data_ptr(), &committed_descriptor,
                 sizeof(committed_descriptor), stream.raw);
@@ -3201,6 +3210,9 @@ public:
                 dispatch_descriptor_snapshot(
                     committed_descriptor, host_route_records));
             lease.complete();
+            host_profile_record(
+                runtime::HostTimelinePhase::kDispatchDescriptorPublication,
+                descriptor_publication_start_ns);
         }
         const int output_tokens = do_expand ? num_expanded_tokens : num_recv_tokens;
         auto narrowed_x = recv_x.narrow(0, 0, output_tokens);

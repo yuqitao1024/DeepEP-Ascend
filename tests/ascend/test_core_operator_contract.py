@@ -332,6 +332,34 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertEqual(
                 combine.count(f"HostTimelinePhase::{phase}"), count, phase)
 
+    def test_dispatch_host_timeline_separates_submit_wait_and_publication(self):
+        source = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        begin = source.index("    dispatch(const torch::Tensor& x,")
+        end = source.index("\n    }", begin)
+        dispatch = source[begin:end]
+
+        expected_phase_counts = {
+            "kDispatchPrelaunchSetup": 1,
+            "kDispatchSubmit": 1,
+            "kDispatchSynchronize": 1,
+            "kDispatchDiagnosticRead": 1,
+            "kDispatchDescriptorPublication": 1,
+        }
+        for phase, count in expected_phase_counts.items():
+            self.assertEqual(
+                dispatch.count(f"HostTimelinePhase::{phase}"), count, phase)
+        self.assertLess(
+            dispatch.index("HostTimelinePhase::kDispatchSynchronize"),
+            dispatch.index("HostTimelinePhase::kDispatchDiagnosticRead"),
+        )
+        self.assertIn(
+            "status = resources_->synchronize_stream(stream.raw);",
+            dispatch[
+                dispatch.index("kDispatchSubmit"):
+                dispatch.index("kDispatchDiagnosticRead")
+            ],
+        )
+
     def test_combine_stable_preflight_avoids_source_metadata_host_copy(self):
         """Keeps the Combine hot path local while retaining full diagnostics."""
         source = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()

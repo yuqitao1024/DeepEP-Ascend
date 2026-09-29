@@ -10,7 +10,10 @@ namespace deep_ep::ascend::runtime {
 
 enum class HostTimelinePhase : std::uint8_t {
     kDispatchPrelaunchSetup,
+    kDispatchSubmit,
     kDispatchSynchronize,
+    kDispatchDiagnosticRead,
+    kDispatchDescriptorPublication,
     kDispatchCountsToHost,
     kDispatchHostPrefix,
     kDispatchPrefixToDevice,
@@ -36,8 +39,14 @@ inline constexpr const char* host_timeline_phase_name(
     switch (phase) {
         case HostTimelinePhase::kDispatchPrelaunchSetup:
             return "dispatch_prelaunch_setup";
+        case HostTimelinePhase::kDispatchSubmit:
+            return "dispatch_submit";
         case HostTimelinePhase::kDispatchSynchronize:
             return "dispatch_synchronize";
+        case HostTimelinePhase::kDispatchDiagnosticRead:
+            return "dispatch_diagnostic_read";
+        case HostTimelinePhase::kDispatchDescriptorPublication:
+            return "dispatch_descriptor_publication";
         case HostTimelinePhase::kDispatchCountsToHost:
             return "dispatch_counts_to_host";
         case HostTimelinePhase::kDispatchHostPrefix:

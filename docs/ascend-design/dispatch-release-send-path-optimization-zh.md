@@ -830,3 +830,72 @@ removing only Python preflight/argument assembly as a material launch-ahead
 optimization. The next attribution boundary is inside the C++ runtime call:
 separate C++ prelaunch, kernel submission, `synchronize_stream`, count
 readback, and descriptor publication before proposing another service design.
+
+## C++ Dispatch host-timeline attribution (2026-09-29)
+
+The C++ runtime boundary was profiled with the same canonical 8192-token FP8
+Normal Dispatch workload, 30 warmups / 30 iterations, and eight ranks. The
+diagnostic build was task `task_20260929_121313_2573261675`. It passed its
+single canonical case with `failed=0, passed=1, pending=0`. The extension
+SHA-256 was
+`e61b469ce74849299b9321d160859ec25038686e711bb922254c2c7d98eb0f98`, and the
+remote artifact was retained under
+`/home/pyptouser/yuqitao/deepep-cpp-host-timeline-20260929/.scratch/launchahead/results/r8-cpp-host-timeline-20260929-r2.json`.
+
+This run had `stage_profile=1`. Its profile-on Dispatch mean of 4.291659 ms
+and 1814.238 GB/s is attribution-only and must not be compared with a
+no-profile result. Stage profiling disables compact stage boundaries and the
+fused consumed barrier, so the slower profile-on envelope is expected.
+
+The report contains eight per-rank records. The per-rank maxima were:
+
+| C++ host phase | Observed |
+| --- | ---: |
+| `dispatch_prelaunch_setup` | 0.151240 ms |
+| `dispatch_submit` | 0.200190 ms |
+| `dispatch_synchronize` | 3.883320 ms |
+| `dispatch_diagnostic_read` | 0.025920 ms |
+| `dispatch_counts_to_host` | 0.017140 ms |
+| `dispatch_host_prefix` | 0 |
+| `dispatch_prefix_to_device` | 0 |
+| `dispatch_descriptor_publication` | 0.021960 ms |
+
+These are per-rank maxima, not disjoint phases on one timeline, so they must
+not be added. The reported total for the maximum-total rank was 4.145560 ms.
+In the captured build `dispatch_synchronize` was recorded after the nested
+diagnostic readback. The local instrumentation has since been corrected to
+record synchronize immediately after `synchronize_stream` and to time the
+diagnostic readback separately. The nested readback was only about 0.026 ms,
+so the conclusion is unchanged.
+
+The per-rank synchronize distribution is more informative than the maxima:
+
+| Rank | Synchronize (ms) | Host entry skew (us) | Host timeline total (ms) |
+| ---: | ---: | ---: | ---: |
+| 0 | 2.963010 | +983.070 | 3.336110 |
+| 1 | 3.089270 | +846.870 | 3.395550 |
+| 2 | 2.959450 | +896.010 | 3.263380 |
+| 3 | 3.087130 | +690.900 | 3.406690 |
+| 4 | 3.883320 | 0.000000 | 4.145560 |
+| 5 | 3.007880 | +887.100 | 3.358530 |
+| 6 | 3.314240 | +508.170 | 3.581380 |
+| 7 | 3.130030 | +872.650 | 3.427320 |
+
+Rank 4 entered Dispatch earliest and waited longest; the other ranks waited
+approximately 2.96-3.31 ms. This pattern is consistent with waiting for a
+global device-side critical path rather than one locally slow rank. Device
+envelopes also show roughly 1.0-1.9 ms idle per rank, with the largest idle
+interval on rank 4. The observed host-entry spread is therefore one input to
+the critical path, but the stream-synchronize wait is not explained by local
+Python or C++ preparation alone.
+
+Conclusion: apart from synchronization, the attributable host work is small.
+Python-side work was already bounded at approximately 0.14 ms, C++ prelaunch
+setup is approximately 0.08-0.15 ms, submission is approximately 0.14-0.20 ms,
+and diagnostic/readback/publication are each approximately 0.02 ms. A generic
+launch-ahead or host-preparation service has no sufficiently large independent
+interval to hide on this workload. The remaining large component is device-side
+or cross-rank arrival/completion structure, including launch skew and the
+release/CQ completion path. The next optimization proposal must first identify a
+specific change to that critical path; merely moving Python/C++ preparation
+earlier is not a candidate.
