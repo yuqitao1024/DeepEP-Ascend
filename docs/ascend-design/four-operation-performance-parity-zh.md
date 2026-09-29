@@ -229,6 +229,7 @@ mean changed from 11.167 to 11.189 ms and p95 from 11.358 to 11.406 ms; both
 are within normal variation. Cached Dispatch and Normal Combine regressed in
 that single gate, so the candidate cannot be attributed a target-specific
 gain. The four-buffer version is therefore rejected and reverted.
+Validation record: task_20260930_012406_270542915522.
 
 ### C4. Combine producer-record and release-wait reduction
 
@@ -300,6 +301,7 @@ gate regressed Normal Combine mean from 10.293 to 11.473 ms and p95 from
 retiring the additional AIV blocks does not compensate for losing the other
 blocks' overlap with the subsequent stage. This follow-up is rejected and
 reverted together with the grouped C3 probe.
+Validation record: task_20260930_012406_270542915522.
 
 ### C5. Combine epilogue-reduce acceleration
 
