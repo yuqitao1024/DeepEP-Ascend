@@ -1318,12 +1318,14 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
         expanded ? num_topk_u32 : 1;
     const std::uint32_t logical_count =
         total_records * copies_per_record;
-    // Keep two tiles in flight across record boundaries, including when a
+    // Keep four tiles in flight across record boundaries, including when a
     // whole record fits in one tile. Each free-buffer event is consumed before
     // MTE2 overwrites that buffer and produced after MTE3 finishes reading it.
     std::uint32_t buffer_index = 0;
     AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3);
     for (std::uint32_t logical = block_index; logical < logical_count;
          logical += block_count) {
         const std::uint32_t compact_record =
@@ -1395,7 +1397,10 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
             const std::uint32_t copy_bytes = static_cast<std::uint32_t>(
                 consumer_copy_plan.vector_bytes - byte < TileBytes ?
                     consumer_copy_plan.vector_bytes - byte : TileBytes);
-            const auto event_id = buffer_index == 0 ? EVENT_ID0 : EVENT_ID1;
+            const auto event_id =
+                buffer_index == 0 ? EVENT_ID0 :
+                buffer_index == 1 ? EVENT_ID1 :
+                buffer_index == 2 ? EVENT_ID2 : EVENT_ID3;
             auto* tile_ub = payload_ub + buffer_index * TileBytes;
             const auto reuse_start = ProfileEnabled ?
                 static_cast<std::uint64_t>(AscendC::GetSystemCycle()) : 0;
@@ -1426,7 +1431,7 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
                 ub_to_gm_cycles += static_cast<std::uint64_t>(
                     AscendC::GetSystemCycle()) - ub_to_gm_start;
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
-            buffer_index ^= 1;
+            buffer_index = (buffer_index + 1) % kDispatchConsumerCopyBuffers;
         }
         if (ProfileEnabled) {
             const auto record_copy_cycles = static_cast<std::uint64_t>(
@@ -1443,6 +1448,8 @@ __aicore__ inline void direct_dispatch_epilogue_vector_payload_impl(
         static_cast<std::uint64_t>(AscendC::GetSystemCycle()) : 0;
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID3);
     if (ProfileEnabled)
         reuse_wait_cycles += static_cast<std::uint64_t>(
             AscendC::GetSystemCycle()) - final_reuse_start;

@@ -216,6 +216,26 @@ Actions:
 Acceptance: reduce Expanded Dispatch epilogue-copy span while keeping output
 and metadata correctness. Target another 1-2 ms of the wall gap.
 
+#### C3 implementation candidate (2026-09-30)
+
+The retained Expanded Dispatch profile reports about 2.1 ms in epilogue copy.
+The active AICore path uses a two-tile double buffer and waits for each
+GM-to-UB completion before submitting the corresponding UB-to-GM request. The
+first bounded candidate increases the in-flight tile count from two to four,
+using four independent MTE free-buffer events and four equal UB tile slots.
+
+This does not change record lookup, expanded destination mapping, copy
+alignment, metadata, scales, or weights. It only increases MTE request
+overlap while preserving the per-slot producer/consumer event order:
+
+1. Wait for the slot's MTE3-to-MTE2 free event before GM-to-UB overwrite.
+2. Wait for that slot's MTE2-to-MTE3 event before UB-to-GM consumes it.
+3. Publish the slot free event after UB-to-GM is issued.
+
+The launch provides four consumer tiles of dynamic UB explicitly; no TPipe or
+shared queue is introduced. The candidate is rejected if correctness fails or
+if four-rank Expanded Dispatch regresses.
+
 ### C4. Combine producer-record and release-wait reduction
 
 Priority: P1. Normal and Reduced Combine spend about 3.4-3.8 ms in producer
@@ -275,6 +295,27 @@ profile, and no launch deadline. Compared with the C1-only revert run:
 Normal Dispatch and Expanded Dispatch remain within normal variation. The
 planning/prefix change therefore has a clear four-rank benefit for both
 Combine variants and does not regress the other three operations.
+
+#### C4 follow-up candidate 1 (2026-09-30)
+
+The retained four-rank profile still spends part of the Combine prefix stage
+repeating deterministic work in every launched block. The prefix kernel's
+tile/rank transform is a single-owner update: every block computes the same
+prefixes and writes the same values. The candidate keeps the kernel ABI and
+launch shape unchanged, but makes block zero own the transform while other
+blocks retire immediately.
+
+Local contract:
+
+1. Preserve the status clean check before any prefix mutation.
+2. Preserve tile-error selection, per-rank prefix publication, capacity
+   checks, and protocol-error publication.
+3. Do not introduce a block-wide barrier or change the producer-record
+   dependency; this kernel remains synchronous with respect to its stage.
+
+Acceptance: improve Normal and Reduced Combine wall time without regressing
+Expanded Dispatch, Cached Dispatch, or Normal Dispatch. This is evaluated with
+the grouped C2/C4 four-rank development gate.
 
 ### C5. Combine epilogue-reduce acceleration
 

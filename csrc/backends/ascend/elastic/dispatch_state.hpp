@@ -23,6 +23,7 @@ scale_factor_byte_offset(
 }
 
 inline constexpr std::uint32_t kDispatchHandleDescriptorAbiVersion = 4;
+inline constexpr std::uint32_t kDispatchConsumerCopyBuffers = 4;
 inline constexpr std::uint32_t kHybridRouteLayoutVersion = 1;
 inline constexpr std::uint64_t kInvalidHybridRouteSlot =
     std::numeric_limits<std::uint64_t>::max();
