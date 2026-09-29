@@ -202,6 +202,40 @@ task_20260930_015137_281824910211 and
 task_20260930_020318_288846122891. The source and focused contract were
 reverted; the planner bottleneck is not the generic owner-grouping loop.
 
+#### C10 candidate: duplicate-free cached route fast path (2026-09-30)
+
+The retained four-rank trace shows the cached planner at 10.95-16.55 ms while
+the following producer-record stage is only about 2.65 ms. The planner already
+performs one bitmap atomic per destination; the additional generic grouping
+work—ballots, shuffles, owner selection, and the duplicate-lane mask—is not
+needed by a route that individually validates and wins its bitmap slot.
+
+The candidate adds a duplicate-free fast path after per-lane expert/rank/slot
+validation. Such a lane immediately performs the same bitmap test-and-set and
+the same count/max atomics as the grouped owner, then skips subgroup grouping.
+Invalid lanes and lanes that lose the bitmap race fall through to the original
+grouped path, preserving slot-broadcast consistency, duplicate detection,
+error encoding, and all capacity checks.
+
+Acceptance: reduce Cached Dispatch wall mean/p95 materially without changing
+cached-handle reuse semantics or regressing the other four operations. A
+correctness failure rejects the candidate immediately.
+
+Result: rejected for correctness. The first fast-path probe let each valid
+lane perform its bitmap test-and-set immediately and then skip subgroup
+grouping. Remote CANN 9.3.0 compilation initially failed only because a new
+use of the destination key was misspelled; after that mechanical fix, build
+task task_20260930_022852_29980896977 succeeded. The four-rank development
+gate task task_20260930_022941_300480230260 then failed during preparation
+with a device invalid-protocol diagnostic on generation 2.
+
+The failure is expected from the mechanism, not from the benchmark: a losing
+duplicate lane must remain visible to the grouped slot-broadcast consistency
+mask, while the first probe skipped it as soon as it won the bitmap race. The
+candidate is therefore rejected and reverted. Any follow-up must preserve a
+lane-visibility bit even when the lane wins its bitmap slot; it cannot simply
+skip the subgroup path.
+
 ### C2. Expanded Dispatch producer-record acceleration
 
 Priority: P1. Expanded Dispatch has the same shared transport service cost as
