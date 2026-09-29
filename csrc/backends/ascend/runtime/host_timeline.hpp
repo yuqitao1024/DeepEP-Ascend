@@ -22,6 +22,12 @@ enum class HostTimelinePhase : std::uint8_t {
     kDispatchEpilogueSubmit,
     kDispatchCompletionRecord,
     kDispatchCompletionWait,
+    kCachedDispatchEventCreate,
+    kCachedDispatchDescriptorStaging,
+    kCachedDispatchSubmit,
+    kCachedDispatchPublish,
+    kCachedDispatchCompletionRecord,
+    kCachedDispatchCompletionWait,
     kCombinePrelaunchSetup,
     kCombineHandleToHost,
     kCombineMetadataToHost,
@@ -63,6 +69,18 @@ inline constexpr const char* host_timeline_phase_name(
             return "dispatch_completion_record";
         case HostTimelinePhase::kDispatchCompletionWait:
             return "dispatch_completion_wait";
+        case HostTimelinePhase::kCachedDispatchEventCreate:
+            return "cached_dispatch_event_create";
+        case HostTimelinePhase::kCachedDispatchDescriptorStaging:
+            return "cached_dispatch_descriptor_staging";
+        case HostTimelinePhase::kCachedDispatchSubmit:
+            return "cached_dispatch_submit";
+        case HostTimelinePhase::kCachedDispatchPublish:
+            return "cached_dispatch_publish";
+        case HostTimelinePhase::kCachedDispatchCompletionRecord:
+            return "cached_dispatch_completion_record";
+        case HostTimelinePhase::kCachedDispatchCompletionWait:
+            return "cached_dispatch_completion_wait";
         case HostTimelinePhase::kCombinePrelaunchSetup:
             return "combine_prelaunch_setup";
         case HostTimelinePhase::kCombineHandleToHost:

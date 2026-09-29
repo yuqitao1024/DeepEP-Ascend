@@ -18,6 +18,12 @@ int main() {
         !profile.record(HostTimelinePhase::kDispatchSynchronize, 200, 225) ||
         !profile.record(HostTimelinePhase::kDispatchOutputAllocation, 300, 340) ||
         !profile.record(HostTimelinePhase::kDispatchCompletionRecord, 400, 430) ||
+        !profile.record(HostTimelinePhase::kCachedDispatchEventCreate, 890, 920) ||
+        !profile.record(HostTimelinePhase::kCachedDispatchDescriptorStaging, 930, 975) ||
+        !profile.record(HostTimelinePhase::kCachedDispatchSubmit, 980, 1030) ||
+        !profile.record(HostTimelinePhase::kCachedDispatchPublish, 1040, 1095) ||
+        !profile.record(HostTimelinePhase::kCachedDispatchCompletionRecord, 1100, 1130) ||
+        !profile.record(HostTimelinePhase::kCachedDispatchCompletionWait, 1140, 1240) ||
         !profile.record(HostTimelinePhase::kCombinePrelaunchSetup, 480, 495) ||
         !profile.record(HostTimelinePhase::kCombineHandleToHost, 500, 520) ||
         !profile.record(HostTimelinePhase::kCombineMetadataToHost, 530, 570) ||
@@ -36,6 +42,12 @@ int main() {
         profile.phase_ns(HostTimelinePhase::kDispatchDescriptorPublication) != 45 ||
         profile.phase_ns(HostTimelinePhase::kDispatchOutputAllocation) != 40 ||
         profile.phase_ns(HostTimelinePhase::kDispatchCompletionRecord) != 30 ||
+        profile.phase_ns(HostTimelinePhase::kCachedDispatchEventCreate) != 30 ||
+        profile.phase_ns(HostTimelinePhase::kCachedDispatchDescriptorStaging) != 45 ||
+        profile.phase_ns(HostTimelinePhase::kCachedDispatchSubmit) != 50 ||
+        profile.phase_ns(HostTimelinePhase::kCachedDispatchPublish) != 55 ||
+        profile.phase_ns(HostTimelinePhase::kCachedDispatchCompletionRecord) != 30 ||
+        profile.phase_ns(HostTimelinePhase::kCachedDispatchCompletionWait) != 100 ||
         profile.phase_ns(HostTimelinePhase::kCombinePrelaunchSetup) != 15 ||
         profile.phase_ns(HostTimelinePhase::kCombineHandleToHost) != 20 ||
         profile.phase_ns(HostTimelinePhase::kCombineMetadataToHost) != 40 ||
@@ -45,11 +57,11 @@ int main() {
         profile.phase_ns(HostTimelinePhase::kCombineSubmit) != 20 ||
         profile.phase_ns(HostTimelinePhase::kCombineCompletionRecord) != 10 ||
         profile.phase_ns(HostTimelinePhase::kCombineCompletionWait) != 100 ||
-        profile.total_ns() != 615)
+        profile.total_ns() != 925)
         return 3;
     if (profile.record(HostTimelinePhase::kDispatchEpilogueSubmit, 10, 9) ||
         profile.record(HostTimelinePhase::kCount, 1, 2) ||
-        profile.bind_generation(20) || profile.total_ns() != 615)
+        profile.bind_generation(20) || profile.total_ns() != 925)
         return 4;
     profile.reset(0);
     return profile.generation == 0 && profile.total_ns() == 0 ? 0 : 5;

@@ -2184,6 +2184,7 @@ public:
         elastic::EventDependency predecessor;
         elastic::EnqueuedEventDependencyGuard predecessor_guard;
         const bool use_comm_stream = cached_mode || stream_mode;
+        std::uint64_t cached_host_phase_start_ns = 0;
         if (use_comm_stream) {
             auto status = resources_->current_stream(&dispatch_stream);
             if (!status.ok())
@@ -2718,9 +2719,13 @@ public:
                 predecessors.resize(1);
         }
         if (cached_mode) {
+            cached_host_phase_start_ns = host_profile_start();
             completion = resources_->create_event();
             if (!completion.status.ok())
                 raise_transport_status(completion.status, rank_idx_);
+            host_profile_record(
+                runtime::HostTimelinePhase::kCachedDispatchEventCreate,
+                cached_host_phase_start_ns);
         }
 #if DEEP_EP_ASCEND_TESTING
         if (cached_mode)
@@ -2737,6 +2742,7 @@ public:
         if (stage_profile_enabled_)
             (void)host_timeline_profile_.bind_generation(generation);
         if (cached_mode) {
+            cached_host_phase_start_ns = host_profile_start();
             const auto committed_descriptor = allow_hybrid_mode_ ?
                 elastic::make_attested_hybrid_dispatch_handle_descriptor(
                     completion_resources_->dispatch_family(), tiling.topology,
@@ -2755,8 +2761,13 @@ public:
                 generation, descriptor_tensor, committed_descriptor,
                 dispatch_descriptor_snapshot(
                     committed_descriptor, host_route_records));
+            host_profile_record(
+                runtime::HostTimelinePhase::kCachedDispatchDescriptorStaging,
+                cached_host_phase_start_ns);
         }
         auto dispatch_submit_start_ns = host_profile_start();
+        if (cached_mode)
+            cached_host_phase_start_ns = dispatch_submit_start_ns;
         const auto launch_status =
             (source_pipeline_config.enabled || pipeline_config.enabled) ?
             elastic::launch_internal_dispatch_pipeline(
@@ -2766,10 +2777,15 @@ public:
                 arguments, tiling, storage, stream.raw);
         if (!launch_status.ok())
             raise_launch_status(launch_status, rank_idx_);
+        if (cached_mode)
+            host_profile_record(
+                runtime::HostTimelinePhase::kCachedDispatchSubmit,
+                cached_host_phase_start_ns);
         host_profile_record(
             runtime::HostTimelinePhase::kDispatchSubmit,
             dispatch_submit_start_ns);
         if (cached_mode) {
+            cached_host_phase_start_ns = host_profile_start();
             predecessor_guard.copy_to(predecessors.front());
             const auto completion_offset =
                 tiling.symmetric_window_layout.control_offset +
@@ -2782,21 +2798,32 @@ public:
                 std::move(retained_tensors), std::move(predecessors));
             if (!published.status.ok())
                 raise_transport_status(published.status, rank_idx_);
+            host_profile_record(
+                runtime::HostTimelinePhase::kCachedDispatchPublish,
+                cached_host_phase_start_ns);
             predecessor_guard.dismiss();
+            cached_host_phase_start_ns = host_profile_start();
             status = completion.event->record(stream);
             if (!status.ok()) {
                 (void)published.operation->finish(0);
                 raise_transport_status(status, rank_idx_);
             }
+            host_profile_record(
+                runtime::HostTimelinePhase::kCachedDispatchCompletionRecord,
+                cached_host_phase_start_ns);
 
             std::optional<EventHandle> event;
             if (async_with_compute_stream) {
                 event.emplace(
                     completion.event, published.operation, async_state_);
             } else {
+                cached_host_phase_start_ns = host_profile_start();
                 status = published.operation->finish(5000);
                 if (!status.ok())
                     raise_transport_status(status, rank_idx_);
+                host_profile_record(
+                    runtime::HostTimelinePhase::kCachedDispatchCompletionWait,
+                    cached_host_phase_start_ns);
             }
             const int num_recv_tokens = *cached_num_recv_tokens;
             const int output_tokens = do_expand ?

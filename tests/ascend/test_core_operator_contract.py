@@ -360,6 +360,25 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             ],
         )
 
+    def test_cached_dispatch_host_timeline_separates_async_completion(self):
+        source = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        begin = source.index("    dispatch(const torch::Tensor& x,")
+        end = source.index("\n    }", begin)
+        dispatch = source[begin:end]
+
+        expected_phase_counts = {
+            "kCachedDispatchEventCreate": 1,
+            "kCachedDispatchDescriptorStaging": 1,
+            "kCachedDispatchSubmit": 1,
+            "kCachedDispatchPublish": 1,
+            "kCachedDispatchCompletionRecord": 1,
+            "kCachedDispatchCompletionWait": 1,
+        }
+        for phase, count in expected_phase_counts.items():
+            self.assertEqual(
+                dispatch.count(f"HostTimelinePhase::{phase}"), count, phase)
+        self.assertIn("status = published.operation->finish(5000);", dispatch)
+
     def test_combine_stable_preflight_avoids_source_metadata_host_copy(self):
         """Keeps the Combine hot path local while retaining full diagnostics."""
         source = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
