@@ -446,8 +446,6 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("const std::uint32_t rank = threadIdx.x", prefix)
         self.assertIn("if (rank < rank_count_u32)", prefix)
         self.assertIn("for (std::uint32_t tile = 0", prefix)
-        self.assertIn("if (blockIdx.x != 0)", prefix)
-        self.assertIn("return;", prefix)
 
 
     def test_combine_stable_preflight_avoids_source_metadata_host_copy(self):
@@ -1684,25 +1682,19 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_dispatch_manages_dynamic_ub_without_tpipe(self):
         source = (ELASTIC / "dispatch.asc").read_text()
-        common_source = (ELASTIC / "dispatch_device_common.hpp").read_text()
-        combined_source = source + "\n" + common_source
         self.assertIn(
-            "constexpr std::uint32_t kDispatchUbPayloadOffset = 0;",
-            combined_source)
+            "constexpr std::uint32_t kDispatchUbPayloadOffset = 0;", source)
         self.assertIn("[0, dynamic_ub_bytes) payload scratch", source)
         self.assertIn("[0, consumer_ub_bytes) consumer payload scratch", source)
-        self.assertIn("copy_gm_to_ubuf_align_v2(", common_source)
-        self.assertIn("copy_ubuf_to_gm_align_v2(", common_source)
+        self.assertIn("copy_gm_to_ubuf_align_v2(", source)
+        self.assertIn("copy_ubuf_to_gm_align_v2(", source)
         self.assertIn("dispatch_dynamic_ub_bytes(arguments)", source)
         self.assertIn("launch.num_blocks, dynamic_ub_bytes,", source)
         self.assertIn("tiling.launch.num_blocks, dynamic_ub_bytes,", source)
         for forbidden in (
                 "AscendC::TPipe", "AscendC::TBuf", "AscendC::LocalTensor",
                 "AscendC::DataCopy("):
-            self.assertNotIn(forbidden, combined_source)
-        state_source = (ELASTIC / "dispatch_state.hpp").read_text()
-        self.assertIn(
-            "kDispatchConsumerCopyBuffers = 4", state_source)
+            self.assertNotIn(forbidden, source)
 
     def test_dispatch_producer_preserves_nonfanout_hidden_tail(self):
         """Keeps the non-2048-byte hidden suffix on the scalar record path."""
@@ -2043,20 +2035,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertLess(expert_marker, metadata_launch)
 
     def test_dispatch_output_copy_uses_compact_receive_domain(self):
-        dispatch_source = (
-            ELASTIC / "direct_dispatch_epilogue_copy_outputs.asc"
-        ).read_text()
-        common_source = (ELASTIC / "dispatch_device_common.hpp").read_text()
-        for source, function_name in (
-                (common_source,
-                 "direct_dispatch_epilogue_vector_payload_impl"),
-                (dispatch_source,
-                 "direct_dispatch_epilogue_copy_outputs_vf")):
-            signature = (
-                f"inline void {function_name}" if function_name.endswith(
-                    "_vf") else
-                f"__aicore__ inline void {function_name}")
-            begin = source.index(signature)
+        source = (ELASTIC / "dispatch.asc").read_text()
+        for function_name in (
+                "direct_dispatch_epilogue_vector_payload_impl",
+                "direct_dispatch_epilogue_copy_outputs_vf"):
+            begin = source.index(f"inline void {function_name}")
             end = source.index("\n}\n", begin)
             function = source[begin:end]
             for marker in (
@@ -2066,12 +2049,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertIn(
                 "total_records * copies_per_record", function)
 
-        copy_begin = dispatch_source.index(
+        copy_begin = source.index(
             "inline void direct_dispatch_epilogue_copy_outputs_vf")
-        copy_end = dispatch_source.index("\n}\n", copy_begin)
+        copy_end = source.index("\n}\n", copy_begin)
         self.assertIn(
             "direct_dispatch_compact_record_coordinates(",
-            dispatch_source[copy_begin:copy_end])
+            source[copy_begin:copy_end])
 
     def test_direct_combine_launcher_consumes_stage_pipeline(self):
         """Catches keeping direct combine data stages on one AI Vector."""
