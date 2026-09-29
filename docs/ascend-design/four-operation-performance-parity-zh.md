@@ -545,6 +545,33 @@ The half-finished queue conversion was therefore reverted without a remote
 run. A future candidate must first establish a queue or event lifetime that
 covers the MTE3 read, rather than weakening that boundary for pipeline form.
 
+#### C16 rejected probe: skip inactive top-k grouping reductions (2026-09-30)
+
+A bounded candidate returned immediately when the subgroup active ballot was
+empty. It preserved the zero group mask and no-owner result that inactive
+lanes previously obtained, while avoiding shuffles and ballots for fully
+inactive token subgroups.
+
+The remote build task task_20260930_025906_313107120391 succeeded with
+extension SHA-256
+2593bd7f463e107db1c04911dd3adf56151cb95d367481f8696622af65d0f105. The
+expanded top-k grouping probe passed its all-inactive fixture, and the
+four-rank gate task task_20260930_030032_31442517993 passed correctness:
+
+| Operation | Retained mean / p95 | Candidate mean / p95 | Change |
+| --- | ---: | ---: | ---: |
+| Cached Dispatch | 26.810 / 27.289 ms | 26.981 / 27.530 ms | +0.171 / +0.241 ms |
+| Normal Dispatch | 3.469 / 3.577 ms | 3.680 / 4.005 ms | +0.211 / +0.428 ms |
+| Expanded Dispatch | 11.204 / 11.467 ms | 11.123 / 11.258 ms | -0.081 / -0.209 ms |
+| Normal Combine | 10.315 / 10.876 ms | 10.409 / 10.918 ms | +0.094 / +0.042 ms |
+| Reduced Combine | 10.007 / 10.311 ms | 10.054 / 10.524 ms | +0.047 / +0.213 ms |
+
+The representative route has essentially no fully inactive token subgroup, so
+the early return does not reduce active-lane grouping work. The source and
+probe fixture were reverted in 6622835; future Cached Dispatch work must
+reduce active-token planner work or replace validation with stronger cached
+handle evidence.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all
