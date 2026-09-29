@@ -315,6 +315,23 @@ Normal Dispatch and Expanded Dispatch remain within normal variation. The
 planning/prefix change therefore has a clear four-rank benefit for both
 Combine variants and does not regress the other three operations.
 
+#### C4 follow-up candidate: parallel combine error scan (2026-09-30)
+
+The retained producer-prefix kernel still scans every tile error on one
+thread before the rank-specific prefix pass begins. The candidate distributes
+tile-error inspection by rank while preserving the first-error peer mapping,
+error encoding, capacity checks, and per-rank prefix construction. This is a
+bounded software change with no launch-shape, workspace, or protocol change.
+
+Acceptance: improve Normal and Reduced Combine without regressing Dispatch.
+
+Result: rejected. The candidate compiled and passed the four-rank development
+gate, but Normal Combine regressed from 10.293 / 10.893 ms to 10.407 /
+11.574 ms while Reduced Combine improved only slightly to 9.921 / 10.185 ms.
+The single-thread error scan is not the bottleneck in the normal path, so the
+source and focused contract were reverted. Validation record:
+task_20260930_021006_29189185911.
+
 #### C4 rejected follow-up (2026-09-30)
 
 A second candidate made the producer-prefix kernel's deterministic tile/rank
