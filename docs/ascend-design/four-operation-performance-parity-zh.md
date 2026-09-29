@@ -562,6 +562,25 @@ without regressing the three Dispatch operations in the four-rank development
 gate. An isolated cycle reduction without end-to-end improvement is not
 sufficient.
 
+#### C15 candidate: 1024-element combine reduction tile (2026-09-30)
+
+The retained epilogue reduction uses a 512-element BF16 tile. The producer
+already uses a separate 1024-element tile and has a much lower payload-copy
+span. The bounded candidate extends the existing selector and template
+fallback to accept an explicit 1024-element reduction tile, reducing the
+representative 7168-element hidden dimension from fourteen to seven vector
+iterations.
+
+The default remains 512. `DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE=0`
+still selects the conservative fallback, and no launch shape, protocol,
+buffer depth, or numerical order changes. The tile must remain aligned with
+the existing DataCopy alignment qualification.
+
+Acceptance: with the explicit 1024 setting, improve Normal and Reduced
+Combine materially without regressing the three Dispatch operations. If the
+gain is absent, keep the selector change only when it does not affect the
+default run and continue with the next mechanism.
+
 ### C6. Grouped validation gate
 
 Priority: P0, required after every grouped source batch.

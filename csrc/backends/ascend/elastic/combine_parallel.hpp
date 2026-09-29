@@ -89,6 +89,9 @@ select_combine_vector_reduce_tile_config(
     else if (value[0] == '5' && value[1] == '1' && value[2] == '2' &&
              value[3] == '\0')
         tile_elements = 512;
+    else if (value[0] == '1' && value[1] == '0' && value[2] == '2' &&
+             value[3] == '4' && value[4] == '\0')
+        tile_elements = 1024;
     else
         return CombineVectorReduceTileConfigStatus::kInvalid;
     if (!direct || hybrid)

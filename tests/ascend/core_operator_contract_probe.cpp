@@ -1404,6 +1404,10 @@ int main() {
             CombineVectorReduceTileConfigStatus::kEnabled ||
         vector_reduce_tile_config.tile_elements != 512 ||
         select_combine_vector_reduce_tile_config(
+            "1024", true, false, &vector_reduce_tile_config) !=
+            CombineVectorReduceTileConfigStatus::kEnabled ||
+        vector_reduce_tile_config.tile_elements != 1024 ||
+        select_combine_vector_reduce_tile_config(
             "256", true, false, &vector_reduce_tile_config) !=
             CombineVectorReduceTileConfigStatus::kInvalid ||
         select_combine_vector_reduce_tile_config(

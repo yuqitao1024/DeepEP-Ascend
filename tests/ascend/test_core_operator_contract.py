@@ -2445,6 +2445,8 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("arguments.vector_reduce_tile_elements", host)
         self.assertIn(
             "select_combine_vector_reduce_tile_config(", parallel)
+        self.assertIn("tile_elements = 1024", parallel)
+        self.assertIn("or 1024", host)
         self.assertIn("TileElements", source)
         self.assertIn(
             "direct_combine_epilogue_vector_reduce_impl<\n"

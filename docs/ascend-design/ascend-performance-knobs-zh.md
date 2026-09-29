@@ -133,10 +133,11 @@ selector 在满足条件时默认启用。显式设置成下表推荐值，通�
 
 ### `DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE`
 
-- 取值：`0`、`1`、`512`，或未设置。
+- 取值：`0`、`1`、`512`、`1024`，或未设置。
 - 未设置：direct、non-hybrid eligible 时默认 `512`。
 - 作用：选择 vector reduction tile。`1` 与 `512` 等价。
-- 对照：`0` 关闭 vector tile specialization。
+- 对照：`0` 关闭 vector tile specialization；`1024` 是 C15 性能探针值，
+  与 producer tile 对齐，默认仍是 `512`。
 
 ### `DEEP_EP_ASCEND_COMBINE_EXPANDED_VECTOR_REDUCE`
 

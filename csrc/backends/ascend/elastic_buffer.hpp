@@ -3440,7 +3440,8 @@ public:
             vector_reduce_tile_config_status !=
                 elastic::CombineVectorReduceTileConfigStatus::kInvalid,
             "DeepEP Ascend backend: "
-            "DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE must be 0, 1, or 512");
+            "DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE must be 0, 1, 512, "
+            "or 1024");
         const auto capacity =
             static_cast<std::uint64_t>(num_max_tokens_per_rank);
         const auto maximum_source_rows =
