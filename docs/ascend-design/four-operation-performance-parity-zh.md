@@ -545,6 +545,24 @@ The half-finished queue conversion was therefore reverted without a remote
 run. A future candidate must first establish a queue or event lifetime that
 covers the MTE3 read, rather than weakening that boundary for pipeline form.
 
+#### C16 candidate: skip inactive top-k grouping reductions (2026-09-30)
+
+The generic subgroup helper always walks every active key group, even when the
+ballot proves that no lane in the subgroup is active. This happens for every
+padding token in the cached planner and contributes needless shuffles and
+ballots to the retained 10.95-16.55 ms planner span.
+
+The bounded candidate returns immediately when the active ballot is empty. It
+does not change any active-lane grouping, owner selection, duplicate
+visibility, slot broadcast, bitmap atomics, or error encoding. Inactive
+subgroups previously completed the loop with an empty group mask and no owner;
+returning the zero-initialized result preserves that state while avoiding the
+reductions.
+
+Acceptance: improve Cached Dispatch materially without regressing Normal,
+Expanded, or the Combine variants. Correctness failures reject the candidate
+immediately.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all

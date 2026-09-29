@@ -109,6 +109,8 @@ group_topk_subgroup(std::int32_t key, bool logically_active) noexcept {
     TopkSubgroupGroup result{};
     result.active_mask = static_cast<TopkSubgroupMask>(
         asc_ballot(active ? 1 : 0));
+    if (result.active_mask == 0)
+        return result;
     TopkSubgroupMask remaining = result.active_mask;
     while (remaining != 0) {
         const std::int32_t leader_lane = topk_first_set_lane(remaining);
