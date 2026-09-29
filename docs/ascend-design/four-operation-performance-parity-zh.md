@@ -255,6 +255,35 @@ that single gate, so the candidate cannot be attributed a target-specific
 gain. The four-buffer version is therefore rejected and reverted.
 Validation record: task_20260930_012406_270542915522.
 
+#### C9 candidate: expanded epilogue source-rank binary search (2026-09-30)
+
+The retained Expanded Dispatch epilogue profile attributes about 321,790
+cycles to vector lookup, versus 76,420 cycles for metadata and about 604,655
+cycles combined for local and remote payload copy. MTE waits are only 691 and
+710 cycles, so the lookup is software work rather than an arrival or copy
+queue stall.
+
+The candidate keeps compact-record ownership and all destination/metadata
+validation unchanged, but replaces the source-rank linear scan with a binary
+search over the monotonic source-bases prefix. With world size four, the
+asymptotic loop count falls from up to four to two; the more important
+mechanism is removing repeated rank-base/count loads from the common lookup
+path. The epilogue output layout, copy scheduling, and buffer/event semantics
+are unchanged.
+
+Acceptance: improve Expanded Dispatch wall mean/p95 without regressing the
+other four operations in the four-rank development gate. If the lookup saving
+does not move end-to-end wall time, reject the candidate rather than claiming
+the isolated cycle reduction as a performance result.
+
+Result: rejected. The candidate compiled remotely with CANN 9.3.0 and passed
+the four-rank development gate in task
+task_20260930_022202_29690912501. Expanded Dispatch changed from the retained
+C5 result of 11.204 / 11.467 ms to 11.130 / 11.268 ms, only about
+0.074 / 0.199 ms and within normal variation; the other four operations also
+remained within normal variation. The isolated lookup cycle saving does not
+produce a material end-to-end gain, so the source change is not retained.
+
 ### C4. Combine producer-record and release-wait reduction
 
 Priority: P1. Normal and Reduced Combine spend about 3.4-3.8 ms in producer
