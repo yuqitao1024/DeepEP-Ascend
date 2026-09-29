@@ -562,6 +562,27 @@ without regressing the three Dispatch operations in the four-rank development
 gate. An isolated cycle reduction without end-to-end improvement is not
 sufficient.
 
+Result: no end-to-end benefit in the current build. The remote build task
+task_20260930_025327_31016547476 succeeded with extension SHA-256
+89742936667d09dcb67dbb906c078051cd9b2b62c44e586b8c34b44332ea145a. The
+four-rank gate task task_20260930_025438_311345818326 passed correctness for
+both runs. Relative to the retained C5 baseline:
+
+| Operation | Retained mean / p95 | C14 default mean / p95 | 1024 tile mean / p95 |
+| --- | ---: | ---: | ---: |
+| Normal Combine | 10.315 / 10.876 ms | 10.322 / 10.710 ms | 11.820 / 12.437 ms |
+| Reduced Combine | 10.007 / 10.311 ms | 10.078 / 10.496 ms | 11.371 / 11.688 ms |
+| Normal Dispatch | 3.469 / 3.577 ms | 3.513 / 3.729 ms | 3.639 / 3.966 ms |
+| Expanded Dispatch | 11.204 / 11.467 ms | 11.208 / 11.407 ms | 11.161 / 11.374 ms |
+| Cached Dispatch | 26.810 / 27.289 ms | 27.006 / 27.410 ms | 26.923 / 27.840 ms |
+
+C14 leaves the default path within normal variation but does not produce a
+material end-to-end gain. C15's explicit 1024 tile regresses both Combine
+variants, so the larger reduction tile is rejected as a default or recommended
+setting. The safe selector extension can remain available for diagnosis, but
+the production default stays 512 and performance work should continue with a
+different mechanism.
+
 #### C15 candidate: 1024-element combine reduction tile (2026-09-30)
 
 The retained epilogue reduction uses a 512-element BF16 tile. The producer
