@@ -236,6 +236,32 @@ candidate is therefore rejected and reverted. Any follow-up must preserve a
 lane-visibility bit even when the lane wins its bitmap slot; it cannot simply
 skip the subgroup path.
 
+#### C10 follow-up direction (2026-09-30)
+
+Cached Dispatch cannot reach the sub-10-ms checkpoint by another owner-grouping
+micro-optimization. The retained path is:
+
+1. The cached planner, at 10.95-16.55 ms in the four-rank trace.
+2. The producer-record kernel, at about 2.64-2.67 ms.
+3. The epilogue-acquire kernel, at 0.04-6.81 ms depending on rank arrival
+   overlap.
+
+The next accepted mechanism must remove work from the planner itself. Two
+bounded directions remain:
+
+- Preserve lane visibility while removing redundant subgroup operations for
+  duplicate-free tokens. A winning lane may publish a single route-presence bit
+  and skip later grouping work, but the subgroup mask must still contain every
+  active lane so losing duplicate lanes remain visible to consistency checks.
+- Reuse the cached handle as stronger evidence: when the attested descriptor,
+  input shape, and generation checks pass, the planner's role is validation of
+  immutable route/slot relationships. Explore a compact per-token signature or
+  summary that proves the full route set without scanning every top-k lane in
+  the expensive generic path.
+
+Do not retry a plain launch-topology change. The retained two- and four-block
+data probes regressed Cached Dispatch, and the planner is the bottleneck.
+
 ### C2. Expanded Dispatch producer-record acceleration
 
 Priority: P1. Expanded Dispatch has the same shared transport service cost as
