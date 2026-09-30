@@ -695,6 +695,9 @@ struct DispatchArguments {
     std::uint32_t parallel_prefix = 0;
     std::uint32_t token_fanout = 0;
     std::uint32_t early_route_plan = 0;
+    std::uint32_t cached_route_plan = 0;
+    std::uint64_t* route_plan = nullptr;
+    std::uint32_t route_plan_words = 0;
     std::uint32_t fused_metadata_copy = 0;
     std::uint32_t compact_epilogue = 0;
     std::uint32_t compact_stage_boundaries = 0;

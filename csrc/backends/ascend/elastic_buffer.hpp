@@ -44,6 +44,21 @@
 
 namespace deep_ep::ascend {
 
+namespace elastic {
+extern "C" int deep_ep_ascend_launch_direct_dispatch_cached_route_plan(
+    const std::int64_t* topk_indices,
+    const std::int32_t* destination_slots,
+    std::uint64_t* route_plan,
+    std::uint32_t route_plan_words,
+    int transport_world_rank,
+    int transport_world_size,
+    std::uint64_t num_tokens,
+    std::uint64_t num_experts,
+    std::uint64_t num_topk,
+    std::uint64_t shard_capacity,
+    void* stream);
+}  // namespace elastic
+
 inline bool environment_is(const char* name, const char* expected) {
     const char* value = std::getenv(name);
     return value != nullptr && std::strcmp(value, expected) == 0;
@@ -1827,7 +1842,7 @@ public:
                std::optional<torch::Tensor>, std::optional<torch::Tensor>,
                std::optional<torch::Tensor>, int, int, std::vector<int>,
                torch::Tensor, torch::Tensor, torch::Tensor,
-               torch::Tensor, torch::Tensor,
+               torch::Tensor, torch::Tensor, torch::Tensor,
                std::optional<torch::Tensor>, std::optional<torch::Tensor>,
                std::optional<EventHandle>>
     dispatch(const torch::Tensor& x, const std::optional<torch::Tensor>& sf,
@@ -1839,9 +1854,10 @@ public:
              const std::optional<std::vector<int>>& cached_num_recv_tokens_per_expert_list,
              const std::optional<torch::Tensor>& cached_psum_num_recv_tokens_per_scaleup_rank,
              const std::optional<torch::Tensor>& cached_psum_num_recv_tokens_per_expert,
-             const std::optional<torch::Tensor>& cached_num_unaligned_recv_tokens_per_expert,
-             const std::optional<torch::Tensor>& cached_dst_buffer_slot_idx,
-             const std::optional<torch::Tensor>& cached_token_metadata_at_forward,
+            const std::optional<torch::Tensor>& cached_num_unaligned_recv_tokens_per_expert,
+            const std::optional<torch::Tensor>& cached_dst_buffer_slot_idx,
+            const std::optional<torch::Tensor>& cached_route_plan_parameter,
+            const std::optional<torch::Tensor>& cached_token_metadata_at_forward,
              const std::optional<torch::Tensor>& cached_recv_src_metadata,
              const std::optional<torch::Tensor>& cached_channel_linked_list,
              const int& num_max_tokens_per_rank, const int& num_experts,
@@ -2157,6 +2173,10 @@ public:
         const auto cached_route_count = allow_hybrid_mode_ && cached_mode ?
             static_cast<std::uint64_t>(*cached_num_recv_tokens) : 0;
         const auto int_options = x.options().dtype(torch::kInt);
+        const auto uint64_options = x.options().dtype(torch::kUInt64);
+        // Keep this as the single C17 switch so host validation and device
+        // argument plumbing cannot disagree about cached-route expectations.
+        constexpr bool route_plan_fast_path_enabled = true;
         const auto metadata_options = x.options().dtype(torch::kByte);
         const auto max_recv_tokens = allow_hybrid_mode_ ?
             tiling.hybrid_route_capacity :
@@ -2234,6 +2254,7 @@ public:
         torch::Tensor unaligned;
         torch::Tensor public_count_bridge;
         torch::Tensor destination_slots;
+        torch::Tensor cached_route_plan_tensor;
         torch::Tensor source_metadata;
         auto kernel_count_bridge = torch::empty(
             {static_cast<int64_t>(count_bridge_layout.kernel_elements)},
@@ -2268,7 +2289,8 @@ public:
                             cached_psum_num_recv_tokens_per_expert.has_value() &&
                             cached_num_unaligned_recv_tokens_per_expert.has_value() &&
                             cached_dst_buffer_slot_idx.has_value() &&
-                            cached_token_metadata_at_forward.has_value() &&
+                            cached_route_plan_parameter.has_value() &&
+            cached_token_metadata_at_forward.has_value() &&
                             cached_recv_src_metadata.has_value(),
                         "DeepEP Ascend backend: dispatch cached mode requires all handles");
             TORCH_CHECK(*cached_num_recv_tokens >= 0 &&
@@ -2285,6 +2307,9 @@ public:
                                 1, torch::kInt, device, "cached unaligned counts");
             validate_npu_tensor(*cached_dst_buffer_slot_idx,
                                 2, torch::kInt, device, "cached destination slots");
+            validate_npu_tensor(*cached_route_plan_parameter,
+                                1, torch::kUInt64, device,
+                                "cached route plan");
             validate_npu_tensor(*cached_recv_src_metadata,
                                 2, torch::kInt, device, "cached source metadata");
             validate_npu_tensor(*cached_token_metadata_at_forward,
@@ -2296,6 +2321,8 @@ public:
                             cached_num_unaligned_recv_tokens_per_expert->size(0) ==
                                 static_cast<int64_t>(local_experts) &&
                             cached_dst_buffer_slot_idx->sizes() == topk_idx.sizes() &&
+                            cached_route_plan_parameter->size(0) ==
+                                static_cast<int64_t>(num_ranks_ + 2) &&
                             cached_recv_src_metadata->size(0) == *cached_num_recv_tokens &&
                             cached_recv_src_metadata->size(1) ==
                                 static_cast<int64_t>(num_topk + 2) &&
@@ -2410,6 +2437,29 @@ public:
             expert_prefix = *cached_psum_num_recv_tokens_per_expert;
             unaligned = *cached_num_unaligned_recv_tokens_per_expert;
             destination_slots = *cached_dst_buffer_slot_idx;
+            cached_route_plan_tensor = *cached_route_plan_parameter;
+            if constexpr (route_plan_fast_path_enabled) {
+                std::vector<std::uint64_t> host_route_plan(
+                    static_cast<std::size_t>(num_ranks_ + 2));
+                status = resources_->copy_to_host(
+                    host_route_plan.data(),
+                    cached_route_plan_tensor.data_ptr<std::uint64_t>(),
+                    host_route_plan.size() * sizeof(std::uint64_t));
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
+                for (std::size_t rank = 0;
+                     rank < static_cast<std::size_t>(num_ranks_); ++rank) {
+                    TORCH_CHECK(
+                        host_route_plan[rank] <=
+                            static_cast<std::uint64_t>(capacity) *
+                                static_cast<std::uint64_t>(num_ranks_),
+                        "DeepEP Ascend backend: dispatch cached route count "
+                        "is invalid");
+                }
+                TORCH_CHECK(host_route_plan[num_ranks_] != 0,
+                            "DeepEP Ascend backend: dispatch cached "
+                            "route digest is unset");
+            }
             source_metadata = *cached_recv_src_metadata;
             status = resources_->copy_to_host(
                 host_rank_prefix.data(), rank_prefix.data_ptr(),
@@ -2497,6 +2547,8 @@ public:
                     count_bridge_layout.public_unaligned_offset),
                 static_cast<int64_t>(local_experts));
             destination_slots = torch::empty({x.size(0), topk_idx.size(1)}, int_options);
+            cached_route_plan_tensor = torch::empty(
+                {static_cast<int64_t>(num_ranks_ + 2)}, uint64_options);
             source_metadata = torch::empty(
                 {static_cast<int64_t>(split_dispatch ? 0 : max_recv_tokens),
                  topk_idx.size(1) + 2},
@@ -2586,6 +2638,7 @@ public:
             retain(cached_psum_num_recv_tokens_per_expert);
             retain(cached_num_unaligned_recv_tokens_per_expert);
             retain(cached_dst_buffer_slot_idx);
+            retain(cached_route_plan_tensor);
             retain(cached_token_metadata_at_forward);
             retain(cached_recv_src_metadata);
             retain(cached_channel_linked_list);
@@ -2641,6 +2694,18 @@ public:
         arguments.public_count_publication =
             device_public_count_publication ? 1U : 0U;
         arguments.destination_slots = destination_slots.data_ptr<std::int32_t>();
+        const auto route_plan_enabled =
+            route_plan_fast_path_enabled &&
+            !allow_hybrid_mode_ &&
+            num_ranks_ + 2 == cached_route_plan_tensor.size(0);
+        arguments.route_plan =
+            route_plan_enabled ?
+                cached_route_plan_tensor.data_ptr<std::uint64_t>() : nullptr;
+        arguments.route_plan_words =
+            route_plan_enabled ?
+                static_cast<std::uint32_t>(
+                    cached_route_plan_tensor.size(0)) :
+                0U;
         arguments.source_metadata = source_metadata.data_ptr<std::int32_t>();
         arguments.num_recv_tokens = static_cast<std::uint64_t>(
             cached_mode ? *cached_num_recv_tokens : initial_recv_tokens);
@@ -2667,6 +2732,8 @@ public:
         // generation, independently of the local number of tokens.
         if (!cached_mode && !allow_hybrid_mode_ && num_ranks_ > 1)
             arguments.source_completion_fence = 1U;
+        arguments.cached_route_plan =
+            route_plan_enabled && cached_mode ? 1U : 0U;
         arguments.consumer_tile_bytes = consumer_tile_config.tile_bytes;
         arguments.fused_metadata_copy = !cached_mode && !do_expand &&
             !allow_hybrid_mode_ && !stream_mode &&
@@ -2777,6 +2844,26 @@ public:
                 arguments, tiling, storage, stream.raw);
         if (!launch_status.ok())
             raise_launch_status(launch_status, rank_idx_);
+        if (route_plan_enabled && !cached_mode) {
+            const int route_plan_status =
+                elastic::deep_ep_ascend_launch_direct_dispatch_cached_route_plan(
+                    arguments.topk_indices,
+                    arguments.destination_slots,
+                    arguments.route_plan,
+                    arguments.route_plan_words,
+                    tiling.transport_context.topology.world_rank,
+                    tiling.transport_context.topology.world_size,
+                    tiling.num_tokens,
+                    tiling.num_experts,
+                    tiling.num_topk,
+                    tiling.num_max_tokens_per_rank,
+                    stream.raw);
+            if (route_plan_status != 0)
+                TORCH_CHECK(
+                    false,
+                    "DeepEP Ascend backend: cached route plan launch failed: ",
+                    route_plan_status);
+        }
         if (cached_mode)
             host_profile_record(
                 runtime::HostTimelinePhase::kCachedDispatchSubmit,
@@ -2847,7 +2934,8 @@ public:
                     narrowed_topk_weights, copied_topk_idx, num_recv_tokens,
                     *cached_num_expanded_tokens, per_expert_list, rank_prefix,
                     expert_prefix, unaligned, narrowed_metadata,
-                    destination_slots, descriptor_tensor, std::nullopt,
+                    destination_slots, cached_route_plan_tensor,
+                    descriptor_tensor, std::nullopt,
                     std::move(event)};
         }
         auto host_phase_start_ns = host_profile_start();
@@ -2883,6 +2971,18 @@ public:
         host_profile_record(
             runtime::HostTimelinePhase::kDispatchDiagnosticRead,
             diagnostic_read_start_ns);
+        if constexpr (route_plan_fast_path_enabled) {
+            std::vector<std::uint64_t> host_route_plan(
+                static_cast<std::size_t>(cached_route_plan_tensor.size(0)));
+            if (!host_route_plan.empty()) {
+                status = resources_->copy_to_host(
+                    host_route_plan.data(),
+                    cached_route_plan_tensor.data_ptr<std::uint64_t>(),
+                    host_route_plan.size() * sizeof(std::uint64_t));
+                if (!status.ok())
+                    raise_transport_status(status, rank_idx_);
+            }
+        }
         if (stage_profile_enabled_)
             host_timeline_profile_.dispatch_synchronize_end_ns =
                 runtime::host_timestamp_ns();
@@ -3279,8 +3379,8 @@ public:
                 narrowed_topk_weights, copied_topk_idx, num_recv_tokens,
                 num_expanded_tokens, per_expert_list, rank_prefix,
                 expert_prefix, unaligned, narrowed_metadata,
-                destination_slots, handle_tensor, std::nullopt,
-                std::move(event)};
+                destination_slots, cached_route_plan_tensor, handle_tensor,
+                std::nullopt, std::move(event)};
     }
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>,

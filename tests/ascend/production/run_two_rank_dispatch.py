@@ -598,7 +598,8 @@ class DispatchMatrix:
             "psum_num_recv_tokens_per_expert",
             "num_unaligned_recv_tokens_per_expert",
             "num_recv_tokens_per_expert_list", "recv_src_metadata",
-            "dst_buffer_slot_idx", "token_metadata_at_forward",
+            "dst_buffer_slot_idx", "cached_route_plan",
+            "token_metadata_at_forward",
             "channel_linked_list", "num_recv_tokens",
             "num_expanded_tokens", "cached_recv_src_metadata_before_sort",
             "_ascend_owner", "_ascend_generation",
@@ -653,6 +654,13 @@ class DispatchMatrix:
         self._assert_tensor(
             handle.dst_buffer_slot_idx, reference["destination_slots"],
             "handle.dst_buffer_slot_idx")
+        route_plan = handle.cached_route_plan
+        _check(route_plan is not None and route_plan.device.type == "npu" and
+               route_plan.device.index == self.device.index and
+               route_plan.dtype == self.torch.uint64 and route_plan.dim() == 1 and
+               route_plan.numel() == self.buffer.num_ranks + 2 and
+               route_plan.is_contiguous(),
+               "handle cached route plan is invalid")
         descriptor = handle.token_metadata_at_forward
         _check(descriptor is not None and descriptor.device.type == "npu" and
                descriptor.device.index == self.device.index and

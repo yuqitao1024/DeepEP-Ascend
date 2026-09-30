@@ -34,6 +34,21 @@ DEEP_EP_ASCEND_SIMT_CALLEE void dispatch_simt_poll_nop() {
     transport::simt::poll_nop();
 }
 
+DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t
+cached_route_digest_entry(std::uint64_t expert, std::uint64_t encoded) noexcept {
+    // A commutative route fingerprint: each entry contributes an
+    // independent positive word, so parallel producers may accumulate it with
+    // 64-bit atomics instead of overwriting a lane-local reduction.
+    auto mix_word = [](std::uint64_t value) noexcept {
+        value += 0x9e3779b97f4a7c15ULL;
+        value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+        value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
+        return value ^ (value >> 31U);
+    };
+    return (mix_word(expert + 0x243f6a8885a308d3ULL) ^
+            mix_word(encoded + 0x13198a2e03707344ULL)) | 1ULL;
+}
+
 DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_store_scale_factor_pack(
     __gm__ std::uint8_t* record, std::uint64_t record_offset,
     __gm__ const std::uint8_t* scale_factors,

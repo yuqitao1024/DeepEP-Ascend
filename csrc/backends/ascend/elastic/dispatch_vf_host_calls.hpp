@@ -550,6 +550,7 @@ inline int launch_direct_dispatch_producer_control_variant_0(
         tiling.transport_context.local_window_base,
         tiling.transport_context.channel_table,
         tiling.transport_context.peer_address_table,
+        tiling.mode_flags,
         tiling.transport_context.topology.abi_version,
         tiling.transport_context.topology.struct_size,
         tiling.transport_context.topology.world_rank,
@@ -625,6 +626,8 @@ inline int launch_direct_dispatch_producer_plan_variant_0(
         tiling.workspace_layout.scratch_rank_values_offset,
         tiling.workspace_layout.dispatch_error_offset,
         tiling.workspace_layout.dispatch_rank_bitmap_offset,
+        arguments.route_plan,
+        arguments.route_plan_words,
         stream, launch, tiling.launch.num_threads);
 }
 

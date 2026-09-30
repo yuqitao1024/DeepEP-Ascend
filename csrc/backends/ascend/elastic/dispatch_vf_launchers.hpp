@@ -38,6 +38,19 @@ extern "C" int deep_ep_ascend_launch_direct_dispatch_acquire_route_plan(
     void* stream, CoreLaunchShape launch,
     std::uint32_t vf_num_threads);
 
+extern "C" int deep_ep_ascend_launch_direct_dispatch_cached_route_plan(
+    const std::int64_t* topk_indices,
+    const std::int32_t* destination_slots,
+    std::uint64_t* route_plan,
+    std::uint32_t route_plan_words,
+    int transport_world_rank,
+    int transport_world_size,
+    std::uint64_t num_tokens,
+    std::uint64_t num_experts,
+    std::uint64_t num_topk,
+    std::uint64_t shard_capacity,
+    void* stream);
+
 extern "C" int deep_ep_ascend_launch_direct_dispatch_epilogue_acquire(
     std::uint8_t* communication_buffer,
     std::uint8_t* workspace,
@@ -474,6 +487,7 @@ extern "C" int deep_ep_ascend_launch_direct_dispatch_producer_control(
     std::uintptr_t transport_local_window_base,
     std::uintptr_t transport_channel_table,
     std::uintptr_t transport_peer_address_table,
+    CoreModeFlags mode_flags,
     std::uint32_t transport_topology_abi_version,
     std::uint32_t transport_topology_struct_size,
     int transport_world_rank,
@@ -535,6 +549,8 @@ extern "C" int deep_ep_ascend_launch_direct_dispatch_producer_plan(
     std::uint64_t workspace_rank_values_offset,
     std::uint64_t dispatch_error_offset,
     std::uint64_t dispatch_rank_bitmap_offset,
+    std::uint64_t* route_plan,
+    std::uint32_t route_plan_words,
     void* stream, CoreLaunchShape launch,
     std::uint32_t vf_num_threads);
 

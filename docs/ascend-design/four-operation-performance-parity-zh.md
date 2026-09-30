@@ -572,6 +572,65 @@ probe fixture were reverted in 6622835; future Cached Dispatch work must
 reduce active-token planner work or replace validation with stronger cached
 handle evidence.
 
+#### C17 candidate: cached route plan digest (2026-09-30)
+
+Priority: P0. Cached Dispatch remains about 27 ms while the post-C1 profile
+still attributes 11-16 ms to direct_dispatch_producer_plan_kernel. The
+handle currently proves descriptor identity, but every cached launch still
+rebuilds and validates the entire outbound route plan from topk_indices and
+destination_slots.
+
+The candidate adds a device-resident cached route plan:
+
+1. Store outbound per-destination counts and a 64-bit route digest beside the
+   cached handle. This is internal handle state; it does not change the
+   descriptor ABI, Python public EPHandle shape, or descriptor fingerprint.
+2. On the initial non-cached dispatch, the planner computes the same
+   destination counts and a commutative digest over the observed top-k and cached slot
+   values.
+3. On cached dispatch, a bounded device preflight recomputes that digest and
+   restores the stored counts. A digest match is not treated as mathematical
+   proof; it is an additional strong identity check layered over the existing
+   descriptor, generation, topology, shape, and mode checks.
+4. Only after a digest match may the launch skip the full planner. A mismatch
+   reports InvalidCachedMetadata and falls back to the existing planner.
+5. The preflight must also validate stored count bounds. maximum_slots is
+   restored from the existing invariant that, for a valid cached route, the
+   maximum slot equals the outbound destination count.
+
+Acceptance: reduce Cached Dispatch wall mean and p95 materially without
+regressing the other four operations in the four-rank development gate.
+Correctness must exercise handle reuse and mutation rejection. If the digest
+preflight is not cheaper than the remaining planner, revert it and record the
+result here.
+
+Implementation status (2026-09-30): the route plan is represented by a compact
+`[num_ranks + 2]` uint64 tensor: per-destination counts, a 64-bit commutative
+digest, and one reserved word. A dedicated small VF originally populated it
+after Normal Dispatch; that probe exposed the launcher ABI rule that this CANN
+build silently drops a non-struct kernel argument list. The VF now uses the
+same packed `KernelArguments` ABI as the production kernels. Cached Dispatch
+passes the tensor into the producer-plan VF. After the digest, per-rank counts,
+and source-slot checks pass, it restores the cached destination counts and
+maximum-slot values while the full planner is skipped.
+
+The first fast-path validation used top-k lane counts, which over-counted a
+token routed to multiple local experts on the same destination. Both producer
+and cached paths now count a token once per destination. The host also validates
+counts against `capacity * num_ranks`; the earlier `capacity`-only check
+incorrectly rejected valid balanced four-rank traffic.
+
+Correctness and performance were measured on devices 0-3 with the
+representative FP8 8,192-token, hidden 7,168, top-k 8, 256-expert case. The
+final build task task_20260930_160914_30880696115 produced extension SHA-256
+64b09e5a82c1bda6cd27311048e78d5ebd2ee2d373fe849feaf6a36a5809baaa, and gate
+task task_20260930_161020_309766612030 passed. Compared with clean head
+aebb8ff, Cached Dispatch improved from 26.16 / 27.30 ms wall mean / p95 to
+10.70 / 11.21 ms (about 2.45x, 103.65 to 260.10 GB/s logical). Normal Combine
+and Reduced Combine stayed within noise. A fused Normal Dispatch probe was
+also tried; it left host wall time at 43-52 ms, so it was rejected and the
+dedicated small VF remains the implementation.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all

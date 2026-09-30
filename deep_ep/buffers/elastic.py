@@ -94,6 +94,7 @@ class EPHandle:
                  recv_src_metadata: torch.Tensor,
                  dst_buffer_slot_idx: torch.Tensor,
                  token_metadata_at_forward: Optional[torch.Tensor],
+                 cached_route_plan: Optional[torch.Tensor],
                  channel_linked_list: Optional[torch.Tensor]):
         # NOTES: remember to copy the original users' input to prevent uncasual modifications on them
         assert topk_idx is not None
@@ -111,6 +112,7 @@ class EPHandle:
         self.recv_src_metadata = recv_src_metadata
         self.dst_buffer_slot_idx = dst_buffer_slot_idx
         self.token_metadata_at_forward = token_metadata_at_forward
+        self.cached_route_plan = cached_route_plan
         self.channel_linked_list = channel_linked_list
 
         # May not be accurate without CPU sync
@@ -1073,9 +1075,11 @@ class ElasticBuffer:
         -> Tuple[Optional[int], Optional[int], Optional[list],
                  Optional[torch.Tensor], Optional[torch.Tensor],
                  Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor],
-                 Optional[torch.Tensor], Optional[torch.Tensor]]:
+                 Optional[torch.Tensor], Optional[torch.Tensor],
+                 Optional[torch.Tensor]]:
         if handle is None:
-            return None, None, None, None, None, None, None, None, None, None
+            return (None, None, None, None, None, None, None, None,
+                    None, None, None)
         return (handle.num_recv_tokens,
                 handle.num_expanded_tokens,
                 handle.num_recv_tokens_per_expert_list,
@@ -1083,6 +1087,7 @@ class ElasticBuffer:
                 handle.psum_num_recv_tokens_per_expert,
                 handle.num_unaligned_recv_tokens_per_expert,
                 handle.dst_buffer_slot_idx,
+                handle.cached_route_plan,
                 handle.token_metadata_at_forward,
                 handle.recv_src_metadata,
                 handle.channel_linked_list)
@@ -1564,6 +1569,7 @@ class ElasticBuffer:
          cached_psum_num_recv_tokens_per_scaleup_rank, cached_psum_num_recv_tokens_per_expert,
          cached_num_unaligned_recv_tokens_per_expert,
          cached_dst_buffer_slot_idx,
+         cached_route_plan,
          cached_token_metadata_at_forward,
          cached_recv_src_metadata,
          cached_channel_linked_list) = self._unpack_handle(handle)
@@ -1591,6 +1597,7 @@ class ElasticBuffer:
          num_unaligned_recv_tokens_per_expert,
          recv_src_metadata,
          dst_buffer_slot_idx,
+         cached_route_plan,
          token_metadata_at_forward,
          channel_linked_list,
          event) = self.runtime.dispatch(x, sf, topk_idx, topk_weights,
@@ -1602,6 +1609,7 @@ class ElasticBuffer:
                                         cached_psum_num_recv_tokens_per_expert,
                                         cached_num_unaligned_recv_tokens_per_expert,
                                         cached_dst_buffer_slot_idx,
+                                        cached_route_plan,
                                         cached_token_metadata_at_forward,
                                         cached_recv_src_metadata,
                                         cached_channel_linked_list,
@@ -1638,6 +1646,7 @@ class ElasticBuffer:
                               recv_src_metadata,
                               dst_buffer_slot_idx,
                               token_metadata_at_forward,
+                              cached_route_plan,
                               channel_linked_list)
         # Create event
         event_overlap = EventOverlap(event)

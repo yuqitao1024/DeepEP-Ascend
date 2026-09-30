@@ -412,6 +412,69 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         guard = plan.index("!cached || num_topk > kTopkSubgroupWidth")
         self.assertLess(guard, fallback_call)
 
+    def test_cached_route_plan_digest_fast_path_is_guarded(self):
+        """The planner may skip grouping only after digest validation."""
+        source = (
+            ELASTIC / "direct_dispatch_producer_plan.asc"
+        ).read_text()
+        marker = "if (cached &&"
+        fast_path = source[
+            source.index(marker):source.index("\n    const auto work =",
+                                               source.index(marker))
+        ]
+        for marker in (
+                "cached_route_digest_entry(",
+                "observed_digest == stored_digest",
+                "DispatchProtocolError::kInvalidCachedMetadata",
+                "plan.counts[rank] != count"):
+            self.assertIn(marker, fast_path)
+        self.assertNotIn("route_plan[world_size + 2U + destination_rank]",
+                         source)
+
+    def test_normal_dispatch_populates_cached_route_plan(self):
+        """A small dedicated VF publishes the cached route plan."""
+        source = (
+            ELASTIC / "direct_dispatch_cached_route_plan.asc"
+        ).read_text()
+        host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        self.assertIn("direct_dispatch_cached_route_plan_vf", source)
+        self.assertIn("cached_route_digest_entry(", source)
+        self.assertIn("route_plan[world_size] =", source)
+        self.assertIn("DirectDispatchCachedRoutePlanKernelArguments", source)
+        self.assertIn("arguments.vf_num_threads", source)
+        self.assertIn(
+            "deep_ep_ascend_launch_direct_dispatch_cached_route_plan", host)
+
+        for source_name in (
+                "dispatch_device_common.hpp",
+                "direct_dispatch_producer_control.asc",
+                "dispatch_producer_prefix.asc",
+                "direct_dispatch_producer_record.asc"):
+            producer = (ELASTIC / source_name).read_text()
+            self.assertNotIn(
+                "route_plan[world_size", producer,
+                f"{source_name} must not extend the large producer VF ABI")
+
+    def test_cached_route_plan_host_validates_digest0(self):
+        """The second digest word is reserved and must not gate reuse."""
+        source = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        self.assertIn("host_route_plan[num_ranks_] != 0", source)
+        self.assertNotIn(
+            "host_route_plan[host_route_plan.size() - 1] != 0", source)
+
+    def test_cached_route_plan_preflight_covers_all_tokens(self):
+        """The preflight must compare a global, not subgroup-local, digest."""
+        source = (
+            ELASTIC / "direct_dispatch_producer_plan.asc"
+        ).read_text()
+        marker = "if (cached &&"
+        fast_path = source[
+            source.index(marker):source.index("\n    const auto work =",
+                                               source.index(marker))
+        ]
+        self.assertIn("for (std::uint32_t lane = 0;", fast_path)
+        self.assertIn("asc_syncthreads()", fast_path)
+
     def test_normal_combine_producer_plan_and_prefix_are_parallel(self):
         """Catches restoring one-thread planning and rank-prefix scans."""
         plan_source = (
@@ -755,7 +818,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         """Catches an unbounded doorbell wait or one-sided worker failure."""
         layout = (ELASTIC / "layout.hpp").read_text()
         kernels = (ELASTIC / "kernels.hpp").read_text()
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "direct_dispatch_acquire_route_plan.asc"
+        ).read_text()
         for marker in (
                 "enum class DispatchPipelineDiagnosticStage",
                 "DispatchPipelineDiagnosticStage diagnostic_stage",
@@ -808,7 +873,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_dispatch_persistent_source_producer_contract(self):
         """Catches repeated VF launches or incomplete hidden publication."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "dispatch_producer_prefix.asc"
+        ).read_text()
         kernels = (ELASTIC / "kernels.hpp").read_text()
         self.assertIn("kProducerRecordPipeline", kernels)
         function = "direct_dispatch_persistent_producer_vf("
@@ -888,7 +955,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_dispatch_persistent_release_contract(self):
         """Keeps release service outside the blocking release VF."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (ELASTIC / "dispatch_producer_prefix.asc").read_text()
         kernels = (ELASTIC / "kernels.hpp").read_text()
         layout = (ELASTIC / "layout.hpp").read_text()
         self.assertIn("kProducerReleasePipeline", kernels)
@@ -950,7 +1017,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_dispatch_persistent_pipeline_launch_is_event_free(self):
         """Catches reintroducing host event or sync gaps into source chunks."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "dispatch_producer_prefix.asc"
+        ).read_text()
         signature = "inline int launch_persistent_dispatch_source_pipeline("
         begin = source.index(signature)
         end = source.index("\n}\n", begin)
@@ -977,7 +1046,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_dispatch_persistent_epilogue_uses_producer_stream_completion(self):
         """Keeps epilogue after producer completion and on release acquire."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "direct_dispatch_acquire_route_plan.asc"
+        ).read_text()
         begin = source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_epilogue_acquire_vf")
@@ -1025,7 +1096,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_dispatch_persistent_control_acquire_diagnoses_before_wait(self):
         """Makes a missing remote release observable without a long wait."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (ELASTIC / "dispatch_producer_prefix.asc").read_text()
         begin = source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_epilogue_acquire_vf")
@@ -1053,7 +1124,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             probe)
         self.assertIn(
             "offsetof(DispatchPipelineState, slots) == 128", probe)
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "dispatch_producer_prefix.asc"
+        ).read_text()
         for forbidden in (
                 "pipeline->abi_version =",
                 "pipeline->struct_size =",
@@ -1116,7 +1189,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             (ELASTIC / "direct_dispatch_producer_control.asc").read_text())
 
     def test_direct_dispatch_expert_histogram_prefix_scatter_is_tiled(self):
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "dispatch_producer_prefix.asc"
+        ).read_text()
         count_begin = source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_epilogue_count_experts_vf")
@@ -1144,7 +1219,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_direct_dispatch_grouping_reuse_contract(self):
         """Catches restoring destination-by-destination top-k rescans."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "direct_dispatch_acquire_route_plan.asc"
+        ).read_text()
         device_macro = "#define DEEP_EP_ASCEND_TOPK_GROUPING_DEVICE 1"
         self.assertIn(device_macro, source)
         self.assertLess(
@@ -1198,7 +1275,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_direct_dispatch_vector_payload_contract(self):
         """Catches payload copies racing record writers on another AIV."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "dispatch_producer_prefix.asc"
+        ).read_text()
         for marker in (
                 '#include "c_api/sync/sync.h"',
                 '#include "simt_api/device_sync_functions.h"',
@@ -1262,7 +1341,16 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_dispatch_token_fanout_selector_and_launch_contract(self):
         """Catches accepting the selector without reaching the AICore path."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        publish_source = (
+            ELASTIC / "direct_dispatch_publish_route_plan.asc"
+        ).read_text()
+        acquire_source = (
+            ELASTIC / "direct_dispatch_acquire_route_plan.asc"
+        ).read_text()
+        payload_source = (
+            ELASTIC / "direct_dispatch_epilogue_acquire.asc"
+        ).read_text()
+        dispatch_source = (ELASTIC / "dispatch.asc").read_text()
         kernels = (ELASTIC / "kernels.hpp").read_text()
         buffer = (
             ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
@@ -1311,7 +1399,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
     def test_dispatch_token_fanout_loads_each_token_before_destination_loop(
             self):
         """Catches reloading a token's hidden row for every destination."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "direct_dispatch_acquire_route_plan.asc"
+        ).read_text()
         signature = (
             "__aicore__ inline void "
             "direct_dispatch_producer_token_fanout_impl")
@@ -1353,7 +1443,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
     def test_dispatch_grouping_builds_rank_and_expert_route_counts_together(
             self):
         """Catches restoring the receiver payload rescan as count source."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "dispatch_producer_prefix.asc"
+        ).read_text()
         group_begin = source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_producer_group_vf")
@@ -1390,7 +1482,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_dispatch_route_plan_storage_uses_actual_local_expert_count(self):
         """Padded route slots must not change the expert-to-rank mapping."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "dispatch_producer_prefix.asc"
+        ).read_text()
         begin = source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_producer_prefix_vf")
@@ -1410,7 +1504,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_dispatch_grouping_uses_native_atomic_expert_accumulator(self):
         """Catches restoring the serial per-tile expert-count reduction."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "direct_dispatch_acquire_route_plan.asc"
+        ).read_text()
         init_begin = source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_producer_expert_count_init_vf")
@@ -1452,7 +1548,17 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_dispatch_early_route_plan_publishes_before_payload_packing(self):
         """Catches coupling receiver prefix back to payload readiness."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        source = (
+            ELASTIC / "direct_dispatch_publish_route_plan.asc"
+        ).read_text()
+        publish_source = source
+        acquire_source = (
+            ELASTIC / "direct_dispatch_acquire_route_plan.asc"
+        ).read_text()
+        payload_source = (
+            ELASTIC / "direct_dispatch_epilogue_acquire.asc"
+        ).read_text()
+        dispatch_source = (ELASTIC / "dispatch.asc").read_text()
         kernels = (ELASTIC / "kernels.hpp").read_text()
         buffer = (
             ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
@@ -1469,11 +1575,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertIn(marker, dispatch)
         self.assertIn("std::uint32_t early_route_plan = 0;", kernels)
 
-        publish_begin = source.index(
+        publish_begin = publish_source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_publish_route_plan_vf")
-        publish_end = source.index("\n}\n", publish_begin)
-        publish = source[publish_begin:publish_end]
+        publish_end = publish_source.index("\n}\n", publish_begin)
+        publish = publish_source[publish_begin:publish_end]
         self.assertIn("transport.put(", publish)
         self.assertIn(
             "transport_local_window_base + dispatch_staging_offset",
@@ -1500,22 +1606,24 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             publish.rindex(flush_call),
             publish.index("transport.device_barrier("))
 
-        acquire_begin = source.index(
+        acquire_begin = acquire_source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_acquire_route_plan_vf")
-        acquire_end = source.index("\n}\n", acquire_begin)
-        acquire = source[acquire_begin:acquire_end]
+        acquire_end = acquire_source.index("\n}\n", acquire_begin)
+        acquire = acquire_source[acquire_begin:acquire_end]
         self.assertIn("release_protocol::acquire_release(", acquire)
         self.assertIn("prefix_per_rank", acquire)
         self.assertIn("prefix_per_expert", acquire)
         self.assertIn("unaligned_per_expert", acquire)
         self.assertNotIn("dispatch_receive_offset", acquire)
 
-        payload_acquire_begin = source.index(
+        payload_acquire_begin = payload_source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_epilogue_acquire_vf")
-        payload_acquire_end = source.index("\n}\n", payload_acquire_begin)
-        payload_acquire = source[payload_acquire_begin:payload_acquire_end]
+        payload_acquire_end = payload_source.index(
+            "\n}\n", payload_acquire_begin)
+        payload_acquire = payload_source[
+            payload_acquire_begin:payload_acquire_end]
         self.assertIn("std::uint32_t early_route_plan", payload_acquire)
         self.assertIn(
             "dispatch_simt_handoff_dispatch_route_source_count(",
@@ -1524,10 +1632,12 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "canonical_source_counts[source_rank] = canonical_count;",
             payload_acquire)
 
-        epilogue_macro_begin = source.index(
+        epilogue_macro_begin = dispatch_source.index(
             "#define DEEP_EP_ASCEND_DIRECT_DISPATCH_EPILOGUE")
-        epilogue_macro_end = source.index("\n    } while (0)", epilogue_macro_begin)
-        epilogue_macro = source[epilogue_macro_begin:epilogue_macro_end]
+        epilogue_macro_end = dispatch_source.index(
+            "\n    } while (0)", epilogue_macro_begin)
+        epilogue_macro = dispatch_source[
+            epilogue_macro_begin:epilogue_macro_end]
         self.assertIn(
             "(EARLY_ROUTE_PLAN) == 0 && \\\n"
             "            ((STAGE) == DirectDispatchStage::kFull || \\\n"
@@ -1539,33 +1649,46 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "             (STAGE) == DirectDispatchStage::kEpilogueExpertPrefix)",
             epilogue_macro)
         self.assertIn(
-            "copy_outputs, stage, early_route_plan, pipeline_source_chunk);",
-            source)
+            "copy_outputs, stage, early_route_plan, pipeline_source_chunk,",
+            dispatch_source)
         self.assertIn(
-            "1U, DirectDispatchStage::kFull, 0U, 0U);", source)
+            "1U, DirectDispatchStage::kFull, 0U, 0U, false);",
+            dispatch_source)
 
-        prefix_stage = source.index(
+        prefix_stage = dispatch_source.index(
             "stage == DirectDispatchStage::kProducerPrefix")
-        publish_call = source.index(
-            "asc_vf_call<direct_dispatch_publish_route_plan_vf>",
+        publish_call = dispatch_source.index(
+            "launch_direct_dispatch_publish_route_plan_variant_0",
             prefix_stage)
-        service_call = source.index(
-            "transport::service::execute<ProfileEnabled>", publish_call)
-        publish_launch = source[publish_call:service_call]
-        self.assertIn("generation, timeout_cycles,", publish_launch)
-        acquire_call = source.index(
-            "asc_vf_call<direct_dispatch_acquire_route_plan_vf>",
-            service_call)
-        record_stage = source.index(
-            "stage == DirectDispatchStage::kProducerRecord", acquire_call)
+        host_source = (
+            ELASTIC / "dispatch_vf_host_calls.hpp"
+        ).read_text()
+        service_call = dispatch_source.index(
+            "launch_direct_dispatch_acquire_route_plan_variant_0",
+            publish_call)
+        publish_launch = host_source[
+            host_source.index(
+                "inline int launch_direct_dispatch_publish_route_plan_variant_0"):
+            host_source.index(
+                "inline int launch_direct_dispatch_acquire_route_plan_variant_0")]
+        self.assertIn(
+            "tiling.symmetric_window_layout.dispatch_route_plan_offset,",
+            publish_launch)
+        acquire_call = service_call
+        record_stage = dispatch_source.index(
+            "launch_direct_dispatch_producer_record_variant_0", acquire_call)
         self.assertLess(publish_call, service_call)
-        self.assertLess(service_call, acquire_call)
         self.assertLess(acquire_call, record_stage)
 
     def test_dispatch_early_route_plan_keeps_outgoing_and_incoming_counts_separate(
             self):
         """Catches route acquire clobbering counts needed by producer release."""
-        source = (ELASTIC / "dispatch.asc").read_text()
+        route_source = (
+            ELASTIC / "direct_dispatch_acquire_route_plan.asc"
+        ).read_text()
+        payload_source = (
+            ELASTIC / "direct_dispatch_epilogue_acquire.asc"
+        ).read_text()
         layout = (ELASTIC / "layout.hpp").read_text()
         tiling = (ELASTIC / "tiling.hpp").read_text()
 
@@ -1575,22 +1698,23 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertIn(marker, layout)
             self.assertIn(marker, tiling)
 
-        acquire_begin = source.index(
+        acquire_begin = route_source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_acquire_route_plan_vf")
-        acquire_end = source.index("\n}\n", acquire_begin)
-        acquire = source[acquire_begin:acquire_end]
+        acquire_end = route_source.index("\n}\n", acquire_begin)
+        acquire = route_source[acquire_begin:acquire_end]
         self.assertIn("workspace_route_source_counts_offset", acquire)
         self.assertIn(
             "workspace + workspace_route_source_counts_offset", acquire)
         self.assertNotIn(
             "workspace + workspace_rank_counts_offset", acquire)
 
-        payload_acquire_begin = source.index(
+        payload_acquire_begin = payload_source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_dispatch_epilogue_acquire_vf")
-        payload_acquire_end = source.index("\n}\n", payload_acquire_begin)
-        payload_acquire = source[
+        payload_acquire_end = payload_source.index(
+            "\n}\n", payload_acquire_begin)
+        payload_acquire = payload_source[
             payload_acquire_begin:payload_acquire_end]
         self.assertIn("workspace_route_source_counts_offset", payload_acquire)
         self.assertIn(
@@ -1599,10 +1723,15 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "            workspace_rank_counts_offset",
             payload_acquire)
 
-        release_begin = source.index(
-            "direct_dispatch_producer_release_body(")
-        release_end = source.index("\n}\n", release_begin)
-        release = source[release_begin:release_end]
+        release_source = (ROOT / "csrc/backends/ascend/elastic" /
+            "dispatch_device_common.hpp").read_text()
+        release_begin = release_source.index(
+            "DEEP_EP_ASCEND_DISPATCH_RELEASE_ARGUMENTS")
+        release_end = release_source.index(
+            "workspace + workspace_rank_counts_offset")
+        release = release_source[release_begin:release_end] + \
+            release_source[release_end:release_end +
+                len("workspace + workspace_rank_counts_offset")]
         self.assertIn("workspace + workspace_rank_counts_offset", release)
         self.assertNotIn("workspace_route_source_counts_offset", release)
 

@@ -435,10 +435,10 @@ def _install_fake_extension(platform, events):
                 args[2].device.type, args[2].shape, args[2].dtype,
                 device_index=args[2].device.index)
             token_metadata_at_forward = (
-                args[12] if platform == "ascend" and args[12] is not None else
+                args[13] if platform == "ascend" and args[13] is not None else
                 _FakeTensor(device.type, (120,), device_index=device.index)
                 if platform == "ascend" else None)
-            event = EventHandle() if args[22] or platform != "ascend" else None
+            event = EventHandle() if args[23] or platform != "ascend" else None
             if platform == "ascend":
                 self.next_dispatch_generation += 1
                 generation = self.next_dispatch_generation
@@ -450,7 +450,7 @@ def _install_fake_extension(platform, events):
                     self.committed_dispatch_fingerprint = tuple(
                         token_metadata_at_forward._values)
 
-                if args[22]:
+                if args[23]:
                     if self.fail_next_dispatch_completion:
                         event._state.completion_error = (
                             "DeepEP Ascend backend: dispatch completion failed")
@@ -459,13 +459,15 @@ def _install_fake_extension(platform, events):
                         event._state.on_finish = commit_dispatch
                 else:
                     commit_dispatch()
-            return (args[0], args[1], None if args[26] else args[2], args[3],
+            return (args[0], args[1], None if args[27] else args[2], args[3],
                     cloned_topk_idx,
                     1, 1, [], _FakeTensor(device.type, device_index=device.index),
                     _FakeTensor(device.type, device_index=device.index),
                     _FakeTensor(device.type, device_index=device.index),
                     recv_src_metadata,
                     _FakeTensor(device.type, device_index=device.index),
+                    _FakeTensor(device.type, (4,),
+                                device_index=device.index),
                     token_metadata_at_forward,
                     None,
                     event)
@@ -1574,12 +1576,12 @@ def _scenario_ascend_dispatch():
         x, topk_idx=topk_idx, topk_weights=topk_weights,
         num_experts=2, num_max_tokens_per_rank=1)
     dispatch_args = runtime.dispatch_calls[-1]
-    assert len(dispatch_args) == 29
+    assert len(dispatch_args) == 30
     assert dispatch_args[2] is topk_idx
     assert dispatch_args[3] is topk_weights
-    assert dispatch_args[18:20] == (max_data_blocks, 0)
-    assert dispatch_args[20:24] == (None, None, False, False)
-    assert dispatch_args[25] is True
+    assert dispatch_args[19:21] == (max_data_blocks, 0)
+    assert dispatch_args[21:25] == (None, None, False, False)
+    assert dispatch_args[26] is True
     assert recv_topk_weights is topk_weights
     assert isinstance(handle, deep_ep.EPHandle)
     assert handle.num_sms == max_data_blocks
@@ -1597,14 +1599,15 @@ def _scenario_ascend_dispatch():
         handle.psum_num_recv_tokens_per_expert,
         handle.num_unaligned_recv_tokens_per_expert,
         handle.dst_buffer_slot_idx,
+        handle.cached_route_plan,
         handle.token_metadata_at_forward,
         handle.recv_src_metadata,
         handle.channel_linked_list,
     )
     assert cached_args[2] is handle.topk_idx
     assert cached_args[3] is cached_topk_weights
-    assert cached_args[5:15] == expected_cached_fields
-    assert cached_args[25] is False
+    assert cached_args[5:16] == expected_cached_fields
+    assert cached_args[26] is False
     assert recv_topk_weights is cached_topk_weights
     assert cached_handle is handle
     assert cached_event.event is None
@@ -1618,7 +1621,7 @@ def _scenario_ascend_dispatch():
         x, topk_weights=cached_topk_weights, handle=handle,
         async_with_compute_stream=True)
     async_args = runtime.dispatch_calls[-1]
-    assert async_args[20:24] == (None, None, True, False)
+    assert async_args[21:25] == (None, None, True, False)
     assert async_handle is handle
     assert async_event.event is not None
     async_event.current_stream_wait()
@@ -1644,15 +1647,15 @@ def _scenario_ascend_dispatch():
         previous_event=previous, async_with_compute_stream=True,
         allocate_on_comm_stream=True)
     previous_args = runtime.dispatch_calls[-1]
-    assert previous_args[20] is previous
-    assert previous_args[21:24] == (None, True, True)
+    assert previous_args[21] is previous
+    assert previous_args[22:25] == (None, True, True)
     assert previous_handle is handle
     previous_event.current_stream_wait()
 
     _, _, _, sync_allocated_handle, sync_allocated_event = buffer.dispatch(
         x, topk_weights=cached_topk_weights, handle=handle,
         allocate_on_comm_stream=True)
-    assert runtime.dispatch_calls[-1][20:24] == (None, None, False, True)
+    assert runtime.dispatch_calls[-1][21:25] == (None, None, False, True)
     assert sync_allocated_handle is handle
     assert sync_allocated_event.event is None
 
@@ -1761,7 +1764,7 @@ def _scenario_ascend_dispatch():
                         async_with_compute_stream=async_mode,
                         allocate_on_comm_stream=allocate)
                 uncached_args = runtime.dispatch_calls[-1]
-                assert uncached_args[22:27] == (
+                assert uncached_args[23:28] == (
                     async_mode, allocate, True, True, expanded)
                 assert (recv_topk_idx is None) == expanded
                 assert uncached_handle.do_expand == expanded
@@ -1779,8 +1782,8 @@ def _scenario_ascend_dispatch():
         previous_event=predecessor, async_with_compute_stream=True,
         allocate_on_comm_stream=True)
     predecessor_args = runtime.dispatch_calls[-1]
-    assert predecessor_args[20] is predecessor.event
-    assert predecessor_args[22:26] == (True, True, True, True)
+    assert predecessor_args[21] is predecessor.event
+    assert predecessor_args[23:27] == (True, True, True, True)
     predecessor_event.current_stream_wait()
     assert predecessor_handle._ascend_owner is buffer
 
@@ -1818,7 +1821,7 @@ def _scenario_ascend_dispatch():
         buffer.dispatch(
             x, topk_idx=topk_idx, num_experts=2,
             num_max_tokens_per_rank=1, num_sms=num_sms)
-        assert runtime.dispatch_calls[-1][18:20] == (num_sms, 0)
+        assert runtime.dispatch_calls[-1][19:21] == (num_sms, 0)
 
     no_weights_idx = _FakeTensor("npu", (1, 1), torch.int64)
     recv_x, recv_topk_idx, recv_topk_weights, no_weights_handle, no_weights_event = \
@@ -1829,8 +1832,8 @@ def _scenario_ascend_dispatch():
     assert no_weights_args[0] is x
     assert no_weights_args[2] is no_weights_idx
     assert no_weights_args[3] is None
-    assert no_weights_args[18:20] == (max_data_blocks, 0)
-    assert no_weights_args[24] is False
+    assert no_weights_args[19:21] == (max_data_blocks, 0)
+    assert no_weights_args[25] is False
     assert recv_x is x
     assert recv_topk_idx is no_weights_idx
     assert recv_topk_weights is None
@@ -1847,8 +1850,8 @@ def _scenario_ascend_dispatch():
     assert empty_args[0] is empty_x
     assert empty_args[2] is empty_topk_idx
     assert empty_args[3] is None
-    assert empty_args[18:20] == (1, 0)
-    assert empty_args[25] is True
+    assert empty_args[19:21] == (1, 0)
+    assert empty_args[26] is True
     assert recv_x is empty_x
     assert recv_topk_idx is empty_topk_idx
     assert recv_topk_weights is None
@@ -1907,7 +1910,7 @@ def _scenario_ascend_fp8_dispatch():
         (x, packed_sf), handle=handle,
         use_tma_aligned_col_major_sf=True)
     assert recv_x == (x, packed_sf), recv_x
-    assert runtime.dispatch_calls[-1][28] is True
+    assert runtime.dispatch_calls[-1][29] is True
 
     group.gathered_objects = gather_valid
     _, _, _, cached_handle, cached_event = buffer.dispatch(
@@ -1915,7 +1918,7 @@ def _scenario_ascend_fp8_dispatch():
         allocate_on_comm_stream=True)
     assert cached_handle is handle
     assert runtime.dispatch_calls[-1][1] is sf
-    assert runtime.dispatch_calls[-1][22:24] == (True, True)
+    assert runtime.dispatch_calls[-1][23:25] == (True, True)
     assert cached_event.event is not None
     cached_event.current_stream_wait()
 
@@ -1927,9 +1930,9 @@ def _scenario_ascend_fp8_dispatch():
         use_tma_aligned_col_major_sf=True)
     assert predecessor_handle is handle
     assert runtime.dispatch_calls[-1][1] is packed_sf
-    assert runtime.dispatch_calls[-1][20] is previous
-    assert runtime.dispatch_calls[-1][22:24] == (True, True)
-    assert runtime.dispatch_calls[-1][28] is True
+    assert runtime.dispatch_calls[-1][21] is previous
+    assert runtime.dispatch_calls[-1][23:25] == (True, True)
+    assert runtime.dispatch_calls[-1][29] is True
     assert predecessor_event.event is not None
     predecessor_event.current_stream_wait()
 
@@ -1940,7 +1943,7 @@ def _scenario_ascend_fp8_dispatch():
         async_with_compute_stream=True, allocate_on_comm_stream=True)
     assert uncached_handle is not handle
     assert runtime.dispatch_calls[-1][1] is sf
-    assert runtime.dispatch_calls[-1][22:27] == (True, True, True, True, False)
+    assert runtime.dispatch_calls[-1][23:28] == (True, True, True, True, False)
     assert uncached_event.event is not None
     uncached_event.current_stream_wait()
 
@@ -1954,9 +1957,9 @@ def _scenario_ascend_fp8_dispatch():
             use_tma_aligned_col_major_sf=True)
     assert predecessor_uncached_handle is not uncached_handle
     assert runtime.dispatch_calls[-1][1] is packed_sf
-    assert runtime.dispatch_calls[-1][20] is previous
-    assert runtime.dispatch_calls[-1][22:27] == (True, True, True, True, False)
-    assert runtime.dispatch_calls[-1][28] is True
+    assert runtime.dispatch_calls[-1][21] is previous
+    assert runtime.dispatch_calls[-1][23:28] == (True, True, True, True, False)
+    assert runtime.dispatch_calls[-1][29] is True
     assert predecessor_uncached_event.event is not None
     predecessor_uncached_event.current_stream_wait()
 
@@ -2186,12 +2189,12 @@ def _scenario_ascend_dispatch_optimized():
         num_max_tokens_per_rank=1, num_sms=1, num_qps=0)
     if len(runtime.dispatch_calls) != 1:
         raise AssertionError("valid explicit Ascend dispatch did not reach runtime")
-    if runtime.dispatch_calls[-1][18:20] != (1, 0):
+    if runtime.dispatch_calls[-1][19:21] != (1, 0):
         raise AssertionError("valid explicit Ascend counts changed before runtime")
     buffer.dispatch(
         x, topk_idx=topk_idx, num_experts=2,
         num_max_tokens_per_rank=1, num_sms=max_data_blocks, num_qps=0)
-    if runtime.dispatch_calls[-1][18:20] != (max_data_blocks, 0):
+    if runtime.dispatch_calls[-1][19:21] != (max_data_blocks, 0):
         raise AssertionError("default-block Ascend dispatch changed before runtime")
     buffer.destroy()
 
@@ -2350,7 +2353,8 @@ def _scenario_ascend_combine():
     handle = deep_ep.EPHandle(
         False, 2, 4, 4, 56, topk_idx, 2, 2, [], rank_prefix,
         _FakeTensor("npu", (1,)), _FakeTensor("npu", (1,)),
-        recv_src_metadata, _FakeTensor("npu", (1, 2)), descriptor, None)
+        recv_src_metadata, _FakeTensor("npu", (1, 2)), descriptor,
+        _FakeTensor("npu", (4,)), None)
     buffer._ascend_handle_generation = 1
     handle._ascend_owner = buffer
     handle._ascend_generation = 1
@@ -2694,18 +2698,18 @@ def _scenario_cuda_preservation():
         num_experts=1, num_max_tokens_per_rank=1, num_sms=2, num_qps=1,
         previous_event=deep_ep.EventOverlap(previous_event),
         previous_event_before_epilogue=previous_event_before_epilogue)
-    assert len(runtime.dispatch_calls[-1]) == 29
-    assert runtime.dispatch_calls[-1][20] is previous_event
-    assert runtime.dispatch_calls[-1][21] is previous_event_before_epilogue
+    assert len(runtime.dispatch_calls[-1]) == 30
+    assert runtime.dispatch_calls[-1][21] is previous_event
+    assert runtime.dispatch_calls[-1][22] is previous_event_before_epilogue
 
     _, _, _, auto_handle, _ = buffer.dispatch(
         _FakeTensor("cuda", (1, 16)), topk_idx=_FakeTensor("cuda", (1, 1)),
         num_experts=8, num_max_tokens_per_rank=1)
     auto_args = runtime.dispatch_calls[-1]
-    assert auto_args[18] > 1
-    assert auto_args[19] > 0
-    assert auto_args[19] <= buffer.num_allocated_qps
-    assert auto_handle.num_sms == auto_args[18]
+    assert auto_args[19] > 1
+    assert auto_args[20] > 0
+    assert auto_args[20] <= buffer.num_allocated_qps
+    assert auto_handle.num_sms == auto_args[19]
 
     combine_previous_event = extension.EventHandle()
     combine_previous_event_before_epilogue = extension.EventHandle()
