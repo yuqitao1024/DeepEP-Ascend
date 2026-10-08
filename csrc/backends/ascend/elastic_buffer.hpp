@@ -2256,6 +2256,8 @@ public:
         torch::Tensor destination_slots;
         torch::Tensor cached_route_plan_tensor;
         torch::Tensor source_metadata;
+        std::vector<std::uint64_t> host_route_plan;
+        bool route_plan_lazy_build = false;
         auto kernel_count_bridge = torch::empty(
             {static_cast<int64_t>(count_bridge_layout.kernel_elements)},
             int_options);
@@ -2439,7 +2441,7 @@ public:
             destination_slots = *cached_dst_buffer_slot_idx;
             cached_route_plan_tensor = *cached_route_plan_parameter;
             if constexpr (route_plan_fast_path_enabled) {
-                std::vector<std::uint64_t> host_route_plan(
+                host_route_plan.resize(
                     static_cast<std::size_t>(num_ranks_ + 2));
                 status = resources_->copy_to_host(
                     host_route_plan.data(),
@@ -2447,18 +2449,22 @@ public:
                     host_route_plan.size() * sizeof(std::uint64_t));
                 if (!status.ok())
                     raise_transport_status(status, rank_idx_);
-                for (std::size_t rank = 0;
-                     rank < static_cast<std::size_t>(num_ranks_); ++rank) {
-                    TORCH_CHECK(
-                        host_route_plan[rank] <=
-                            static_cast<std::uint64_t>(capacity) *
-                                static_cast<std::uint64_t>(num_ranks_),
-                        "DeepEP Ascend backend: dispatch cached route count "
-                        "is invalid");
+                const bool route_plan_ready =
+                    host_route_plan[num_ranks_] != 0;
+                if (route_plan_ready) {
+                    for (std::size_t rank = 0;
+                         rank < static_cast<std::size_t>(num_ranks_);
+                         ++rank) {
+                        TORCH_CHECK(
+                            host_route_plan[rank] <=
+                                static_cast<std::uint64_t>(capacity) *
+                                    static_cast<std::uint64_t>(num_ranks_),
+                            "DeepEP Ascend backend: dispatch cached route "
+                            "count is invalid");
+                    }
+                } else {
+                    route_plan_lazy_build = true;
                 }
-                TORCH_CHECK(host_route_plan[num_ranks_] != 0,
-                            "DeepEP Ascend backend: dispatch cached "
-                            "route digest is unset");
             }
             source_metadata = *cached_recv_src_metadata;
             status = resources_->copy_to_host(
@@ -2547,7 +2553,7 @@ public:
                     count_bridge_layout.public_unaligned_offset),
                 static_cast<int64_t>(local_experts));
             destination_slots = torch::empty({x.size(0), topk_idx.size(1)}, int_options);
-            cached_route_plan_tensor = torch::empty(
+            cached_route_plan_tensor = torch::zeros(
                 {static_cast<int64_t>(num_ranks_ + 2)}, uint64_options);
             source_metadata = torch::empty(
                 {static_cast<int64_t>(split_dispatch ? 0 : max_recv_tokens),
@@ -2835,16 +2841,7 @@ public:
         auto dispatch_submit_start_ns = host_profile_start();
         if (cached_mode)
             cached_host_phase_start_ns = dispatch_submit_start_ns;
-        const auto launch_status =
-            (source_pipeline_config.enabled || pipeline_config.enabled) ?
-            elastic::launch_internal_dispatch_pipeline(
-                arguments, tiling, storage, stream.raw,
-                resources_->comm_stream().raw) :
-            elastic::launch_internal_dispatch(
-                arguments, tiling, storage, stream.raw);
-        if (!launch_status.ok())
-            raise_launch_status(launch_status, rank_idx_);
-        if (route_plan_enabled && !cached_mode) {
+        if (route_plan_enabled && route_plan_lazy_build) {
             const int route_plan_status =
                 elastic::deep_ep_ascend_launch_direct_dispatch_cached_route_plan(
                     arguments.topk_indices,
@@ -2863,7 +2860,28 @@ public:
                     false,
                     "DeepEP Ascend backend: cached route plan launch failed: ",
                     route_plan_status);
+            status = resources_->synchronize_stream(stream.raw);
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            status = resources_->copy_to_host(
+                host_route_plan.data(),
+                cached_route_plan_tensor.data_ptr<std::uint64_t>(),
+                host_route_plan.size() * sizeof(std::uint64_t));
+            if (!status.ok())
+                raise_transport_status(status, rank_idx_);
+            TORCH_CHECK(host_route_plan[num_ranks_] != 0,
+                        "DeepEP Ascend backend: dispatch cached "
+                        "route digest is unset");
         }
+        const auto launch_status =
+            (source_pipeline_config.enabled || pipeline_config.enabled) ?
+            elastic::launch_internal_dispatch_pipeline(
+                arguments, tiling, storage, stream.raw,
+                resources_->comm_stream().raw) :
+            elastic::launch_internal_dispatch(
+                arguments, tiling, storage, stream.raw);
+        if (!launch_status.ok())
+            raise_launch_status(launch_status, rank_idx_);
         if (cached_mode)
             host_profile_record(
                 runtime::HostTimelinePhase::kCachedDispatchSubmit,

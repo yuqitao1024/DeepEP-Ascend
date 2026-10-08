@@ -631,6 +631,39 @@ and Reduced Combine stayed within noise. A fused Normal Dispatch probe was
 also tried; it left host wall time at 43-52 ms, so it was rejected and the
 dedicated small VF remains the implementation.
 
+Known regression and follow-up: the dedicated route-plan VF adds an extra scan
+to Normal Dispatch. In the final four-rank gate, Normal Dispatch moved from
+3.523 / 3.903 ms to 4.237 / 5.435 ms wall mean / p95, and Expanded Dispatch was
+also affected. A bounded probe that disabled the artifact for Expanded Dispatch
+failed the cached-expanded correctness path because that handle also requires
+the route plan. The accepted follow-up is lazy generation: uncached Normal and
+Expanded Dispatch no longer launch the route-plan VF. The first cached call
+that sees a zero digest launches the VF before the producer-plan fast path,
+synchronizes once, and verifies the digest; subsequent cached calls consume the
+stored artifact. This removes the extra scan from the uncached operations while
+preserving cached correctness.
+
+Lazy-build validation update (2026-10-08): the first build, task
+task_20261008_081038_160423029781, and gate, task_20261008_081916_164526314061,
+reproduced the expected initialization hazard. The uncached route-plan tensor
+was allocated with `torch::empty`, so a nonzero garbage count could be rejected
+before the lazy builder ran. The retained correction treats a zero digest as
+the sole "not built" sentinel, skips count validation in that state, and
+allocates the small route-plan artifact with `torch::zeros`. Build task
+task_20261008_082440_168118231872 produced extension SHA-256
+cb3c6bc188f00d3cf69eb31f7ff01d18d28dafd2592ac97a5ef0ee8bc099a43e.
+
+The corrected binary has not completed the four-rank gate yet. Task
+task_20261008_103823_142641017894 stopped at the standalone topk-grouping probe
+with exit 139; rerunning that one-card probe as task
+task_20261008_105106_6718223360 passed, so the crash was treated as transient
+host/device instability rather than a route-plan failure. Gate task
+task_20261008_105304_9824125158 was then queued, but the host became
+SSH-unreachable before its result could be observed. Local route-plan and
+Python API tests passed. Re-run the four-rank gate on this exact build when the
+environment is healthy; do not claim the Normal/Expanded Dispatch recovery or
+the preserved Cached Dispatch gain until that gate reports metrics.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all
