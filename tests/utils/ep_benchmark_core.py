@@ -83,7 +83,8 @@ def build_dispatch_arguments(
     expanded = {
         **normal,
         "do_expand": True,
-        "use_tma_aligned_col_major_sf": case.use_fp8_dispatch,
+        "use_tma_aligned_col_major_sf": False,
+        "do_zero_padding": True,
     }
     return DispatchArguments(
         normal=normal,

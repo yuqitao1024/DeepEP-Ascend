@@ -1179,12 +1179,12 @@ class AscendRuntime:
                     quantization_input, (0, padded_hidden - spec.hidden))
             grouped = quantization_input.reshape(
                 rank_workload.num_tokens, -1, scale_group_elements)
-            scales = grouped.abs().amax(dim=2).clamp(min=1e-4) / 448.0
-            payload = (grouped / scales.unsqueeze(2)).to(
+            scale_values = grouped.abs().amax(dim=2).clamp(min=1e-4) / 448.0
+            payload = (grouped / scale_values.unsqueeze(2)).to(
                 self.torch.float8_e4m3fn).reshape(
                     rank_workload.num_tokens, padded_hidden
                 ).narrow(1, 0, spec.hidden).contiguous()
-            x = (payload, scales.contiguous())
+            x = (payload, scale_values.contiguous())
         topk_idx = self.torch.tensor(
             rank_workload.topk_idx,
             dtype=self.torch.int64,
@@ -1656,9 +1656,10 @@ class AscendRuntime:
                 int((recv_topk_idx[:num_recv_tokens] != -1).sum().item()),
                 count_unique_destinations(routes),
             )
+        # Official URMA bandwidth counts the BF16 combine payload only. Top-k
+        # weights participate in the protocol but are excluded from the reported
+        # bytes, matching tests/ep/test_ep.py in the official repository.
         combine_row_bytes = spec.hidden * 2
-        if recv_weights is not None:
-            combine_row_bytes += recv_weights.shape[1] * recv_weights.element_size()
         bias_bytes = 0
         if bias is not None:
             bias_tensors = bias if isinstance(bias, tuple) else (bias,)

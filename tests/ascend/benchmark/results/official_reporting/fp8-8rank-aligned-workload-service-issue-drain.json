@@ -1,0 +1,107 @@
+{
+  "alignment_scope": "reporting-only",
+  "case_id": "ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0",
+  "comparability_caveats": {
+    "defer_epilogue": "Current implementation lacks the official defer_epilogue API; epilogue work cannot be split into the official separate kernels.",
+    "fp8_scale_factor_layout": "The benchmark now selects row-major scale factors. The ABI still accepts float32 scale packs, while the official workload uses an int16 view; both transfer 224 scale bytes per token for hidden=7168.",
+    "kernel_boundary": "Current dispatch_kernel/combine_kernel cover a wider boundary than official dispatch_impl/combine_impl. They are raw msprof diagnostics only; the archived comparison uses stage_service_issue_drain.",
+    "package_version": "Ignored per comparison policy; CANN/Torch package versions are not treated as implementation differences.",
+    "set_barrier_in_prologue": "Current implementation lacks the official deep_ep._C.set_barrier_in_prologue API; the external barrier could not be moved into the communication kernel prologue.",
+    "stage_clock_calibration": "Stage JSON has cycle counters but no explicit frequency. Seconds are calibrated as device_timeline_cycles.envelope_cycles divided by device_seconds.mean; this is an approximation, not an independent hardware timer measurement.",
+    "stage_profile_sample_count": "Stage profile has one aggregated observation, unlike msprof's 50 sampled iterations; its min/mean/max represent rank/mapping variation, not iteration variance."
+  },
+  "environment": {
+    "cann": "/usr/local/Ascend/cann-9.3.0",
+    "code": "known-good NPU8P validation copy from commit 3497395 with the remote-only 32MiB workspace alignment patch",
+    "devices": "0,1,2,3,4,5,6,7",
+    "host": "direct NPU8P",
+    "msprof_task": "task_20261009_211108_88754524853",
+    "python": "/data/disk2/pyptouser/yuqitao/deepep-venv-py311/bin/python",
+    "stage_task": "task_20261009_211205_93635418509"
+  },
+  "notes": [
+    "Bandwidth uses the official per-rank received-token byte formula.",
+    "stage_service_issue_drain maps service_submit + cq_wait and is the preferred proxy for official URMA issue-and-drain.",
+    "stage_network maps publication + service_submit + cq_wait + barrier_wait.",
+    "stage_producer_plus_network is an upper-bound communication window."
+  ],
+  "operations": [
+    {
+      "bandwidth_mappings": {
+        "stage_service_issue_drain": {
+          "gbps": 274.4893358877489,
+          "seconds": 0.0019774148210332187
+        }
+      },
+      "bytes_per_rank": 542779281,
+      "current_operation": "expanded_dispatch",
+      "official_operation": "dispatch",
+      "official_reference_gbps": {
+        "maximum": 375.0,
+        "mean": 374.0,
+        "minimum": 373.0
+      },
+      "stage_phase_cycles": {
+        "cq_wait": 1413138,
+        "service_submit": 533280
+      }
+    },
+    {
+      "bandwidth_mappings": {
+        "stage_service_issue_drain": {
+          "gbps": 285.8247455249094,
+          "seconds": 0.0036473697967804052
+        }
+      },
+      "bytes_per_rank": 1042508544,
+      "current_operation": "reduced_combine",
+      "official_operation": "combine",
+      "official_reference_gbps": {
+        "maximum": 347.0,
+        "mean": 346.0,
+        "minimum": 345.0
+      },
+      "stage_phase_cycles": {
+        "cq_wait": 2763590,
+        "service_submit": 464761
+      }
+    }
+  ],
+  "schema_version": 1,
+  "source_files": {
+    "msprof": {
+      "path": "results/official-msprof-aligned-workload/fp8-8rank-transport-service.json",
+      "sha256": "e43bfb0cb771bd34f3e3b22948ce5518874e0c6eb9fbf80aef32cb9fd61e73b9"
+    },
+    "stage_profile": {
+      "path": "results/official-msprof-aligned-workload/fp8-8rank-stage-profile.json",
+      "sha256": "05348add16476ead94606b2daa85d333af066a48d0dc77ee5b0f451f98ee1142"
+    }
+  },
+  "timing_protocol": {
+    "bandwidth_bytes": "per-rank scaleup logical bytes",
+    "barrier": "ElasticBuffer.barrier",
+    "barrier_location": "external-before-operation",
+    "cold_l2_epilogue_zero": "1<<26 int32 elements after communication launch",
+    "device_busy_before_barrier": true,
+    "flush_l2": true,
+    "internal_barrier_prologue_toggle": false,
+    "iterations": 50,
+    "profiler": "official bench_msprof semantics",
+    "reason": "current ElasticBuffer lacks official set_barrier_in_prologue API",
+    "timer": "torch_npu_profiler_ffts",
+    "timing": "transport service kernel; excludes outer producer and epilogue",
+    "warmups": 10
+  },
+  "workload": {
+    "hidden": 7168,
+    "masked_ratio": 0.0,
+    "num_experts": 256,
+    "num_tokens": 16384,
+    "num_topk": 6,
+    "precise_unbalanced_ratio": false,
+    "seed": 0,
+    "unbalanced_ratio": 1.0,
+    "world_size": 8
+  }
+}

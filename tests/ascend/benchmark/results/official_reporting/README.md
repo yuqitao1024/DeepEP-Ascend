@@ -14,6 +14,9 @@ output and the 2026-10-09 NPU8P smoke validation output.
   profile with per-block raw counters removed.
 - `fp8-8rank-formal-service-issue-drain.json` and `.md`: the corrected
   formal report generated from the same msprof and stage-profile runs.
+- `fp8-8rank-aligned-workload-service-issue-drain.json` and `.md`: the
+  follow-up run with official expanded-dispatch zero padding, row-major
+  scale factors, and the official combine BF16-only byte formula.
 - `fp8-8rank-smoke-summary.json`: a compact per-rank summary of the NPU8P
   smoke validation.
 

@@ -15,6 +15,27 @@
 | [`results/official_reporting/fp8-8rank-formal-summary.json`](results/official_reporting/fp8-8rank-formal-summary.json) | 2026-10-09 修正口径后的 NPU8P 正式结果摘要。 |
 | [`results/official_reporting/fp8-8rank-formal-service-issue-drain.json`](results/official_reporting/fp8-8rank-formal-service-issue-drain.json) | 2026-10-09 正式对齐 JSON。 |
 | [`results/official_reporting/fp8-8rank-formal-service-issue-drain.md`](results/official_reporting/fp8-8rank-formal-service-issue-drain.md) | 2026-10-09 正式对齐报告。 |
+| [`results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.json`](results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.json) | 2026-10-09 负载/字节口径对齐后的正式结果摘要。 |
+| [`results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.md`](results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.md) | 2026-10-09 负载/字节口径对齐后的可读报告。 |
+
+## 负载与字节口径对齐后的复测
+
+2026-10-09 晚间按官方 `tests/ep/test_ep.py` 的负载语义补齐三项测试层差异后重新采集：
+
+- expanded dispatch 开启 `do_zero_padding=True`；
+- expanded dispatch 使用 row-major scale factor（`use_tma_aligned_col_major_sf=False`）；
+- combine 的 URMA 字节只计 BF16 hidden payload，不计 top-k weights。
+
+本轮仍在直连 NPU8P 设备 0–7，CANN /usr/local/Ascend/cann-9.3.0。msprof task 为 task_20261009_211108_88754524853，stage task 为 task_20261009_211205_93635418509，均为 10 warmup、50 sample 且 exit=0。
+
+| 操作 | service_submit + cq_wait | 折算带宽 | 官方均值 | 相对值 |
+|---|---:|---:|---:|---:|
+| dispatch | 1977.41µs | 274.49 GB/s | 374 GB/s | 0.73x |
+| combine | 3647.37µs | 285.82 GB/s | 346 GB/s | 0.83x |
+
+与上一轮相比，dispatch 从 263.52 GB/s 提高到 274.49 GB/s；combine 的结果同时受时间变化与字节口径修正影响，从 291.07 GB/s 变为 285.82 GB/s。本轮两个结果都低于 EP8 物理带宽上限，也低于官方参考值。
+
+完整结果摘要见 tests/ascend/benchmark/results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.json 与同名 Markdown。
 
 ## 使用方法
 
@@ -142,6 +163,8 @@ dispatch 的每 token 总逻辑字节数为 7464：
 - 24 字节 top-k weight。
 
 因此，官方 pack 为 2 字节、当前 pack 为 4 字节的差异，主要是 API/layout 兼容性问题，不是这个 workload 上的带宽差异来源。
+
+本轮 benchmark 已把 scale factor 的 layout 对齐为 row-major，但未把 host ABI 从 float32 改成官方 int16 视图；这是因为当前实现只接受 float32/int32 scale pack，直接传 int16 会在 preflight 报 invalid_sf_tensor。对该 workload 来说，两种 ABI 每 token 都是 224 字节，带宽口径一致。
 
 ## NPU8P 冒烟验证
 
