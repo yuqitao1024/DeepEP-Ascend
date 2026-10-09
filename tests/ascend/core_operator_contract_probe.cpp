@@ -519,8 +519,8 @@ int main() {
         select_dispatch_parallel_prefix_config(
             "1", true, false, true, true, false, false,
             &parallel_prefix_contract) !=
-                DispatchParallelPrefixConfigStatus::kDisabled ||
-        parallel_prefix_contract.enabled ||
+                DispatchParallelPrefixConfigStatus::kEnabled ||
+        !parallel_prefix_contract.enabled ||
         select_dispatch_parallel_prefix_config(
             nullptr, false, false, true, false, false, false,
             &parallel_prefix_contract) !=
@@ -652,9 +652,6 @@ int main() {
                 &parallel_prefix_config),
             select_dispatch_parallel_prefix_config(
                 "1", true, false, false, false, false, false,
-                &parallel_prefix_config),
-            select_dispatch_parallel_prefix_config(
-                "1", true, false, true, true, false, false,
                 &parallel_prefix_config),
             select_dispatch_parallel_prefix_config(
                 "1", true, false, true, false, true, false,

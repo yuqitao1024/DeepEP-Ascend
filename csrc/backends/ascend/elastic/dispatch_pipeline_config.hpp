@@ -27,8 +27,9 @@ select_dispatch_parallel_prefix_config(
     if (output == nullptr)
         return DispatchParallelPrefixConfigStatus::kInvalid;
     *output = {};
+    (void)expanded;
     const bool eligible = device_prefix_enabled && !cached_mode && cpu_sync &&
-        !expanded && !hybrid_mode && !stream_mode;
+        !hybrid_mode && !stream_mode;
     if (value == nullptr) {
         if (eligible)
             output->enabled = true;

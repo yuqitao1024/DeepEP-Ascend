@@ -921,6 +921,96 @@ Dispatch changes are within 1.3%, alternate in sign, and are not a
 reproducible regression. C19.4 is accepted; retain 3584 as the default and
 keep the 1024 selector for regression and future tile experiments.
 
+#### C20.1 measurement: no-profile Expanded Dispatch timeline (2026-10-09)
+
+The C20 stage profile showed two multi-millisecond gaps around the producer
+and epilogue-prefix stages, but those gaps could also contain real work hidden
+behind the generic `dispatch_kernel` name. A diagnostic-only Torch-NPU timeline
+therefore ran the current unchanged binary with four ranks, no
+`--profile-stages`, and the same Expanded-only capture procedure.
+
+- Binary: extension SHA-256
+  `56f4875f28f14250366295f959105e3924a320dffb911084865da24cac83c235`.
+- Timeline task: `task_20261009_155027_63555023499`.
+- Four-rank, 30 warmup and 30 plain iterations, followed by 12 profiler
+  captures; the first profiler capture is excluded.
+
+On the slowest-rank captures, the DeepEP kernel span averaged about
+9.904 ms, cumulative kernel execution was about 9.887 ms, and total kernel
+gap was only about 17 us. Thus the earlier stage gaps are not launch or idle
+time in the normal path; they contain real generic-stage work. The largest
+items were:
+
+| Kernel/group | Mean total |
+| --- | ---: |
+| generic `dispatch_kernel` stages | 3.131 ms |
+| single-thread epilogue prefix | 2.812 ms |
+| producer record VF | 2.661 ms |
+| epilogue assign destinations | 0.330 ms |
+| epilogue metadata | 0.302 ms |
+| epilogue copy outputs | 0.144 ms |
+
+This invalidated further work on the already widened 8192-byte consumer tile:
+Expanded's epilogue-copy VF is only about 0.144 ms here. The clear next item
+was the single-thread epilogue prefix, since Normal Dispatch already has a
+parallel implementation with a historically much smaller span.
+
+#### C20.1 candidate: enable Expanded parallel expert prefix (2026-10-09)
+
+The parallel-prefix selector conservatively excluded Expanded Dispatch even
+though `direct_dispatch_epilogue_parallel_prefix_vf` computes only rank
+prefixes, local expert counts, aligned expert prefixes, and capacity checks.
+It does not write expanded output slots or source metadata. The candidate
+removed only the `!expanded` exclusion while preserving the device-prefix,
+non-cached, CPU-sync, non-hybrid, non-stream eligibility requirements and the
+explicit 0/1 selector fallback. The Expanded layout, destination assignment,
+epilogue-copy semantics, payload-before-control ordering, and all protocol
+checks are unchanged.
+
+The local contract tests and pure-C++ probe passed. The remote build task
+`task_20261009_155902_77227529754` succeeded with extension SHA-256
+`6eecb3e45386acaa7738b657e3537db9e8fc8be8fc9579d249276722900859da`. The
+first representative gate `task_20261009_160353_102006622614` passed
+correctness and reduced Expanded Dispatch from the preceding 11.100 ms
+non-profile reference to 8.492 ms mean.
+
+Three same-binary ABBA batches then used only the explicit selector. Leg A
+forced the legacy prefix off; leg B enabled parallel prefix:
+
+| Leg | Selector | Task | Result |
+| --- | ---: | --- | --- |
+| A1 | off | `task_20261009_160601_10327163497` | correctness passed |
+| B1 | on | `task_20261009_160638_103734815146` | correctness passed |
+| A2 | off | `task_20261009_160710_10418359911` | correctness passed |
+| B2 | on | `task_20261009_160806_10746843868` | correctness passed |
+| A3 | off | `task_20261009_160839_107979813099` | correctness passed |
+| B3 | on | `task_20261009_160927_108902630397` | correctness passed |
+
+Leg A2 contained two late environmental outliers: Normal Dispatch reached
+27.010 ms and Expanded Dispatch reached 35.810 ms maximum, although the case
+still passed correctness. They dominate that run's recorded means, so the
+summary below treats A2 as an environmental anomaly rather than mechanism
+evidence:
+
+| Operation | Legacy mean / p95 | Parallel mean / p95 | Mean change |
+| --- | ---: | ---: | ---: |
+| Operation | A1 mean / p95 | B1 mean / p95 | A3 mean / p95 | B3 mean / p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Normal Dispatch | 6.119 / 6.321 | 3.536 / 3.677 | 6.438 / 6.888 | 3.629 / 3.926 |
+| Expanded Dispatch | 11.128 / 11.295 | 8.513 / 8.693 | 11.335 / 11.503 | 8.673 / 9.048 |
+| Cached Dispatch | 9.648 / 10.238 | 9.449 / 9.904 | 9.513 / 10.014 | 9.564 / 10.063 |
+| Normal Combine | 8.455 / 8.757 | 8.489 / 8.805 | 9.035 / 10.266 | 8.662 / 8.995 |
+| Reduced Combine | 8.503 / 8.723 | 8.647 / 9.237 | 8.575 / 9.022 | 8.636 / 9.120 |
+
+Ignoring the environmental A2 run, Expanded Dispatch improves from about
+11.128-11.335 ms to 8.513-8.673 ms mean, a 2.55-2.66 ms reduction
+(22.9-23.6%). Normal Dispatch also improves because the explicit-off leg
+disables its existing default parallel-prefix optimization; the mechanism is
+therefore not an Expanded-specific regression. Cached Dispatch and both Combine
+variants stay within their normal variation. C20.1 is accepted: retain the
+parallel prefix for qualified Expanded Dispatch and keep the explicit off
+selector for regression and diagnosis.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all

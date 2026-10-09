@@ -130,13 +130,15 @@ select_combine_producer_payload_tile_config(
     std::uint32_t tile_elements = kCombineProducerVectorTileElements;
     if (value == nullptr) {
         // Keep the widened tile as the default for direct Combine.
-    } else if (value[0] == '0' && value[1] == '\0' ||
-               value[0] == '1' && value[1] == '0' && value[2] == '2' &&
-               value[3] == '4' && value[4] == '\0') {
+    } else if ((value[0] == '0' && value[1] == '\0') ||
+               (value[0] == '1' && value[1] == '0' &&
+                value[2] == '2' && value[3] == '4' &&
+                value[4] == '\0')) {
         tile_elements = kCombineProducerLegacyVectorTileElements;
-    } else if (value[0] == '1' && value[1] == '\0' ||
-               value[0] == '3' && value[1] == '5' && value[2] == '8' &&
-               value[3] == '4' && value[4] == '\0') {
+    } else if ((value[0] == '1' && value[1] == '\0') ||
+               (value[0] == '3' && value[1] == '5' &&
+                value[2] == '8' && value[3] == '4' &&
+                value[4] == '\0')) {
         tile_elements = kCombineProducerVectorTileElements;
     } else {
         return CombineProducerPayloadTileConfigStatus::kInvalid;

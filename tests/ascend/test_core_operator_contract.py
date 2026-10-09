@@ -2066,6 +2066,18 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("std::uint32_t parallel_prefix = 0;", kernels)
         self.assertIn(
             '"DEEP_EP_ASCEND_DISPATCH_PARALLEL_PREFIX"', dispatch)
+        self.assertIn(
+            "(void)expanded;\n    const bool eligible = "
+            "device_prefix_enabled && !cached_mode && cpu_sync &&\n"
+            "        !hybrid_mode && !stream_mode;",
+            (ELASTIC / "dispatch_pipeline_config.hpp").read_text(),
+        )
+        self.assertIn(
+            "select_dispatch_parallel_prefix_config(\n"
+            '            "1", true, false, true, true, false, false,\n'
+            "            &parallel_prefix_contract) !=",
+            (ROOT / "tests/ascend/core_operator_contract_probe.cpp").read_text(),
+        )
         self.assertIn("select_dispatch_parallel_prefix_config(", dispatch)
         self.assertRegex(
             dispatch,
