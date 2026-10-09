@@ -752,6 +752,34 @@ Future Dispatch stage-gap work must first model those boundaries explicitly or
 build a new fused VF with its own correctness proof; simply reusing the Normal
 Dispatch selector is unsafe.
 
+#### C19.1 candidate: producer record rank-interval reuse (2026-10-09)
+
+The first C19 trailer-fusion candidate was rejected for correctness before
+timing. The retained follow-up is narrower: each producer-record thread keeps
+its last destination-rank interval in registers and reuses it while its next
+strided row remains in that interval. The lookup still falls back to the full
+monotonic prefix scan whenever the row crosses a rank boundary. Record layout,
+metadata reads, payload writes, trailer/header writes, weights, validation,
+transport order, and launch shape are unchanged.
+
+The candidate built as task task_20261009_115210_31564331254 with extension
+SHA-256 d9226e154816de1841bcc3257baffb90bc3c7f07bddccdb2acc99a3e469705a1.
+The four-rank gate task task_20261009_115240_316469029470 passed:
+
+| Operation | Before mean / p95 | Candidate mean / p95 | Change |
+| --- | ---: | ---: | ---: |
+| Normal Dispatch | 3.475 / 3.660 ms | 3.436 / 3.556 ms | -0.039 / -0.104 ms |
+| Expanded Dispatch | 11.166 / 11.284 ms | 11.093 / 11.238 ms | -0.073 / -0.045 ms |
+| Cached Dispatch | 9.651 / 10.388 ms | 9.390 / 10.184 ms | -0.261 / -0.203 ms |
+| Normal Combine | 9.911 / 10.198 ms | 10.004 / 10.391 ms | +0.092 / +0.193 ms |
+| Reduced Combine | 9.751 / 10.189 ms | 9.661 / 9.987 ms | -0.090 / -0.202 ms |
+
+Correctness passed, and Cached Dispatch and Reduced Combine improved, but
+Normal Combine regressed within the single-run noise band. The mechanism does
+not provide a clear target-operation gain; retain it only if follow-up ABBA
+shows stable no-regression and a reproducible Dispatch gain. Do not claim the
+single-run Cached/Reduced improvements as retained performance yet.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all

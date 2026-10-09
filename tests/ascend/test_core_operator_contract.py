@@ -2288,6 +2288,21 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "kCombineProducerVectorTileElements * sizeof(bfloat16_t)",
             producer_copy)
 
+    def test_combine_producer_record_reuses_rank_interval(self):
+        """Caches the destination rank interval across strided rows."""
+        source = (
+            ELASTIC / "direct_combine_producer_record.asc").read_text()
+        begin = source.index(
+            "__simt_vf__ __launch_bounds__(512) inline void "
+            "direct_combine_producer_record_vf")
+        end = source.index("\n}\n", begin)
+        function = source[begin:end]
+        self.assertIn("cached_rank_begin", function)
+        self.assertIn("cached_rank_end", function)
+        self.assertIn("row >= cached_rank_begin", function)
+        self.assertIn("row < cached_rank_end", function)
+        self.assertIn("begins[rank - 1]", function)
+
     def test_reduced_combine_producer_uses_opt_in_vector_reduction(self):
         """Catches rescanning top-k once per hidden element in reduced combine."""
         source = (ELASTIC / "combine.asc").read_text()
