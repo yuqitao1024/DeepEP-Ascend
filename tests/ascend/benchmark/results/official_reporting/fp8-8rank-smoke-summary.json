@@ -1,0 +1,577 @@
+{
+  "schema_version": 1,
+  "purpose": "NPU8P smoke validation of archived bench_ep_msprof.py",
+  "source_file_sha256": "9b5be60369d9fd7039c239a89cc8f1c7f9118de7ceca8dc4d18d8b1ce1c7224b",
+  "case_id": "ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0",
+  "cann_note": "CANN 9.3.0; official reference used CANN 9.2.0",
+  "workload": {
+    "hidden": 7168,
+    "masked_ratio": 0.0,
+    "num_experts": 256,
+    "num_tokens": 16384,
+    "num_topk": 6,
+    "precise_unbalanced_ratio": false,
+    "seed": 0,
+    "unbalanced_ratio": 1.0,
+    "world_size": 8
+  },
+  "timing_protocol": {
+    "bandwidth_bytes": "per-rank scaleup logical bytes",
+    "barrier": "ElasticBuffer.barrier",
+    "barrier_location": "external-before-operation",
+    "cold_l2_epilogue_zero": "1<<26 int32 elements after communication launch",
+    "device_busy_before_barrier": true,
+    "flush_l2": true,
+    "internal_barrier_prologue_toggle": false,
+    "iterations": 2,
+    "profiler": "official bench_msprof semantics",
+    "reason": "current ElasticBuffer lacks official set_barrier_in_prologue API",
+    "timer": "torch_npu_profiler_ffts",
+    "timing": "selected communication kernel only, excludes epilogue",
+    "warmups": 1
+  },
+  "device": {
+    "local_rank": 0,
+    "name": "Ascend950DT_9581",
+    "num_qps": 0,
+    "num_sms": 64
+  },
+  "ranks": [
+    {
+      "rank": 0,
+      "operations": [
+        {
+          "official_operation": "dispatch",
+          "current_operation": "expanded_dispatch",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic15dispatch_kernelILb0EEEvNS1_23DispatchKernelArgumentsENS1_10CoreTilingE",
+          "urma": {
+            "dur_us": 798.6716363636364,
+            "dur_ns": 798671.6363636364
+          },
+          "urma_bytes": 542416344,
+          "urma_gbps": 679.1481245905132,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+          "epilogue": {
+            "dur_us": 2.6625,
+            "dur_ns": 2662.5
+          },
+          "logical_bytes": {
+            "copy": 1291268704,
+            "scaleout": 0,
+            "scaleup": 542416344
+          },
+          "work_counts": {
+            "expanded_slots": 100017,
+            "hidden_elements": 117440512,
+            "input_rows": 16384,
+            "input_tokens": 16384,
+            "output_tokens": 100017,
+            "received_records": 72671,
+            "topk_elements": 98304,
+            "valid_routes": 98304
+          }
+        },
+        {
+          "official_operation": "combine",
+          "current_operation": "reduced_combine",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic14combine_kernelILb0EEEvPKtPKfPKiPKNS1_17HybridRouteRecordEmPKlS8_PhPtPfS4_S4_mmmmmjjjjjNS1_10CoreTilingENS1_18DirectCombineStageE",
+          "urma": {
+            "dur_us": 1064.4535909090907,
+            "dur_ns": 1064453.5909090908
+          },
+          "urma_bytes": 1043555560,
+          "urma_gbps": 980.3673630418749,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+          "epilogue": {
+            "dur_us": 2.3195,
+            "dur_ns": 2319.5
+          },
+          "logical_bytes": {
+            "reduction": 1281199200,
+            "scaleout": 0,
+            "scaleup": 1043555560
+          },
+          "work_counts": {
+            "expanded_slots": 100017,
+            "hidden_elements": 717488128,
+            "input_rows": 100096,
+            "input_tokens": 16384,
+            "output_tokens": 16384,
+            "received_records": 72671,
+            "topk_elements": 98304,
+            "valid_routes": 98304
+          }
+        }
+      ]
+    },
+    {
+      "rank": 1,
+      "operations": [
+        {
+          "official_operation": "dispatch",
+          "current_operation": "expanded_dispatch",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic15dispatch_kernelILb0EEEvNS1_23DispatchKernelArgumentsENS1_10CoreTilingE",
+          "urma": {
+            "dur_us": 800.9048181818182,
+            "dur_ns": 800904.8181818182
+          },
+          "urma_bytes": 544237560,
+          "urma_gbps": 679.5283879494021,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+          "epilogue": {
+            "dur_us": 2.904,
+            "dur_ns": 2904.0
+          },
+          "logical_bytes": {
+            "copy": 1300270632,
+            "scaleout": 0,
+            "scaleup": 544237560
+          },
+          "work_counts": {
+            "expanded_slots": 100978,
+            "hidden_elements": 117433344,
+            "input_rows": 16383,
+            "input_tokens": 16384,
+            "output_tokens": 100978,
+            "received_records": 72915,
+            "topk_elements": 98298,
+            "valid_routes": 98298
+          }
+        },
+        {
+          "official_operation": "combine",
+          "current_operation": "reduced_combine",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic14combine_kernelILb0EEEvPKtPKfPKiPKNS1_17HybridRouteRecordEmPKlS8_PhPtPfS4_S4_mmmmmjjjjjNS1_10CoreTilingENS1_18DirectCombineStageE",
+          "urma": {
+            "dur_us": 1061.7858636363635,
+            "dur_ns": 1061785.8636363635
+          },
+          "urma_bytes": 1047059400,
+          "urma_gbps": 986.130476830866,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+          "epilogue": {
+            "dur_us": 2.5565,
+            "dur_ns": 2556.5
+          },
+          "logical_bytes": {
+            "reduction": 1277609200,
+            "scaleout": 0,
+            "scaleup": 1047059400
+          },
+          "work_counts": {
+            "expanded_slots": 100978,
+            "hidden_elements": 723910656,
+            "input_rows": 100992,
+            "input_tokens": 16384,
+            "output_tokens": 16384,
+            "received_records": 72915,
+            "topk_elements": 98304,
+            "valid_routes": 98298
+          }
+        }
+      ]
+    },
+    {
+      "rank": 2,
+      "operations": [
+        {
+          "official_operation": "dispatch",
+          "current_operation": "expanded_dispatch",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic15dispatch_kernelILb0EEEvNS1_23DispatchKernelArgumentsENS1_10CoreTilingE",
+          "urma": {
+            "dur_us": 806.433590909091,
+            "dur_ns": 806433.5909090909
+          },
+          "urma_bytes": 542498448,
+          "urma_gbps": 672.7131088233101,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+          "epilogue": {
+            "dur_us": 2.9625,
+            "dur_ns": 2962.5
+          },
+          "logical_bytes": {
+            "copy": 1292194592,
+            "scaleout": 0,
+            "scaleup": 542498448
+          },
+          "work_counts": {
+            "expanded_slots": 100130,
+            "hidden_elements": 117426176,
+            "input_rows": 16382,
+            "input_tokens": 16384,
+            "output_tokens": 100130,
+            "received_records": 72682,
+            "topk_elements": 98292,
+            "valid_routes": 98292
+          }
+        },
+        {
+          "official_operation": "combine",
+          "current_operation": "reduced_combine",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic14combine_kernelILb0EEEvPKtPKfPKiPKNS1_17HybridRouteRecordEmPKlS8_PhPtPfS4_S4_mmmmmjjjjjNS1_10CoreTilingENS1_18DirectCombineStageE",
+          "urma": {
+            "dur_us": 1052.131,
+            "dur_ns": 1052131.0
+          },
+          "urma_bytes": 1043713520,
+          "urma_gbps": 991.9995894047414,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+          "epilogue": {
+            "dur_us": 2.7205,
+            "dur_ns": 2720.5
+          },
+          "logical_bytes": {
+            "reduction": 1279978600,
+            "scaleout": 0,
+            "scaleup": 1043713520
+          },
+          "work_counts": {
+            "expanded_slots": 100130,
+            "hidden_elements": 718405632,
+            "input_rows": 100224,
+            "input_tokens": 16384,
+            "output_tokens": 16384,
+            "received_records": 72682,
+            "topk_elements": 98304,
+            "valid_routes": 98292
+          }
+        }
+      ]
+    },
+    {
+      "rank": 3,
+      "operations": [
+        {
+          "official_operation": "dispatch",
+          "current_operation": "expanded_dispatch",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic15dispatch_kernelILb0EEEvNS1_23DispatchKernelArgumentsENS1_10CoreTilingE",
+          "urma": {
+            "dur_us": 795.5972727272728,
+            "dur_ns": 795597.2727272727
+          },
+          "urma_bytes": 542461128,
+          "urma_gbps": 681.8287927766104,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+          "epilogue": {
+            "dur_us": 2.9845,
+            "dur_ns": 2984.5
+          },
+          "logical_bytes": {
+            "copy": 1294321672,
+            "scaleout": 0,
+            "scaleup": 542461128
+          },
+          "work_counts": {
+            "expanded_slots": 100420,
+            "hidden_elements": 117419008,
+            "input_rows": 16381,
+            "input_tokens": 16384,
+            "output_tokens": 100420,
+            "received_records": 72677,
+            "topk_elements": 98286,
+            "valid_routes": 98286
+          }
+        },
+        {
+          "official_operation": "combine",
+          "current_operation": "reduced_combine",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic14combine_kernelILb0EEEvPKtPKfPKiPKNS1_17HybridRouteRecordEmPKlS8_PhPtPfS4_S4_mmmmmjjjjjNS1_10CoreTilingENS1_18DirectCombineStageE",
+          "urma": {
+            "dur_us": 1054.7212727272727,
+            "dur_ns": 1054721.2727272727
+          },
+          "urma_bytes": 1043641720,
+          "urma_gbps": 989.4952789767638,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+          "epilogue": {
+            "dur_us": 2.405,
+            "dur_ns": 2405.0
+          },
+          "logical_bytes": {
+            "reduction": 1277709720,
+            "scaleout": 0,
+            "scaleup": 1043641720
+          },
+          "work_counts": {
+            "expanded_slots": 100420,
+            "hidden_elements": 720240640,
+            "input_rows": 100480,
+            "input_tokens": 16384,
+            "output_tokens": 16384,
+            "received_records": 72677,
+            "topk_elements": 98304,
+            "valid_routes": 98286
+          }
+        }
+      ]
+    },
+    {
+      "rank": 4,
+      "operations": [
+        {
+          "official_operation": "dispatch",
+          "current_operation": "expanded_dispatch",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic15dispatch_kernelILb0EEEvNS1_23DispatchKernelArgumentsENS1_10CoreTilingE",
+          "urma": {
+            "dur_us": 810.0045454545455,
+            "dur_ns": 810004.5454545454
+          },
+          "urma_bytes": 541595304,
+          "urma_gbps": 668.6324256317305,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+          "epilogue": {
+            "dur_us": 2.724,
+            "dur_ns": 2724.0
+          },
+          "logical_bytes": {
+            "copy": 1294414992,
+            "scaleout": 0,
+            "scaleup": 541595304
+          },
+          "work_counts": {
+            "expanded_slots": 100549,
+            "hidden_elements": 117411840,
+            "input_rows": 16380,
+            "input_tokens": 16384,
+            "output_tokens": 100549,
+            "received_records": 72561,
+            "topk_elements": 98280,
+            "valid_routes": 98280
+          }
+        },
+        {
+          "official_operation": "combine",
+          "current_operation": "reduced_combine",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic14combine_kernelILb0EEEvPKtPKfPKiPKNS1_17HybridRouteRecordEmPKlS8_PhPtPfS4_S4_mmmmmjjjjjNS1_10CoreTilingENS1_18DirectCombineStageE",
+          "urma": {
+            "dur_us": 1061.766409090909,
+            "dur_ns": 1061766.4090909092
+          },
+          "urma_bytes": 1041975960,
+          "urma_gbps": 981.3608257697153,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+          "epilogue": {
+            "dur_us": 2.008,
+            "dur_ns": 2008.0
+          },
+          "logical_bytes": {
+            "reduction": 1280093480,
+            "scaleout": 0,
+            "scaleup": 1041975960
+          },
+          "work_counts": {
+            "expanded_slots": 100549,
+            "hidden_elements": 721158144,
+            "input_rows": 100608,
+            "input_tokens": 16384,
+            "output_tokens": 16384,
+            "received_records": 72561,
+            "topk_elements": 98304,
+            "valid_routes": 98280
+          }
+        }
+      ]
+    },
+    {
+      "rank": 5,
+      "operations": [
+        {
+          "official_operation": "dispatch",
+          "current_operation": "expanded_dispatch",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic15dispatch_kernelILb0EEEvNS1_23DispatchKernelArgumentsENS1_10CoreTilingE",
+          "urma": {
+            "dur_us": 801.511590909091,
+            "dur_ns": 801511.5909090909
+          },
+          "urma_bytes": 543379200,
+          "urma_gbps": 677.9430343405116,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+          "epilogue": {
+            "dur_us": 2.788,
+            "dur_ns": 2788.0
+          },
+          "logical_bytes": {
+            "copy": 1298214352,
+            "scaleout": 0,
+            "scaleup": 543379200
+          },
+          "work_counts": {
+            "expanded_slots": 100818,
+            "hidden_elements": 117404672,
+            "input_rows": 16379,
+            "input_tokens": 16384,
+            "output_tokens": 100818,
+            "received_records": 72800,
+            "topk_elements": 98274,
+            "valid_routes": 98274
+          }
+        },
+        {
+          "official_operation": "combine",
+          "current_operation": "reduced_combine",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic14combine_kernelILb0EEEvPKtPKfPKiPKNS1_17HybridRouteRecordEmPKlS8_PhPtPfS4_S4_mmmmmjjjjjNS1_10CoreTilingENS1_18DirectCombineStageE",
+          "urma": {
+            "dur_us": 1056.2422727272726,
+            "dur_ns": 1056242.2727272727
+          },
+          "urma_bytes": 1045408000,
+          "urma_gbps": 989.7426253360434,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+          "epilogue": {
+            "dur_us": 2.6255,
+            "dur_ns": 2625.5
+          },
+          "logical_bytes": {
+            "reduction": 1279274960,
+            "scaleout": 0,
+            "scaleup": 1045408000
+          },
+          "work_counts": {
+            "expanded_slots": 100818,
+            "hidden_elements": 722993152,
+            "input_rows": 100864,
+            "input_tokens": 16384,
+            "output_tokens": 16384,
+            "received_records": 72800,
+            "topk_elements": 98304,
+            "valid_routes": 98274
+          }
+        }
+      ]
+    },
+    {
+      "rank": 6,
+      "operations": [
+        {
+          "official_operation": "dispatch",
+          "current_operation": "expanded_dispatch",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic15dispatch_kernelILb0EEEvNS1_23DispatchKernelArgumentsENS1_10CoreTilingE",
+          "urma": {
+            "dur_us": 806.1107727272727,
+            "dur_ns": 806110.7727272727
+          },
+          "urma_bytes": 541931184,
+          "urma_gbps": 672.2788012949044,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+          "epilogue": {
+            "dur_us": 2.8105,
+            "dur_ns": 2810.5
+          },
+          "logical_bytes": {
+            "copy": 1291154664,
+            "scaleout": 0,
+            "scaleup": 541931184
+          },
+          "work_counts": {
+            "expanded_slots": 100067,
+            "hidden_elements": 117397504,
+            "input_rows": 16378,
+            "input_tokens": 16384,
+            "output_tokens": 100067,
+            "received_records": 72606,
+            "topk_elements": 98268,
+            "valid_routes": 98268
+          }
+        },
+        {
+          "official_operation": "combine",
+          "current_operation": "reduced_combine",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic14combine_kernelILb0EEEvPKtPKfPKiPKNS1_17HybridRouteRecordEmPKlS8_PhPtPfS4_S4_mmmmmjjjjjNS1_10CoreTilingENS1_18DirectCombineStageE",
+          "urma": {
+            "dur_us": 1060.740318181818,
+            "dur_ns": 1060740.3181818181
+          },
+          "urma_bytes": 1042622160,
+          "urma_gbps": 982.9193273120098,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+          "epilogue": {
+            "dur_us": 2.1895,
+            "dur_ns": 2189.5
+          },
+          "logical_bytes": {
+            "reduction": 1279619600,
+            "scaleout": 0,
+            "scaleup": 1042622160
+          },
+          "work_counts": {
+            "expanded_slots": 100067,
+            "hidden_elements": 717488128,
+            "input_rows": 100096,
+            "input_tokens": 16384,
+            "output_tokens": 16384,
+            "received_records": 72606,
+            "topk_elements": 98304,
+            "valid_routes": 98268
+          }
+        }
+      ]
+    },
+    {
+      "rank": 7,
+      "operations": [
+        {
+          "official_operation": "dispatch",
+          "current_operation": "expanded_dispatch",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic15dispatch_kernelILb0EEEvNS1_23DispatchKernelArgumentsENS1_10CoreTilingE",
+          "urma": {
+            "dur_us": 805.5411363636364,
+            "dur_ns": 805541.1363636364
+          },
+          "urma_bytes": 543715080,
+          "urma_gbps": 674.9687327632103,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+          "epilogue": {
+            "dur_us": 2.653,
+            "dur_ns": 2653.0
+          },
+          "logical_bytes": {
+            "copy": 1294939096,
+            "scaleout": 0,
+            "scaleup": 543715080
+          },
+          "work_counts": {
+            "expanded_slots": 100334,
+            "hidden_elements": 117390336,
+            "input_rows": 16377,
+            "input_tokens": 16384,
+            "output_tokens": 100334,
+            "received_records": 72845,
+            "topk_elements": 98262,
+            "valid_routes": 98262
+          }
+        },
+        {
+          "official_operation": "combine",
+          "current_operation": "reduced_combine",
+          "urma_kernel": "_ZN7deep_ep6ascend7elastic14combine_kernelILb0EEEvPKtPKfPKiPKNS1_17HybridRouteRecordEmPKlS8_PhPtPfS4_S4_mmmmmjjjjjNS1_10CoreTilingENS1_18DirectCombineStageE",
+          "urma": {
+            "dur_us": 1060.8879545454545,
+            "dur_ns": 1060887.9545454546
+          },
+          "urma_bytes": 1046054200,
+          "urma_gbps": 986.0176048922997,
+          "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+          "epilogue": {
+            "dur_us": 2.446,
+            "dur_ns": 2446.0
+          },
+          "logical_bytes": {
+            "reduction": 1280337600,
+            "scaleout": 0,
+            "scaleup": 1046054200
+          },
+          "work_counts": {
+            "expanded_slots": 100334,
+            "hidden_elements": 719323136,
+            "input_rows": 100352,
+            "input_tokens": 16384,
+            "output_tokens": 16384,
+            "received_records": 72845,
+            "topk_elements": 98304,
+            "valid_routes": 98262
+          }
+        }
+      ]
+    }
+  ]
+}

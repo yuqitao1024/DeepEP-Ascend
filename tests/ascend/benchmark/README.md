@@ -10,6 +10,35 @@ byte formulas.
 The deterministic case enumeration is defined in
 `tests/utils/ep_benchmark_manifest.py`.
 
+## Official msprof reporting
+
+`bench_ep_msprof.py` measures a selected EP case with the official DeepSeek
+`bench_msprof` protocol: 8GB L2 flush, device-busy matmul, cross-rank barrier,
+256MB dirty-buffer zeroing after communication launch, FFTS kernel timing, and
+per-rank scaleup logical bytes. Use the same 8-rank FP8 case as the archived
+result with:
+
+```bash
+torchrun --standalone --nproc-per-node=8 \
+  tests/ascend/benchmark/bench_ep_msprof.py \
+  --case ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0 \
+  --num-tokens 16384 --hidden 7168 --num-topk 6 --num-experts 256 \
+  --warmups 10 --iterations 50 --skip-check \
+  --output results/official-msprof/fp8-8rank.json
+```
+
+`align_official_reporting.py` combines that output with a stage-profile JSON
+and produces the official-reporting comparison tables. The methodology,
+archived result, and NPU8P smoke validation are documented in
+`docs/ascend-design/official-reporting-alignment-zh.md`.
+
+The current msprof script times the transport service kernels
+(`direct_dispatch_producer_release_kernel` and
+`direct_combine_producer_release_kernel`), not the outer
+`dispatch_kernel` / `combine_kernel`. For the staged-transport report,
+`stage_service_issue_drain` (`service_submit + cq_wait`) is the preferred
+official-semantic proxy.
+
 ## Ascend data-block profiles
 
 Ascend direct EP resolves the device's AI Vector data-block count at runtime
