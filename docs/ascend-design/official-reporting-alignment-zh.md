@@ -71,6 +71,7 @@ Netlayer0 的单链物理带宽上限约 50GB/s，不能把 675 GB/s 或 854 GB/
 - stage 侧以 `service_submit + cq_wait` 作为官方 URMA issue-and-drain 语义的代理；
 `stage_network` 在该结果中为 `publication + service_submit + cq_wait + barrier_wait`，比 issue-and-drain 更宽，不能作为首选对标口径；
 consumer/epilogue 不属于官方 URMA kernel 计时。
+stage 聚合对每个 rank 的各 phase 取最大值，因此它是跨 rank 的墙钟近似，不是把所有 block 的 cycles 相加；用 `service_submit + cq_wait` 对齐 URMA issue-and-drain 时，仍要注意它是 staged transport 的服务边界代理，不等于官方直驱 kernel 的逐指令边界。
 
 当前遗留限制是：历史 50-sample msprof 原始 JSON 已丢失，无法重新提取 service kernel 的 50-sample 统计；归档的 msprof 数值仍保留当时外层 kernel 的结果，只作为错误口径的历史证据。下一次 NPU8P 正式运行应使用修正后的脚本并保留原始输出。
 
