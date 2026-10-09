@@ -733,6 +733,25 @@ task_20261009_095552_205494510247 passed all 14 cases. This prerequisite is
 accepted because it applies an already proven host mechanism to the four
 remaining operations without weakening any handle proof.
 
+#### C18 rejected probe: extend compact dispatch boundaries (2026-10-09)
+
+The retained explicit `DISPATCH_COMPACT_STAGE_BOUNDARIES` selector currently
+admits only Normal Dispatch. Two bounded probes tried to admit Cached and
+Expanded Dispatch while preserving the VF sequence and stream-order
+dependencies.
+
+The Cached expansion passed compilation but failed the four-rank correctness
+preflight: every rank reported mismatched cached output payloads. The Expanded
+expansion then failed with `invalid_protocol` during cached-expanded
+preparation on every rank. Both failures are deterministic mode-specific
+protocol violations, not benchmark noise.
+
+Result: rejected. The producer-record and epilogue-metadata launch boundaries
+carry mode-specific control semantics that Normal Dispatch does not exercise.
+Future Dispatch stage-gap work must first model those boundaries explicitly or
+build a new fused VF with its own correctness proof; simply reusing the Normal
+Dispatch selector is unsafe.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all
