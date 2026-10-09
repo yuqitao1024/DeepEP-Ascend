@@ -11,11 +11,11 @@ struct CombineVfScalars {
     std::uint32_t local_copy_datacopy;
     std::uint32_t direct_local_placement;
     std::uint32_t vector_reduce_tile_elements;
+    std::uint32_t producer_payload_tile_elements;
     DirectCombineStage stage;
     bool profile_enabled;
     CoreTiling tiling;
 };
-constexpr std::uint32_t kCombineProducerVectorTileElements = 3584;
 constexpr std::uint32_t kCombineVectorReduceDefaultTileElements = 512;
 constexpr std::uint32_t kCombineDataCopyAlignmentElements = 16;
 constexpr std::uint32_t kCombineLocalCopyDefaultTileBytes = 32768;
@@ -125,6 +125,7 @@ DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t hybrid_combine_records_for_row(
 
 
 
+template <std::uint32_t TileElements>
 __aicore__ inline void direct_combine_producer_expanded_vector_reduce_impl(
     __gm__ const bfloat16_t* x,
     __gm__ const std::int32_t* source_metadata,
@@ -149,7 +150,7 @@ __aicore__ inline void direct_combine_producer_expanded_vector_reduce_impl(
         return;
     const auto payload_plan =
         aicore_combine_expanded_producer_payload_plan(
-            hidden_elements, kCombineProducerVectorTileElements,
+            hidden_elements, TileElements,
             kCombineDataCopyAlignmentElements, true);
     if (!payload_plan.valid || payload_plan.vector_elements == 0)
         return;
@@ -160,13 +161,13 @@ __aicore__ inline void direct_combine_producer_expanded_vector_reduce_impl(
     AscendC::TBuf<AscendC::QuePosition::VECCALC> scratch_buffer;
     (void)pipe.InitBuffer(
         input_queue, 2,
-        kCombineProducerVectorTileElements * sizeof(bfloat16_t));
+        TileElements * sizeof(bfloat16_t));
     (void)pipe.InitBuffer(
         output_queue, 1,
-        kCombineProducerVectorTileElements * sizeof(bfloat16_t));
+        TileElements * sizeof(bfloat16_t));
     (void)pipe.InitBuffer(
         scratch_buffer,
-        2 * kCombineProducerVectorTileElements * sizeof(float));
+        2 * TileElements * sizeof(float));
 
     AscendC::GlobalTensor<std::uint64_t> begins_global;
     AscendC::GlobalTensor<std::int32_t> slots_global;
@@ -208,7 +209,7 @@ __aicore__ inline void direct_combine_producer_expanded_vector_reduce_impl(
         static_cast<std::uint32_t>(AscendC::GetBlockNum());
     auto scratch = scratch_buffer.Get<float>();
     auto accumulation = scratch;
-    auto contribution = scratch[kCombineProducerVectorTileElements];
+    auto contribution = scratch[TileElements];
     for (std::uint32_t row = block_index; row < row_count;
          row += block_count) {
         const std::int32_t local_occurrence = slots_global.GetValue(row);
@@ -257,30 +258,30 @@ __aicore__ inline void direct_combine_producer_expanded_vector_reduce_impl(
 
         for (std::uint32_t hidden = 0;
              hidden < payload_plan.vector_elements;
-             hidden += kCombineProducerVectorTileElements) {
+             hidden += TileElements) {
             AscendC::Duplicate(
                 accumulation, 0.0F,
-                static_cast<std::int32_t>(kCombineProducerVectorTileElements));
+                static_cast<std::int32_t>(TileElements));
             for (std::uint32_t input_index = 0;
                  input_index < input_count; ++input_index) {
                 input_global.SetGlobalBuffer(
                     const_cast<__gm__ bfloat16_t*>(x) +
                         static_cast<std::uint64_t>(input_rows[input_index]) *
                             hidden_elements + hidden,
-                    kCombineProducerVectorTileElements);
+                    TileElements);
                 auto input_local = input_queue.AllocTensor<bfloat16_t>();
                 AscendC::DataCopy(
-                    input_local, input_global, kCombineProducerVectorTileElements);
+                    input_local, input_global, TileElements);
                 input_queue.EnQue(input_local);
                 input_local = input_queue.DeQue<bfloat16_t>();
                 AscendC::Cast(
                     contribution, input_local,
                     AscendC::RoundMode::CAST_NONE,
-                    kCombineProducerVectorTileElements);
+                    TileElements);
                 AscendC::Add(
                     accumulation, accumulation, contribution,
                     static_cast<std::int32_t>(
-                        kCombineProducerVectorTileElements));
+                        TileElements));
                 input_queue.FreeTensor(input_local);
             }
 
@@ -288,18 +289,18 @@ __aicore__ inline void direct_combine_producer_expanded_vector_reduce_impl(
             AscendC::Cast(
                 output_local, accumulation,
                 AscendC::RoundMode::CAST_RINT,
-                kCombineProducerVectorTileElements);
+                TileElements);
             output_queue.EnQue(output_local);
             output_local = output_queue.DeQue<bfloat16_t>();
-            output_global.SetGlobalBuffer(
-                record + hidden, kCombineProducerVectorTileElements);
+            output_global.SetGlobalBuffer(record + hidden, TileElements);
             AscendC::DataCopy(
-                output_global, output_local, kCombineProducerVectorTileElements);
+                output_global, output_local, TileElements);
             output_queue.FreeTensor(output_local);
         }
     }
 }
 
+template <std::uint32_t TileElements>
 __aicore__ inline void direct_combine_producer_vector_payload_impl(
     __gm__ const bfloat16_t* x,
     __gm__ const std::uint8_t* workspace,
@@ -321,7 +322,7 @@ __aicore__ inline void direct_combine_producer_vector_payload_impl(
     if (transport::aicore::load_device(status) != 0)
         return;
     const auto payload_plan = aicore_combine_producer_payload_copy_plan(
-        hidden_elements, kCombineProducerVectorTileElements,
+        hidden_elements, TileElements,
         kCombineDataCopyAlignmentElements, false);
     if (!payload_plan.valid || payload_plan.vector_elements == 0)
         return;
@@ -329,8 +330,7 @@ __aicore__ inline void direct_combine_producer_vector_payload_impl(
     AscendC::TPipe pipe;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> payload_buffer;
     (void)pipe.InitBuffer(
-        payload_buffer,
-        kCombineProducerVectorTileElements * sizeof(bfloat16_t));
+        payload_buffer, TileElements * sizeof(bfloat16_t));
     auto payload_local = payload_buffer.Get<bfloat16_t>();
     AscendC::GlobalTensor<std::uint64_t> begins_global;
     AscendC::GlobalTensor<std::int32_t> slots_global;
@@ -397,19 +397,16 @@ __aicore__ inline void direct_combine_producer_vector_payload_impl(
                 record_region_shard_bytes + output_slot * combine_record_bytes);
         for (std::uint64_t hidden = 0;
              hidden < payload_plan.vector_elements;
-             hidden += kCombineProducerVectorTileElements) {
+             hidden += TileElements) {
             input_global.SetGlobalBuffer(
                 const_cast<__gm__ bfloat16_t*>(x) +
                     static_cast<std::uint64_t>(row) * hidden_elements + hidden,
-                kCombineProducerVectorTileElements);
-            AscendC::DataCopy(
-                payload_local, input_global, kCombineProducerVectorTileElements);
+                TileElements);
+            AscendC::DataCopy(payload_local, input_global, TileElements);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
-            output_global.SetGlobalBuffer(
-                record + hidden, kCombineProducerVectorTileElements);
-            AscendC::DataCopy(
-                output_global, payload_local, kCombineProducerVectorTileElements);
+            output_global.SetGlobalBuffer(record + hidden, TileElements);
+            AscendC::DataCopy(output_global, payload_local, TileElements);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         }

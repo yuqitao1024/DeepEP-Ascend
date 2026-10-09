@@ -3582,6 +3582,19 @@ public:
             "DeepEP Ascend backend: "
             "DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE must be 0, 1, 512, "
             "or 1024");
+        elastic::CombineProducerPayloadTileConfig producer_payload_tile_config{};
+        const auto producer_payload_tile_config_status =
+            elastic::select_combine_producer_payload_tile_config(
+                std::getenv(
+                    "DEEP_EP_ASCEND_COMBINE_PRODUCER_PAYLOAD_TILE"),
+                !allow_hybrid_mode_, allow_hybrid_mode_,
+                &producer_payload_tile_config);
+        TORCH_CHECK(
+            producer_payload_tile_config_status !=
+                elastic::CombineProducerPayloadTileConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_COMBINE_PRODUCER_PAYLOAD_TILE must be "
+            "0, 1, 1024, or 3584");
         const auto capacity =
             static_cast<std::uint64_t>(num_max_tokens_per_rank);
         const auto maximum_source_rows =
@@ -3954,6 +3967,8 @@ public:
         arguments.vector_reduce_tile_elements =
             vector_reduce_tile_config.enabled ?
                 vector_reduce_tile_config.tile_elements : 0U;
+        arguments.producer_payload_tile_elements =
+            producer_payload_tile_config.tile_elements;
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_),
             resources_->workspace_bytes()};

@@ -6,6 +6,8 @@
 namespace deep_ep::ascend::elastic {
 
 inline constexpr std::uint64_t kCombineRecordsPerTile = 128;
+inline constexpr std::uint32_t kCombineProducerLegacyVectorTileElements = 1024;
+inline constexpr std::uint32_t kCombineProducerVectorTileElements = 3584;
 
 struct CombineProducerPayloadCopyPlan {
     bool valid = false;
@@ -106,6 +108,48 @@ struct CombineLocalCopyPlan {
     std::uint64_t vector_bytes = 0;
     std::uint64_t scalar_begin = 0;
 };
+
+enum class CombineProducerPayloadTileConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct CombineProducerPayloadTileConfig {
+    bool enabled = false;
+    std::uint32_t tile_elements = 0;
+};
+
+inline CombineProducerPayloadTileConfigStatus
+select_combine_producer_payload_tile_config(
+    const char* value, bool direct, bool hybrid,
+    CombineProducerPayloadTileConfig* output) noexcept {
+    if (output == nullptr)
+        return CombineProducerPayloadTileConfigStatus::kInvalid;
+    *output = {};
+    std::uint32_t tile_elements = kCombineProducerVectorTileElements;
+    if (value == nullptr) {
+        // Keep the widened tile as the default for direct Combine.
+    } else if (value[0] == '0' && value[1] == '\0' ||
+               value[0] == '1' && value[1] == '0' && value[2] == '2' &&
+               value[3] == '4' && value[4] == '\0') {
+        tile_elements = kCombineProducerLegacyVectorTileElements;
+    } else if (value[0] == '1' && value[1] == '\0' ||
+               value[0] == '3' && value[1] == '5' && value[2] == '8' &&
+               value[3] == '4' && value[4] == '\0') {
+        tile_elements = kCombineProducerVectorTileElements;
+    } else {
+        return CombineProducerPayloadTileConfigStatus::kInvalid;
+    }
+    if (!direct || hybrid) {
+        output->enabled = false;
+        output->tile_elements = kCombineProducerLegacyVectorTileElements;
+        return CombineProducerPayloadTileConfigStatus::kDisabled;
+    }
+    output->enabled = true;
+    output->tile_elements = tile_elements;
+    return CombineProducerPayloadTileConfigStatus::kEnabled;
+}
 
 inline CombineLocalCopyDataCopyConfigStatus
 select_combine_local_copy_datacopy_config(

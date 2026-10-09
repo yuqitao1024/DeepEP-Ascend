@@ -1351,6 +1351,56 @@ int main() {
             CombineLocalCopyDataCopyConfigStatus::kInvalid)
         return 89;
 
+    CombineProducerPayloadTileConfig producer_payload_tile_config{};
+    if (select_combine_producer_payload_tile_config(
+            nullptr, true, false,
+            &producer_payload_tile_config) !=
+            CombineProducerPayloadTileConfigStatus::kEnabled ||
+        !producer_payload_tile_config.enabled ||
+        producer_payload_tile_config.tile_elements != 3584 ||
+        select_combine_producer_payload_tile_config(
+            "1", true, false,
+            &producer_payload_tile_config) !=
+            CombineProducerPayloadTileConfigStatus::kEnabled ||
+        producer_payload_tile_config.tile_elements != 3584 ||
+        select_combine_producer_payload_tile_config(
+            "3584", true, false,
+            &producer_payload_tile_config) !=
+            CombineProducerPayloadTileConfigStatus::kEnabled ||
+        producer_payload_tile_config.tile_elements != 3584 ||
+        select_combine_producer_payload_tile_config(
+            "0", true, false,
+            &producer_payload_tile_config) !=
+            CombineProducerPayloadTileConfigStatus::kEnabled ||
+        producer_payload_tile_config.tile_elements != 1024 ||
+        select_combine_producer_payload_tile_config(
+            "1024", true, false,
+            &producer_payload_tile_config) !=
+            CombineProducerPayloadTileConfigStatus::kEnabled ||
+        producer_payload_tile_config.tile_elements != 1024 ||
+        select_combine_producer_payload_tile_config(
+            "2", true, false,
+            &producer_payload_tile_config) !=
+            CombineProducerPayloadTileConfigStatus::kInvalid ||
+        select_combine_producer_payload_tile_config(
+            "512", true, false,
+            &producer_payload_tile_config) !=
+            CombineProducerPayloadTileConfigStatus::kInvalid ||
+        select_combine_producer_payload_tile_config(
+            "1", false, false,
+            &producer_payload_tile_config) !=
+            CombineProducerPayloadTileConfigStatus::kDisabled ||
+        producer_payload_tile_config.tile_elements != 1024 ||
+        select_combine_producer_payload_tile_config(
+            "1", true, true,
+            &producer_payload_tile_config) !=
+            CombineProducerPayloadTileConfigStatus::kDisabled ||
+        producer_payload_tile_config.tile_elements != 1024 ||
+        select_combine_producer_payload_tile_config(
+            "1", true, false, nullptr) !=
+            CombineProducerPayloadTileConfigStatus::kInvalid)
+        return 90;
+
     CombineDirectLocalPlacementConfig direct_local_config{};
     if (select_combine_direct_local_placement_config(
             nullptr, true, false, &direct_local_config) !=

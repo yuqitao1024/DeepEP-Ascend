@@ -2262,7 +2262,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         kernel = source[source.index(
             "__global__ __vector__ void combine_kernel"):]
         vector_call = kernel.index(
-            "direct_combine_producer_vector_payload_impl(")
+            "direct_combine_producer_vector_payload_impl<")
         vector_caller = source[source.index(
             "inline int launch_combine_kernel("):]
         record_launcher = vector_caller.index(
@@ -2285,7 +2285,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn(
             "AscendC::TBuf<AscendC::QuePosition::VECCALC>", producer_copy)
         self.assertIn(
-            "kCombineProducerVectorTileElements * sizeof(bfloat16_t)",
+            "TileElements * sizeof(bfloat16_t)",
             producer_copy)
 
     def test_combine_producer_record_reuses_rank_interval(self):
@@ -2348,7 +2348,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         kernel = source[source.index(
             "__global__ __vector__ void combine_kernel"):]
         self.assertIn(
-            "direct_combine_producer_expanded_vector_reduce_impl(", kernel)
+            "direct_combine_producer_expanded_vector_reduce_impl<", kernel)
         self.assertIn("arguments.expanded_vector_reduce", kernel)
 
         signature = (
@@ -2580,21 +2580,27 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("combine_contributor_entry_offset", source)
 
     def test_direct_combine_producer_uses_2048_byte_vector_tiles(self):
-        """Keeps producer payload tiling independent from C6 reduction tiling."""
+        """Keeps producer payload tiling independent and statically sized."""
         source = (ELASTIC / "combine_device_common.hpp").read_text()
+        calls = (ELASTIC / "combine.asc").read_text()
+        parallel = (ELASTIC / "combine_parallel.hpp").read_text()
         self.assertIn(
-            "kCombineProducerVectorTileElements = 3584;", source)
+            "kCombineProducerVectorTileElements = 3584;", parallel)
         producer_begin = source.index(
             "__aicore__ inline void direct_combine_producer_vector_payload_impl")
         producer_end = source.index("\n}\n", producer_begin)
         producer = source[producer_begin:producer_end]
         for marker in (
-                "kCombineProducerVectorTileElements * sizeof(bfloat16_t)",
-                "hidden += kCombineProducerVectorTileElements",
-                "output_global, payload_local, kCombineProducerVectorTileElements"):
+                "TileElements * sizeof(bfloat16_t)",
+                "hidden += TileElements",
+                "output_global, payload_local, TileElements"):
             self.assertIn(marker, producer)
         self.assertNotIn(
             "payload_buffer, kCombineVectorTileElements", producer)
+        self.assertIn(
+            "direct_combine_producer_vector_payload_impl<"
+            "\n                    kCombineProducerVectorTileElements>(",
+            calls)
 
     def test_combine_vector_reduce_tile_selector_contract(self):
         """Catches a fixed 256-element C6 tile with no screening selector."""
@@ -2623,6 +2629,31 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "__global__ __vector__ void combine_kernel"):]
         self.assertIn("vector_reduce_tile_elements", kernel)
         self.assertIn("kCombineVectorReduceDefaultTileElements", source)
+
+    def test_combine_producer_payload_tile_selector_contract(self):
+        """Keeps C19.4 selectable without rebuilding the extension."""
+        source = (ELASTIC / "combine.asc").read_text()
+        header = (ELASTIC / "kernels.hpp").read_text()
+        host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        parallel = (ELASTIC / "combine_parallel.hpp").read_text()
+
+        self.assertIn("producer_payload_tile_elements", header)
+        self.assertIn(
+            '"DEEP_EP_ASCEND_COMBINE_PRODUCER_PAYLOAD_TILE"', host)
+        self.assertIn(
+            "select_combine_producer_payload_tile_config(", host)
+        self.assertIn("arguments.producer_payload_tile_elements", host)
+        self.assertIn(
+            "select_combine_producer_payload_tile_config(", parallel)
+        self.assertIn("kCombineProducerVectorTileElements", parallel)
+        self.assertIn("kCombineProducerLegacyVectorTileElements", parallel)
+        self.assertIn("producer_payload_tile_elements", source)
+        self.assertIn(
+            "direct_combine_producer_vector_payload_impl<",
+            source)
+        self.assertIn(
+            "direct_combine_producer_expanded_vector_reduce_impl<",
+            source)
 
     def test_direct_combine_common_shape_specialization_contract(self):
         """Catches losing the K=8/H=7168 AOT path or dynamic fallback."""

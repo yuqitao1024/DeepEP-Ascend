@@ -878,6 +878,49 @@ producer-record attribution, and require both Combine variants to improve
 without a reproducible Dispatch regression. No protocol or ordering change is
 part of this candidate.
 
+#### C19.4 acceptance: runtime tile selector and repeated same-binary A/B (2026-10-09)
+
+To separate the tile-size effect from build and environment variation, the
+producer payload tile was made selectable at runtime without changing the
+default. The selector accepts unset, 0/1024, and 1/3584; invalid values fail
+fast. Hybrid and non-direct paths conservatively retain the legacy 1024-element
+tile. The device implementations use static 1024/3584 template instantiations,
+so runtime selection happens at a bounded call site and the producer still
+keeps a compile-time tile size for AscendC pipe initialization. The default
+remains 3584, payload-before-control ordering and all protocol checks are
+unchanged, and Dispatch code is untouched.
+
+The local contract probe passed, the focused contract tests passed, and the
+remote default build succeeded as task
+task_20261009_144901_392377322739 with extension SHA-256
+56f4875f28f14250366295f959105e3924a320dffb911084865da24cac83c235. Three
+same-binary ABBA batches used only the environment selector:
+
+| Leg | Tile | Task | Result |
+| --- | ---: | --- | --- |
+| A1 | 1024 | task_20261009_145532_397174014768 | correctness passed |
+| B1 | 3584 | task_20261009_145605_397732528017 | correctness passed |
+| A2 | 1024 | task_20261009_145641_398378919599 | correctness passed |
+| B2 | 3584 | task_20261009_145714_398866014190 | correctness passed |
+| A3 | 1024 | task_20261009_145750_399322528472 | correctness passed |
+| B3 | 3584 | task_20261009_145824_399676127681 | correctness passed |
+
+Wall mean / p95 averages over the three legs per setting were:
+
+| Operation | 1024 mean / p95 | 3584 mean / p95 | Mean change |
+| --- | ---: | ---: | ---: |
+| Normal Dispatch | 3.534 / 3.799 ms | 3.518 / 3.697 ms | -0.46% |
+| Expanded Dispatch | 11.077 / 11.246 ms | 11.123 / 11.268 ms | +0.41% |
+| Cached Dispatch | 9.426 / 10.195 ms | 9.306 / 10.046 ms | -1.28% |
+| Normal Combine | 9.965 / 10.341 ms | 8.346 / 8.639 ms | -16.24% |
+| Reduced Combine | 9.656 / 10.078 ms | 8.511 / 8.943 ms | -11.86% |
+
+Both Combine variants improve reproducibly: Normal Combine saves about
+1.618 ms and Reduced Combine about 1.145 ms on mean wall time. The three
+Dispatch changes are within 1.3%, alternate in sign, and are not a
+reproducible regression. C19.4 is accepted; retain 3584 as the default and
+keep the 1024 selector for regression and future tile experiments.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all
