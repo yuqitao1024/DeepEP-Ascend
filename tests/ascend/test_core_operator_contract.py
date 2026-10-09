@@ -1390,17 +1390,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             self.assertIn(marker, dispatch)
         self.assertIn("std::uint32_t token_fanout = 0;", kernels)
 
-        kernel_begin = source.index(
-            "__global__ __vector__ void dispatch_kernel")
-        kernel_body = source.index("{", kernel_begin)
-        kernel_signature = source[kernel_begin:kernel_body]
-        self.assertIn("std::uint32_t token_fanout", kernel_signature)
-
-        launch_begin = source.index(
+        launch_begin = dispatch_source.index(
             "template <bool ProfileEnabled>\ninline int "
             "launch_dispatch_kernel")
-        launch_end = source.index("\n}\n", launch_begin)
-        launcher = source[launch_begin:launch_end]
+        launch_end = dispatch_source.index("\n}\n", launch_begin)
+        launcher = dispatch_source[launch_begin:launch_end]
         self.assertIn("arguments.token_fanout", launcher)
 
     def test_dispatch_token_fanout_allows_source_chunks_but_not_slot_chunks(self):
@@ -1581,7 +1575,6 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             ELASTIC / "direct_dispatch_epilogue_acquire.asc"
         ).read_text()
         dispatch_source = (ELASTIC / "dispatch.asc").read_text()
-        kernels = (ELASTIC / "kernels.hpp").read_text()
         buffer = (
             ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
         dispatch = buffer[

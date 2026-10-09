@@ -992,8 +992,6 @@ still passed correctness. They dominate that run's recorded means, so the
 summary below treats A2 as an environmental anomaly rather than mechanism
 evidence:
 
-| Operation | Legacy mean / p95 | Parallel mean / p95 | Mean change |
-| --- | ---: | ---: | ---: |
 | Operation | A1 mean / p95 | B1 mean / p95 | A3 mean / p95 | B3 mean / p95 |
 | --- | ---: | ---: | ---: | ---: |
 | Normal Dispatch | 6.119 / 6.321 | 3.536 / 3.677 | 6.438 / 6.888 | 3.629 / 3.926 |
@@ -1010,6 +1008,45 @@ therefore not an Expanded-specific regression. Cached Dispatch and both Combine
 variants stay within their normal variation. C20.1 is accepted: retain the
 parallel prefix for qualified Expanded Dispatch and keep the explicit off
 selector for regression and diagnosis.
+
+#### C20.2 rejected probe: Expanded token fanout (2026-10-09)
+
+The C20.1 timeline still showed the Expanded producer-record VF at about
+2.66 ms. A bounded candidate removed only the Expanded exclusion from
+`select_dispatch_token_fanout_config`. The correctness argument is that the
+fanout VF copies only the 7168-byte hidden row once per token and then stores
+it to every unique destination slot; the following producer-record VF still
+writes scale factors, top-k indices/weights, source metadata, and all expanded
+destination metadata. Slot, layout, transport order, and validation semantics
+are unchanged.
+
+The local contract tests and pure-C++ probe passed. Remote build task
+`task_20261009_162937_1241313412` succeeded with extension SHA-256
+`d6b4cabc8c090f5f7beccf07340af05874bd5cd60f642c3b790f247ee5a08b3a`. The
+first four-rank gate `task_20261009_163257_12776498524` passed correctness
+with Expanded Dispatch at 8.460 / 8.606 ms mean / p95, essentially the
+C20.1-retained level.
+
+Three same-binary ABBA batches then toggled only
+`DEEP_EP_ASCEND_DISPATCH_TOKEN_FANOUT` on devices 1-4:
+
+| Leg | Fanout | Task | Expanded mean / p95 |
+| --- | ---: | --- | ---: |
+| A1 | off | `task_20261009_163420_1291346310` | 8.769 / 9.204 ms |
+| B1 | on | `task_20261009_163455_129770722404` | 8.706 / 9.065 ms |
+| A2 | off | `task_20261009_163530_130423725166` | 8.683 / 8.899 ms |
+| B2 | on | `task_20261009_163634_13141527171` | 8.868 / 9.476 ms |
+| A3 | off | `task_20261009_163711_131952820101` | 8.738 / 9.073 ms |
+| B3 | on | `task_20261009_163750_1326690162` | 8.472 / 8.699 ms |
+
+The three-leg averages were 8.730 / 9.059 ms with fanout off and 8.682 /
+9.080 ms with fanout on, a mean change of only 0.048 ms with p95 slightly
+worse. Normal Dispatch improves in the B legs because the selector toggle also
+controls its retained fanout; that does not transfer to Expanded. Cached
+Dispatch and Combine moved within normal variation. The candidate is therefore
+rejected and the source change reverted. After C20.1, the remaining Expanded
+producer-record cost is metadata/record work rather than redundant hidden-row
+loads.
 
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
