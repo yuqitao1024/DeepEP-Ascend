@@ -2581,9 +2581,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
 
     def test_direct_combine_producer_uses_2048_byte_vector_tiles(self):
         """Keeps producer payload tiling independent from C6 reduction tiling."""
-        source = (ELASTIC / "combine.asc").read_text()
+        source = (ELASTIC / "combine_device_common.hpp").read_text()
         self.assertIn(
-            "kCombineProducerVectorTileElements = 1024;", source)
+            "kCombineProducerVectorTileElements = 3584;", source)
         producer_begin = source.index(
             "__aicore__ inline void direct_combine_producer_vector_payload_impl")
         producer_end = source.index("\n}\n", producer_begin)

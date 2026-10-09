@@ -808,6 +808,76 @@ The next release-path work item should be bounded payload/control overlap
 with a fresh per-peer arrival trace, not another flush-boundary or channel-
 count mutation.
 
+#### C19.3 measurement: Combine release phase attribution (2026-10-09)
+
+The Combine release path previously exposed service-level attribution but not
+the producer-VF phase intervals. A measurement-only build added the missing
+phase clocks without changing protocol order or default behavior:
+
+- Diagnostic build: task_20261009_133215_355431012693, extension SHA-256
+  0bf646229e96ee8f09ac52ba112400dfe71869a5802c90e2f00c43f987c2638d.
+- Four-rank profile: task_20261009_133240_355827516161.
+
+The representative Combine case passed correctness. The producer-VF phases were
+small:
+
+| Phase | Max span |
+| --- | ---: |
+| payload construct | 0.052 ms |
+| payload flush enqueue | 0.007 ms |
+| local control | 0.001 ms |
+| peer control | 0.076 ms |
+| barrier flush | 0.007 ms |
+
+The service attribution remained concentrated in payload completion:
+
+| Attribution | Max span |
+| --- | ---: |
+| payload command construction | 0.015 ms |
+| control command construction | 0.039 ms |
+| flush command service | 2.230 ms |
+| CQ drain | 2.211 ms |
+| send-path CQE poll | 2.208 ms |
+
+Therefore the 2.2 ms release cost is neither command construction nor control
+publication; it is the explicit payload flush waiting for CQEs. A control-WQE
+prebuild or simple control reorder cannot recover this time. The next Combine
+candidate must either reduce the payload completion wait itself or overlap it
+with independent work while preserving payload-before-control ordering,
+two-generation reuse, and generation/error checks.
+
+#### C19.4 candidate: full-record Combine producer tiles (2026-10-09)
+
+The C19.3 timeline still shows Combine producer record at about 2.29 ms,
+ahead of release and epilogue reduction. The retained producer payload path
+uses a 1024-element BF16 tile, issuing seven MTE2/MTE3 event pairs for the
+representative hidden=7168 body. A bounded tile-size candidate changes only
+that producer tile to 3584 elements (7168 BF16 elements / 7 KiB), so the
+aligned body completes in two event pairs. The 16-element alignment gate,
+scalar tail, record layout, weights/header writes, transport order, epilogue
+reduction, and all protocol checks are unchanged.
+
+The default non-diagnostic build succeeded as task
+task_20261009_135033_36272211562 with extension SHA-256
+19b8f4d963f882ef237548ee885ec1999673de5f653c6756d2f9a13a877a16a8. The
+four-rank representative gate task
+task_20261009_135217_363367516504 passed correctness:
+
+| Operation | C19.1 reference mean / p95 | 3584-element tile mean / p95 | Change |
+| --- | ---: | ---: | ---: |
+| Normal Dispatch | 3.436 / 3.556 ms | 3.511 / 3.896 ms | +0.075 / +0.340 ms |
+| Expanded Dispatch | 11.093 / 11.238 ms | 11.195 / 11.391 ms | +0.102 / +0.153 ms |
+| Cached Dispatch | 9.390 / 10.184 ms | 9.510 / 10.403 ms | +0.120 / +0.219 ms |
+| Normal Combine | 10.004 / 10.391 ms | 8.338 / 8.665 ms | -1.666 / -1.726 ms |
+| Reduced Combine | 9.661 / 9.987 ms | 8.497 / 8.854 ms | -1.164 / -1.133 ms |
+
+The target operation gains are large and directional, but this is a single
+same-binary run and all three Dispatch operations moved slightly worse. Do not
+retain it as final yet: run at least three same-binary ABBA batches, confirm
+producer-record attribution, and require both Combine variants to improve
+without a reproducible Dispatch regression. No protocol or ordering change is
+part of this candidate.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all

@@ -15,10 +15,7 @@ struct CombineVfScalars {
     bool profile_enabled;
     CoreTiling tiling;
 };
-// Producer payload is MTE-bound.  A 2 KiB tile reduces the per-record
-// MTE2/MTE3 event pairs for the common hidden=7168 case from fourteen to
-// seven while preserving the 16-element DataCopy alignment.
-constexpr std::uint32_t kCombineProducerVectorTileElements = 1024;
+constexpr std::uint32_t kCombineProducerVectorTileElements = 3584;
 constexpr std::uint32_t kCombineVectorReduceDefaultTileElements = 512;
 constexpr std::uint32_t kCombineDataCopyAlignmentElements = 16;
 constexpr std::uint32_t kCombineLocalCopyDefaultTileBytes = 32768;
