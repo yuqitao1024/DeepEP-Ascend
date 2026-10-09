@@ -1703,3 +1703,44 @@ hidden 128 的第 1/4 次在 benchmark 写出完整 JSON 并报告 1 case passed
 可以作为独立 correctness fix 保留；不声称 producer-side ordering 已被
 排除，后续如再次出现非零错误值或 index/metadata 异常，再按 producer
 visibility/ordering 分支继续定位。
+
+### 2026-10-09 C21.2 Combine per-peer payload release 撤回
+
+背景来自 C21.1 Combine timeline：payload release service/CQE wait 约
+2.24 ms。候选实现了一个新的 `kFlushPeer` transport command，并把 Direct
+Combine release 改成两段式流程：先为全部 peer append payload put，再逐个
+peer drain 并立刻发布 control。该实现保留了 payload-before-control 顺序，
+避免最初一阶段 per-peer flush 版本在第一个 loop 内等待 peer1 完成后才提交
+peer2 payload 的串行化问题。
+
+验证环境：
+
+- NPU8P，devices 0-7 中的 0-3，4 rank；
+- CANN/HCOMM 9.3.0；
+- candidate binary SHA256
+  `d824d29f9d1d60d02c843fe920f95f0c98f2b829f490967170b8d6e9ddc76b94`；
+- workload：8192 tokens、hidden 7168、top-k 8、256 experts；
+- `DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY=1`；
+- `DEEP_EP_ASCEND_COMBINE_PRODUCER_PAYLOAD_TILE=3584`；
+- runtime selector：`DEEP_EP_ASCEND_COMBINE_PEER_RELEASE=1/0`，同一 binary
+  做 ABBA。
+
+首轮 correctness/performance gate task：
+`task_20261009_181257_318990828512`。Normal Combine wall mean/p95 为
+8.535 / 8.907 ms，相较 C21.1 基线 8.138 / 8.558 ms 没有收益。
+
+3 组 ABBA task：
+
+| Group | On mean/p95 | Off mean/p95 | On - Off mean/p95 |
+| --- | ---: | ---: | ---: |
+| `task_20261009_182523_379831830846` / `task_20261009_182556_38073976327` | 8.441 / 8.693 ms | 8.411 / 8.850 ms | +0.030 / -0.157 ms |
+| `task_20261009_182708_382767421165` / `task_20261009_182631_381765527452` | 8.905 / 10.975 ms | 8.359 / 8.728 ms | +0.547 / +2.247 ms |
+| `task_20261009_182743_393989523266` / `task_20261009_182816_400142011643` | 8.455 / 8.990 ms | 8.430 / 10.883 ms | +0.025 / -1.893 ms |
+
+三组 mean 均为 on 更慢；平均 on 8.600 / 9.553 ms，off 8.400 / 9.487 ms，
+on 平均慢 0.200 ms，p95 差异受 run-to-run 长尾影响且方向不一致。
+
+结论：per-peer payload release 没有可复现收益，反而增加 command/service
+复杂度。C21.2 撤回，不进入主线；后续 Combine payload wait 优化不应重试
+逐 peer flush/提前 control 方向，除非先证明有新的 completion 语义或能与
+独立 device work overlap。
