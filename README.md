@@ -88,7 +88,7 @@ mean/p95, and bandwidth is the reported logical bandwidth.
 | 8 | Normal Combine | 8.290 / 8.779 ms | 1375.6 GB/s |
 | 8 | Reduced Combine | 8.343 / 8.815 ms | 1367.6 GB/s |
 
-These records were collected on Ascend 950PR with CANN/HCOMM 9.3.0 and the
+These records were collected on Ascend 950DT with CANN/HCOMM 9.3.0 and the
 retained default selectors. Detailed validation tasks, ABBA evidence, and the
 selector/build-macro inventory are maintained in
 [docs/ascend-design/four-operation-performance-parity-zh.md](docs/ascend-design/four-operation-performance-parity-zh.md)

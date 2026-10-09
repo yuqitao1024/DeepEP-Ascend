@@ -207,3 +207,21 @@ netlayer=0 不是把 layers[1] 改成 layers[0] 即可完成的适配。它至�
    后续失败应优先从共享 Jetty 并发模型分析。
 5. 完整 correctness 之前不跑性能结论：当前 --skip-check 用例失败，
    不能用该状态测试或解释性能数据。
+
+## 2026-10-09 全局 SQE 分配实验结论
+
+在 2 rank smoke case 中尝试给每个 AIV 分配共享 Jetty 上的独立物理 SQE 区间：
+host 侧 workspace 增加 `netlayer0_sqe_offsets[kNumMaxVecCores]`，每个 AIV
+发布自己的 `lsqe_counter`，再按 AIV index 做前缀和，作为 `psqe_counter` 的
+全局基址；AIV 0 汇总所有 AIV 的 SQE 数并 ring 一次 doorbell。
+
+该方案能编译，但首次运行出现双 rank CPU 100% 且长时间不返回，任务被手动
+终止。修正一个前缀和方向错误后重跑，kernel 立即触发 vector core exception
+341：VEC 访问 UB 越界。该结果说明共享 Jetty 下仅分配全局 SQE index 并不能
+自然兼容官方 dispatch 的多 AIV 写路径；official layout 或写队列代码还有对
+“每 AIV 独占 Jetty head”的隐含假设。实验改动已回退，仅保留此结论。
+
+新的优先级：先做一个 1 AIV/1 Jetty 的最小 dispatch 变体验证单 producer
+数据面；成功后再逐步增加 AIV。若多 AIV 共享 Jetty 继续触发 UB 越界或 CQE
+status 6，应停止在该模型上做 SQE 偏移实验，转向单 producer 聚合或减少
+AIV 并发度。

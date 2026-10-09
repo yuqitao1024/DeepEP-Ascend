@@ -57,9 +57,21 @@ DeepEP-Ascend 在 layer 1 用它做 peer buffer 地址发现和数据面访问�
 的对照结果。合理的性能结论必须等待 `benchmarks/netlayer_ab` 在同一硬件、
 同一 CANN、同一 payload/请求规模下完成 A/B 测试。
 
-## 3. 软件实现差异
+## 3. 两套软件实现的差异
 
-官方 DeepEP-Ascend 的 layer 1 初始化流程可以概括为：
+本节比较的是两类已经存在或已经验证的软件形态：
+
+1. **官方 DeepEP-Ascend netlayer1 实现**：EP kernel 直接拥有 Jetty/SQ，多个
+   AIV 同时生成并提交 WQE。
+2. **本仓库 netlayer0 通信实现**：业务 kernel 只生成 transport command，由
+   单个 transport service 统一解析 channel、提交 WQE 和 drain CQ。
+
+二者不是“同一个 kernel 换一个 layer 参数”的关系，而是 producer/consumer
+所有权模型完全不同。
+
+### 3.0 官方 DeepEP-Ascend netlayer1：EP kernel 直接提交
+
+官方实现的初始化流程可以概括为：
 
 1. `HcclRankGraphGetLayers` 后立即复制 `layers[1]`，避免库内缓冲被后续查询
    复用；
@@ -73,25 +85,27 @@ DeepEP-Ascend 在 layer 1 用它做 peer buffer 地址发现和数据面访问�
    并用 `HcommChannelGetStatus` 轮询到 ready；
 7. 将 channel handle 表复制到 device，kernel 按 AIV/peer 索引解析。
 
-这套实现的重点是：`UB_MEM` 负责 peer 地址空间，`UBC_CTP` 负责 URMA 发送
-队列；共享 Jetty 由官方 kernel 的调度逻辑保证使用顺序。官方性能数据基于
-Ascend 950DT、CANN 9.2.0 和特定 PoC HDK，README 标明 EP8 dispatch 约
-373–375 GB/s、combine 约 345–347 GB/s，且均使用 netlayer 1。
+这里的 "shared queue" 是 Jetty 维度上的共享：一个 AIV 的 Jetty 可服务多个
+peer，但 **不同 AIV 不共享同一个 Jetty**。因此每个 AIV 仍然有独立 SQ/CQ。
 
-| 维度 | layer 1 / 官方路径 | layer 0 / 当前 NPU8P 路径 |
-| --- | --- | --- |
-| layer 选择 | `layers[1]` | `layers[0]` |
-| 资源模型 | 每个 AIV 一个 Jetty/SQ | 共享 Jetty 或少量独立 Jetty |
-| 并发假设 | 64 个 AIV 同时提交 | 共享队列要求调用者串行化 |
-| SQE 位置 | 每 AIV 从自己的 Jetty head 计算 | 多 AIV 使用同一 head 会写同一 SQE |
-| CQ/drain | 每 AIV/队列独立推进 | 共享队列的 CQ 所有权需要明确 |
-| DeepEP 官方代码 | 直接匹配 | 需要重构资源表和提交协议 |
+```text
+Official netlayer1 ownership
 
-上表中的“当前 NPU8P 路径”指本仓库独立 AB 基准，而不是 DeepEP 生产实现。
-它通过编译宏隔离两种协议：`NETLAYER_AB_USE_UB_CTP` 对应 layer 0，
-`NETLAYER_AB_USE_UB_MEM` 对应 layer 1。NPU8P 已验证 layer 0 能完整运行；
-layer 1 编译通过，但 `HcclChannelAcquire` 在该环境返回 status 9，不能作为
-性能结论。
+             EP dispatch/combine kernel
+             +--------------------------------------+
+             | AIV0   AIV1   AIV2 ... AIV63          |
+             +--|------|------|---------|-----------+
+                |      |      |         |
+                v      v      v         v
+             Jetty0 Jetty1 Jetty2 ... Jetty63
+                |      |      |         |
+                | SQ0  | SQ1  | SQ2 ...| SQ63
+                v      v      v         v
+             UBC_CTP/URMA network
+                |      |      |         |
+                v      v      v         v
+             peer0 peer1 peer2 ... peerN
+```
 
 官方 kernel 中的关键模型是：
 
@@ -100,18 +114,201 @@ HcommJettyInfo::load_jetty_info(..., vec_core_idx, lane_idx)
 HcommJetty jetty(..., vec_core_idx)
 ```
 
-即 AIV 索引决定 Jetty/SQ。每个 AIV 使用自己的 SQE slot 和 head 推进，最后
+即 AIV index 决定 Jetty/SQ。每个 AIV 使用自己的 SQE slot 和 head 推进，最后
 独立 ring doorbell。这使 dispatch/combine 可以把不同 token/expert 的发送
 工作分发到多个 AIV，通信提交和计算重叠。
 
-layer 0 的诊断适配曾把 64 个 AIV 全部指向共享 Jetty index 0。此时每个 AIV
-的局部 `psqe_idx` 都从 0 开始，它们读取同一个 packed head 后写同一个物理
-SQE 区间。第一个 SQE 被写 64 次，但 doorbell 只按某一个 AIV 的局部计数推
-进，硬件看到不完整的 WQE 序列，最终返回 CQE status=6。
+### 3.1 本仓库 netlayer0：单 transport service 提交
 
-CANN 9.3 的 `hcomm_channel.h` 对共享队列的说明是：不同 channel 不支持并发
-使用，需要调用者按业务顺序串行调用。因此共享 Jetty 不是只改 doorbell 就
-能修复的锁竞争问题，而是接口契约层面的串行队列。
+本仓库生产实现没有把 EP kernel 和 WQE 提交耦合在一起。它分成三层：
+
+1. **业务 AICore kernel**：只写 `TransportCommand`，例如 `Put`、
+   `Signal`、`RemoteAdd64`、`Flush`、`Barrier`；
+2. **transport service**：一个 executor 顺序消费命令；
+3. **HCOMM/URMA channel**：按 `peer * channel_count + channel` 选择独立
+   channel，然后提交 WQE 并 drain。
+
+```text
+Repository netlayer0 ownership
+
+             dispatch/combine/business kernels
+             +--------------------------------------+
+             | AIV0   AIV1   AIV2 ... AIV63          |
+             |  |      |      |         |            |
+             |  +------v------+---------+---+        |
+             |        TransportCommandQueue          |
+             +------------------|-------------------+
+                                |
+                                v
+                     single transport executor
+                     (exactly one lane posts/drains)
+                                |
+                     +----------+-----------+
+                     |          |           |
+                     v          v           v
+                  peer0/ch0  peer1/ch0 ... peer7/ch0
+                     |          |           |
+                     v          v           v
+                  UB_CTP independent channels
+```
+
+在 AICore 原生路径中，service 内部直接解析 channel 的 SQ/CQ context，按
+队列深度计算 slot/owner bit，用 MTE3 copy 发布 WQE，再更新 head 和 doorbell。
+在 official SIMT 路径中，service 调 HCOMM 的 `WriteNbi`、`AtomicFAA`、
+`Drain`。两种后端都保持同一个契约：**一个 service invocation 内只有一个
+producer 拥有所有 channel**。
+
+这个设计与共享 Jetty 的串行契约兼容，同时保留了对多 peer 并发通信的抽象。
+它并发的是多个 peer/channel，而不是多个 WQE producer。
+
+### 3.2 Device channel 表布局差异
+
+```text
+Official netlayer1 table
+
+ index      0 ... 63                64 ... 64+P-1
+        +--------------+          +----------------+
+        | Jetty/AIV 0  | ...      | peer channels  |
+        +--------------+          +----------------+
+        kernel uses vec_core_idx to select producer queue
+        kernel uses peer offset to load peer metadata
+
+
+Repository netlayer0 table
+
+ peer             0       1       2       3   ...   7
+ channel       +-------+-------+-------+-------+-----+
+        0      | p0,c0 | p1,c0 | p2,c0 | p3,c0 | ... |
+               +-------+-------+-------+-------+-----+
+        1      | p0,c1 | p1,c1 | p2,c1 | p3,c1 | ... |
+               +-------+-------+-------+-------+-----+
+
+ address = peer * channel_count + channel
+```
+
+官方表按“producer/Jetty”和“peer metadata”分块；本仓库表是二维
+peer/channel 矩阵。若把官方 netlayer1 的表布局直接改造成
+`[shared jetty, peer0, peer1, ...]`，只是改了索引，并没有解决 SQ 所有权问题。
+
+### 3.3 WQE 提交时序差异
+
+```text
+Official netlayer1 multi-producer
+
+ AIV0: load own Jetty head -> build SQE -> write SQ -> ring DB
+ AIV1: load own Jetty head -> build SQE -> write SQ -> ring DB
+ ...
+ AIV63: load own Jetty head -> build SQE -> write SQ -> ring DB
+ barrier: every AIV drains its own CQ
+
+
+Repository netlayer0 single service
+
+ producers: append TransportCommand (no WQE, no doorbell)
+ service: acquire queue ownership
+ service: for each command:
+            resolve peer/channel
+            resolve local/remote MR
+            write WQE
+            update head + doorbell
+          flush/barrier:
+            drain CQ
+            update tails
+ service: publish completion
+```
+
+官方模型中 WQE 构造和 doorbell 分布在 64 个 AIV 上；本仓库模型中这些动作被
+集中到一个 executor。业务 kernel 与通信提交的 overlap 依赖 command queue 的
+异步性，而不是多个 WQE producer 同时写 SQ。
+
+### 3.4 为什么共享 Jetty 不能靠全局 SQE offset 修复
+
+layer 0 诊断曾尝试把 64 个 AIV 全部指向共享 Jetty index 0，并给每个 AIV 分配
+全局唯一 SQE offset。该方案能编译，但会触发 vector core exception 341
+（VEC 访问 UB 越界）。
+
+这说明官方 dispatch 的多 AIV 路径除了物理 SQE slot 之外，还隐含依赖
+“每个 AIV 独立加载自己的 Jetty info 和 head”。当所有 AIV 共享一个 Jetty 时，
+WQE 构造、head snapshot、owner bit、CQ tail 和 drain 语义都会交织。CANN
+接口契约也明确要求共享 queue 的调用者串行化。
+
+因此对 netlayer0 更稳的适配方向不是继续调共享 SQ offset，而是参考本仓库：
+把 WQE 提交收敛到一个 service producer。
+
+### 3.5 已验证证据
+
+本仓库的多 channel 验证已经证明 layer0 的独立 channel 模型可用：
+
+| 每 peer channel 数 | 每 rank SQ/CQ 套数 | 实际使用队列数 | 结论 |
+| ---: | ---: | ---: | --- |
+| 1 | 7 | 7 | 默认稳定路径 |
+| 2 | 14 | 14 | 可用，端到端收益不稳定 |
+| 4 | 28 | 28 | 可用，典型 case 性能退化 |
+
+诊断同时验证了每条队列的 SQ 提交数与 CQ 完成数相等。这说明“单 service
+producer + 独立 per-peer channel”在 NPU8P layer0 上是 correctness 已验证的
+通信模型。
+
+官方 netlayer1 性能数据基于 Ascend 950DT、CANN 9.2.0 和特定 PoC HDK，README
+标明 EP8 dispatch 约 373–375 GB/s、combine 约 345–347 GB/s。这些数据不能
+直接换算到当前 NPU8P/CANN 9.3 环境，只能作为官方目标环境的参考。
+
+#### 官方 EP8 性能统计口径
+
+官方 README 对上述数值的说明是：**Bandwidth ranges cover all ranks, using
+timings that include issue and drain but exclude final epilogues**。对应实现
+不是完整 API 端到端计时，而是 `tests/ep/test_ep.py` 中的 profiler 采样：
+
+1. 先设置 `set_barrier_in_prologue(True)`，用 `bench_msprof` 对
+   `dispatch_impl` / `combine_impl` 采通信 kernel，对
+   `dispatch_copy_epilogue_impl` / `combine_reduce_epilogue_impl` 采最终
+   epilogue；
+2. 再设置 `set_barrier_in_prologue(False)`，单独采前一个 kernel，用于报告
+   barrier 被移到 epilogue 时的 prologue 侧时间；它不是输出 URMA 带宽的
+   那次采样；
+3. 输出的 URMA GB/s 使用通信 kernel 的 `dur_ns`，而不是 API wall time 或
+   NPU Event 端到端时间；
+4. `dur_ns` 来自 Torch-NPU/FFTS profiler 的 kernel 开始/结束时间，并在
+   50 个采样上按 kernel 求平均；
+5. Dispatch 的字节公式是
+   `num_recv_tokens * count_bytes(x, topk_idx, topk_weights) / num_tokens`；
+   Combine 是 `num_recv_tokens * count_bytes(input_for_combine) /
+   input_for_combine.size(0)`。它们是逻辑 URMA 字节，不是完整 API 逻辑字节，
+   也不是物理链路字节。
+
+因此官方 EP8 350–375 GB/s 只覆盖“通信 issue + drain + 通信 kernel 排队/执行”
+的边界，并明确排除最终 epilogue。与本仓库正式 benchmark 的 max-rank NPU
+Event 端到端口径不能直接互比；与本仓库仅统计 producer/release kernel 的
+诊断口径也不能直接互比。
+
+### 3.6 差异总表
+
+| 维度 | 官方 netlayer1 | 本仓库 netlayer0 |
+| --- | --- | --- |
+| layer | `layers[1]` | `layers[0]` |
+| 地址发现 | peer `UB_MEM` channel | `HcclChannelGetRemoteMems` |
+| 发送协议 | `UBC_CTP` Jetty/URMA | `UB_CTP` independent channel |
+| 队列所有权 | 每 AIV 一个 Jetty/SQ | 单 service producer |
+| EP kernel 职责 | 直接构造和提交 WQE | 只生成 TransportCommand |
+| channel 表 | AIV Jetty 区 + peer 区 | `peer * channel_count + channel` |
+| 并发位置 | 多 producer | 多 peer/channel，单 producer |
+| CQ drain | 每 AIV/队列独立推进 | service 统一 drain |
+| 共享 queue 语义 | Jetty 内共享，跨 AIV独立 | service 串行拥有所有 channel |
+| 已验证规模 | 官方 950DT 环境 | NPU8P 8 rank，1/2/4 channel |
+
+### 3.7 对 netlayer0 打通的架构建议
+
+1. 保留官方 EP kernel 的 dispatch/combine 语义；
+2. 把直接 WQE 写入替换成 TransportCommand 生成；
+3. 引入单 producer transport service；
+4. host 初始化采用本仓库模型：每 peer 独立 `UB_CTP` channel，默认 1 channel；
+5. device 表采用 `peer * channel_count + channel`；
+6. 先跑通 2 rank smoke，再扩展 8 rank；
+7. correctness 通过后再评估 2 channel；默认不启用 4 channel，因为本仓库实测
+   其在典型 case 中退化。
+
+这个方案牺牲官方 netlayer1 的多 WQE producer 并行性，但符合 netlayer0 的队列
+所有权约束，并且有本仓库生产实现的 correctness 证据。
 
 ## 4. 使用方式差异
 
