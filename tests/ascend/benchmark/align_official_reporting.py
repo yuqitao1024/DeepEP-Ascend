@@ -22,7 +22,10 @@ OFFICIAL_REFERENCE_GBPS = {
 
 
 def _select_operation(report: dict[str, Any], operation_id: str) -> dict[str, Any]:
-    case = report.get("cases", [{}])[0]
+    if "operations" in report:
+        case = report
+    else:
+        case = report.get("cases", [{}])[0]
     matches = [
         operation
         for operation in case.get("operations", [])
@@ -96,13 +99,17 @@ def _stage_time_seconds(
 
 def _official_bytes(stage_operation: dict[str, Any]) -> int:
     ranks = stage_operation.get("per_rank", [])
-    if not ranks:
-        raise ValueError("stage operation has no per-rank data")
-
-    byte_values = [
-        rank.get("logical_bytes", {}).get("scaleup", 0)
-        for rank in ranks
-    ]
+    if ranks:
+        byte_values = [
+            rank.get("logical_bytes", {}).get("scaleup", 0)
+            for rank in ranks
+        ]
+    else:
+        # Compact stage summaries omit per-rank counters. Fall back to the
+        # aggregated scaleup byte total divided by the report world size.
+        total = stage_operation.get("logical_bytes", {}).get("scaleup", 0)
+        world_size = stage_operation.get("world_size", 8)
+        byte_values = [total // world_size]
     if any(value <= 0 for value in byte_values):
         raise ValueError("scaleup logical bytes are missing")
 
@@ -144,7 +151,8 @@ def build_report(msprof_path: Path, stage_path: Path) -> dict[str, Any]:
     msprof = json.loads(msprof_path.read_text(encoding="utf-8"))
     stage = json.loads(stage_path.read_text(encoding="utf-8"))
 
-    if msprof.get("case_id") != stage.get("cases", [{}])[0].get("case_id"):
+    stage_case_id = stage.get("case_id", stage.get("cases", [{}])[0].get("case_id"))
+    if msprof.get("case_id") != stage_case_id:
         raise ValueError("msprof and stage reports use different case IDs")
 
     operations: list[dict[str, Any]] = []
@@ -165,13 +173,14 @@ def build_report(msprof_path: Path, stage_path: Path) -> dict[str, Any]:
             })
 
         mappings: dict[str, Any] = {
-            "msprof_archived_outer_kernel_time": {
+            "msprof_raw_outer_kernel_time": {
                 "seconds_per_rank": [
                     row["kernel_us"] / 1e6 for row in rank_msprof
                 ],
                 "description": (
-                    "Archived dispatch_kernel/combine_kernel wall time; this "
-                    "outer-kernel boundary omits the transport service kernel"
+                    "Raw dispatch_kernel/combine_kernel wall time. This outer "
+                    "boundary is retained for msprof diagnostics only; the "
+                    "staged transport service executes across later kernels."
                 ),
             }
         }
@@ -215,15 +224,16 @@ def build_report(msprof_path: Path, stage_path: Path) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "alignment_scope": "reporting-only",
-        "case_id": msprof.get("case_id"),
+        "case_id": stage_case_id,
         "workload": msprof.get("workload"),
         "timing_protocol": msprof.get("timing_protocol"),
         "operations": operations,
         "comparability_caveats": {
             "kernel_boundary": (
-                "Current dispatch_kernel/combine_kernel cover a wider boundary "
-                "than official dispatch_impl/combine_impl; msprof numbers are "
-                "therefore lower bounds on official-equivalent bandwidth."
+                "The current implementation has no single msprof kernel that "
+                "matches official URMA issue-and-drain. producer_release only "
+                "appends transport commands; use "
+                "stage_service_issue_drain for the preferred proxy."
             ),
             "set_barrier_in_prologue": (
                 "Current implementation lacks the official "

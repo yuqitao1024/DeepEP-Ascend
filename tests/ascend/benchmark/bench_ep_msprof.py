@@ -21,13 +21,19 @@ OFFICIAL_OPERATIONS = {
     "dispatch": "expanded_dispatch",
     "combine": "reduced_combine",
 }
+# The staged transport implementation has no single msprof kernel that covers
+# the official URMA issue-and-drain boundary. producer_release only appends
+# transport commands; service_submit/cq_wait execute later in the outer
+# dispatch/combine and barrier kernels. Keep the communication kernel for raw
+# msprof collection, but never report it as the official-equivalent transport
+# service time.
 KERNEL_MATCHES = {
     "expanded_dispatch": (
-        "direct_dispatch_producer_release_kernel",
+        "dispatch_kernel",
         "dispatch_epilogue_complete_kernel",
     ),
     "reduced_combine": (
-        "direct_combine_producer_release_kernel",
+        "combine_kernel",
         "combine_epilogue_complete_kernel",
     ),
 }
@@ -225,7 +231,11 @@ def main() -> int:
                     "reason": "current ElasticBuffer lacks official set_barrier_in_prologue API",
                     "cold_l2_epilogue_zero": "1<<26 int32 elements after communication launch",
                     "bandwidth_bytes": "per-rank scaleup logical bytes",
-                    "timing": "transport service kernel; excludes outer producer and epilogue",
+                    "timing": (
+                        "outer communication kernel for raw msprof collection; "
+                        "the staged transport has no single official-equivalent "
+                        "URMA issue-and-drain kernel"
+                    ),
                 },
                 "cann_note": "CANN 9.3.0; official reference used CANN 9.2.0",
                 "ranks": gathered,

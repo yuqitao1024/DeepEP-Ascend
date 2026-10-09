@@ -1,0 +1,177 @@
+{
+  "case_id": "ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0",
+  "execution_protocol": {
+    "allow_multiple_reduction": 1,
+    "stage_profile": 1
+  },
+  "git_commit": "unknown",
+  "operations": [
+    {
+      "device_seconds": {
+        "maximum": 0.024835651397705077,
+        "mean": 0.0244571061706543,
+        "minimum": 0.024237075805664064,
+        "p50": 0.024447558403015136,
+        "p95": 0.024629929065704347
+      },
+      "logical_bytes": {
+        "copy": 10356778704,
+        "scaleout": 0,
+        "scaleup": 4342234248
+      },
+      "logical_gbps": 601.0119451350755,
+      "operation_id": "expanded_dispatch",
+      "stage_profile": {
+        "device_timeline_cycles": {
+          "active_cycles": 9230686,
+          "envelope_cycles": 23008355,
+          "idle_cycles": 13786752,
+          "overlap_cycles": 0
+        },
+        "phase_cycles": {
+          "barrier_wait": 208610,
+          "consumer_compute": 5846201,
+          "consumer_wait": 10257,
+          "cq_wait": 1412864,
+          "epilogue": 1212,
+          "producer": 1616865,
+          "publication": 0,
+          "service_submit": 524817
+        },
+        "pipeline_cycles": {
+          "consumer": 5857670,
+          "network": 2146291,
+          "producer": 1616865
+        },
+        "service_cycles": {
+          "barrier_command_cycles": 323584,
+          "barrier_poll_cycles": 208610,
+          "control_command_cycles": 141791,
+          "cycles": 14952228,
+          "flush_command_cycles": 1501784,
+          "payload_command_cycles": 73482,
+          "wait_cycles": 1412864
+        },
+        "stage_spans_cycles": {
+          "epilogue_acquire": 1191,
+          "epilogue_complete": 1212,
+          "epilogue_copy": 5829479,
+          "epilogue_expert_count": 9735,
+          "epilogue_expert_prefix": 959,
+          "epilogue_metadata": 8989,
+          "epilogue_validate": 9433,
+          "producer_control": 2753,
+          "producer_group": 36667,
+          "producer_prefix": 1113,
+          "producer_record": 1577329,
+          "release_barrier": 44889,
+          "release_control": 214327,
+          "release_payload": 1531907
+        }
+      },
+      "work_counts": {
+        "expanded_slots": 100978,
+        "hidden_elements": 117440512,
+        "input_rows": 16384,
+        "input_tokens": 16384,
+        "output_tokens": 100978,
+        "received_records": 72915,
+        "topk_elements": 98304,
+        "valid_routes": 98304
+      }
+    },
+    {
+      "device_seconds": {
+        "maximum": 0.017306161880493165,
+        "mean": 0.016373082580566408,
+        "minimum": 0.01618984031677246,
+        "p50": 0.016318527221679688,
+        "p95": 0.01666043119430542
+      },
+      "logical_bytes": {
+        "reduction": 10235822360,
+        "scaleout": 0,
+        "scaleup": 8354030520
+      },
+      "logical_gbps": 1135.3911389944817,
+      "operation_id": "reduced_combine",
+      "stage_profile": {
+        "device_timeline_cycles": {
+          "active_cycles": 11982275,
+          "envelope_cycles": 14733098,
+          "idle_cycles": 2756173,
+          "overlap_cycles": 0
+        },
+        "phase_cycles": {
+          "barrier_wait": 0,
+          "consumer_compute": 7482244,
+          "consumer_wait": 10504,
+          "cq_wait": 2773844,
+          "epilogue": 706,
+          "producer": 1304238,
+          "publication": 6664,
+          "service_submit": 454390
+        },
+        "pipeline_cycles": {
+          "consumer": 7493454,
+          "network": 3234898,
+          "producer": 1304238
+        },
+        "service_cycles": {
+          "barrier_command_cycles": 0,
+          "barrier_poll_cycles": 0,
+          "control_command_cycles": 205175,
+          "cycles": 3300155,
+          "flush_command_cycles": 2865616,
+          "payload_command_cycles": 73500,
+          "wait_cycles": 2773844
+        },
+        "stage_spans_cycles": {
+          "epilogue_acquire": 925,
+          "epilogue_complete": 706,
+          "epilogue_reduce": 7473297,
+          "epilogue_validate": 8669,
+          "epilogue_validate_reduce": 963,
+          "epilogue_weights": 9156,
+          "producer_control": 1618,
+          "producer_local_copy": 958,
+          "producer_plan": 8666,
+          "producer_plan_prefix": 619,
+          "producer_record": 1294163,
+          "release_barrier": 44881,
+          "release_control": 285795,
+          "release_payload": 2894041
+        }
+      },
+      "work_counts": {
+        "expanded_slots": 100978,
+        "hidden_elements": 723910656,
+        "input_rows": 100992,
+        "input_tokens": 16384,
+        "output_tokens": 16384,
+        "received_records": 72915,
+        "topk_elements": 98304,
+        "valid_routes": 98304
+      }
+    }
+  ],
+  "purpose": "Compact formal stage-profile summary; original 5.5MB JSON identified by SHA256",
+  "schema_version": 1,
+  "schema_version_source": 3,
+  "source_file": {
+    "path": "results/official-msprof-formal/fp8-8rank-stage-profile.json",
+    "sha256": "210abcb1de63d6ffb4e631dd8c4b209a74b9691939ec9da9566b2ae43f25eb4b"
+  },
+  "workload": {
+    "hidden": 7168,
+    "masked_ratio": 0.0,
+    "num_experts": 256,
+    "num_tokens": 16384,
+    "num_topk": 6,
+    "precise_unbalanced_ratio": false,
+    "seed": 0,
+    "unbalanced_ratio": 1.0,
+    "world_size": 8
+  },
+  "world_size": 8
+}

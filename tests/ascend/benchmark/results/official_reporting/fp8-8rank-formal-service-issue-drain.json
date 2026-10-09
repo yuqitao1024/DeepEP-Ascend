@@ -1,0 +1,388 @@
+{
+  "alignment_scope": "reporting-only",
+  "case_id": "ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0",
+  "comparability_caveats": {
+    "defer_epilogue": "Current implementation lacks the official defer_epilogue API; epilogue work cannot be split into the official separate kernels.",
+    "fp8_scale_factor_layout": "Current expanded FP8 path uses column-major scale factors while the official public reference uses row-major. Byte count is the same for hidden=7168, but access locality is not identical.",
+    "kernel_boundary": "The current implementation has no single msprof kernel that matches official URMA issue-and-drain. producer_release only appends transport commands; use stage_service_issue_drain for the preferred proxy.",
+    "package_version": "Ignored per comparison policy; CANN/Torch package versions are not treated as implementation differences.",
+    "set_barrier_in_prologue": "Current implementation lacks the official deep_ep._C.set_barrier_in_prologue API; the external barrier could not be moved into the communication kernel prologue.",
+    "stage_clock_calibration": "Stage JSON has cycle counters but no explicit frequency. Seconds are calibrated as device_timeline_cycles.envelope_cycles divided by device_seconds.mean; this is an approximation, not an independent hardware timer measurement.",
+    "stage_profile_sample_count": "Stage profile has one aggregated observation, unlike msprof's 50 sampled iterations; its min/mean/max represent rank/mapping variation, not iteration variance."
+  },
+  "notes": [
+    "Bandwidth uses the official per-rank received-token byte formula.",
+    "stage_service_issue_drain maps service_submit + cq_wait and is the preferred proxy for official URMA issue-and-drain.",
+    "stage_network maps publication + service_submit + cq_wait + barrier_wait.",
+    "stage_producer_plus_network is an upper-bound communication window."
+  ],
+  "operations": [
+    {
+      "bandwidth_mappings": {
+        "msprof_raw_outer_kernel_time": {
+          "gbps": {
+            "maximum": 3865.8357198256585,
+            "mean": 3784.6279636761337,
+            "minimum": 3598.661723487919,
+            "p50": 3800.039993382148
+          },
+          "time_seconds": {
+            "maximum": 0.00015123332000000002,
+            "mean": 0.000143491185,
+            "minimum": 0.00014033148,
+            "p50": 0.0001417372
+          }
+        },
+        "stage_cq_wait": {
+          "gbps": {
+            "maximum": 361.4126943033587,
+            "mean": 361.4126943033587,
+            "minimum": 361.4126943033587,
+            "p50": 361.4126943033587
+          },
+          "time_seconds": {
+            "maximum": 0.0015018268299796015,
+            "mean": 0.0015018268299796015,
+            "minimum": 0.0015018268299796015,
+            "p50": 0.0015018268299796015
+          }
+        },
+        "stage_network": {
+          "gbps": {
+            "maximum": 237.9113479599088,
+            "mean": 237.9113479599088,
+            "minimum": 237.9113479599088,
+            "p50": 237.9113479599088
+          },
+          "time_seconds": {
+            "maximum": 0.0022814350204575593,
+            "mean": 0.0022814350204575593,
+            "minimum": 0.0022814350204575593,
+            "p50": 0.0022814350204575593
+          }
+        },
+        "stage_producer": {
+          "gbps": {
+            "maximum": 315.8129991831232,
+            "mean": 315.8129991831232,
+            "minimum": 315.8129991831232,
+            "p50": 315.8129991831232
+          },
+          "time_seconds": {
+            "maximum": 0.0017186730198058473,
+            "mean": 0.0017186730198058473,
+            "minimum": 0.0017186730198058473,
+            "p50": 0.0017186730198058473
+          }
+        },
+        "stage_producer_plus_network": {
+          "gbps": {
+            "maximum": 135.69115522296192,
+            "mean": 135.69115522296192,
+            "minimum": 135.69115522296192,
+            "p50": 135.69115522296192
+          },
+          "time_seconds": {
+            "maximum": 0.004000108040263407,
+            "mean": 0.004000108040263407,
+            "minimum": 0.004000108040263407,
+            "p50": 0.004000108040263407
+          }
+        },
+        "stage_service_issue_drain": {
+          "gbps": {
+            "maximum": 263.5247932576211,
+            "mean": 263.5247932576211,
+            "minimum": 263.5247932576211,
+            "p50": 263.5247932576211
+          },
+          "time_seconds": {
+            "maximum": 0.0020596896189171102,
+            "mean": 0.0020596896189171102,
+            "minimum": 0.0020596896189171102,
+            "p50": 0.0020596896189171102
+          }
+        }
+      },
+      "bytes_per_rank": 542779281,
+      "current_operation": "expanded_dispatch",
+      "msprof_rank_data": [
+        {
+          "bytes": 542416344,
+          "kernel_us": 142.92838,
+          "msprof_gbps": 3795.021982338287,
+          "rank": 0,
+          "reported_gbps": 3795.021982338287
+        },
+        {
+          "bytes": 544237560,
+          "kernel_us": 151.23332000000002,
+          "msprof_gbps": 3598.661723487919,
+          "rank": 1,
+          "reported_gbps": 3598.661723487919
+        },
+        {
+          "bytes": 542498448,
+          "kernel_us": 140.33148,
+          "msprof_gbps": 3865.8357198256585,
+          "rank": 2,
+          "reported_gbps": 3865.835719825658
+        },
+        {
+          "bytes": 542461128,
+          "kernel_us": 141.7372,
+          "msprof_gbps": 3827.231862912489,
+          "rank": 3,
+          "reported_gbps": 3827.2318629124884
+        },
+        {
+          "bytes": 541595304,
+          "kernel_us": 142.52357999999998,
+          "msprof_gbps": 3800.039993382148,
+          "rank": 4,
+          "reported_gbps": 3800.039993382148
+        },
+        {
+          "bytes": 543379200,
+          "kernel_us": 141.55964,
+          "msprof_gbps": 3838.517814823491,
+          "rank": 5,
+          "reported_gbps": 3838.5178148234904
+        },
+        {
+          "bytes": 541931184,
+          "kernel_us": 146.27516,
+          "msprof_gbps": 3704.8750040676764,
+          "rank": 6,
+          "reported_gbps": 3704.8750040676764
+        },
+        {
+          "bytes": 543715080,
+          "kernel_us": 141.34072,
+          "msprof_gbps": 3846.839608571401,
+          "rank": 7,
+          "reported_gbps": 3846.839608571401
+        }
+      ],
+      "official_operation": "dispatch",
+      "official_reference_gbps": {
+        "maximum": 375.0,
+        "mean": 374.0,
+        "minimum": 373.0
+      },
+      "stage_clock_calibration_hz": 940763589.9134856,
+      "stage_cycles": {
+        "consumer": 5857670,
+        "network": 2146291,
+        "producer": 1616865
+      },
+      "stage_phase_cycles": {
+        "barrier_wait": 208610,
+        "consumer_compute": 5846201,
+        "consumer_wait": 10257,
+        "cq_wait": 1412864,
+        "epilogue": 1212,
+        "producer": 1616865,
+        "publication": 0,
+        "service_submit": 524817
+      }
+    },
+    {
+      "bandwidth_mappings": {
+        "msprof_raw_outer_kernel_time": {
+          "gbps": {
+            "maximum": 6567.897474415928,
+            "mean": 6409.736436339698,
+            "minimum": 6057.185612877205,
+            "p50": 6443.538112675379
+          },
+          "time_seconds": {
+            "maximum": 0.00017286236,
+            "mean": 0.00016301113749999998,
+            "minimum": 0.00015891135999999997,
+            "p50": 0.00016149034
+          }
+        },
+        "stage_cq_wait": {
+          "gbps": {
+            "maximum": 338.75652024664447,
+            "mean": 338.75652024664447,
+            "minimum": 338.75652024664447,
+            "p50": 338.75652024664447
+          },
+          "time_seconds": {
+            "maximum": 0.003082608754629111,
+            "mean": 0.003082608754629111,
+            "minimum": 0.003082608754629111,
+            "p50": 0.003082608754629111
+          }
+        },
+        "stage_network": {
+          "gbps": {
+            "maximum": 290.4752301763559,
+            "mean": 290.4752301763559,
+            "minimum": 290.4752301763559,
+            "p50": 290.4752301763559
+          },
+          "time_seconds": {
+            "maximum": 0.0035949840348383695,
+            "mean": 0.0035949840348383695,
+            "minimum": 0.0035949840348383695,
+            "p50": 0.0035949840348383695
+          }
+        },
+        "stage_producer": {
+          "gbps": {
+            "maximum": 720.4649313599461,
+            "mean": 720.4649313599461,
+            "minimum": 720.4649313599461,
+            "p50": 720.4649313599461
+          },
+          "time_seconds": {
+            "maximum": 0.0014494165774715385,
+            "mean": 0.0014494165774715385,
+            "minimum": 0.0014494165774715385,
+            "p50": 0.0014494165774715385
+          }
+        },
+        "stage_producer_plus_network": {
+          "gbps": {
+            "maximum": 207.0124669423946,
+            "mean": 207.0124669423946,
+            "minimum": 207.0124669423946,
+            "p50": 207.0124669423946
+          },
+          "time_seconds": {
+            "maximum": 0.005044400612309908,
+            "mean": 0.005044400612309908,
+            "minimum": 0.005044400612309908,
+            "p50": 0.005044400612309908
+          }
+        },
+        "stage_service_issue_drain": {
+          "gbps": {
+            "maximum": 291.0748542847369,
+            "mean": 291.0748542847369,
+            "minimum": 291.0748542847369,
+            "p50": 291.0748542847369
+          },
+          "time_seconds": {
+            "maximum": 0.0035875782453488204,
+            "mean": 0.0035875782453488204,
+            "minimum": 0.0035875782453488204,
+            "p50": 0.0035875782453488204
+          }
+        }
+      },
+      "bytes_per_rank": 1044253815,
+      "current_operation": "reduced_combine",
+      "msprof_rank_data": [
+        {
+          "bytes": 1043555560,
+          "kernel_us": 160.81302,
+          "msprof_gbps": 6489.247947709707,
+          "rank": 0,
+          "reported_gbps": 6489.247947709707
+        },
+        {
+          "bytes": 1047059400,
+          "kernel_us": 172.86236,
+          "msprof_gbps": 6057.185612877205,
+          "rank": 1,
+          "reported_gbps": 6057.185612877205
+        },
+        {
+          "bytes": 1043713520,
+          "kernel_us": 158.91135999999997,
+          "msprof_gbps": 6567.897474415928,
+          "rank": 2,
+          "reported_gbps": 6567.897474415927
+        },
+        {
+          "bytes": 1043641720,
+          "kernel_us": 160.31572,
+          "msprof_gbps": 6509.915060107643,
+          "rank": 3,
+          "reported_gbps": 6509.915060107643
+        },
+        {
+          "bytes": 1041975960,
+          "kernel_us": 162.69194,
+          "msprof_gbps": 6404.594843481491,
+          "rank": 4,
+          "reported_gbps": 6404.59484348149
+        },
+        {
+          "bytes": 1045408000,
+          "kernel_us": 162.2413,
+          "msprof_gbps": 6443.538112675379,
+          "rank": 5,
+          "reported_gbps": 6443.53811267538
+        },
+        {
+          "bytes": 1042622160,
+          "kernel_us": 164.76306,
+          "msprof_gbps": 6328.009203033739,
+          "rank": 6,
+          "reported_gbps": 6328.009203033738
+        },
+        {
+          "bytes": 1046054200,
+          "kernel_us": 161.49034,
+          "msprof_gbps": 6477.5032364164945,
+          "rank": 7,
+          "reported_gbps": 6477.5032364164945
+        }
+      ],
+      "official_operation": "combine",
+      "official_reference_gbps": {
+        "maximum": 347.0,
+        "mean": 346.0,
+        "minimum": 345.0
+      },
+      "stage_clock_calibration_hz": 899836541.3173361,
+      "stage_cycles": {
+        "consumer": 7493454,
+        "network": 3234898,
+        "producer": 1304238
+      },
+      "stage_phase_cycles": {
+        "barrier_wait": 0,
+        "consumer_compute": 7482244,
+        "consumer_wait": 10504,
+        "cq_wait": 2773844,
+        "epilogue": 706,
+        "producer": 1304238,
+        "publication": 6664,
+        "service_submit": 454390
+      }
+    }
+  ],
+  "schema_version": 1,
+  "timing_protocol": {
+    "bandwidth_bytes": "per-rank scaleup logical bytes",
+    "barrier": "ElasticBuffer.barrier",
+    "barrier_location": "external-before-operation",
+    "cold_l2_epilogue_zero": "1<<26 int32 elements after communication launch",
+    "device_busy_before_barrier": true,
+    "flush_l2": true,
+    "internal_barrier_prologue_toggle": false,
+    "iterations": 50,
+    "profiler": "official bench_msprof semantics",
+    "reason": "current ElasticBuffer lacks official set_barrier_in_prologue API",
+    "timer": "torch_npu_profiler_ffts",
+    "timing": "transport service kernel; excludes outer producer and epilogue",
+    "warmups": 10
+  },
+  "workload": {
+    "hidden": 7168,
+    "masked_ratio": 0.0,
+    "num_experts": 256,
+    "num_tokens": 16384,
+    "num_topk": 6,
+    "precise_unbalanced_ratio": false,
+    "seed": 0,
+    "unbalanced_ratio": 1.0,
+    "world_size": 8
+  }
+}

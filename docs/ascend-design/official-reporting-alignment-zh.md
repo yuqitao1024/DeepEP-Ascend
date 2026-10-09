@@ -12,6 +12,9 @@
 | [`results/official_reporting/fp8-8rank-official-workload.json`](results/official_reporting/fp8-8rank-official-workload.json) | 历史正式对齐结果：10 warmup、50 sample。 |
 | [`results/official_reporting/fp8-8rank-official-workload.md`](results/official_reporting/fp8-8rank-official-workload.md) | 历史正式结果的可读报告。 |
 | [`results/official_reporting/fp8-8rank-smoke-summary.json`](results/official_reporting/fp8-8rank-smoke-summary.json) | NPU8P 冒烟验证摘要，保留原始文件 SHA256。 |
+| [`results/official_reporting/fp8-8rank-formal-summary.json`](results/official_reporting/fp8-8rank-formal-summary.json) | 2026-10-09 修正口径后的 NPU8P 正式结果摘要。 |
+| [`results/official_reporting/fp8-8rank-formal-service-issue-drain.json`](results/official_reporting/fp8-8rank-formal-service-issue-drain.json) | 2026-10-09 正式对齐 JSON。 |
+| [`results/official_reporting/fp8-8rank-formal-service-issue-drain.md`](results/official_reporting/fp8-8rank-formal-service-issue-drain.md) | 2026-10-09 正式对齐报告。 |
 
 ## 使用方法
 
@@ -36,7 +39,7 @@
      --output results/official-reporting/fp8-8rank-aligned.json
    ```
 
-历史正式结果中的 stage JSON 已经因为旧远端目录清理丢失；本归档保留当时已经生成的对齐 JSON 与 Markdown。
+历史正式结果中的 stage JSON 已经因为旧远端目录清理丢失；本归档保留当时已经生成的对齐 JSON 与 Markdown。2026-10-09 已重新完成 50-sample msprof 与同 workload 的 stage profile 正式采集，并归档修正后的摘要。
 
 ## 官方统计口径
 
@@ -60,20 +63,22 @@ Netlayer0 的单链物理带宽上限约 50GB/s，不能把 675 GB/s 或 854 GB/
 
 - 当前路径把 producer、release/service、外层控制和 epilogue 拆成多个 kernel；
 - `dispatch_kernel` / `combine_kernel` 是外层通信 kernel，并不等价于官方 `dispatch_impl` / `combine_impl`；
-- URMA service 在 `direct_dispatch_producer_release_kernel` / `direct_combine_producer_release_kernel` 中执行；
-- 历史冒烟 profile 中，dispatch 外层 kernel 约 799µs，而 stage 的 `service_submit + cq_wait` 约 2.09ms；combine 外层 kernel 约 1224µs，stage 的 `service_submit + cq_wait` 约 3.57ms。
+- `direct_dispatch_producer_release_kernel` / `direct_combine_producer_release_kernel` 只把 `TransportCommand` 追加到 device command queue，不执行真实 URMA service；
+- service 在后续 `dispatch_kernel` / `combine_kernel` 与 barrier kernel 中的 `transport::service::execute()` 里提交和 drain；
+- 2026-10-09 正式 msprof 中，dispatch producer-release 平均约 143µs、外层 kernel 约 805µs；combine producer-release 平均约 163µs、外层 kernel 约 1057µs；
+- 同 workload stage profile 中，dispatch `service_submit + cq_wait` 约 2.060ms；combine 约 3.588ms。
 
 因此，旧的 `msprof_current_kernel_time` 只会得到一个过小的时间分母，进而得到超过物理链路带宽的表观带宽。这不是实现性能更好，而是统计边界错误。
 
 归档脚本的修正口径如下：
 
-- msprof 侧选择 transport service kernel：`direct_dispatch_producer_release_kernel` / `direct_combine_producer_release_kernel`；
+- msprof 侧保留外层 `dispatch_kernel` / `combine_kernel` 作为原始 kernel 诊断，不把它们或 producer-release kernel 当作官方等价 service kernel；
 - stage 侧以 `service_submit + cq_wait` 作为官方 URMA issue-and-drain 语义的代理；
 `stage_network` 在该结果中为 `publication + service_submit + cq_wait + barrier_wait`，比 issue-and-drain 更宽，不能作为首选对标口径；
 consumer/epilogue 不属于官方 URMA kernel 计时。
 stage 聚合对每个 rank 的各 phase 取最大值，因此它是跨 rank 的墙钟近似，不是把所有 block 的 cycles 相加；用 `service_submit + cq_wait` 对齐 URMA issue-and-drain 时，仍要注意它是 staged transport 的服务边界代理，不等于官方直驱 kernel 的逐指令边界。
 
-当前遗留限制是：历史 50-sample msprof 原始 JSON 已丢失，无法重新提取 service kernel 的 50-sample 统计；归档的 msprof 数值仍保留当时外层 kernel 的结果，只作为错误口径的历史证据。下一次 NPU8P 正式运行应使用修正后的脚本并保留原始输出。
+当前 staged transport 没有单一 msprof kernel 等价官方 URMA issue-and-drain。2026-10-09 的 50-sample msprof 原始 JSON 和 5.5MB stage JSON 保留在远端验证目录，未直接入库；本地归档摘要记录其 SHA256、关键 kernel、stage phase 与结果。
 
 ## 历史 EP8 结果
 
@@ -93,6 +98,34 @@ Case 为 `ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0`，参数为 16384 to
   - combine 为官方均值的约 `0.99x`。
 - 因此，之前“我们比官方快 1.8x–2.5x”的表述不成立，那是 kernel 边界错配带来的表观结果。
 - 用户指出的物理带宽检查是有效的红灯：Netlayer0 单链约 50GB/s，675–854GB/s 的表观带宽说明时间分母缺了 transport service。修正后的口径应使用 transport service kernel，或使用 stage 的 `service_submit + cq_wait`。
+
+## 2026-10-09 正式 EP8 结果
+
+运行环境为直连 NPU8P，设备 0–7，CANN `/usr/local/Ascend/cann-9.3.0`，Python 为既有 deepep-venv-py311。代码是 main HEAD `3497395` 的远端验证副本；为了让 16K token 用例跑通，远端副本额外包含 workspace 对齐修改，未进入本地仓库。
+
+- msprof task：`task_20261009_173805_2798064565`，10 warmup、50 sample，exit=0；
+- stage task：`task_20261009_175931_305367014262`，同 case，exit=0；
+- case：`ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0`，16384 tokens、hidden 7168、top-k 6、256 experts、EP8；
+- 字节口径：per-rank scaleup logical bytes 的平均值。
+
+| 操作 | service_submit | cq_wait | issue-and-drain | 折算带宽 | 官方均值 | 相对值 |
+|---|---:|---:|---:|---:|---:|---:|
+| dispatch | 557.86µs | 1501.83µs | 2059.69µs | 263.52 GB/s | 374 GB/s | 0.70x |
+| combine | 504.97µs | 3082.61µs | 3587.58µs | 291.07 GB/s | 346 GB/s | 0.84x |
+
+同一轮 msprof 的原始 kernel 证据也否定了“producer-release 就是 transport service kernel”的判断：
+
+| 操作 | producer-release 均值 | 外层 kernel 均值 | issue-and-drain |
+|---|---:|---:|---:|
+| dispatch | 143.49µs | 804.59µs | 2059.69µs |
+| combine | 163.01µs | 1057.29µs | 3587.58µs |
+
+因此，本轮正式结论是：
+
+- dispatch 约为官方均值的 `0.70x`；
+- combine 约为官方均值的 `0.84x`；
+- 之前仅用 `cq_wait` 得到的 `0.96x` / `0.99x` 低估了 service submit 时间，不能作为对齐结论；
+- 之前任何 3.6–6.5 TB/s 级别的表观带宽都是 kernel 边界错误，不是可实现性能。
 
 ## FP8 scale factor 结论
 
@@ -144,4 +177,4 @@ dispatch 的每 token 总逻辑字节数为 7464：
 - stage profile 是一次聚合观测，不是 50 个独立 sample；其 min/mean/max 反映 rank/mapping 差异，不是迭代方差。
 - stage cycle counter 没有显式频率，脚本用 `device_timeline_cycles.envelope_cycles / device_seconds.mean` 校准，属于近似。
 - 历史正式结果使用 CANN 9.3.0，官方 README 使用 CANN 9.2.0；按既定策略，包版本差异不作为实现差异。
-- 历史原始 msprof JSON 和原始 stage JSON 已随旧远端目录删除，本归档只保留生成的对齐摘要。
+- 历史原始 msprof JSON 和原始 stage JSON 已随旧远端目录删除；2026-10-09 原始 JSON 仍在远端验证目录中，本归档只保留摘要和对齐结果。

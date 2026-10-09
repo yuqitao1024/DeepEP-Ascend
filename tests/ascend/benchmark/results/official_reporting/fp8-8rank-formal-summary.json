@@ -1,0 +1,232 @@
+{
+  "case_id": "ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0",
+  "environment": {
+    "cann": "/usr/local/Ascend/cann-9.3.0",
+    "code": "repository snapshot from commit 3497395 with one remote-only 32MiB workspace alignment patch",
+    "devices": "0,1,2,3,4,5,6,7",
+    "host": "direct NPU8P",
+    "msprof_task": "task_20261009_173805_2798064565",
+    "python": "/data/disk2/pyptouser/yuqitao/deepep-venv-py311/bin/python",
+    "stage_task": "task_20261009_175931_305367014262"
+  },
+  "operations": [
+    {
+      "bytes_per_rank": {
+        "maximum": 544237560,
+        "mean": 542779281,
+        "minimum": 541595304
+      },
+      "current_operation": "expanded_dispatch",
+      "event_device_envelope_seconds": {
+        "maximum": 0.024835651397705077,
+        "mean": 0.0244571061706543,
+        "minimum": 0.024237075805664064,
+        "p50": 0.024447558403015136,
+        "p95": 0.024629929065704347
+      },
+      "event_logical_gbps": 601.0119451350755,
+      "kernels": {
+        "dispatch_consumed_barrier": {
+          "aggregation": "max-of-rank-msprof-kernel-samples; wall-time proxy includes rank skew, not a service boundary",
+          "dur_us": {
+            "maximum": 189.7036,
+            "mean": 142.13295,
+            "minimum": 88.60611999999999,
+            "p50": 137.23688
+          },
+          "kernel": "barrier_producer_kernelILb0ELb1E"
+        },
+        "external_barrier": {
+          "aggregation": "max-of-rank-msprof-kernel-samples; wall-time proxy includes rank skew, not a service boundary",
+          "dur_us": {
+            "maximum": 3233.874,
+            "mean": 1844.16509,
+            "minimum": 1279.23246,
+            "p50": 1540.74509
+          },
+          "kernel": "barrier_producer_kernelILb0ELb0E"
+        },
+        "outer": {
+          "dur_us": {
+            "maximum": 808.0704054545454,
+            "mean": 804.5947047727273,
+            "minimum": 798.7660436363636,
+            "p50": 805.431690909091
+          },
+          "kernel": "dispatch_kernel"
+        },
+        "producer_release": {
+          "dur_us": {
+            "maximum": 151.23332000000002,
+            "mean": 143.491185,
+            "minimum": 140.33148,
+            "p50": 142.13038999999998
+          },
+          "kernel": "direct_dispatch_producer_release_kernel"
+        }
+      },
+      "official_operation": "dispatch",
+      "physical_plausibility": {
+        "producer_release_gbps_mean": 3782.6663777290564
+      },
+      "stage_clock_calibration_hz": 940763589.9134856,
+      "stage_mappings": {
+        "barrier_wait": {
+          "cycles": 208610,
+          "seconds": 0.0002217454015404488
+        },
+        "cq_wait": {
+          "cycles": 1412864,
+          "seconds": 0.0015018268299796015
+        },
+        "publication": {
+          "cycles": 0,
+          "seconds": 0.0
+        },
+        "service_issue_drain": {
+          "aggregation": "max-per-rank phase cycles; preferred staged-transport issue-and-drain proxy",
+          "cycles": 1937681,
+          "gbps_mean": 263.5247932576211,
+          "seconds": 0.0020596896189171102
+        },
+        "service_submit": {
+          "cycles": 524817,
+          "seconds": 0.0005578627889375089
+        }
+      },
+      "stage_phase_cycles": {
+        "barrier_wait": 208610,
+        "consumer_compute": 5846201,
+        "consumer_wait": 10257,
+        "cq_wait": 1412864,
+        "epilogue": 1212,
+        "producer": 1616865,
+        "publication": 0,
+        "service_submit": 524817
+      }
+    },
+    {
+      "bytes_per_rank": {
+        "maximum": 1047059400,
+        "mean": 1044253815,
+        "minimum": 1041975960
+      },
+      "current_operation": "reduced_combine",
+      "event_device_envelope_seconds": {
+        "maximum": 0.017306161880493165,
+        "mean": 0.016373082580566408,
+        "minimum": 0.01618984031677246,
+        "p50": 0.016318527221679688,
+        "p95": 0.01666043119430542
+      },
+      "event_logical_gbps": 1135.3911389944817,
+      "kernels": {
+        "external_barrier": {
+          "aggregation": "max-of-rank-msprof-kernel-samples; wall-time proxy includes rank skew, not a service boundary",
+          "dur_us": {
+            "maximum": 28205.026420000002,
+            "mean": 13265.5975,
+            "minimum": 3749.05142,
+            "p50": 11928.04918
+          },
+          "kernel": "barrier_producer_kernelILb0ELb0E"
+        },
+        "outer": {
+          "dur_us": {
+            "maximum": 1062.5192054545455,
+            "mean": 1057.2938193181817,
+            "minimum": 1050.5197418181817,
+            "p50": 1058.8790027272726
+          },
+          "kernel": "combine_kernel"
+        },
+        "producer_release": {
+          "dur_us": {
+            "maximum": 172.86236,
+            "mean": 163.0111375,
+            "minimum": 158.91135999999997,
+            "p50": 161.86581999999999
+          },
+          "kernel": "direct_combine_producer_release_kernel"
+        }
+      },
+      "official_operation": "combine",
+      "physical_plausibility": {
+        "producer_release_gbps_mean": 6406.0274102436715
+      },
+      "stage_clock_calibration_hz": 899836541.3173361,
+      "stage_mappings": {
+        "barrier_wait": {
+          "cycles": 0,
+          "seconds": 0.0
+        },
+        "cq_wait": {
+          "cycles": 2773844,
+          "seconds": 0.003082608754629111
+        },
+        "publication": {
+          "cycles": 6664,
+          "seconds": 7.405789489548942e-06
+        },
+        "service_issue_drain": {
+          "aggregation": "max-per-rank phase cycles; preferred staged-transport issue-and-drain proxy",
+          "cycles": 3228234,
+          "gbps_mean": 291.0748542847369,
+          "seconds": 0.0035875782453488204
+        },
+        "service_submit": {
+          "cycles": 454390,
+          "seconds": 0.0005049694907197094
+        }
+      },
+      "stage_phase_cycles": {
+        "barrier_wait": 0,
+        "consumer_compute": 7482244,
+        "consumer_wait": 10504,
+        "cq_wait": 2773844,
+        "epilogue": 706,
+        "producer": 1304238,
+        "publication": 6664,
+        "service_submit": 454390
+      }
+    }
+  ],
+  "purpose": "NPU8P formal run; original artifacts identified by SHA256",
+  "schema_version": 1,
+  "source_files": {
+    "msprof": {
+      "path": "results/official-msprof-formal/fp8-8rank-transport-service.json",
+      "sha256": "2a19a4f76d218d27a37ce3700d4d1ac57aca0abf09cb1e8d729857a7de99bce7"
+    },
+    "stage_profile": {
+      "path": "results/official-msprof-formal/fp8-8rank-stage-profile.json",
+      "sha256": "210abcb1de63d6ffb4e631dd8c4b209a74b9691939ec9da9566b2ae43f25eb4b"
+    }
+  },
+  "timing_protocol": {
+    "bandwidth_bytes": "per-rank scaleup logical bytes",
+    "barrier": "ElasticBuffer.barrier",
+    "barrier_location": "external-before-operation",
+    "cold_l2_epilogue_zero": "1<<26 int32 elements after communication launch",
+    "device_busy_before_barrier": true,
+    "flush_l2": true,
+    "internal_barrier_prologue_toggle": false,
+    "iterations": 50,
+    "profiler": "official bench_msprof semantics",
+    "reason": "current ElasticBuffer lacks official set_barrier_in_prologue API",
+    "timer": "torch_npu_profiler_ffts",
+    "timing": "transport service kernel; excludes outer producer and epilogue",
+    "warmups": 10
+  },
+  "workload": {
+    "hidden": 7168,
+    "masked_ratio": 0.0,
+    "num_experts": 256,
+    "num_tokens": 16384,
+    "num_topk": 6,
+    "precise_unbalanced_ratio": false,
+    "seed": 0,
+    "unbalanced_ratio": 1.0,
+    "world_size": 8
+  }
+}

@@ -1,0 +1,935 @@
+{
+  "cann_note": "CANN 9.3.0; official reference used CANN 9.2.0",
+  "case_id": "ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0",
+  "device": {
+    "local_rank": 0,
+    "name": "Ascend950DT_9581",
+    "num_qps": 0,
+    "num_sms": 64
+  },
+  "platform": "ascend",
+  "ranks": [
+    [
+      {
+        "current_operation": "expanded_dispatch",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0014044086676336493,
+          "aiv_mte3": 0.00046813622254454965,
+          "aiv_scalar": 0.4489803511987576,
+          "aiv_total_cycles": 4280,
+          "aiv_vec": 0.3222887813966441,
+          "dur_ns": 2790.8,
+          "dur_us": 2.7908000000000004
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+        "logical_bytes": {
+          "copy": 1291268704,
+          "scaleout": 0,
+          "scaleup": 542416344
+        },
+        "official_operation": "dispatch",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.547861250790453e-05,
+          "aiv_mte3": 8.492870835968174e-06,
+          "aiv_scalar": 0.0031965404985266586,
+          "aiv_total_cycles": 235496,
+          "aiv_vec": 0.9916190148331636,
+          "dur_ns": 142928.38,
+          "dur_us": 142.92838
+        },
+        "urma_bytes": 542416344,
+        "urma_gbps": 3795.021982338287,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic39direct_dispatch_producer_release_kernelENS1_44DirectDispatchProducerReleaseKernelArgumentsE",
+        "work_counts": {
+          "expanded_slots": 100017,
+          "hidden_elements": 117440512,
+          "input_rows": 16384,
+          "input_tokens": 16384,
+          "output_tokens": 100017,
+          "received_records": 72671,
+          "topk_elements": 98304,
+          "valid_routes": 98304
+        }
+      },
+      {
+        "current_operation": "reduced_combine",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0017203037396760358,
+          "aiv_mte3": 0.000573434579892012,
+          "aiv_scalar": 0.4359391325235913,
+          "aiv_total_cycles": 3512,
+          "aiv_vec": 0.3605757882989438,
+          "dur_ns": 2325.84,
+          "dur_us": 2.3258400000000004
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+        "logical_bytes": {
+          "reduction": 1281199200,
+          "scaleout": 0,
+          "scaleup": 1043555560
+        },
+        "official_operation": "combine",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.2639259263369848e-05,
+          "aiv_mte3": 7.546419754456616e-06,
+          "aiv_scalar": 0.004740235702786017,
+          "aiv_total_cycles": 265032,
+          "aiv_vec": 0.9909690898116722,
+          "dur_ns": 160813.02,
+          "dur_us": 160.81302
+        },
+        "urma_bytes": 1043555560,
+        "urma_gbps": 6489.247947709707,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic38direct_combine_producer_release_kernelEPKtPKfPKiPKNS1_17HybridRouteRecordEPKlS7_PhPtPfS3_S3_NS1_16CombineVfScalarsE",
+        "work_counts": {
+          "expanded_slots": 100017,
+          "hidden_elements": 717488128,
+          "input_rows": 100096,
+          "input_tokens": 16384,
+          "output_tokens": 16384,
+          "received_records": 72671,
+          "topk_elements": 98304,
+          "valid_routes": 98304
+        }
+      }
+    ],
+    [
+      {
+        "current_operation": "expanded_dispatch",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0013170165255309294,
+          "aiv_mte3": 0.00043900550851030994,
+          "aiv_scalar": 0.4677693374072483,
+          "aiv_total_cycles": 4562,
+          "aiv_vec": 0.4335191659794391,
+          "dur_ns": 2961.8,
+          "dur_us": 2.9618
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+        "logical_bytes": {
+          "copy": 1300270632,
+          "scaleout": 0,
+          "scaleup": 544237560
+        },
+        "official_operation": "dispatch",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.408346501092462e-05,
+          "aiv_mte3": 8.027821670308207e-06,
+          "aiv_scalar": 0.003794708854124239,
+          "aiv_total_cycles": 249136,
+          "aiv_vec": 0.9917048441294755,
+          "dur_ns": 151233.32,
+          "dur_us": 151.23332000000002
+        },
+        "urma_bytes": 544237560,
+        "urma_gbps": 3598.661723487919,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic39direct_dispatch_producer_release_kernelENS1_44DirectDispatchProducerReleaseKernelArgumentsE",
+        "work_counts": {
+          "expanded_slots": 100978,
+          "hidden_elements": 117433344,
+          "input_rows": 16383,
+          "input_tokens": 16384,
+          "output_tokens": 100978,
+          "received_records": 72915,
+          "topk_elements": 98298,
+          "valid_routes": 98298
+        }
+      },
+      {
+        "current_operation": "reduced_combine",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0016148416959778393,
+          "aiv_mte3": 0.0005382805653259465,
+          "aiv_scalar": 0.3592144998565563,
+          "aiv_total_cycles": 3746,
+          "aiv_vec": 0.4692155595350657,
+          "dur_ns": 2468.32,
+          "dur_us": 2.4683200000000003
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+        "logical_bytes": {
+          "reduction": 1277609200,
+          "scaleout": 0,
+          "scaleup": 1047059400
+        },
+        "official_operation": "combine",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.106766647751531e-05,
+          "aiv_mte3": 7.0225554925051055e-06,
+          "aiv_scalar": 0.005084697969878088,
+          "aiv_total_cycles": 284801,
+          "aiv_vec": 0.9908813990277743,
+          "dur_ns": 172862.36,
+          "dur_us": 172.86236
+        },
+        "urma_bytes": 1047059400,
+        "urma_gbps": 6057.185612877205,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic38direct_combine_producer_release_kernelEPKtPKfPKiPKNS1_17HybridRouteRecordEPKlS7_PhPtPfS3_S3_NS1_16CombineVfScalarsE",
+        "work_counts": {
+          "expanded_slots": 100978,
+          "hidden_elements": 723910656,
+          "input_rows": 100992,
+          "input_tokens": 16384,
+          "output_tokens": 16384,
+          "received_records": 72915,
+          "topk_elements": 98304,
+          "valid_routes": 98298
+        }
+      }
+    ],
+    [
+      {
+        "current_operation": "expanded_dispatch",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0013862518124456184,
+          "aiv_mte3": 0.00046208393748187285,
+          "aiv_scalar": 0.44768621030626127,
+          "aiv_total_cycles": 4340,
+          "aiv_vec": 0.4504700443991054,
+          "dur_ns": 2830.1,
+          "dur_us": 2.8301
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+        "logical_bytes": {
+          "copy": 1292194592,
+          "scaleout": 0,
+          "scaleup": 542498448
+        },
+        "official_operation": "dispatch",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.596083554803518e-05,
+          "aiv_mte3": 8.653611849345064e-06,
+          "aiv_scalar": 0.003254112654382883,
+          "aiv_total_cycles": 231122,
+          "aiv_vec": 0.9916887986102816,
+          "dur_ns": 140331.48,
+          "dur_us": 140.33148
+        },
+        "urma_bytes": 542498448,
+        "urma_gbps": 3865.835719825658,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic39direct_dispatch_producer_release_kernelENS1_44DirectDispatchProducerReleaseKernelArgumentsE",
+        "work_counts": {
+          "expanded_slots": 100130,
+          "hidden_elements": 117426176,
+          "input_rows": 16382,
+          "input_tokens": 16384,
+          "output_tokens": 100130,
+          "received_records": 72682,
+          "topk_elements": 98292,
+          "valid_routes": 98292
+        }
+      },
+      {
+        "current_operation": "reduced_combine",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0014475031235246585,
+          "aiv_mte3": 0.00048250104117488623,
+          "aiv_scalar": 0.3695095470549981,
+          "aiv_total_cycles": 4170,
+          "aiv_vec": 0.47034115150801925,
+          "dur_ns": 2726.12,
+          "dur_us": 2.72612
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+        "logical_bytes": {
+          "reduction": 1279978600,
+          "scaleout": 0,
+          "scaleup": 1043713520
+        },
+        "official_operation": "combine",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.2915804836920525e-05,
+          "aiv_mte3": 7.63860161230684e-06,
+          "aiv_scalar": 0.005307507088692406,
+          "aiv_total_cycles": 261833,
+          "aiv_vec": 0.9903575940864324,
+          "dur_ns": 158911.36,
+          "dur_us": 158.91135999999997
+        },
+        "urma_bytes": 1043713520,
+        "urma_gbps": 6567.897474415927,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic38direct_combine_producer_release_kernelEPKtPKfPKiPKNS1_17HybridRouteRecordEPKlS7_PhPtPfS3_S3_NS1_16CombineVfScalarsE",
+        "work_counts": {
+          "expanded_slots": 100130,
+          "hidden_elements": 718405632,
+          "input_rows": 100224,
+          "input_tokens": 16384,
+          "output_tokens": 16384,
+          "received_records": 72682,
+          "topk_elements": 98304,
+          "valid_routes": 98292
+        }
+      }
+    ],
+    [
+      {
+        "current_operation": "expanded_dispatch",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0013844271932997967,
+          "aiv_mte3": 0.0004614757310999322,
+          "aiv_scalar": 0.45320357803390415,
+          "aiv_total_cycles": 4341,
+          "aiv_vec": 0.44505547079444036,
+          "dur_ns": 2827.74,
+          "dur_us": 2.82774
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+        "logical_bytes": {
+          "copy": 1294321672,
+          "scaleout": 0,
+          "scaleup": 542461128
+        },
+        "official_operation": "dispatch",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.5686813093713864e-05,
+          "aiv_mte3": 8.562271031237958e-06,
+          "aiv_scalar": 0.0033477071835058807,
+          "aiv_total_cycles": 233589,
+          "aiv_vec": 0.9915236127765781,
+          "dur_ns": 141737.2,
+          "dur_us": 141.7372
+        },
+        "urma_bytes": 542461128,
+        "urma_gbps": 3827.2318629124884,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic39direct_dispatch_producer_release_kernelENS1_44DirectDispatchProducerReleaseKernelArgumentsE",
+        "work_counts": {
+          "expanded_slots": 100420,
+          "hidden_elements": 117419008,
+          "input_rows": 16381,
+          "input_tokens": 16384,
+          "output_tokens": 100420,
+          "received_records": 72677,
+          "topk_elements": 98286,
+          "valid_routes": 98286
+        }
+      },
+      {
+        "current_operation": "reduced_combine",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0016255727653772633,
+          "aiv_mte3": 0.0005418575884590879,
+          "aiv_scalar": 0.4179322034050355,
+          "aiv_total_cycles": 3774,
+          "aiv_vec": 0.40402374607944147,
+          "dur_ns": 2484.56,
+          "dur_us": 2.48456
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+        "logical_bytes": {
+          "reduction": 1277709720,
+          "scaleout": 0,
+          "scaleup": 1043641720
+        },
+        "official_operation": "combine",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.2708933258909233e-05,
+          "aiv_mte3": 7.569644419636408e-06,
+          "aiv_scalar": 0.0048235429310082,
+          "aiv_total_cycles": 264218,
+          "aiv_vec": 0.990690667833089,
+          "dur_ns": 160315.72,
+          "dur_us": 160.31572
+        },
+        "urma_bytes": 1043641720,
+        "urma_gbps": 6509.915060107643,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic38direct_combine_producer_release_kernelEPKtPKfPKiPKNS1_17HybridRouteRecordEPKlS7_PhPtPfS3_S3_NS1_16CombineVfScalarsE",
+        "work_counts": {
+          "expanded_slots": 100420,
+          "hidden_elements": 720240640,
+          "input_rows": 100480,
+          "input_tokens": 16384,
+          "output_tokens": 16384,
+          "received_records": 72677,
+          "topk_elements": 98304,
+          "valid_routes": 98286
+        }
+      }
+    ],
+    [
+      {
+        "current_operation": "expanded_dispatch",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0014515479378712963,
+          "aiv_mte3": 0.00048384931262376537,
+          "aiv_scalar": 0.4602472544731854,
+          "aiv_total_cycles": 4154,
+          "aiv_vec": 0.4325848551116212,
+          "dur_ns": 2714.9,
+          "dur_us": 2.7149
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+        "logical_bytes": {
+          "copy": 1294414992,
+          "scaleout": 0,
+          "scaleup": 541595304
+        },
+        "official_operation": "dispatch",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.5557067865749427e-05,
+          "aiv_mte3": 8.519022621916477e-06,
+          "aiv_scalar": 0.0031876359489573726,
+          "aiv_total_cycles": 234772,
+          "aiv_vec": 0.9919245821547764,
+          "dur_ns": 142523.58,
+          "dur_us": 142.52357999999998
+        },
+        "urma_bytes": 541595304,
+        "urma_gbps": 3800.039993382148,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic39direct_dispatch_producer_release_kernelENS1_44DirectDispatchProducerReleaseKernelArgumentsE",
+        "work_counts": {
+          "expanded_slots": 100549,
+          "hidden_elements": 117411840,
+          "input_rows": 16380,
+          "input_tokens": 16384,
+          "output_tokens": 100549,
+          "received_records": 72561,
+          "topk_elements": 98280,
+          "valid_routes": 98280
+        }
+      },
+      {
+        "current_operation": "reduced_combine",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0016392411953114069,
+          "aiv_mte3": 0.0005464137317704688,
+          "aiv_scalar": 0.4159069220206329,
+          "aiv_total_cycles": 3705,
+          "aiv_vec": 0.40074688733232355,
+          "dur_ns": 2444.22,
+          "dur_us": 2.4442199999999996
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+        "logical_bytes": {
+          "reduction": 1280093480,
+          "scaleout": 0,
+          "scaleup": 1041975960
+        },
+        "official_operation": "combine",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.2389658596520533e-05,
+          "aiv_mte3": 7.4632195321735106e-06,
+          "aiv_scalar": 0.004872980728983088,
+          "aiv_total_cycles": 267984,
+          "aiv_vec": 0.990938289478092,
+          "dur_ns": 162691.94,
+          "dur_us": 162.69194
+        },
+        "urma_bytes": 1041975960,
+        "urma_gbps": 6404.59484348149,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic38direct_combine_producer_release_kernelEPKtPKfPKiPKNS1_17HybridRouteRecordEPKlS7_PhPtPfS3_S3_NS1_16CombineVfScalarsE",
+        "work_counts": {
+          "expanded_slots": 100549,
+          "hidden_elements": 721158144,
+          "input_rows": 100608,
+          "input_tokens": 16384,
+          "output_tokens": 16384,
+          "received_records": 72561,
+          "topk_elements": 98304,
+          "valid_routes": 98280
+        }
+      }
+    ],
+    [
+      {
+        "current_operation": "expanded_dispatch",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0013770658500199173,
+          "aiv_mte3": 0.00045902195000663905,
+          "aiv_scalar": 0.4733852136909069,
+          "aiv_total_cycles": 4373,
+          "aiv_vec": 0.4203732343388553,
+          "dur_ns": 2850.16,
+          "dur_us": 2.85016
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+        "logical_bytes": {
+          "copy": 1298214352,
+          "scaleout": 0,
+          "scaleup": 543379200
+        },
+        "official_operation": "dispatch",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.572307810618343e-05,
+          "aiv_mte3": 8.574359368727813e-06,
+          "aiv_scalar": 0.004103188338780195,
+          "aiv_total_cycles": 233255,
+          "aiv_vec": 0.9911667695929544,
+          "dur_ns": 141559.64,
+          "dur_us": 141.55964
+        },
+        "urma_bytes": 543379200,
+        "urma_gbps": 3838.5178148234904,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic39direct_dispatch_producer_release_kernelENS1_44DirectDispatchProducerReleaseKernelArgumentsE",
+        "work_counts": {
+          "expanded_slots": 100818,
+          "hidden_elements": 117404672,
+          "input_rows": 16379,
+          "input_tokens": 16384,
+          "output_tokens": 100818,
+          "received_records": 72800,
+          "topk_elements": 98274,
+          "valid_routes": 98274
+        }
+      },
+      {
+        "current_operation": "reduced_combine",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0016199606875768075,
+          "aiv_mte3": 0.0005399868958589358,
+          "aiv_scalar": 0.3589669369722518,
+          "aiv_total_cycles": 3741,
+          "aiv_vec": 0.47118617535992285,
+          "dur_ns": 2466.02,
+          "dur_us": 2.46602
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+        "logical_bytes": {
+          "reduction": 1279274960,
+          "scaleout": 0,
+          "scaleup": 1045408000
+        },
+        "official_operation": "combine",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.24447074204055e-05,
+          "aiv_mte3": 7.481569140135165e-06,
+          "aiv_scalar": 0.005382341827382329,
+          "aiv_total_cycles": 267328,
+          "aiv_vec": 0.9900651507216655,
+          "dur_ns": 162241.3,
+          "dur_us": 162.2413
+        },
+        "urma_bytes": 1045408000,
+        "urma_gbps": 6443.53811267538,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic38direct_combine_producer_release_kernelEPKtPKfPKiPKNS1_17HybridRouteRecordEPKlS7_PhPtPfS3_S3_NS1_16CombineVfScalarsE",
+        "work_counts": {
+          "expanded_slots": 100818,
+          "hidden_elements": 722993152,
+          "input_rows": 100864,
+          "input_tokens": 16384,
+          "output_tokens": 16384,
+          "received_records": 72800,
+          "topk_elements": 98304,
+          "valid_routes": 98274
+        }
+      }
+    ],
+    [
+      {
+        "current_operation": "expanded_dispatch",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0014581447918910135,
+          "aiv_mte3": 0.0004860482639636711,
+          "aiv_scalar": 0.46431082690842357,
+          "aiv_total_cycles": 4122,
+          "aiv_vec": 0.4308695952844841,
+          "dur_ns": 2696.0,
+          "dur_us": 2.696
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+        "logical_bytes": {
+          "copy": 1291154664,
+          "scaleout": 0,
+          "scaleup": 541931184
+        },
+        "official_operation": "dispatch",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.4892546379916186e-05,
+          "aiv_mte3": 8.297515459972066e-06,
+          "aiv_scalar": 0.0030563501171486274,
+          "aiv_total_cycles": 241038,
+          "aiv_vec": 0.9921845414803293,
+          "dur_ns": 146275.16,
+          "dur_us": 146.27516
+        },
+        "urma_bytes": 541931184,
+        "urma_gbps": 3704.8750040676764,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic39direct_dispatch_producer_release_kernelENS1_44DirectDispatchProducerReleaseKernelArgumentsE",
+        "work_counts": {
+          "expanded_slots": 100067,
+          "hidden_elements": 117397504,
+          "input_rows": 16378,
+          "input_tokens": 16384,
+          "output_tokens": 100067,
+          "received_records": 72606,
+          "topk_elements": 98268,
+          "valid_routes": 98268
+        }
+      },
+      {
+        "current_operation": "reduced_combine",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0014994351677859866,
+          "aiv_mte3": 0.000499811722595329,
+          "aiv_scalar": 0.3771667658882001,
+          "aiv_total_cycles": 4037,
+          "aiv_vec": 0.44714748429535883,
+          "dur_ns": 2645.3,
+          "dur_us": 2.6453
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+        "logical_bytes": {
+          "reduction": 1279619600,
+          "scaleout": 0,
+          "scaleup": 1042622160
+        },
+        "official_operation": "combine",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.2099593067267794e-05,
+          "aiv_mte3": 7.366531022422595e-06,
+          "aiv_scalar": 0.004581630002900225,
+          "aiv_total_cycles": 271503,
+          "aiv_vec": 0.9913542795241262,
+          "dur_ns": 164763.06,
+          "dur_us": 164.76306
+        },
+        "urma_bytes": 1042622160,
+        "urma_gbps": 6328.009203033738,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic38direct_combine_producer_release_kernelEPKtPKfPKiPKNS1_17HybridRouteRecordEPKlS7_PhPtPfS3_S3_NS1_16CombineVfScalarsE",
+        "work_counts": {
+          "expanded_slots": 100067,
+          "hidden_elements": 717488128,
+          "input_rows": 100096,
+          "input_tokens": 16384,
+          "output_tokens": 16384,
+          "received_records": 72606,
+          "topk_elements": 98304,
+          "valid_routes": 98268
+        }
+      }
+    ],
+    [
+      {
+        "current_operation": "expanded_dispatch",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0014637006330603449,
+          "aiv_mte3": 0.00048790021102011494,
+          "aiv_scalar": 0.464881677359079,
+          "aiv_total_cycles": 4107,
+          "aiv_vec": 0.4238369740174356,
+          "dur_ns": 2686.62,
+          "dur_us": 2.68662
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic33dispatch_epilogue_complete_kernelENS1_39DispatchEpilogueCompleteKernelArgumentsE",
+        "logical_bytes": {
+          "copy": 1294939096,
+          "scaleout": 0,
+          "scaleup": 543715080
+        },
+        "official_operation": "dispatch",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.577247249626824e-05,
+          "aiv_mte3": 8.590824165422748e-06,
+          "aiv_scalar": 0.003267195920636502,
+          "aiv_total_cycles": 232810,
+          "aiv_vec": 0.9915400146601624,
+          "dur_ns": 141340.72,
+          "dur_us": 141.34072
+        },
+        "urma_bytes": 543715080,
+        "urma_gbps": 3846.839608571401,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic39direct_dispatch_producer_release_kernelENS1_44DirectDispatchProducerReleaseKernelArgumentsE",
+        "work_counts": {
+          "expanded_slots": 100334,
+          "hidden_elements": 117390336,
+          "input_rows": 16377,
+          "input_tokens": 16384,
+          "output_tokens": 100334,
+          "received_records": 72845,
+          "topk_elements": 98262,
+          "valid_routes": 98262
+        }
+      },
+      {
+        "current_operation": "reduced_combine",
+        "epilogue": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 0.0015372981476273228,
+          "aiv_mte3": 0.0005124327158757741,
+          "aiv_scalar": 0.3985954314634077,
+          "aiv_total_cycles": 3949,
+          "aiv_vec": 0.426898438324547,
+          "dur_ns": 2591.66,
+          "dur_us": 2.59166
+        },
+        "epilogue_kernel": "_ZN7deep_ep6ascend7elastic32combine_epilogue_complete_kernelEPhmmNS1_10CoreTilingE",
+        "logical_bytes": {
+          "reduction": 1280337600,
+          "scaleout": 0,
+          "scaleup": 1046054200
+        },
+        "official_operation": "combine",
+        "urma": {
+          "aic_fixpipe": 0.0,
+          "aic_mad": 0.0,
+          "aic_mte1": 0.0,
+          "aic_mte2": 0.0,
+          "aic_mte3": 0.0,
+          "aic_scalar": 0.0,
+          "aic_total_cycles": 0,
+          "aiv_mte2": 2.255719814256389e-05,
+          "aiv_mte3": 7.519066047521297e-06,
+          "aiv_scalar": 0.004375532965394116,
+          "aiv_total_cycles": 265994,
+          "aiv_vec": 0.9914164756282123,
+          "dur_ns": 161490.34,
+          "dur_us": 161.49034
+        },
+        "urma_bytes": 1046054200,
+        "urma_gbps": 6477.5032364164945,
+        "urma_kernel": "_ZN7deep_ep6ascend7elastic38direct_combine_producer_release_kernelEPKtPKfPKiPKNS1_17HybridRouteRecordEPKlS7_PhPtPfS3_S3_NS1_16CombineVfScalarsE",
+        "work_counts": {
+          "expanded_slots": 100334,
+          "hidden_elements": 719323136,
+          "input_rows": 100352,
+          "input_tokens": 16384,
+          "output_tokens": 16384,
+          "received_records": 72845,
+          "topk_elements": 98304,
+          "valid_routes": 98262
+        }
+      }
+    ]
+  ],
+  "timing_protocol": {
+    "bandwidth_bytes": "per-rank scaleup logical bytes",
+    "barrier": "ElasticBuffer.barrier",
+    "barrier_location": "external-before-operation",
+    "cold_l2_epilogue_zero": "1<<26 int32 elements after communication launch",
+    "device_busy_before_barrier": true,
+    "flush_l2": true,
+    "internal_barrier_prologue_toggle": false,
+    "iterations": 50,
+    "profiler": "official bench_msprof semantics",
+    "reason": "current ElasticBuffer lacks official set_barrier_in_prologue API",
+    "timer": "torch_npu_profiler_ffts",
+    "timing": "transport service kernel; excludes outer producer and epilogue",
+    "warmups": 10
+  },
+  "workload": {
+    "hidden": 7168,
+    "masked_ratio": 0.0,
+    "num_experts": 256,
+    "num_tokens": 16384,
+    "num_topk": 6,
+    "precise_unbalanced_ratio": false,
+    "seed": 0,
+    "unbalanced_ratio": 1.0,
+    "world_size": 8
+  }
+}

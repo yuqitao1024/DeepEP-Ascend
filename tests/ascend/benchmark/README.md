@@ -32,12 +32,13 @@ and produces the official-reporting comparison tables. The methodology,
 archived result, and NPU8P smoke validation are documented in
 `docs/ascend-design/official-reporting-alignment-zh.md`.
 
-The current msprof script times the transport service kernels
-(`direct_dispatch_producer_release_kernel` and
-`direct_combine_producer_release_kernel`), not the outer
-`dispatch_kernel` / `combine_kernel`. For the staged-transport report,
-`stage_service_issue_drain` (`service_submit + cq_wait`) is the preferred
-official-semantic proxy.
+The current msprof script times the outer communication kernels
+(`dispatch_kernel` / `combine_kernel`) for raw kernel diagnostics. The staged
+transport implementation has no single msprof kernel that is equivalent to
+official URMA issue-and-drain: producer-release only appends transport
+commands, while service submission and CQ draining execute in later kernels.
+For official-semantic comparison, use `stage_service_issue_drain`
+(`service_submit + cq_wait`).
 
 ## Ascend data-block profiles
 
