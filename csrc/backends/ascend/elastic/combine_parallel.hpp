@@ -124,13 +124,15 @@ select_combine_vector_reduce_prefetch_config(
         return CombineVectorReducePrefetchConfigStatus::kInvalid;
     *output = {};
     std::uint32_t depth = kCombineVectorReduceQueueDepth;
-    if (value != nullptr && value[0] == '0' && value[1] == '\0')
-        depth = kCombineVectorReduceQueueDepth;
-    else if (value != nullptr && value[0] == '1' && value[1] == '\0')
-        depth = kCombineVectorReduceQueueDepth;
-    else if (value != nullptr && value[0] == '4' && value[1] == '\0')
+    if (value == nullptr)
         depth = kCombineVectorReducePrefetchQueueDepth;
-    else if (value != nullptr)
+    else if (value[0] == '0' && value[1] == '\0')
+        depth = kCombineVectorReduceQueueDepth;
+    else if (value[0] == '1' && value[1] == '\0')
+        depth = kCombineVectorReduceQueueDepth;
+    else if (value[0] == '4' && value[1] == '\0')
+        depth = kCombineVectorReducePrefetchQueueDepth;
+    else
         return CombineVectorReducePrefetchConfigStatus::kInvalid;
     if (!direct || hybrid || !qualified_tile)
         depth = kCombineVectorReduceQueueDepth;

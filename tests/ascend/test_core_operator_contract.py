@@ -2683,7 +2683,7 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             source)
 
     def test_combine_vector_reduce_prefetch_selector_contract(self):
-        """Keeps C21.3 prefetch selectable without changing tile defaults."""
+        """Keeps C21.3 prefetch on by default with explicit fallback."""
         source = (ELASTIC / "combine.asc").read_text()
         header = (ELASTIC / "kernels.hpp").read_text()
         host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
@@ -2698,6 +2698,9 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("arguments.vector_reduce_prefetch_depth", host)
         self.assertIn(
             "select_combine_vector_reduce_prefetch_config(", parallel)
+        self.assertIn(
+            "if (value == nullptr)\n"
+            "        depth = kCombineVectorReducePrefetchQueueDepth", parallel)
         self.assertIn(
             "PrefetchDepth = kCombineVectorReduceQueueDepth", common)
         self.assertIn("AscendC::QuePosition::VECIN, PrefetchDepth", common)

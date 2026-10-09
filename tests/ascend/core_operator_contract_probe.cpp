@@ -1472,10 +1472,10 @@ int main() {
     if (select_combine_vector_reduce_prefetch_config(
             nullptr, true, false, true,
             &vector_reduce_prefetch_config) !=
-                CombineVectorReducePrefetchConfigStatus::kDisabled ||
-        vector_reduce_prefetch_config.enabled ||
+                CombineVectorReducePrefetchConfigStatus::kEnabled ||
+        !vector_reduce_prefetch_config.enabled ||
         vector_reduce_prefetch_config.depth !=
-            kCombineVectorReduceQueueDepth ||
+            kCombineVectorReducePrefetchQueueDepth ||
         select_combine_vector_reduce_prefetch_config(
             "4", true, false, true,
             &vector_reduce_prefetch_config) !=

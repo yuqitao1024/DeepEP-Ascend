@@ -1101,14 +1101,13 @@ protocol, and all correctness checks are unchanged.
 
 The candidate dequeues each contributor tile before issuing its replacement,
 so the in-flight count never exceeds the selected queue depth. The mechanism
-is exposed only through the
+is exposed through the
 DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_PREFETCH environment selector for
-same-binary ABBA: 0/1 and unset retain the existing depth 2; 4 enables the
-bounded depth-4 prefetch. The selector is disabled unless the direct,
-non-hybrid, aligned, 512-element vector path is selected. This is a diagnostic
-candidate, not a retained default; acceptance requires repeated no-profile
-end-to-end gains in both Combine variants without a reproducible Dispatch
-regression.
+same-binary ABBA: 4 enables the bounded depth-4 prefetch, while 0/1 retains
+the original depth-two path. The selector is disabled unless the direct,
+non-hybrid, aligned, 512-element vector path is selected. This was initially
+a diagnostic candidate; acceptance required repeated no-profile end-to-end
+gains in both Combine variants without a reproducible Dispatch regression.
 
 Result: accepted as an opt-in setting, not a new production default. The
 corrected candidate preserves the baseline depth-two path and dequeues each
@@ -1134,8 +1133,22 @@ variants. Normal Dispatch, Expanded Dispatch, and Cached Dispatch averages
 move within normal shared-host variation; the largest mean increase is 0.202
 ms for Expanded Dispatch, while the same operation also has an on-leg faster
 than two off-legs. Because the improvement is large and reproducible but the
-selector is not yet a default, retain the mechanism and record the setting as
-a validated opt-in.
+selector is an opt-in setting, retain the mechanism and record the setting as
+a validated candidate for promotion.
+
+Follow-up (2026-10-09): promoted depth-4 prefetch to the default for every
+qualified path. Unset now selects depth 4; 0/1 remain explicit fallbacks to
+the original depth-two path. This is a product-behavior change in a separate
+commit so the original ABBA evidence remains attributable to the mechanism
+rather than default switching.
+
+The promoted default was rebuilt remotely as task
+task_20261009_202937_38304374765 with extension SHA-256
+2a8c2cc571b7a8faed64013f98c3d2b5cb2043f7c975e8481b4ab5c33da6dce6. The
+no-profile unset gate task task_20261009_203541_389389626126 passed
+correctness on devices 0-3. Its unset Combine wall mean/p95 was 7.503 /
+7.662 ms and Reduced Combine was 7.500 / 7.621 ms, matching the prior explicit
+depth-4 level rather than the depth-two fallback.
 
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
