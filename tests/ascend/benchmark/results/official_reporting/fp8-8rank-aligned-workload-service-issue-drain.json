@@ -19,6 +19,12 @@
     "python": "/data/disk2/pyptouser/yuqitao/deepep-venv-py311/bin/python",
     "stage_task": "task_20261009_211205_93635418509"
   },
+  "launch_alignment": {
+    "current_num_sms": 64,
+    "description": "Both the official reference workload and this benchmark launch the data path with 64 AIVs; the launch count is aligned.",
+    "num_aiv": 64,
+    "official_num_sms": 64
+  },
   "notes": [
     "Bandwidth uses the official per-rank received-token byte formula.",
     "stage_service_issue_drain maps service_submit + cq_wait and is the preferred proxy for official URMA issue-and-drain.",

@@ -7,6 +7,7 @@ This run aligns the benchmark workload with the official EP8 test:
 - expanded dispatch uses `do_expand=True`, `do_zero_padding=True`, and row-major scale factors;
 - combine bandwidth counts only the BF16 hidden payload, excluding top-k weights from the official URMA byte formula;
 - dispatch uses FP8 payload plus scale bytes and combine uses BF16 payload, with official top-k index and weight dtypes.
+- the official reference workload and this benchmark both launch the data path with 64 AIVs.
 
 ## Bandwidth mappings
 
@@ -28,9 +29,10 @@ Bytes per rank: 1,042,508,544
 
 ## Interpretation
 
-The service issue-and-drain proxy remains below the physical EP8 ceiling.
+The service issue-and-drain proxy remains below the physical EP8 ceiling. AIV
+launch count is not a source of the remaining gap: both sides use 64 AIVs.
 Dispatch improved from 263.52 to 274.49 GB/s after row-major scale factors and
-ero padding were enabled. Combine changed from 291.07 to 285.82 GB/s after
+zero padding were enabled. Combine changed from 291.07 to 285.82 GB/s after
 its byte formula was corrected to exclude top-k weights; the time also moved
 from 3.588ms to 3.647ms in this run.
 

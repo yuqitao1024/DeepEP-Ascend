@@ -25,6 +25,7 @@
 - expanded dispatch 开启 `do_zero_padding=True`；
 - expanded dispatch 使用 row-major scale factor（`use_tma_aligned_col_major_sf=False`）；
 - combine 的 URMA 字节只计 BF16 hidden payload，不计 top-k weights。
+- 官方参考 workload 与本轮 benchmark 的 data path 均启动 64 个 AIV：当前固定 `num_sms=64`，官方 direct scale-up 路径同样为 64 AIV。
 
 本轮仍在直连 NPU8P 设备 0–7，CANN /usr/local/Ascend/cann-9.3.0。msprof task 为 task_20261009_211108_88754524853，stage task 为 task_20261009_211205_93635418509，均为 10 warmup、50 sample 且 exit=0。
 
@@ -33,7 +34,7 @@
 | dispatch | 1977.41µs | 274.49 GB/s | 374 GB/s | 0.73x |
 | combine | 3647.37µs | 285.82 GB/s | 346 GB/s | 0.83x |
 
-与上一轮相比，dispatch 从 263.52 GB/s 提高到 274.49 GB/s；combine 的结果同时受时间变化与字节口径修正影响，从 291.07 GB/s 变为 285.82 GB/s。本轮两个结果都低于 EP8 物理带宽上限，也低于官方参考值。
+与上一轮相比，dispatch 从 263.52 GB/s 提高到 274.49 GB/s；combine 的结果同时受时间变化与字节口径修正影响，从 291.07 GB/s 变为 285.82 GB/s。本轮两个结果都低于 EP8 物理带宽上限，也低于官方参考值。AIV 启动数不是剩余差距的来源：双方均为 64 AIV。
 
 完整结果摘要见 tests/ascend/benchmark/results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.json 与同名 Markdown。
 
