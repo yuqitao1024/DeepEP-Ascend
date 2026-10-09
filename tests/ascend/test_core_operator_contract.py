@@ -469,6 +469,21 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("x.options().dtype(torch::kInt64)", host)
         self.assertNotIn("torch::zeros(\n                {static_cast<int64_t>(num_ranks_ + 2)}, uint64_options)", host)
 
+    def test_cached_and_combine_handles_use_pinned_readback(self):
+        """Small handle readbacks must reuse the pinned stream path."""
+        host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        # Both operation entry points resolve a caller stream before reading
+        # handle metadata; all bounded validation reads use that stream.
+        self.assertGreaterEqual(
+            host.count("runtime::StreamIdentity host_transfer_stream;"), 2)
+        self.assertGreaterEqual(
+            host.count("copy_to_host_on_stream("), 12)
+        for marker in (
+                "cached_token_metadata_at_forward->data_ptr(),",
+                "token_metadata_at_forward->data_ptr(),",
+                "cached_route_plan_tensor.data_ptr<std::uint64_t>(),"):
+            self.assertIn(marker, host)
+
     def test_cached_route_plan_preflight_covers_all_tokens(self):
         """The preflight must compare a global, not subgroup-local, digest."""
         source = (

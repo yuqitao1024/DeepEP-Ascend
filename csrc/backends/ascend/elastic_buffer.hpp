@@ -1879,6 +1879,15 @@ public:
                     "DeepEP Ascend backend: dispatch does not support "
                     "cumulative expert stats");
         const bool cached_mode = cached_num_recv_tokens.has_value();
+        // Handle validation reads precede the operation stream setup below.
+        // Use the caller's current stream for the bounded pinned-staging path;
+        // the tensors are retained by the handle and are not mutated by this
+        // readback.
+        runtime::StreamIdentity host_transfer_stream;
+        auto host_transfer_status =
+            resources_->current_stream(&host_transfer_stream);
+        if (!host_transfer_status.ok())
+            raise_transport_status(host_transfer_status, rank_idx_);
         const char* fused_metadata_setting =
             std::getenv("DEEP_EP_ASCEND_DISPATCH_FUSED_METADATA_COPY");
         TORCH_CHECK(!fused_metadata_setting ||
@@ -2338,9 +2347,9 @@ public:
                                         sizeof(elastic::HybridRouteRecord)),
                         "DeepEP Ascend backend: dispatch cached handle shape mismatch");
             elastic::DispatchHandleDescriptor descriptor{};
-            auto status = resources_->copy_to_host(
+            auto status = resources_->copy_to_host_on_stream(
                 &descriptor, cached_token_metadata_at_forward->data_ptr(),
-                sizeof(descriptor));
+                sizeof(descriptor), host_transfer_stream.raw);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
             if (allow_hybrid_mode_) {
@@ -2351,10 +2360,11 @@ public:
                         static_cast<const std::uint8_t*>(
                             cached_token_metadata_at_forward->data_ptr()) +
                         sizeof(elastic::DispatchHandleDescriptor);
-                    status = resources_->copy_to_host(
+                    status = resources_->copy_to_host_on_stream(
                         host_route_records.data(), device_records,
                         host_route_records.size() *
-                            sizeof(elastic::HybridRouteRecord));
+                            sizeof(elastic::HybridRouteRecord),
+                        host_transfer_stream.raw);
                     if (!status.ok())
                         raise_transport_status(status, rank_idx_);
                 }
@@ -2392,10 +2402,11 @@ public:
                         static_cast<std::size_t>(num_topk),
                     -1);
                 if (!host_route_records.empty()) {
-                    status = resources_->copy_to_host(
+                    status = resources_->copy_to_host_on_stream(
                         host_source_metadata.data(),
                         cached_recv_src_metadata->data_ptr(),
-                        host_source_metadata.size() * sizeof(std::int32_t));
+                        host_source_metadata.size() * sizeof(std::int32_t),
+                        host_transfer_stream.raw);
                     if (!status.ok())
                         raise_transport_status(status, rank_idx_);
                     for (std::size_t index = 0;
@@ -2446,10 +2457,11 @@ public:
             if constexpr (route_plan_fast_path_enabled) {
                 host_route_plan.resize(
                     static_cast<std::size_t>(num_ranks_ + 2));
-                status = resources_->copy_to_host(
+                status = resources_->copy_to_host_on_stream(
                     host_route_plan.data(),
                     cached_route_plan_tensor.data_ptr<std::uint64_t>(),
-                    host_route_plan.size() * sizeof(std::uint64_t));
+                    host_route_plan.size() * sizeof(std::uint64_t),
+                    host_transfer_stream.raw);
                 if (!status.ok())
                     raise_transport_status(status, rank_idx_);
                 const bool route_plan_ready =
@@ -2470,19 +2482,22 @@ public:
                 }
             }
             source_metadata = *cached_recv_src_metadata;
-            status = resources_->copy_to_host(
+            status = resources_->copy_to_host_on_stream(
                 host_rank_prefix.data(), rank_prefix.data_ptr(),
-                host_rank_prefix.size() * sizeof(std::int32_t));
+                host_rank_prefix.size() * sizeof(std::int32_t),
+                host_transfer_stream.raw);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
-            status = resources_->copy_to_host(
+            status = resources_->copy_to_host_on_stream(
                 host_expert_prefix.data(), expert_prefix.data_ptr(),
-                host_expert_prefix.size() * sizeof(std::int32_t));
+                host_expert_prefix.size() * sizeof(std::int32_t),
+                host_transfer_stream.raw);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
-            status = resources_->copy_to_host(
+            status = resources_->copy_to_host_on_stream(
                 host_unaligned.data(), unaligned.data_ptr(),
-                host_unaligned.size() * sizeof(std::int32_t));
+                host_unaligned.size() * sizeof(std::int32_t),
+                host_transfer_stream.raw);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
             TORCH_CHECK(host_rank_prefix.back() == *cached_num_recv_tokens,
@@ -2864,13 +2879,10 @@ public:
                     false,
                     "DeepEP Ascend backend: cached route plan launch failed: ",
                     route_plan_status);
-            status = resources_->synchronize_stream(stream.raw);
-            if (!status.ok())
-                raise_transport_status(status, rank_idx_);
-            status = resources_->copy_to_host(
+            status = resources_->copy_to_host_on_stream(
                 host_route_plan.data(),
                 cached_route_plan_tensor.data_ptr<std::uint64_t>(),
-                host_route_plan.size() * sizeof(std::uint64_t));
+                host_route_plan.size() * sizeof(std::uint64_t), stream.raw);
             if (!status.ok())
                 raise_transport_status(status, rank_idx_);
             TORCH_CHECK(host_route_plan[num_ranks_] != 0,
@@ -2997,10 +3009,11 @@ public:
             std::vector<std::uint64_t> host_route_plan(
                 static_cast<std::size_t>(cached_route_plan_tensor.size(0)));
             if (!host_route_plan.empty()) {
-                status = resources_->copy_to_host(
+                status = resources_->copy_to_host_on_stream(
                     host_route_plan.data(),
                     cached_route_plan_tensor.data_ptr<std::uint64_t>(),
-                    host_route_plan.size() * sizeof(std::uint64_t));
+                    host_route_plan.size() * sizeof(std::uint64_t),
+                    stream.raw);
                 if (!status.ok())
                     raise_transport_status(status, rank_idx_);
             }
@@ -3427,6 +3440,11 @@ public:
         if (stage_profile_enabled_)
             host_timeline_profile_.reset(0);
         auto combine_host_phase_start_ns = host_profile_start();
+        runtime::StreamIdentity host_transfer_stream;
+        auto host_transfer_status =
+            resources_->current_stream(&host_transfer_stream);
+        if (!host_transfer_status.ok())
+            raise_transport_status(host_transfer_status, rank_idx_);
         if (stage_profile_enabled_)
             host_timeline_profile_.combine_entry_ns =
                 combine_host_phase_start_ns;
@@ -3604,9 +3622,9 @@ public:
             combine_host_phase_start_ns);
         combine_host_phase_start_ns = host_profile_start();
         elastic::DispatchHandleDescriptor descriptor{};
-        status = resources_->copy_to_host(
+        status = resources_->copy_to_host_on_stream(
             &descriptor, token_metadata_at_forward->data_ptr(),
-            sizeof(descriptor));
+            sizeof(descriptor), host_transfer_stream.raw);
         if (!status.ok())
             raise_transport_status(status, rank_idx_);
         const auto& context = resources_->device_context();
@@ -3649,10 +3667,11 @@ public:
                     static_cast<const std::uint8_t*>(
                         token_metadata_at_forward->data_ptr()) +
                     sizeof(elastic::DispatchHandleDescriptor);
-                status = resources_->copy_to_host(
+                status = resources_->copy_to_host_on_stream(
                     host_route_records.data(), device_records,
                     host_route_records.size() *
-                        sizeof(elastic::HybridRouteRecord));
+                        sizeof(elastic::HybridRouteRecord),
+                    host_transfer_stream.raw);
                 if (!status.ok())
                     raise_transport_status(status, rank_idx_);
             }

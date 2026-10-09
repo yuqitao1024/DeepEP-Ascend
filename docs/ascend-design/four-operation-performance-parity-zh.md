@@ -699,6 +699,40 @@ behavior. C17 is accepted; the next work item should be selected from the
 remaining operations using a fresh stage profile rather than re-opening Normal
 Dispatch micro-optimization.
 
+#### C18 prerequisite: shared pinned handle readback (2026-10-09)
+
+Before opening the dispatch-stage-gap and Combine producer work items, the
+retained Normal Dispatch host-transfer optimization was audited. Its reusable
+4096-byte pinned staging path was present in the runtime, but Cached Dispatch
+and Combine still used synchronous `copy_to_host` for descriptor, route-plan,
+prefix, unaligned-count, and bounded hybrid-route readbacks.
+
+The prerequisite change routes those bounded reads through the existing
+`SmallHostTransfer` stream path. No validation, generation, topology, shape,
+or handle-attestation check is removed. The first lazy-build call still
+synchronizes through the same stream-ordered copy after building its route
+plan; only the redundant separate stream synchronize is removed.
+
+The candidate built as task task_20261009_095354_204461512397 with extension
+SHA-256 2a816b333dc0688d578cca762c3541f53997820a0f19af150bd4925396c2aa5e.
+The four-rank gate task task_20261009_095445_204812330959 passed:
+
+| Operation | Before mean / p95 | Candidate mean / p95 | Change |
+| --- | ---: | ---: | ---: |
+| Normal Dispatch | 4.028 / 4.331 ms | 3.475 / 3.660 ms | -0.552 / -0.671 ms |
+| Expanded Dispatch | 11.448 / 11.839 ms | 11.166 / 11.284 ms | -0.283 / -0.556 ms |
+| Cached Dispatch | 10.657 / 11.083 ms | 9.651 / 10.388 ms | -1.006 / -0.696 ms |
+| Normal Combine | 10.328 / 10.861 ms | 9.911 / 10.198 ms | -0.417 / -0.664 ms |
+| Reduced Combine | 9.982 / 10.331 ms | 9.751 / 10.189 ms | -0.231 / -0.142 ms |
+
+The follow-up stage profile task task_20261009_095623_205841315789 passed and
+confirmed the mechanism: Cached Dispatch prelaunch setup fell from about 2.455
+to 0.680 ms, while Combine handle readback fell from about 0.255-0.270 to
+0.020 ms. The two-rank dispatch matrix task
+task_20261009_095552_205494510247 passed all 14 cases. This prerequisite is
+accepted because it applies an already proven host mechanism to the four
+remaining operations without weakening any handle proof.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all
