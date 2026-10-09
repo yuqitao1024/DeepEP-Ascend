@@ -780,6 +780,34 @@ not provide a clear target-operation gain; retain it only if follow-up ABBA
 shows stable no-regression and a reproducible Dispatch gain. Do not claim the
 single-run Cached/Reduced improvements as retained performance yet.
 
+#### C19.2 diagnosis: release payload and channel boundary (2026-10-09)
+
+The previously deferred payload-flush candidate was already rejected in three
+eight-rank ABBA batches: Normal Combine moved -1.57%, -3.45%, and +3.03%, so
+the result was not reproducible. The follow-up release attribution shows that
+local CQ bookkeeping and command construction are not the dominant tail;
+generation waiting is. The existing explicit payload flush therefore remains
+required.
+
+The already-implemented multi-channel path was also rechecked on the current
+CANN 9.3 build. A two-channel four-rank gate, task
+task_20261009_120727_326979330952, passed correctness but regressed both
+Combine variants versus the same-binary one-channel run:
+
+| Operation | 1 channel mean / p95 | 2 channels mean / p95 | Change |
+| --- | ---: | ---: | ---: |
+| Normal Dispatch | 3.436 / 3.556 ms | 3.503 / 3.697 ms | +0.067 / +0.140 ms |
+| Expanded Dispatch | 11.093 / 11.238 ms | 11.206 / 11.432 ms | +0.113 / +0.194 ms |
+| Cached Dispatch | 9.390 / 10.184 ms | 9.473 / 10.076 ms | +0.083 / -0.108 ms |
+| Normal Combine | 10.004 / 10.391 ms | 10.274 / 11.005 ms | +0.270 / +0.615 ms |
+| Reduced Combine | 9.661 / 9.987 ms | 9.910 / 10.460 ms | +0.248 / +0.473 ms |
+
+This is consistent with the earlier eight-rank result: two channels did not
+provide a stable gain and regressed Combine. Keep the default at one channel.
+The next release-path work item should be bounded payload/control overlap
+with a fresh per-peer arrival trace, not another flush-boundary or channel-
+count mutation.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all
