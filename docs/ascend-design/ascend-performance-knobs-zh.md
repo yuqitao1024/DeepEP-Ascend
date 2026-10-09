@@ -26,6 +26,8 @@ selector 在满足条件时默认启用。显式设置成下表推荐值，通�
 | Combine | `DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT` | eligible 时开启 |
 | Combine | `DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE` | eligible 时 512 |
 | Combine | `DEEP_EP_ASCEND_COMBINE_EXPANDED_VECTOR_REDUCE` | eligible 时开启 |
+| Combine | `DEEP_EP_ASCEND_COMBINE_PRODUCER_PAYLOAD_TILE` | eligible 时 3584 |
+| Combine | `DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_PREFETCH` | eligible 时 4 |
 
 “eligible 时”表示调用模式满足该优化的边界条件。selector 的显式 `1` 不会强行
 打开不满足条件的路径，而是返回 disabled；非法值在 host 边界 fail-fast。
@@ -149,6 +151,27 @@ selector 在满足条件时默认启用。显式设置成下表推荐值，通�
 - 对照：`0` 回到 scalar control。
 - 注意：Normal Combine 不是它的适用路径；它主要影响 expanded/reduced Combine。
 
+### `DEEP_EP_ASCEND_COMBINE_PRODUCER_PAYLOAD_TILE`
+
+- 取值：`0`、`1`、`1024`、`3584`，或未设置。
+- 未设置：direct、non-hybrid Combine eligible 时默认 `3584`。
+- 作用：选择 producer payload / expanded vector reduce 的向量 tile。
+- 对照：`0`、`1` 或 `1024` 回到旧 1024-element tile；`3584` 是 C19.4 验收后
+  保留的默认值。
+
+### `DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_PREFETCH`
+
+- 取值：`0`、`1`、`4`，或未设置。
+- 未设置：direct、non-hybrid 且使用合格 512-element vector reduce tile 时
+  默认 `4`。
+- 作用：C21.3。把最终 epilogue reduce，以及复用同一机制的 expanded
+  producer vector reduce 的 `VECIN` 输入队列从 depth 2 提升到 depth 4；
+  每个 tile 先出队、计算并释放，再补发下一 tile，保证在飞请求数不超过
+  队列深度。
+- 对照：`0` 或 `1` 显式回到 depth 2；`4` 显式启用 depth 4。
+- 语义：不改变 tile 大小、输入顺序、浮点累加顺序、bias 顺序、输出布局
+  或 transport 协议。
+
 ## 实验或非默认 runtime selector
 
 ### `DEEP_EP_ASCEND_CHANNELS`
@@ -174,6 +197,12 @@ Ascend build 的编译宏在构建时固化，修改后必须重新构建 extens
 | `DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP` | `OFF` | 2026-09-25 无 profile ABBA 显示无稳定收益且偏慢，保持关闭；profile 模式下该开关本身也不会生效 |
 | `DEEP_EP_ASCEND_POLLING_NOP` | `OFF` | 真实机器 polling NOP selector。Driver 25.6 已验证默认关闭无卡死；开启仅用于旧 driver 对照，不是性能优化推荐 |
 | `DEEP_EP_ASCEND_OFFICIAL_SIMT` | `OFF` | 实验用官方 Hcomm SIMT 执行器；保留现有 producer/command queue。五组 8-rank ABBA 加一组 30-warmup 对照仍无稳定正收益，继续默认关闭；见[接口核对和数据](official-simt-backend-abba-zh.md) |
+
+Ascend build 还固定启用三个设备侧 staged-URMA 基础宏：
+`DEEP_EP_ASCEND_STAGED_URMA`、`DEEP_EP_ASCEND_AICORE_URMA_SERVICE` 和
+`DEEP_EP_ASCEND_AICORE_WQE_CALLEE=__aicore__`。它们是当前 AICore transport
+service 的基础设施，不是可选性能开关；没有 runtime 对照路径，不应与
+`RELEASE_SIGNAL_ONLY` 等 A/B 编译宏混用。
 
 `DEEP_EP_ASCEND_RELEASE_SIGNAL_ONLY=ON` 只跳过最终 direct Dispatch/Combine
 producer release barrier；payload/control put、CQ drain、release signal、
@@ -247,6 +276,8 @@ export DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY=32768
 export DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT=1
 export DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE=512
 export DEEP_EP_ASCEND_COMBINE_EXPANDED_VECTOR_REDUCE=1
+export DEEP_EP_ASCEND_COMBINE_PRODUCER_PAYLOAD_TILE=3584
+export DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_PREFETCH=4
 
 # 如果要测试真正非默认项，例如多 channel，必须单独改 DEEP_EP_ASCEND_CHANNELS，
 # 不要同时叠加其他变量。

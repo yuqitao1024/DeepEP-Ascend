@@ -2362,6 +2362,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn(
             "direct_combine_producer_expanded_vector_reduce_impl<", kernel)
         self.assertIn("arguments.expanded_vector_reduce", kernel)
+        self.assertIn(
+            "direct_combine_producer_expanded_vector_reduce_impl<\n"
+            "                        kCombineProducerVectorTileElements,\n"
+            "                        kCombineVectorReducePrefetchQueueDepth>(",
+            source)
 
         signature = (
             "__aicore__ inline void "
@@ -2370,9 +2375,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         vector_end = common.index("\n}\n", vector_begin)
         vector_reduce = common[vector_begin:vector_end]
         self.assertIn(
-            "AscendC::TQue<AscendC::QuePosition::VECIN, 2>",
+            "AscendC::TQue<AscendC::QuePosition::VECIN, PrefetchDepth>",
             vector_reduce)
-        self.assertIn("input_queue, 2,", vector_reduce)
+        self.assertIn("input_queue, PrefetchDepth,", vector_reduce)
+        self.assertIn("issued < PrefetchDepth", vector_reduce)
 
     def test_direct_combine_local_copy_uses_opt_in_datacopy_body(self):
         """Catches restoring a byte-at-a-time copy for the local rank shard."""
@@ -2680,6 +2686,10 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             source)
         self.assertIn(
             "direct_combine_producer_expanded_vector_reduce_impl<",
+            source)
+        self.assertIn(
+            "kCombineVectorReducePrefetchQueueDepth :\n"
+            "                        kCombineVectorReduceQueueDepth>(",
             source)
 
     def test_combine_vector_reduce_prefetch_selector_contract(self):

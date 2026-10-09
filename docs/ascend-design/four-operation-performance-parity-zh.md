@@ -1150,6 +1150,45 @@ correctness on devices 0-3. Its unset Combine wall mean/p95 was 7.503 /
 7.662 ms and Reduced Combine was 7.500 / 7.621 ms, matching the prior explicit
 depth-4 level rather than the depth-two fallback.
 
+Reuse follow-up: the same selector now also selects the qualified expanded
+Combine producer vector-reduce queue. Unset/4 enables its depth-4 input
+prefetch; 0/1 preserves the original depth-two path. Input-row order, floating
+point accumulation order, output tile order, record layout, and transport
+protocol remain unchanged. Validation is pending in this section and must be
+completed before treating the reuse as retained.
+
+Reuse result: accepted. Remote build task task_20261009_210232_49902726454
+succeeded with extension SHA-256
+67331ffcaf1d4f142970e9ca98fc47ca24fcddea077ef2bca61539878d233b5a. Three
+same-binary ABBA repetitions on devices 0-3 all passed correctness:
+
+| Repetition | Leg | Task | Normal Combine | Reduced Combine |
+| ---: | --- | --- | ---: | ---: |
+| 1 | off | task_20261009_210501_84902821659 | 8.548 / 9.048 | 8.555 / 9.085 |
+| 1 | on | task_20261009_210527_85426220919 | 7.722 / 8.047 | 7.601 / 7.904 |
+| 2 | off | task_20261009_210553_8578809306 | 8.300 / 8.607 | 8.421 / 9.010 |
+| 2 | on | task_20261009_210619_86093917586 | 7.713 / 8.054 | 7.632 / 8.291 |
+| 3 | off | task_20261009_210645_86367213113 | 8.474 / 8.754 | 8.521 / 8.928 |
+| 3 | on | task_20261009_210711_86631613195 | 7.735 / 8.118 | 7.680 / 7.895 |
+
+The averages improve Normal Combine from 8.441 / 8.803 ms to 7.724 / 8.073 ms
+and Reduced Combine from 8.499 / 9.008 ms to 7.638 / 8.030 ms. Reduced Combine
+gains an additional 0.026 / 0.165 ms over the prior epilogue-only C21.3
+average, while the three Dispatch operations remain within normal variation.
+Every on-leg improves both Combine variants.
+
+The same binary then ran the representative no-profile eight-rank gate on
+devices 0-7 as task_20261009_210903_87553832305. Correctness passed. Wall
+mean/p95 and logical bandwidth were:
+
+| Operation | mean / p95 | Logical bandwidth |
+| --- | ---: | ---: |
+| Normal Dispatch | 3.853 / 4.205 ms | 12248.2 GB/s |
+| Expanded Dispatch | 10.746 / 10.999 ms | 11577.1 GB/s |
+| Cached Dispatch | 11.083 / 11.583 ms | 745.2 GB/s |
+| Normal Combine | 8.290 / 8.779 ms | 1375.6 GB/s |
+| Reduced Combine | 8.343 / 8.815 ms | 1367.6 GB/s |
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all
