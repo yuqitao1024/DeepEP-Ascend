@@ -1048,6 +1048,46 @@ rejected and the source change reverted. After C20.1, the remaining Expanded
 producer-record cost is metadata/record work rather than redundant hidden-row
 loads.
 
+#### C21.1 measurement: current Combine no-profile timeline (2026-10-09)
+
+Before opening a Combine release-overlap candidate, the retained C20.1 build
+was profiled again without `--profile-stages`. This avoids treating the old
+C19.3 diagnostic service attribution as current end-to-end truth.
+
+- Binary: extension SHA-256
+  `d6b4cabc8c090f5f7beccf07340af05874bd5cd60f642c3b790f247ee5a08b3a`.
+- Four-rank timeline task: `task_20261009_170158_22510506543`.
+- Operation: representative Normal Combine, 30 warmups and 30 plain
+  iterations, then 12 profiler captures with the first excluded.
+
+The plain max-rank wall mean/p95 was 8.138 / 8.558 ms. On the slowest-rank
+captures, 23 DeepEP kernels spanned 6.530 ms and total kernel gap was only
+about 20 us. The largest items were:
+
+| Stage/kernel group | Mean |
+| --- | ---: |
+| generic `combine_kernel` service stages | 4.639 ms |
+| epilogue prepare vector slots | 0.586 ms |
+| epilogue validate | 0.547 ms |
+| producer plan | 0.309 ms |
+| epilogue acquire | 0.181 ms |
+| producer release VF | 0.084 ms |
+| producer plan prefix | 0.077 ms |
+| producer record VF | 0.032 ms |
+
+A representative capture resolves the generic stages as follows:
+
+1. producer hidden copy: about 0.75 ms;
+2. payload release service/CQE wait: about 2.24 ms;
+3. final epilogue reduction: about 1.64 ms.
+
+The host entry-to-first-kernel interval is also material in the profiler
+(about 2.31 ms mean), but the plain no-profiler result remains 8.138 ms, so
+profiler entry overhead cannot be claimed as production gain. The next viable
+Combine work item is therefore not another producer-record tile or control-WQE
+change. It must address the 2.24 ms payload completion wait or the 1.64 ms
+final reduction while preserving payload-before-control order.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all
