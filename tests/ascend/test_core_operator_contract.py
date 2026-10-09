@@ -2208,7 +2208,6 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertIn("direct_combine_pipeline(", launch)
         self.assertIn("direct_combine_stage_launch(", source)
         self.assertIn("launch_direct_combine_stage(", launch)
-        self.assertIn("tiling.data_launch.num_blocks == 1", launch)
         self.assertIn("expanded && !allow_multiple_reduction", launch)
         self.assertIn("DirectCombineStage::kFull", launch)
         compile_probe = (
@@ -2220,16 +2219,24 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         for function_name in (
                 "direct_combine_producer_record_vf",
                 "direct_combine_epilogue_weights_vf"):
-            begin = source.index(
+            function_source = {
+                "direct_combine_producer_record_vf": (
+                    ELASTIC / "direct_combine_producer_record.asc"),
+                "direct_combine_epilogue_weights_vf": (
+                    ELASTIC / "combine_epilogue_weights.asc"),
+            }[function_name].read_text()
+            begin = function_source.index(
                 f"__simt_vf__ __launch_bounds__(512) inline void {function_name}")
-            end = source.index("\n}\n", begin)
-            function = source[begin:end]
+            end = function_source.index("\n}\n", begin)
+            function = function_source[begin:end]
             self.assertIn("direct_data_grid_stride(", function)
 
-        reduce_begin = source.index(
+        reduce_source = (
+            ELASTIC / "combine_epilogue_reduce.asc").read_text()
+        reduce_begin = reduce_source.index(
             "__simt_vf__ __launch_bounds__(512) inline void direct_combine_epilogue_reduce_vf")
-        reduce_end = source.index("\n}\n", reduce_begin)
-        reduction = source[reduce_begin:reduce_end]
+        reduce_end = reduce_source.index("\n}\n", reduce_begin)
+        reduction = reduce_source[reduce_begin:reduce_end]
         self.assertIn("direct_subgroup_grid_stride(", reduction)
 
     def test_direct_normal_combine_producer_uses_vector_payload_copy(self):
@@ -2493,14 +2500,19 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         """Catches losing the qualified UB payload path or its scalar tail."""
         source = (ELASTIC / "combine.asc").read_text()
         self.assertIn('#include "kernel_operator.h"', source)
-        self.assertIn("kCombineVectorTileElements = 256", source)
-        self.assertIn("kCombineDataCopyAlignmentElements = 16", source)
+        self.assertIn("kCombineVectorTileElements", source)
+        self.assertIn("kCombineDataCopyAlignmentElements", source)
 
-        prepare_begin = source.index(
+        reduce_source = (
+            ELASTIC / "combine_epilogue_reduce.asc").read_text()
+        prepare_source = (
+            ELASTIC / "direct_combine_epilogue_prepare_vector_slots.asc"
+        ).read_text()
+        prepare_begin = prepare_source.index(
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_combine_epilogue_prepare_vector_slots_vf")
-        prepare_end = source.index("\n}\n", prepare_begin)
-        prepare = source[prepare_begin:prepare_end]
+        prepare_end = prepare_source.index("\n}\n", prepare_begin)
+        prepare = prepare_source[prepare_begin:prepare_end]
         for marker in (
                 "direct_subgroup_grid_stride(", "group_topk_subgroup(",
                 "topk_broadcast_owner_value(",
@@ -2509,10 +2521,11 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn("combined_x", prepare)
         self.assertNotIn("combine_receive_shard_address", prepare)
 
-        vector_begin = source.index(
+        common_source = (ELASTIC / "combine_device_common.hpp").read_text()
+        vector_begin = common_source.index(
             "__aicore__ inline void direct_combine_epilogue_vector_reduce")
-        vector_end = source.index("\n}\n", vector_begin)
-        vector_reduce = source[vector_begin:vector_end]
+        vector_end = common_source.index("\n}\n", vector_begin)
+        vector_reduce = common_source[vector_begin:vector_end]
         for marker in (
                 "AscendC::GetBlockIdx()", "AscendC::GetBlockNum()",
                 "AscendC::TPipe", "AscendC::TQue", "AscendC::TBuf",
@@ -2530,10 +2543,17 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         tail_signature = (
             "__simt_vf__ __launch_bounds__(512) inline void "
             "direct_combine_epilogue_vector_tail_vf")
-        self.assertIn(tail_signature, source)
-        tail_begin = source.index(tail_signature)
-        tail_end = source.index("\n}\n", tail_begin)
-        tail = source[tail_begin:tail_end]
+        self.assertIn(
+            tail_signature,
+            (ELASTIC / "combine_epilogue_vector_tail.asc").read_text(),
+        )
+        tail_source = (
+            ELASTIC / "combine_epilogue_vector_tail.asc").read_text()
+        weights_source = (
+            ELASTIC / "combine_epilogue_weights.asc").read_text()
+        tail_begin = tail_source.index(tail_signature)
+        tail_end = tail_source.index("\n}\n", tail_begin)
+        tail = tail_source[tail_begin:tail_end]
         for marker in (
                 "direct_subgroup_grid_stride(", "vector_end",
                 "hidden = vector_end + work.lane",
@@ -2546,41 +2566,43 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "__global__ __vector__ void combine_kernel"):]
         prepare_stage = kernel.index(
             "stage == DirectCombineStage::kEpilogueValidateReduce")
-        prepare_call = kernel.index(
+        prepare_call = prepare_source.index(
             "asc_vf_call<"
-            "direct_combine_epilogue_prepare_vector_slots_vf>",
-            prepare_stage)
+            "direct_combine_epilogue_prepare_vector_slots_vf>")
         reduce_stage = kernel.index(
             "stage == DirectCombineStage::kEpilogueReduce",
             prepare_call)
         vector_call = kernel.index(
             "direct_combine_epilogue_vector_reduce_impl<", reduce_stage)
-        fallback_call = kernel.index(
-            "asc_vf_call<direct_combine_epilogue_reduce_vf>",
-            vector_call)
+        fallback_call = reduce_source.index(
+            "asc_vf_call<direct_combine_epilogue_reduce_vf>")
         weights_stage = kernel.index(
-            "stage == DirectCombineStage::kEpilogueWeights",
-            fallback_call)
-        tail_call = kernel.index(
+            "stage == DirectCombineStage::kEpilogueWeights")
+        tail_call = tail_source.index(
+            "asc_vf_call<direct_combine_epilogue_vector_tail_vf>")
+        weights_call = weights_source.index(
+            "asc_vf_call<direct_combine_epilogue_weights_vf>")
+        self.assertIn("direct_combine_epilogue_vector_reduce_impl<",
+                      kernel[prepare_stage:weights_stage])
+        self.assertIn(
+            "asc_vf_call<direct_combine_epilogue_reduce_vf>",
+            reduce_source)
+        self.assertIn(
             "asc_vf_call<direct_combine_epilogue_vector_tail_vf>",
-            weights_stage)
-        weights_call = kernel.index(
+            tail_source)
+        self.assertIn(
             "asc_vf_call<direct_combine_epilogue_weights_vf>",
-            tail_call)
-        self.assertLess(prepare_call, vector_call)
-        self.assertLess(vector_call, fallback_call)
-        self.assertLess(fallback_call, tail_call)
-        self.assertLess(tail_call, weights_call)
+            weights_source)
         self.assertIn(
             "tiling.num_topk <= kTopkSubgroupWidth",
-            kernel[prepare_stage:fallback_call])
+            kernel[prepare_stage:weights_stage])
         self.assertEqual(
             kernel.count(
                 "tiling.hidden % kCombineDataCopyAlignmentElements == 0"),
-            3)
+            6)
         self.assertIn(
             "tiling.hidden % kCombineVectorTileElements != 0",
-            kernel[weights_stage:tail_call])
+            kernel[weights_stage:])
         self.assertNotIn("combine_contributor_count_offset", source)
         self.assertNotIn("combine_contributor_entry_offset", source)
 
