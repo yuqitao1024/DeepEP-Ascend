@@ -56,6 +56,45 @@ Comparing with V1, **V2 achieves up to 1.3x peak performance, while saving up to
 
 We omit results for larger EP configurations for the time being, but encourage interested users to benchmark them directly. Based on our internal experience, we expect the kernel to continue saturating hardware bandwidth at scale.
 
+### Ascend NPU reference results
+
+The five-operation Ascend optimization phase is concluded with the following
+reference records. Both use the representative FP8 case:
+
+```text
+case: ep-fp8-align128-bias0-hcopy1-prev0-async0-alloc0
+tokens per rank: 8192
+hidden: 7168
+top-k: 8
+experts: 256
+warmups/iterations: 30/30
+stage profile: disabled
+```
+
+The 4-rank result is the average of three selector-on runs on the same binary.
+The 8-rank result is one no-profile gate run. Wall latency is the maximum-rank
+mean/p95, and bandwidth is the reported logical bandwidth.
+
+| Ranks | Operation | Wall mean / p95 | Logical bandwidth |
+| --: | -- | --: | --: |
+| 4 | Normal Dispatch | 3.459 / 3.580 ms | 4139.2 GB/s |
+| 4 | Expanded Dispatch | 8.518 / 8.852 ms | 4978.1 GB/s |
+| 4 | Cached Dispatch | 9.579 / 10.372 ms | 299.8 GB/s |
+| 4 | Normal Combine | 7.724 / 8.073 ms | 526.0 GB/s |
+| 4 | Reduced Combine | 7.638 / 8.030 ms | 534.2 GB/s |
+| 8 | Normal Dispatch | 3.853 / 4.205 ms | 12248.2 GB/s |
+| 8 | Expanded Dispatch | 10.746 / 10.999 ms | 11577.1 GB/s |
+| 8 | Cached Dispatch | 11.083 / 11.583 ms | 745.2 GB/s |
+| 8 | Normal Combine | 8.290 / 8.779 ms | 1375.6 GB/s |
+| 8 | Reduced Combine | 8.343 / 8.815 ms | 1367.6 GB/s |
+
+These records were collected on Ascend 950PR with CANN/HCOMM 9.3.0 and the
+retained default selectors. Detailed validation tasks, ABBA evidence, and the
+selector/build-macro inventory are maintained in
+[docs/ascend-design/four-operation-performance-parity-zh.md](docs/ascend-design/four-operation-performance-parity-zh.md)
+and
+[docs/ascend-design/ascend-performance-knobs-zh.md](docs/ascend-design/ascend-performance-knobs-zh.md).
+
 For V1 performance data, see [docs/legacy.md](docs/legacy.md#performance).
 
 ## Quick start
