@@ -2173,7 +2173,10 @@ public:
         const auto cached_route_count = allow_hybrid_mode_ && cached_mode ?
             static_cast<std::uint64_t>(*cached_num_recv_tokens) : 0;
         const auto int_options = x.options().dtype(torch::kInt);
-        const auto uint64_options = x.options().dtype(torch::kUInt64);
+        // CANN 9.3 does not implement aclnnInplaceZero for uint64. Zero the
+        // equally-sized int64 storage first, then expose the public uint64
+        // view so the handle ABI and downstream kernels stay unchanged.
+        const auto int64_options = x.options().dtype(torch::kInt64);
         // Keep this as the single C17 switch so host validation and device
         // argument plumbing cannot disagree about cached-route expectations.
         constexpr bool route_plan_fast_path_enabled = true;
@@ -2554,7 +2557,8 @@ public:
                 static_cast<int64_t>(local_experts));
             destination_slots = torch::empty({x.size(0), topk_idx.size(1)}, int_options);
             cached_route_plan_tensor = torch::zeros(
-                {static_cast<int64_t>(num_ranks_ + 2)}, uint64_options);
+                {static_cast<int64_t>(num_ranks_ + 2)},
+                int64_options).view(torch::kUInt64);
             source_metadata = torch::empty(
                 {static_cast<int64_t>(split_dispatch ? 0 : max_recv_tokens),
                  topk_idx.size(1) + 2},

@@ -462,6 +462,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
         self.assertNotIn(
             "host_route_plan[host_route_plan.size() - 1] != 0", source)
 
+    def test_cached_route_plan_zero_initialization_cann_compat(self):
+        """CANN 9.3 cannot zero uint64 tensors with aclnnInplaceZero."""
+        host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        self.assertIn("int64_options).view(torch::kUInt64)", host)
+        self.assertIn("x.options().dtype(torch::kInt64)", host)
+        self.assertNotIn("torch::zeros(\n                {static_cast<int64_t>(num_ranks_ + 2)}, uint64_options)", host)
+
     def test_cached_route_plan_preflight_covers_all_tokens(self):
         """The preflight must compare a global, not subgroup-local, digest."""
         source = (

@@ -664,6 +664,41 @@ Python API tests passed. Re-run the four-rank gate on this exact build when the
 environment is healthy; do not claim the Normal/Expanded Dispatch recovery or
 the preserved Cached Dispatch gain until that gate reports metrics.
 
+Lazy-build acceptance (2026-10-09): the reinstalled NPU8P host now runs CANN
+9.3.0. The original corrected build reached the gate, but CANN rejected the
+small route-plan artifact at initialization because this runtime does not
+implement aclnnInplaceZero for uint64. The retained compatibility fix allocates
+equally-sized int64 storage, zeroes it, and exposes a uint64 view before the
+artifact enters the existing handle ABI. Build task
+task_20261009_090056_18422638577 succeeded and produced extension SHA-256
+ef2ad99d99d76a034067438bde8b0d938314370a99031c897e994c2f0e247231.
+
+The first retried gate failed for an environment reason unrelated to the
+route-plan change: with ASCEND_RT_VISIBLE_DEVICES=0,1,2,3, HCOMM topology
+queries for physical devices 4-7 returned CANN 107001 (device-id mapping). A
+four-process HCCL all-reduce on devices 0-3 passed, confirming that the devices
+and communicator were healthy. The accepted retry let task-submit lock devices
+0-3 without exporting ASCEND_RT_VISIBLE_DEVICES; gate task
+task_20261009_090353_184977523962 then passed the representative four-rank
+case:
+
+| Operation | Before lazy-build mean / p95 | Lazy-build mean / p95 |
+| --- | ---: | ---: |
+| Normal Dispatch | 4.237 / 5.435 ms | 4.028 / 4.331 ms |
+| Expanded Dispatch | affected by route-plan scan | 11.448 / 11.839 ms |
+| Cached Dispatch | 10.700 / 11.210 ms | 10.657 / 11.083 ms |
+| Normal Combine | within noise | 10.328 / 10.861 ms |
+| Reduced Combine | within noise | 9.982 / 10.331 ms |
+
+The gate preserves the roughly 10.7 ms Cached Dispatch gain, recovers Normal
+Dispatch to near its pre-C17 result, and leaves the other three operations in
+their expected ranges. A separate two-rank correctness matrix, task
+task_20261009_090524_185416223382, passed all 14 cases, including cached reuse,
+near-capacity cached traffic, 100 sequential generations, and round-trip
+behavior. C17 is accepted; the next work item should be selected from the
+remaining operations using a fresh stage profile rather than re-opening Normal
+Dispatch micro-optimization.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all
