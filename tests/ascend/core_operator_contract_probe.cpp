@@ -1468,6 +1468,59 @@ int main() {
             CombineVectorReduceTileConfigStatus::kInvalid)
         return 90;
 
+    CombineVectorReducePrefetchConfig vector_reduce_prefetch_config{};
+    if (select_combine_vector_reduce_prefetch_config(
+            nullptr, true, false, true,
+            &vector_reduce_prefetch_config) !=
+                CombineVectorReducePrefetchConfigStatus::kDisabled ||
+        vector_reduce_prefetch_config.enabled ||
+        vector_reduce_prefetch_config.depth !=
+            kCombineVectorReduceQueueDepth ||
+        select_combine_vector_reduce_prefetch_config(
+            "4", true, false, true,
+            &vector_reduce_prefetch_config) !=
+                CombineVectorReducePrefetchConfigStatus::kEnabled ||
+        !vector_reduce_prefetch_config.enabled ||
+        vector_reduce_prefetch_config.depth != 4 ||
+        select_combine_vector_reduce_prefetch_config(
+            "0", true, false, true,
+            &vector_reduce_prefetch_config) !=
+                CombineVectorReducePrefetchConfigStatus::kDisabled ||
+        vector_reduce_prefetch_config.depth !=
+            kCombineVectorReduceQueueDepth ||
+        select_combine_vector_reduce_prefetch_config(
+            "1", true, false, true,
+            &vector_reduce_prefetch_config) !=
+                CombineVectorReducePrefetchConfigStatus::kDisabled ||
+        vector_reduce_prefetch_config.depth !=
+            kCombineVectorReduceQueueDepth ||
+        select_combine_vector_reduce_prefetch_config(
+            "4", true, false, false,
+            &vector_reduce_prefetch_config) !=
+                CombineVectorReducePrefetchConfigStatus::kDisabled ||
+        vector_reduce_prefetch_config.depth !=
+            kCombineVectorReduceQueueDepth ||
+        select_combine_vector_reduce_prefetch_config(
+            "4", false, false, true,
+            &vector_reduce_prefetch_config) !=
+                CombineVectorReducePrefetchConfigStatus::kDisabled ||
+        vector_reduce_prefetch_config.depth !=
+            kCombineVectorReduceQueueDepth ||
+        select_combine_vector_reduce_prefetch_config(
+            "4", true, true, true,
+            &vector_reduce_prefetch_config) !=
+                CombineVectorReducePrefetchConfigStatus::kDisabled ||
+        vector_reduce_prefetch_config.depth !=
+            kCombineVectorReduceQueueDepth ||
+        select_combine_vector_reduce_prefetch_config(
+            "2", true, false, true,
+            &vector_reduce_prefetch_config) !=
+                CombineVectorReducePrefetchConfigStatus::kInvalid ||
+        select_combine_vector_reduce_prefetch_config(
+            "4", true, false, true, nullptr) !=
+                CombineVectorReducePrefetchConfigStatus::kInvalid)
+        return 90;
+
     const auto aligned_local_copy =
         combine_local_copy_plan(14336, 256, 32, true);
     const auto tail_local_copy =

@@ -550,7 +550,8 @@ DEEP_EP_ASCEND_SIMT_CALLEE std::uint32_t topk_compact_owner_ordinal(
 
 template <std::uint64_t StaticNumTopk,
           std::uint64_t StaticHiddenElements,
-          std::uint32_t TileElements = kCombineVectorTileElements>
+          std::uint32_t TileElements = kCombineVectorTileElements,
+          std::uint32_t PrefetchDepth = kCombineVectorReduceQueueDepth>
 __aicore__ inline void direct_combine_epilogue_vector_reduce_impl(
     __gm__ const std::int64_t* combined_topk_indices,
     __gm__ const bfloat16_t* bias_0,
@@ -587,11 +588,11 @@ __aicore__ inline void direct_combine_epilogue_vector_reduce_impl(
         static_cast<std::uint32_t>(effective_hidden_elements);
 
     AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::QuePosition::VECIN, 2> input_queue;
+    AscendC::TQue<AscendC::QuePosition::VECIN, PrefetchDepth> input_queue;
     AscendC::TQue<AscendC::QuePosition::VECOUT, 1> output_queue;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> scratch_buffer;
     (void)pipe.InitBuffer(
-        input_queue, 2,
+        input_queue, PrefetchDepth,
         TileElements * sizeof(bfloat16_t));
     (void)pipe.InitBuffer(
         output_queue, 1,
@@ -660,40 +661,35 @@ __aicore__ inline void direct_combine_epilogue_vector_reduce_impl(
             AscendC::Duplicate(
                 accumulation, 0.0F,
                 static_cast<std::int32_t>(TileElements));
-            if (contributor_count != 0) {
+            // Keep up to PrefetchDepth contributor tiles in flight. The
+            // queue preserves FIFO order, so Cast/Add still consumes the
+            // contributors in ascending-rank order.
+            std::uint32_t issued = 0;
+            for (; issued < contributor_count && issued < PrefetchDepth;
+                 ++issued) {
                 const std::uintptr_t shard = local_window_base +
                     combine_receive_offset +
-                    static_cast<std::uint64_t>(contributor_ranks[0]) *
+                    static_cast<std::uint64_t>(
+                        contributor_ranks[issued]) *
                         combine_receive_shard_bytes;
                 auto* payload = reinterpret_cast<__gm__ bfloat16_t*>(
-                    shard + static_cast<std::uint64_t>(receive_slots[0]) *
+                    shard + static_cast<std::uint64_t>(
+                        receive_slots[issued]) *
                         combine_record_bytes);
                 input_global.SetGlobalBuffer(
                     payload + hidden, TileElements);
-                auto input_local = input_queue.AllocTensor<bfloat16_t>();
+                auto input_local =
+                    input_queue.template AllocTensor<bfloat16_t>();
                 AscendC::DataCopy(input_local, input_global, TileElements);
                 input_queue.EnQue(input_local);
             }
             for (std::uint32_t contributor_index = 0;
                  contributor_index < contributor_count;
                  ++contributor_index) {
-                if (contributor_index + 1 < contributor_count) {
-                    const std::uint32_t next = contributor_index + 1;
-                    const std::uintptr_t shard = local_window_base +
-                        combine_receive_offset +
-                        static_cast<std::uint64_t>(contributor_ranks[next]) *
-                            combine_receive_shard_bytes;
-                    auto* payload = reinterpret_cast<__gm__ bfloat16_t*>(
-                        shard + static_cast<std::uint64_t>(
-                            receive_slots[next]) * combine_record_bytes);
-                    input_global.SetGlobalBuffer(
-                        payload + hidden, TileElements);
-                    auto input_local = input_queue.AllocTensor<bfloat16_t>();
-                    AscendC::DataCopy(
-                        input_local, input_global, TileElements);
-                    input_queue.EnQue(input_local);
-                }
-                auto input_local = input_queue.DeQue<bfloat16_t>();
+                // Dequeue before issuing the next tile so the number of
+                // in-flight requests never exceeds PrefetchDepth.
+                auto input_local =
+                    input_queue.template DeQue<bfloat16_t>();
                 AscendC::Cast(
                     contribution, input_local,
                     AscendC::RoundMode::CAST_NONE,
@@ -703,6 +699,26 @@ __aicore__ inline void direct_combine_epilogue_vector_reduce_impl(
                     static_cast<std::int32_t>(
                         TileElements));
                 input_queue.FreeTensor(input_local);
+
+                if (issued < contributor_count) {
+                    const std::uintptr_t shard = local_window_base +
+                        combine_receive_offset +
+                        static_cast<std::uint64_t>(
+                            contributor_ranks[issued]) *
+                            combine_receive_shard_bytes;
+                    auto* payload = reinterpret_cast<__gm__ bfloat16_t*>(
+                        shard + static_cast<std::uint64_t>(
+                            receive_slots[issued]) *
+                            combine_record_bytes);
+                    input_global.SetGlobalBuffer(
+                        payload + hidden, TileElements);
+                    auto input_local =
+                        input_queue.template AllocTensor<bfloat16_t>();
+                    AscendC::DataCopy(
+                        input_local, input_global, TileElements);
+                    input_queue.EnQue(input_local);
+                    ++issued;
+                }
             }
 
             const std::uint64_t logical =
@@ -713,12 +729,13 @@ __aicore__ inline void direct_combine_epilogue_vector_reduce_impl(
                     const_cast<__gm__ bfloat16_t*>(bias_0) + logical,
                     TileElements);
                 auto input_local =
-                    input_queue.AllocTensor<bfloat16_t>();
+                    input_queue.template AllocTensor<bfloat16_t>();
                 AscendC::DataCopy(
                     input_local, input_global,
                     TileElements);
                 input_queue.EnQue(input_local);
-                input_local = input_queue.DeQue<bfloat16_t>();
+                input_local =
+                    input_queue.template DeQue<bfloat16_t>();
                 AscendC::Cast(
                     contribution, input_local,
                     AscendC::RoundMode::CAST_NONE,
@@ -734,12 +751,13 @@ __aicore__ inline void direct_combine_epilogue_vector_reduce_impl(
                     const_cast<__gm__ bfloat16_t*>(bias_1) + logical,
                     TileElements);
                 auto input_local =
-                    input_queue.AllocTensor<bfloat16_t>();
+                    input_queue.template AllocTensor<bfloat16_t>();
                 AscendC::DataCopy(
                     input_local, input_global,
                     TileElements);
                 input_queue.EnQue(input_local);
-                input_local = input_queue.DeQue<bfloat16_t>();
+                input_local =
+                    input_queue.template DeQue<bfloat16_t>();
                 AscendC::Cast(
                     contribution, input_local,
                     AscendC::RoundMode::CAST_NONE,

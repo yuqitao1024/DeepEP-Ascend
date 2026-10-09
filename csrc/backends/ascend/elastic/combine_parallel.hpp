@@ -8,6 +8,8 @@ namespace deep_ep::ascend::elastic {
 inline constexpr std::uint64_t kCombineRecordsPerTile = 128;
 inline constexpr std::uint32_t kCombineProducerLegacyVectorTileElements = 1024;
 inline constexpr std::uint32_t kCombineProducerVectorTileElements = 3584;
+inline constexpr std::uint32_t kCombineVectorReduceQueueDepth = 2;
+inline constexpr std::uint32_t kCombineVectorReducePrefetchQueueDepth = 4;
 
 struct CombineProducerPayloadCopyPlan {
     bool valid = false;
@@ -74,6 +76,17 @@ struct CombineVectorReduceTileConfig {
     std::uint32_t tile_elements = 0;
 };
 
+enum class CombineVectorReducePrefetchConfigStatus : std::uint8_t {
+    kDisabled,
+    kEnabled,
+    kInvalid,
+};
+
+struct CombineVectorReducePrefetchConfig {
+    bool enabled = false;
+    std::uint32_t depth = kCombineVectorReduceQueueDepth;
+};
+
 inline CombineVectorReduceTileConfigStatus
 select_combine_vector_reduce_tile_config(
     const char* value, bool direct, bool hybrid,
@@ -101,6 +114,31 @@ select_combine_vector_reduce_tile_config(
     output->enabled = true;
     output->tile_elements = tile_elements;
     return CombineVectorReduceTileConfigStatus::kEnabled;
+}
+
+inline CombineVectorReducePrefetchConfigStatus
+select_combine_vector_reduce_prefetch_config(
+    const char* value, bool direct, bool hybrid, bool qualified_tile,
+    CombineVectorReducePrefetchConfig* output) noexcept {
+    if (output == nullptr)
+        return CombineVectorReducePrefetchConfigStatus::kInvalid;
+    *output = {};
+    std::uint32_t depth = kCombineVectorReduceQueueDepth;
+    if (value != nullptr && value[0] == '0' && value[1] == '\0')
+        depth = kCombineVectorReduceQueueDepth;
+    else if (value != nullptr && value[0] == '1' && value[1] == '\0')
+        depth = kCombineVectorReduceQueueDepth;
+    else if (value != nullptr && value[0] == '4' && value[1] == '\0')
+        depth = kCombineVectorReducePrefetchQueueDepth;
+    else if (value != nullptr)
+        return CombineVectorReducePrefetchConfigStatus::kInvalid;
+    if (!direct || hybrid || !qualified_tile)
+        depth = kCombineVectorReduceQueueDepth;
+    output->enabled = depth > kCombineVectorReduceQueueDepth;
+    output->depth = depth;
+    return output->enabled ?
+        CombineVectorReducePrefetchConfigStatus::kEnabled :
+        CombineVectorReducePrefetchConfigStatus::kDisabled;
 }
 
 struct CombineLocalCopyPlan {

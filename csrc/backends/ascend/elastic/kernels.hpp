@@ -728,6 +728,8 @@ struct CombineArguments {
     std::uint32_t direct_local_placement = 0;
     std::uint32_t vector_reduce_tile_elements = 0;
     std::uint32_t producer_payload_tile_elements = 0;
+    std::uint32_t vector_reduce_prefetch_depth =
+        kCombineVectorReduceQueueDepth;
 };
 
 }  // namespace deep_ep::ascend::elastic

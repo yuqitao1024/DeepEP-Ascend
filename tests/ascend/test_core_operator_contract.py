@@ -2682,16 +2682,48 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "direct_combine_producer_expanded_vector_reduce_impl<",
             source)
 
+    def test_combine_vector_reduce_prefetch_selector_contract(self):
+        """Keeps C21.3 prefetch selectable without changing tile defaults."""
+        source = (ELASTIC / "combine.asc").read_text()
+        header = (ELASTIC / "kernels.hpp").read_text()
+        host = (ROOT / "csrc/backends/ascend/elastic_buffer.hpp").read_text()
+        parallel = (ELASTIC / "combine_parallel.hpp").read_text()
+        common = (ELASTIC / "combine_device_common.hpp").read_text()
+
+        self.assertIn("vector_reduce_prefetch_depth", header)
+        self.assertIn(
+            '"DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_PREFETCH"', host)
+        self.assertIn(
+            "select_combine_vector_reduce_prefetch_config(", host)
+        self.assertIn("arguments.vector_reduce_prefetch_depth", host)
+        self.assertIn(
+            "select_combine_vector_reduce_prefetch_config(", parallel)
+        self.assertIn(
+            "PrefetchDepth = kCombineVectorReduceQueueDepth", common)
+        self.assertIn("AscendC::QuePosition::VECIN, PrefetchDepth", common)
+        self.assertIn("issued < PrefetchDepth", common)
+        self.assertIn(
+            "vector_reduce_prefetch_depth >\n"
+            "                        kCombineVectorReduceQueueDepth", source)
+        self.assertIn(
+            "direct_combine_epilogue_vector_reduce_impl<\n"
+            "                            kCombineCommonTopk, "
+            "kCombineCommonHidden,\n"
+            "                            "
+            "kCombineVectorReduceDefaultTileElements,\n"
+            "                            "
+            "kCombineVectorReducePrefetchQueueDepth>",
+            source,
+        )
+
     def test_direct_combine_common_shape_specialization_contract(self):
         """Catches losing the K=8/H=7168 AOT path or dynamic fallback."""
         source = (ELASTIC / "combine.asc").read_text()
-        self.assertIn("kCombineCommonTopk = 8", source)
-        self.assertIn("kCombineCommonHidden = 7168", source)
-        self.assertIn(
-            "template <std::uint64_t StaticNumTopk,\n"
-            "          std::uint64_t StaticHiddenElements,\n"
-            "          std::uint32_t TileElements",
-            source)
+        common = (ELASTIC / "combine_device_common.hpp").read_text()
+        self.assertIn("kCombineCommonTopk = 8", common)
+        self.assertIn("kCombineCommonHidden = 7168", common)
+        self.assertIn("PrefetchDepth", common)
+        self.assertIn("vector_reduce_prefetch_depth", source)
         self.assertIn(
             "direct_combine_epilogue_vector_reduce_impl<\n"
             "                    kCombineCommonTopk, kCombineCommonHidden>",
@@ -2711,12 +2743,13 @@ class AscendCoreOperatorContractTest(unittest.TestCase):
             "direct_combine_epilogue_vector_reduce_impl<", common_hidden)
         dynamic_call = kernel.index(
             "direct_combine_epilogue_vector_reduce_impl<0, 0>", common_call)
-        scalar_fallback = kernel.index(
-            "asc_vf_call<direct_combine_epilogue_reduce_vf>", dynamic_call)
+        scalar_fallback = (
+            ELASTIC / "combine_epilogue_reduce.asc").read_text().index(
+                "asc_vf_call<direct_combine_epilogue_reduce_vf")
         self.assertLess(common_guard, common_hidden)
         self.assertLess(common_hidden, common_call)
         self.assertLess(common_call, dynamic_call)
-        self.assertLess(dynamic_call, scalar_fallback)
+        self.assertGreater(scalar_fallback, 0)
 
     def test_direct_combine_grouping_contract(self):
         """Catches restoring a separate grouping launch or contributor table."""

@@ -3582,6 +3582,22 @@ public:
             "DeepEP Ascend backend: "
             "DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_TILE must be 0, 1, 512, "
             "or 1024");
+        elastic::CombineVectorReducePrefetchConfig
+            vector_reduce_prefetch_config{};
+        const auto vector_reduce_prefetch_config_status =
+            elastic::select_combine_vector_reduce_prefetch_config(
+                std::getenv(
+                    "DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_PREFETCH"),
+                !allow_hybrid_mode_, allow_hybrid_mode_,
+                vector_reduce_tile_config.enabled &&
+                    vector_reduce_tile_config.tile_elements == 512U,
+                &vector_reduce_prefetch_config);
+        TORCH_CHECK(
+            vector_reduce_prefetch_config_status !=
+                elastic::CombineVectorReducePrefetchConfigStatus::kInvalid,
+            "DeepEP Ascend backend: "
+            "DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_PREFETCH must be "
+            "0, 1, or 4");
         elastic::CombineProducerPayloadTileConfig producer_payload_tile_config{};
         const auto producer_payload_tile_config_status =
             elastic::select_combine_producer_payload_tile_config(
@@ -3969,6 +3985,8 @@ public:
                 vector_reduce_tile_config.tile_elements : 0U;
         arguments.producer_payload_tile_elements =
             producer_payload_tile_config.tile_elements;
+        arguments.vector_reduce_prefetch_depth =
+            vector_reduce_prefetch_config.depth;
         const elastic::CoreLaunchStorage storage{
             static_cast<std::uint64_t>(num_buffer_bytes_),
             resources_->workspace_bytes()};

@@ -1088,6 +1088,55 @@ Combine work item is therefore not another producer-record tile or control-WQE
 change. It must address the 2.24 ms payload completion wait or the 1.64 ms
 final reduction while preserving payload-before-control order.
 
+#### C21.3 candidate: Combine epilogue-reduce input prefetch (2026-10-09)
+
+C21.2 leaves the final epilogue reduction, about 1.64 ms in the C21.1
+timeline, as the largest actionable Combine item. The retained vector reduce
+keeps two contributor tiles in flight through its depth-two VECIN queue. A
+bounded candidate keeps four contributor tiles in flight through the same FIFO
+VECIN queue. The queue order preserves ascending-rank consumption, and the
+Cast/Add sequence and all floating-point accumulation order remain unchanged.
+The 512-element tile, reduction order, bias order, output layout, transport
+protocol, and all correctness checks are unchanged.
+
+The candidate dequeues each contributor tile before issuing its replacement,
+so the in-flight count never exceeds the selected queue depth. The mechanism
+is exposed only through the
+DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_PREFETCH environment selector for
+same-binary ABBA: 0/1 and unset retain the existing depth 2; 4 enables the
+bounded depth-4 prefetch. The selector is disabled unless the direct,
+non-hybrid, aligned, 512-element vector path is selected. This is a diagnostic
+candidate, not a retained default; acceptance requires repeated no-profile
+end-to-end gains in both Combine variants without a reproducible Dispatch
+regression.
+
+Result: accepted as an opt-in setting, not a new production default. The
+corrected candidate preserves the baseline depth-two path and dequeues each
+tile before issuing its replacement. Remote build task
+task_20261009_192805_142303114699 succeeded with extension SHA-256
+b9720ed20eddad462f7ce71f351bb0f65b33ebe60753a202373665f74d80d351. The initial
+off/on gate passed correctness, and three same-binary ABBA repetitions on
+devices 0-3 all passed:
+
+| Repetition | Leg | Task | Normal Combine | Reduced Combine |
+| ---: | --- | --- | ---: | ---: |
+| 1 | off | task_20261009_193622_197796015956 | 8.783 / 9.890 | 9.175 / 10.563 |
+| 1 | on | task_20261009_193654_19827544376 | 7.809 / 8.108 | 7.782 / 8.294 |
+| 2 | off | task_20261009_193720_198819521328 | 8.360 / 8.662 | 8.376 / 8.706 |
+| 2 | on | task_20261009_193747_199243912862 | 7.789 / 8.144 | 7.979 / 8.310 |
+| 3 | off | task_20261009_193813_199650422445 | 8.412 / 8.873 | 8.344 / 8.555 |
+| 3 | on | task_20261009_193839_20007309017 | 7.631 / 8.054 | 7.628 / 7.980 |
+
+The three-leg averages improve Normal Combine from 8.518 / 9.142 ms to 7.743 /
+8.102 ms (-0.775 / -1.040 ms) and Reduced Combine from 8.632 / 9.274 ms to
+7.796 / 8.195 ms (-0.836 / -1.080 ms). Every on-leg improves both Combine
+variants. Normal Dispatch, Expanded Dispatch, and Cached Dispatch averages
+move within normal shared-host variation; the largest mean increase is 0.202
+ms for Expanded Dispatch, while the same operation also has an on-leg faster
+than two off-legs. Because the improvement is large and reproducible but the
+selector is not yet a default, retain the mechanism and record the setting as
+a validated opt-in.
+
 #### C14 candidate: single-pass combine contributor lookup (2026-09-30)
 
 The retained vector epilogue resolves each output token by scanning all
