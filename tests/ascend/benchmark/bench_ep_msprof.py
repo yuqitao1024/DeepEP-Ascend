@@ -168,7 +168,9 @@ def main() -> int:
             def operation_once():
                 result = prepared.launches[operation_id]()
                 l2_dirty_buffer.zero_()
-                if len(result) > 0 and hasattr(result[-1], "current_stream_wait"):
+                if (case.async_with_compute_stream
+                        and len(result) > 0
+                        and hasattr(result[-1], "current_stream_wait")):
                     result[-1].current_stream_wait()
                 return result
 

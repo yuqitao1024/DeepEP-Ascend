@@ -54,6 +54,15 @@ runs retain partial results. `--start`, `--stop`, and `--cases` can be
 used to resume or select a subset without changing the default full-matrix
 behavior.
 
+Use --indices to select exact one-based case positions (for example
+100-102,105). It takes precedence over --start and --stop and is useful for
+batch schedulers that resume a matrix in short chunks.
+
+For a resumable batch workflow, add --resume. The runner then verifies the
+workload fingerprint, retains passed rows from the existing summary, skips the
+selected passed indices, retries selected failed or missing indices, and merges
+all rows back into the same summary by case index.
+
 The current msprof script times the outer communication kernels
 (`dispatch_kernel` / `combine_kernel`) for raw kernel diagnostics. The staged
 transport implementation has no single msprof kernel that is equivalent to

@@ -93,6 +93,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="One-based case index to stop at (inclusive); 0 means the end",
     )
     parser.add_argument(
+        "--indices",
+        default="",
+        help=(
+            "Exact one-based case indices, supporting lists and ranges "
+            "(for example: 1,2,3 or 100-102,105). Takes precedence over "
+            "--start and --stop"
+        ),
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Load the existing matrix summary, skip passed cases, and merge "
+            "new rows by one-based case index"
+        ),
+    )
+    parser.add_argument(
         "--stop-on-failure",
         action="store_true",
         help="Stop the matrix at the first failed case",
@@ -153,6 +170,43 @@ def _selection(args: argparse.Namespace) -> tuple[str, ...]:
     if unsupported:
         raise ValueError("unsupported case IDs: " + ", ".join(unsupported))
     return selected
+
+
+def _parse_indices(value: str, case_count: int) -> tuple[int, ...]:
+    indices: list[int] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "-" in item:
+            bounds = item.split("-")
+            if len(bounds) != 2:
+                raise ValueError(f"invalid index range: {item}")
+            try:
+                first, last = (int(bound.strip()) for bound in bounds)
+            except ValueError as error:
+                raise ValueError(f"invalid index range: {item}") from error
+            if first < 1 or last < first:
+                raise ValueError(f"invalid index range: {item}")
+            indices.extend(range(first, last + 1))
+        else:
+            try:
+                index = int(item)
+            except ValueError as error:
+                raise ValueError(f"invalid case index: {item}") from error
+            if index < 1:
+                raise ValueError(f"case index must be positive: {item}")
+            indices.append(index)
+
+    if not indices:
+        raise ValueError("--indices must select at least one case")
+    invalid = sorted(set(index for index in indices if index > case_count))
+    if invalid:
+        raise ValueError(
+            f"case indices out of range (1-{case_count}): "
+            + ", ".join(map(str, invalid))
+        )
+    return tuple(dict.fromkeys(indices))
 
 
 def _case_prefix(index: int, case_id: str) -> str:
@@ -270,14 +324,14 @@ def _artifact_paths(
 
 def _write_matrix_summary(
     output_dir: Path,
-    selected: tuple[str, ...],
+    selected_count: int,
     rows: list[dict[str, Any]],
     manifest: Any,
 ) -> None:
     summary = {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "selected_count": len(selected),
+        "selected_count": selected_count,
         "case_summary": {
             "total": len(rows),
             "passed": sum(row["status"] == "passed" for row in rows),
@@ -292,15 +346,23 @@ def _write_matrix_summary(
 
 
 def run_matrix(args: argparse.Namespace) -> int:
-    selected = _selection(args)
-    if args.start < 1:
-        raise ValueError("--start must be at least one")
-    if args.stop and args.stop < args.start:
-        raise ValueError("--stop must not be less than --start")
-    if args.stop:
-        selected = selected[args.start - 1:args.stop]
+    all_cases = _selection(args)
+    if args.indices:
+        selected_indices = _parse_indices(args.indices, len(all_cases))
+        selected = tuple(all_cases[index - 1] for index in selected_indices)
     else:
-        selected = selected[args.start - 1:]
+        if args.start < 1:
+            raise ValueError("--start must be at least one")
+        if args.stop and args.stop < args.start:
+            raise ValueError("--stop must not be less than --start")
+        if args.stop:
+            selected_indices = tuple(range(args.start, args.stop + 1))
+            selected = all_cases[args.start - 1:args.stop]
+        else:
+            selected_indices = tuple(
+                range(args.start, len(all_cases) + 1)
+            )
+            selected = all_cases[args.start - 1:]
 
     repository = Path(__file__).resolve().parents[3]
     output_dir = args.output_dir
@@ -335,16 +397,45 @@ def run_matrix(args: argparse.Namespace) -> int:
     ))
     write_manifest(manifest_path, manifest)
 
+    summary_path = output_dir / "matrix-summary.json"
     rows: list[dict[str, Any]] = []
-    for position, case_id in enumerate(selected, start=args.start):
+    selected_count = len(selected)
+    if args.resume and summary_path.exists():
+        previous = json.loads(summary_path.read_text(encoding="utf-8"))
+        if previous.get("workload_fingerprint") != manifest.fingerprint:
+            raise ValueError(
+                "cannot resume: workload fingerprint does not match the "
+                "existing matrix summary"
+            )
+        rows = list(previous.get("cases", []))
+        selected_count = len(all_cases)
+
+    existing_by_index = {row["index"]: row for row in rows}
+    rows = [
+        row for row in rows
+        if row["index"] not in selected_indices
+    ]
+    skipped = {
+        index for index in selected_indices
+        if existing_by_index.get(index, {}).get("status") == "passed"
+    }
+    for position, case_id in zip(selected_indices, selected, strict=True):
+        if position in skipped:
+            print(f"[{position}] skipping passed {case_id}", flush=True)
+            continue
         prefix = _case_prefix(position, case_id)
         msprof_path = msprof_dir / f"{prefix}.json"
         stage_path = stage_dir / f"{prefix}.json"
         alignment_path = alignment_dir / f"{prefix}.json"
         alignment_markdown_path = alignment_dir / f"{prefix}.md"
         log_path = logs_dir / f"{prefix}.log"
+        selected_position = sum(
+            1
+            for index in selected_indices
+            if index not in skipped and index <= position
+        )
         print(
-            f"[{position}] running {case_id} ({position - args.start + 1}/"
+            f"[{position}] running {case_id} ({selected_position}/"
             f"{len(selected)})",
             flush=True,
         )
@@ -462,12 +553,11 @@ def run_matrix(args: argparse.Namespace) -> int:
             "log": str(log_path),
         })
 
-        _write_matrix_summary(output_dir, selected, rows, manifest)
+        _write_matrix_summary(output_dir, selected_count, rows, manifest)
 
-    _write_matrix_summary(output_dir, selected, rows, manifest)
-    final_summary = json.loads(
-        (output_dir / "matrix-summary.json").read_text(encoding="utf-8")
-    )
+    rows.sort(key=lambda row: row["index"])
+    _write_matrix_summary(output_dir, selected_count, rows, manifest)
+    final_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     print(
         f"matrix completed: {final_summary['case_summary']['passed']} passed, "
         f"{final_summary['case_summary']['failed']} failed",
