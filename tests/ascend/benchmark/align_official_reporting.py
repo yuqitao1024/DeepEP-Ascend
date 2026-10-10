@@ -77,7 +77,7 @@ def _stage_clock_calibration(
     envelope_cycles = profile.get("device_timeline_cycles", {}).get(
         "envelope_cycles"
     )
-    mean_seconds = stage_operation.get("device_seconds", {}).get("mean")
+    mean_seconds = stage_operation.get("wall_seconds", {}).get("mean")
     if (
         not isinstance(envelope_cycles, int)
         or envelope_cycles <= 0
@@ -86,8 +86,13 @@ def _stage_clock_calibration(
     ):
         raise ValueError("stage clock calibration inputs are unavailable")
     # The stage JSON contains cycle counts but no explicit clock frequency.
-    # Calibrate it from the event-timed device envelope and the captured
-    # envelope-cycle count. This is approximately 0.9-1.0 GHz on this device.
+    # Calibrate it from the wall-clock operation envelope and the captured
+    # envelope-cycle count. The event-timed device envelope must not be used
+    # here: in the synchronous non-communication-stream mode it only records
+    # the outer launch kernel, while the staged service continues after the
+    # launch returns. The wall envelope covers that completion wait and
+    # calibrates consistently across every stream mode at approximately
+    # 0.9-1.0 GHz on this device.
     return envelope_cycles / mean_seconds
 
 
@@ -257,8 +262,9 @@ def build_report(msprof_path: Path, stage_path: Path) -> dict[str, Any]:
             "stage_clock_calibration": (
                 "Stage JSON has cycle counters but no explicit frequency. "
                 "Seconds are calibrated as device_timeline_cycles.envelope_cycles "
-                "divided by device_seconds.mean; this is an approximation, not "
-                "an independent hardware timer measurement."
+                "divided by wall_seconds.mean. The wall envelope is used because "
+                "the synchronous non-communication-stream device event does not "
+                "cover the staged completion wait."
             ),
             "package_version": (
                 "Ignored per comparison policy; CANN/Torch package versions are "
