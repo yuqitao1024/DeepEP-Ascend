@@ -158,6 +158,15 @@ Repository netlayer0 ownership
 `Drain`。两种后端都保持同一个契约：**一个 service invocation 内只有一个
 producer 拥有所有 channel**。
 
+这里需要把两个原因分开。第一，必须有 AICore transport service，是因为
+SIMT VF 不能安全调用 SQ/CQ 提交所需的 st_dev / ld_dev 设备语义操作；因此
+SIMT 只能生成 TransportCommand，由外层 AICore kernel 的 service 阶段统一
+构造 WQE、ring doorbell 并 drain CQ。第二，这个 service 当前收敛为 single
+producer，是因为本仓库的 channel 模型要求每个 channel 的 SQ/CQ 计数器
+只有一个 producer/consumer owner；多个 block 或多个 SIMT thread 不得共享
+同一个 channel。若要恢复多 producer，需要为每个 producer 分配独立
+channel，或者先实现并验证多 producer SQ reservation 协议。
+
 这个设计与共享 Jetty 的串行契约兼容，同时保留了对多 peer 并发通信的抽象。
 它并发的是多个 peer/channel，而不是多个 WQE producer。
 
@@ -235,6 +244,12 @@ WQE 构造、head snapshot、owner bit、CQ tail 和 drain 语义都会交织。
 因此对 netlayer0 更稳的适配方向不是继续调共享 SQ offset，而是参考本仓库：
 把 WQE 提交收敛到一个 service producer。
 
+需要强调的是，“一个 channel 只能由一个 producer 消费”解释的是为什么
+service 采用 single producer 模型；它不是 transport service 存在的根因。
+service 存在的根因仍然是 SIMT VF 与 AICore service 之间的执行域边界：
+SIMT 不能安全执行 SQ/CQ doorbell 和设备语义 load/store。把这两个结论混在
+一起，会误把队列所有权约束解释成 staged transport 的设计动机。
+
 ### 3.5 已验证证据
 
 本仓库的多 channel 验证已经证明 layer0 的独立 channel 模型可用：
@@ -294,6 +309,7 @@ Event 端到端口径不能直接互比；与本仓库仅统计 producer/release
 | 并发位置 | 多 producer | 多 peer/channel，单 producer |
 | CQ drain | 每 AIV/队列独立推进 | service 统一 drain |
 | 共享 queue 语义 | Jetty 内共享，跨 AIV独立 | service 串行拥有所有 channel |
+| service 动机 | 官方路径假设 AIV 可直接提交 | SIMT/AICore 执行域边界 |
 | 已验证规模 | 官方 950DT 环境 | NPU8P 8 rank，1/2/4 channel |
 
 ### 3.7 对 netlayer0 打通的架构建议

@@ -1,0 +1,321 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1500" viewBox="0 0 2400 1500">
+  <rect width="2400" height="1500" fill="white"/>
+  <rect x="30" y="30" width="1150" height="1440" rx="30" fill="#f8fafc" stroke="#cbd5e1" stroke-width="2"/>
+  <rect x="1220" y="30" width="1150" height="1440" rx="30" fill="#f8fafc" stroke="#cbd5e1" stroke-width="2"/>
+  <line x1="1200" y1="60" x2="1200" y2="1440" stroke="#cbd5e1" stroke-width="3"/>
+  <text x="612.0" y="105.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="38" font-weight="700" fill="#0f172a" text-anchor="middle">Official DeepEP-Ascend netlayer 1</text>
+  <text x="612.0" y="146.75" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" font-weight="400" fill="#475569" text-anchor="middle">multi-producer, per-AIV queue ownership</text>
+  <rect x="72" y="180" width="1080" height="140" rx="18" fill="#e0f2fe" stroke="#0284c7" stroke-width="3"/>
+  <text x="612.0" y="227.8" font-family="DejaVu Sans, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a" text-anchor="middle">EP dispatch/combine kernel</text>
+  <text x="612.0" y="275.7" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="400" fill="#1e293b" text-anchor="middle">64 AIVs active</text>
+  <rect x="72.0" y="370" width="111.11111111111111" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="127.55555555555556" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV0</text>
+  <rect x="193.11111111111111" y="370" width="111.11111111111111" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="248.66666666666669" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV1</text>
+  <rect x="314.22222222222223" y="370" width="111.11111111111114" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="369.77777777777777" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV2</text>
+  <rect x="435.33333333333337" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="490.8888888888889" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV3</text>
+  <rect x="556.4444444444445" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="612.0" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV4</text>
+  <rect x="677.5555555555555" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="733.1111111111111" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV5</text>
+  <rect x="798.6666666666667" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="854.2222222222223" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV6</text>
+  <rect x="919.7777777777778" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="975.3333333333334" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">...</text>
+  <rect x="1040.888888888889" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="1096.4444444444446" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV63</text>
+  <line x1="127.55555555555556" y1="426" x2="127.55555555555556" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="117.55555555555556,448 137.55555555555554,448 127.55555555555556,466" fill="#334155"/>
+  <line x1="248.66666666666669" y1="426" x2="248.66666666666669" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="238.66666666666669,448 258.6666666666667,448 248.66666666666669,466" fill="#334155"/>
+  <line x1="369.77777777777777" y1="426" x2="369.77777777777777" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="359.77777777777777,448 379.77777777777777,448 369.77777777777777,466" fill="#334155"/>
+  <line x1="490.8888888888889" y1="426" x2="490.8888888888889" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="480.8888888888889,448 500.8888888888889,448 490.8888888888889,466" fill="#334155"/>
+  <line x1="612.0" y1="426" x2="612.0" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="602.0,448 622.0,448 612.0,466" fill="#334155"/>
+  <line x1="733.1111111111111" y1="426" x2="733.1111111111111" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="723.1111111111111,448 743.1111111111111,448 733.1111111111111,466" fill="#334155"/>
+  <line x1="854.2222222222223" y1="426" x2="854.2222222222223" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="844.2222222222223,448 864.2222222222223,448 854.2222222222223,466" fill="#334155"/>
+  <line x1="975.3333333333334" y1="426" x2="975.3333333333334" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="965.3333333333334,448 985.3333333333334,448 975.3333333333334,466" fill="#334155"/>
+  <line x1="1096.4444444444446" y1="426" x2="1096.4444444444446" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1086.4444444444446,448 1106.4444444444446,448 1096.4444444444446,466" fill="#334155"/>
+  <rect x="72.0" y="470" width="111.11111111111111" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="127.55555555555556" y="506.6" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="400" fill="#1e293b" text-anchor="middle">Jetty0/SQ0</text>
+  <rect x="193.11111111111111" y="470" width="111.11111111111111" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="248.66666666666669" y="506.6" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="400" fill="#1e293b" text-anchor="middle">Jetty1/SQ1</text>
+  <rect x="314.22222222222223" y="470" width="111.11111111111114" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="369.77777777777777" y="506.6" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="400" fill="#1e293b" text-anchor="middle">Jetty2/SQ2</text>
+  <rect x="435.33333333333337" y="470" width="111.11111111111109" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="490.8888888888889" y="506.6" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="400" fill="#1e293b" text-anchor="middle">Jetty3/SQ3</text>
+  <rect x="556.4444444444445" y="470" width="111.11111111111109" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="612.0" y="506.6" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="400" fill="#1e293b" text-anchor="middle">Jetty4/SQ4</text>
+  <rect x="677.5555555555555" y="470" width="111.11111111111109" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="733.1111111111111" y="506.6" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="400" fill="#1e293b" text-anchor="middle">Jetty5/SQ5</text>
+  <rect x="798.6666666666667" y="470" width="111.11111111111109" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="854.2222222222223" y="506.6" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="400" fill="#1e293b" text-anchor="middle">Jetty6/SQ6</text>
+  <rect x="919.7777777777778" y="470" width="111.11111111111109" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="975.3333333333334" y="506.6" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="400" fill="#1e293b" text-anchor="middle">...</text>
+  <rect x="1040.888888888889" y="470" width="111.11111111111109" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="1096.4444444444446" y="506.6" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="400" fill="#1e293b" text-anchor="middle">Jetty63/SQ63</text>
+  <line x1="127.55555555555556" y1="428" x2="127.55555555555556" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="117.55555555555556,448 137.55555555555554,448 127.55555555555556,466" fill="#334155"/>
+  <line x1="248.66666666666669" y1="428" x2="248.66666666666669" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="238.66666666666669,448 258.6666666666667,448 248.66666666666669,466" fill="#334155"/>
+  <line x1="369.77777777777777" y1="428" x2="369.77777777777777" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="359.77777777777777,448 379.77777777777777,448 369.77777777777777,466" fill="#334155"/>
+  <line x1="490.8888888888889" y1="428" x2="490.8888888888889" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="480.8888888888889,448 500.8888888888889,448 490.8888888888889,466" fill="#334155"/>
+  <line x1="612.0" y1="428" x2="612.0" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="602.0,448 622.0,448 612.0,466" fill="#334155"/>
+  <line x1="733.1111111111111" y1="428" x2="733.1111111111111" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="723.1111111111111,448 743.1111111111111,448 733.1111111111111,466" fill="#334155"/>
+  <line x1="854.2222222222223" y1="428" x2="854.2222222222223" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="844.2222222222223,448 864.2222222222223,448 854.2222222222223,466" fill="#334155"/>
+  <line x1="975.3333333333334" y1="428" x2="975.3333333333334" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="965.3333333333334,448 985.3333333333334,448 975.3333333333334,466" fill="#334155"/>
+  <line x1="1096.4444444444446" y1="428" x2="1096.4444444444446" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1086.4444444444446,448 1106.4444444444446,448 1096.4444444444446,466" fill="#334155"/>
+  <rect x="72" y="610" width="1080" height="105" rx="18" fill="#ede9fe" stroke="#7c3aed" stroke-width="3"/>
+  <text x="612.0" y="658.5" font-family="DejaVu Sans, Arial, sans-serif" font-size="30" font-weight="700" fill="#0f172a" text-anchor="middle">UBC_CTP / URMA network</text>
+  <line x1="127.55555555555556" y1="534" x2="127.55555555555556" y2="606" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="117.55555555555556,588 137.55555555555554,588 127.55555555555556,606" fill="#334155"/>
+  <line x1="248.66666666666669" y1="534" x2="248.66666666666669" y2="606" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="238.66666666666669,588 258.6666666666667,588 248.66666666666669,606" fill="#334155"/>
+  <line x1="369.77777777777777" y1="534" x2="369.77777777777777" y2="606" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="359.77777777777777,588 379.77777777777777,588 369.77777777777777,606" fill="#334155"/>
+  <line x1="490.8888888888889" y1="534" x2="490.8888888888889" y2="606" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="480.8888888888889,588 500.8888888888889,588 490.8888888888889,606" fill="#334155"/>
+  <line x1="612.0" y1="534" x2="612.0" y2="606" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="602.0,588 622.0,588 612.0,606" fill="#334155"/>
+  <line x1="733.1111111111111" y1="534" x2="733.1111111111111" y2="606" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="723.1111111111111,588 743.1111111111111,588 733.1111111111111,606" fill="#334155"/>
+  <line x1="854.2222222222223" y1="534" x2="854.2222222222223" y2="606" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="844.2222222222223,588 864.2222222222223,588 854.2222222222223,606" fill="#334155"/>
+  <line x1="975.3333333333334" y1="534" x2="975.3333333333334" y2="606" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="965.3333333333334,588 985.3333333333334,588 975.3333333333334,606" fill="#334155"/>
+  <line x1="1096.4444444444446" y1="534" x2="1096.4444444444446" y2="606" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1086.4444444444446,588 1106.4444444444446,588 1096.4444444444446,606" fill="#334155"/>
+  <rect x="72.0" y="810" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="135.125" y="848.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer0</text>
+  <rect x="208.25" y="810" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="271.375" y="848.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer1</text>
+  <rect x="344.5" y="810" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="407.625" y="848.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer2</text>
+  <rect x="480.75" y="810" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="543.875" y="848.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer3</text>
+  <rect x="617.0" y="810" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="680.125" y="848.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer4</text>
+  <rect x="753.25" y="810" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="816.375" y="848.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer5</text>
+  <rect x="889.5" y="810" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="952.625" y="848.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer6</text>
+  <rect x="1025.75" y="810" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="1088.875" y="848.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer7</text>
+  <line x1="135.125" y1="806" x2="135.125" y2="858" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="125.125,840 145.125,840 135.125,858" fill="#334155"/>
+  <line x1="271.375" y1="806" x2="271.375" y2="858" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="261.375,840 281.375,840 271.375,858" fill="#334155"/>
+  <line x1="407.625" y1="806" x2="407.625" y2="858" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="397.625,840 417.625,840 407.625,858" fill="#334155"/>
+  <line x1="543.875" y1="806" x2="543.875" y2="858" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="533.875,840 553.875,840 543.875,858" fill="#334155"/>
+  <line x1="680.125" y1="806" x2="680.125" y2="858" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="670.125,840 690.125,840 680.125,858" fill="#334155"/>
+  <line x1="816.375" y1="806" x2="816.375" y2="858" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="806.375,840 826.375,840 816.375,858" fill="#334155"/>
+  <line x1="952.625" y1="806" x2="952.625" y2="858" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="942.625,840 962.625,840 952.625,858" fill="#334155"/>
+  <line x1="1088.875" y1="806" x2="1088.875" y2="858" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1078.875,840 1098.875,840 1088.875,858" fill="#334155"/>
+  <text x="612.0" y="948.05" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" fill="#0f766e" text-anchor="middle">WQE construction and doorbell distributed across AIVs</text>
+  <text x="612.0" y="985.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#64748b" text-anchor="middle">One Jetty/SQ per AIV</text>
+  <text x="1802.0" y="105.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="38" font-weight="700" fill="#0f172a" text-anchor="middle">This repo netlayer 0</text>
+  <text x="1802.0" y="146.75" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" font-weight="400" fill="#475569" text-anchor="middle">single service producer, per-peer channels</text>
+  <rect x="1262" y="180" width="1080" height="140" rx="18" fill="#e0f2fe" stroke="#0284c7" stroke-width="3"/>
+  <text x="1802.0" y="227.8" font-family="DejaVu Sans, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a" text-anchor="middle">dispatch/combine kernels</text>
+  <text x="1802.0" y="275.7" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="400" fill="#1e293b" text-anchor="middle">64 AIVs active</text>
+  <rect x="1262.0" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="1317.5555555555557" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV0</text>
+  <rect x="1383.111111111111" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="1438.6666666666667" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV1</text>
+  <rect x="1504.2222222222222" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="1559.7777777777778" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV2</text>
+  <rect x="1625.3333333333335" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="1680.8888888888891" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV3</text>
+  <rect x="1746.4444444444443" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="1802.0" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV4</text>
+  <rect x="1867.5555555555557" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="1923.1111111111113" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV5</text>
+  <rect x="1988.6666666666667" y="370" width="111.11111111111109" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="2044.2222222222224" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV6</text>
+  <rect x="2109.777777777778" y="370" width="111.11111111111131" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="2165.3333333333335" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">...</text>
+  <rect x="2230.8888888888887" y="370" width="111.11111111111131" height="56" rx="12" fill="white" stroke="#0284c7" stroke-width="2"/>
+  <text x="2286.4444444444443" y="404.3" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" fill="#1e293b" text-anchor="middle">AIV63</text>
+  <line x1="1317.5555555555557" y1="426" x2="1317.5555555555557" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1307.5555555555557,448 1327.5555555555557,448 1317.5555555555557,466" fill="#334155"/>
+  <line x1="1438.6666666666667" y1="426" x2="1438.6666666666667" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1428.6666666666667,448 1448.6666666666667,448 1438.6666666666667,466" fill="#334155"/>
+  <line x1="1559.7777777777778" y1="426" x2="1559.7777777777778" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1549.7777777777778,448 1569.7777777777778,448 1559.7777777777778,466" fill="#334155"/>
+  <line x1="1680.8888888888891" y1="426" x2="1680.8888888888891" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1670.8888888888891,448 1690.8888888888891,448 1680.8888888888891,466" fill="#334155"/>
+  <line x1="1802.0" y1="426" x2="1802.0" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1792.0,448 1812.0,448 1802.0,466" fill="#334155"/>
+  <line x1="1923.1111111111113" y1="426" x2="1923.1111111111113" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1913.1111111111113,448 1933.1111111111113,448 1923.1111111111113,466" fill="#334155"/>
+  <line x1="2044.2222222222224" y1="426" x2="2044.2222222222224" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2034.2222222222224,448 2054.2222222222226,448 2044.2222222222224,466" fill="#334155"/>
+  <line x1="2165.3333333333335" y1="426" x2="2165.3333333333335" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2155.3333333333335,448 2175.3333333333335,448 2165.3333333333335,466" fill="#334155"/>
+  <line x1="2286.4444444444443" y1="426" x2="2286.4444444444443" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2276.4444444444443,448 2296.4444444444443,448 2286.4444444444443,466" fill="#334155"/>
+  <rect x="1262" y="470" width="1080" height="90" rx="18" fill="#dcfce7" stroke="#15803d" stroke-width="3"/>
+  <text x="1802.0" y="517.8" font-family="DejaVu Sans, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a" text-anchor="middle">TransportCommand queue</text>
+  <line x1="1317.5555555555557" y1="428" x2="1317.5555555555557" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1307.5555555555557,448 1327.5555555555557,448 1317.5555555555557,466" fill="#334155"/>
+  <line x1="1438.6666666666667" y1="428" x2="1438.6666666666667" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1428.6666666666667,448 1448.6666666666667,448 1438.6666666666667,466" fill="#334155"/>
+  <line x1="1559.7777777777778" y1="428" x2="1559.7777777777778" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1549.7777777777778,448 1569.7777777777778,448 1559.7777777777778,466" fill="#334155"/>
+  <line x1="1680.8888888888891" y1="428" x2="1680.8888888888891" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1670.8888888888891,448 1690.8888888888891,448 1680.8888888888891,466" fill="#334155"/>
+  <line x1="1802.0" y1="428" x2="1802.0" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1792.0,448 1812.0,448 1802.0,466" fill="#334155"/>
+  <line x1="1923.1111111111113" y1="428" x2="1923.1111111111113" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1913.1111111111113,448 1933.1111111111113,448 1923.1111111111113,466" fill="#334155"/>
+  <line x1="2044.2222222222224" y1="428" x2="2044.2222222222224" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2034.2222222222224,448 2054.2222222222226,448 2044.2222222222224,466" fill="#334155"/>
+  <line x1="2165.3333333333335" y1="428" x2="2165.3333333333335" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2155.3333333333335,448 2175.3333333333335,448 2165.3333333333335,466" fill="#334155"/>
+  <line x1="2286.4444444444443" y1="428" x2="2286.4444444444443" y2="466" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2276.4444444444443,448 2296.4444444444443,448 2286.4444444444443,466" fill="#334155"/>
+  <rect x="1262" y="610" width="1080" height="145" rx="18" fill="#dcfce7" stroke="#15803d" stroke-width="3"/>
+  <text x="1802.0" y="657.8" font-family="DejaVu Sans, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a" text-anchor="middle">single transport service</text>
+  <text x="1802.0" y="705.7" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="400" fill="#1e293b" text-anchor="middle">resolve peer/channel</text>
+  <text x="1802.0" y="739.7" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="400" fill="#1e293b" text-anchor="middle">construct WQE</text>
+  <text x="1802.0" y="773.7" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="400" fill="#1e293b" text-anchor="middle">post SQ / drain CQ</text>
+  <line x1="1802.0" y1="562" x2="1802.0" y2="606" stroke="#334155" stroke-width="5" stroke-linecap="round"/>
+  <polygon points="1792.0,588 1812.0,588 1802.0,606" fill="#334155"/>
+  <rect x="1262.0" y="810" width="126.25" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="1325.125" y="846.95" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400" fill="#1e293b" text-anchor="middle">peer0/ch0</text>
+  <rect x="1398.25" y="810" width="126.25" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="1461.375" y="846.95" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400" fill="#1e293b" text-anchor="middle">peer1/ch0</text>
+  <rect x="1534.5" y="810" width="126.25" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="1597.625" y="846.95" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400" fill="#1e293b" text-anchor="middle">peer2/ch0</text>
+  <rect x="1670.75" y="810" width="126.25" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="1733.875" y="846.95" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400" fill="#1e293b" text-anchor="middle">peer3/ch0</text>
+  <rect x="1807.0" y="810" width="126.25" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="1870.125" y="846.95" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400" fill="#1e293b" text-anchor="middle">peer4/ch0</text>
+  <rect x="1943.25" y="810" width="126.25" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="2006.375" y="846.95" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400" fill="#1e293b" text-anchor="middle">peer5/ch0</text>
+  <rect x="2079.5" y="810" width="126.25" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="2142.625" y="846.95" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400" fill="#1e293b" text-anchor="middle">peer6/ch0</text>
+  <rect x="2215.75" y="810" width="126.25" height="62" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="2278.875" y="846.95" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400" fill="#1e293b" text-anchor="middle">peer7/ch0</text>
+  <line x1="1802.0" y1="757" x2="1325.125" y2="806" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1343.125,796 1343.125,816 1325.125,806" fill="#334155"/>
+  <line x1="1802.0" y1="757" x2="1461.375" y2="806" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1479.375,796 1479.375,816 1461.375,806" fill="#334155"/>
+  <line x1="1802.0" y1="757" x2="1597.625" y2="806" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1615.625,796 1615.625,816 1597.625,806" fill="#334155"/>
+  <line x1="1802.0" y1="757" x2="1733.875" y2="806" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1751.875,796 1751.875,816 1733.875,806" fill="#334155"/>
+  <line x1="1802.0" y1="757" x2="1870.125" y2="806" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1852.125,796 1852.125,816 1870.125,806" fill="#334155"/>
+  <line x1="1802.0" y1="757" x2="2006.375" y2="806" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1988.375,796 1988.375,816 2006.375,806" fill="#334155"/>
+  <line x1="1802.0" y1="757" x2="2142.625" y2="806" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2124.625,796 2124.625,816 2142.625,806" fill="#334155"/>
+  <line x1="1802.0" y1="757" x2="2278.875" y2="806" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2260.875,796 2260.875,816 2278.875,806" fill="#334155"/>
+  <rect x="1262" y="935" width="1080" height="105" rx="18" fill="#ede9fe" stroke="#7c3aed" stroke-width="3"/>
+  <text x="1802.0" y="983.5" font-family="DejaVu Sans, Arial, sans-serif" font-size="30" font-weight="700" fill="#0f172a" text-anchor="middle">UB_CTP independent channels</text>
+  <line x1="1325.125" y1="874" x2="1325.125" y2="931" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1315.125,913 1335.125,913 1325.125,931" fill="#334155"/>
+  <line x1="1461.375" y1="874" x2="1461.375" y2="931" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1451.375,913 1471.375,913 1461.375,931" fill="#334155"/>
+  <line x1="1597.625" y1="874" x2="1597.625" y2="931" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1587.625,913 1607.625,913 1597.625,931" fill="#334155"/>
+  <line x1="1733.875" y1="874" x2="1733.875" y2="931" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1723.875,913 1743.875,913 1733.875,931" fill="#334155"/>
+  <line x1="1870.125" y1="874" x2="1870.125" y2="931" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1860.125,913 1880.125,913 1870.125,931" fill="#334155"/>
+  <line x1="2006.375" y1="874" x2="2006.375" y2="931" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1996.375,913 2016.375,913 2006.375,931" fill="#334155"/>
+  <line x1="2142.625" y1="874" x2="2142.625" y2="931" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2132.625,913 2152.625,913 2142.625,931" fill="#334155"/>
+  <line x1="2278.875" y1="874" x2="2278.875" y2="931" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2268.875,913 2288.875,913 2278.875,931" fill="#334155"/>
+  <text x="1802.0" y="1128.05" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" fill="#0f766e" text-anchor="middle">WQE construction and doorbell centralized in service</text>
+  <text x="1802.0" y="1165.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#64748b" text-anchor="middle">Concurrency across peer channels, not WQE producers</text>
+  <rect x="72.0" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="135.125" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer0</text>
+  <rect x="208.25" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="271.375" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer1</text>
+  <rect x="344.5" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="407.625" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer2</text>
+  <rect x="480.75" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="543.875" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer3</text>
+  <rect x="617.0" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="680.125" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer4</text>
+  <rect x="753.25" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="816.375" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer5</text>
+  <rect x="889.5" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="952.625" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer6</text>
+  <rect x="1025.75" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="1088.875" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer7</text>
+  <line x1="135.125" y1="1236" x2="135.125" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="125.125,1270 145.125,1270 135.125,1288" fill="#334155"/>
+  <line x1="271.375" y1="1236" x2="271.375" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="261.375,1270 281.375,1270 271.375,1288" fill="#334155"/>
+  <line x1="407.625" y1="1236" x2="407.625" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="397.625,1270 417.625,1270 407.625,1288" fill="#334155"/>
+  <line x1="543.875" y1="1236" x2="543.875" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="533.875,1270 553.875,1270 543.875,1288" fill="#334155"/>
+  <line x1="680.125" y1="1236" x2="680.125" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="670.125,1270 690.125,1270 680.125,1288" fill="#334155"/>
+  <line x1="816.375" y1="1236" x2="816.375" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="806.375,1270 826.375,1270 816.375,1288" fill="#334155"/>
+  <line x1="952.625" y1="1236" x2="952.625" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="942.625,1270 962.625,1270 952.625,1288" fill="#334155"/>
+  <line x1="1088.875" y1="1236" x2="1088.875" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1078.875,1270 1098.875,1270 1088.875,1288" fill="#334155"/>
+  <rect x="1262.0" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="1325.125" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer0</text>
+  <rect x="1398.25" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="1461.375" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer1</text>
+  <rect x="1534.5" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="1597.625" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer2</text>
+  <rect x="1670.75" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="1733.875" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer3</text>
+  <rect x="1807.0" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="1870.125" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer4</text>
+  <rect x="1943.25" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="2006.375" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer5</text>
+  <rect x="2079.5" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="2142.625" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer6</text>
+  <rect x="2215.75" y="1240" width="126.25" height="62" rx="12" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="2278.875" y="1278.35" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" fill="#1e293b" text-anchor="middle">peer7</text>
+  <line x1="1325.125" y1="1236" x2="1325.125" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1315.125,1270 1335.125,1270 1325.125,1288" fill="#334155"/>
+  <line x1="1461.375" y1="1236" x2="1461.375" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1451.375,1270 1471.375,1270 1461.375,1288" fill="#334155"/>
+  <line x1="1597.625" y1="1236" x2="1597.625" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1587.625,1270 1607.625,1270 1597.625,1288" fill="#334155"/>
+  <line x1="1733.875" y1="1236" x2="1733.875" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1723.875,1270 1743.875,1270 1733.875,1288" fill="#334155"/>
+  <line x1="1870.125" y1="1236" x2="1870.125" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1860.125,1270 1880.125,1270 1870.125,1288" fill="#334155"/>
+  <line x1="2006.375" y1="1236" x2="2006.375" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="1996.375,1270 2016.375,1270 2006.375,1288" fill="#334155"/>
+  <line x1="2142.625" y1="1236" x2="2142.625" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2132.625,1270 2152.625,1270 2142.625,1288" fill="#334155"/>
+  <line x1="2278.875" y1="1236" x2="2278.875" y2="1288" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="2268.875,1270 2288.875,1270 2278.875,1288" fill="#334155"/>
+</svg>

@@ -12,7 +12,7 @@ MoE dispatch 和 combine 的通信由 router 结果决定。每个 token 可能�
 
 这不是 SIMT 直接敲 doorbell。当前 CANN 9.3.0 下，SQ/CQ 和 doorbell 操作属于 AICore 执行域，所以实现采用 staged transport：SIMT 负责动态通信意图，AICore service 负责批量提交和完成处理。payload 仍走 symmetric window 和 URMA，不先进 UB。
 
-本文解释这条路径的边界和工程取舍。文末的性能章节是验收口径，不是性能结论；没有同条件数据，就不写“全面更快”。
+本文解释这条路径的边界和工程取舍。文末给出一组与官方 DeepEP-Ascend 报告口径近似对齐的性能记录；两边实现和通信 layer 不同，所以它是可追溯的参考数据，不是“全面更快”的结论。
 
 如果你读过《昇腾950 AIV 直驱URMA 实践》，可以把本文当成互补路径：那篇讲 AIV 在调用点直接构造并提交 WQE；这篇讲 DeepEP 在 MoE 动态路由下，由 SIMT 生成通信命令，再交给 AICore service 统一提交。两者都在 Device 侧，但调度模型不同。
 
@@ -32,7 +32,7 @@ MoE dispatch 和 combine 的通信由 router 结果决定。每个 token 可能�
 
 1. 不比较 DeepEP 与 HCCL/NCCL 在所有 collective 上的性能；
 2. 不把 staged transport 说成官方直驱路径的替代品；
-3. 不在缺少同版本、同 workload 数据时给性能结论。
+3. 不把实现方案不同的近似对齐数据写成严格 A/B 结论。
 
 > 一句话概括：SIMT 负责“我要发给谁、写到哪、发多少”；AICore service 负责“怎么把一批通信意图高效提交给 URMA 队列”。
 
@@ -290,62 +290,75 @@ capability bit 在这里起关键作用。代码里存在某个接口，不等�
 
 这套方法的重点不是“代码行数少”，而是依赖边界清楚、可测试、可替换。CANN 9.3.0 的 communication-domain 路径负责 rank graph、内存注册、AIV channel 和远端 MR 查询，DeepEP 在 host transport 层把这些资源整理成设备可见的 Team / Window / Channel 表，再让 device facade 保持稳定。
 
-## 9. 性能验证口径
+## 9. 与官方实现近似对齐的性能记录
 
-这一节是验收清单，不是性能结论。本文先解释架构，性能数据需要另文给出；没有同版本、同 workload、同配置的数据，就不能宣称优于某个基线。
+性能比较前必须先说明基线。官方 DeepEP-Ascend 的公开 EP8 数据使用 netlayer 1：EP kernel 内 64 个 AIV 直接拥有 Jetty/SQ，每个 AIV 构造 WQE、推进自己的队列并 ring doorbell，数据面经 UBC_CTP/URMA 访问 SuperPoD 外部 Clos 网络。本仓库当前可用的 NPU8P 环境选择 netlayer 0：dispatch/combine kernel 只生成 TransportCommand，由单个 AICore transport service 解析 peer/channel、构造 WQE、提交 SQ 并 drain CQ，数据面使用每 peer 独立的 UB_CTP channel 和机内直连拓扑。
 
-建议至少覆盖三类 workload：
+![netlayer 0 vs netlayer 1](assets/simt-urma-netlayer0-vs-netlayer1.png)
 
-1. **大块、规则、均匀通信**：验证基础搬运能力；
-2. **小包、多 peer、动态路由**：观察控制面收益；
-3. **长尾 expert 负载**：观察完成语义和尾部 rank 表现。
+图 8：官方 netlayer 1 与本仓库 netlayer 0 的所有权模型。左边是多 producer：每个 AIV 拥有独立 Jetty/SQ；右边是单 service producer：多 AIV 只追加命令，WQE 构造和 doorbell 集中在 transport service。
 
-建议报告的指标包括：
+这不是“同一个 kernel 换一个 layer 参数”。两条路径的物理通路、地址发现协议、队列所有权和并发位置都不同：
 
-- dispatch / combine 端到端 latency；
-- p50 / p95 / p99；
-- router 结束到第一批通信命令提交的启动时间；
-- CPU launch 和 host synchronization 次数；
-- command generation 和 service submission 时间；
-- 不同 top-k、peer 数、payload size 下的有效带宽；
-- 通信与排序、GEMM 等计算的重叠收益；
-- channel 数从 1 到 2/4 的收益和资源成本。
+| 维度 | 官方 netlayer 1 | 本仓库 netlayer 0 |
+| --- | --- | --- |
+| 拓扑 | SuperPoD 外部 Clos | 单机 8 NPU 直连 |
+| 地址发现 | peer UB_MEM channel | HcclChannelGetRemoteMems |
+| 发送协议 | UBC_CTP Jetty/URMA | UB_CTP independent channel |
+| 队列所有权 | 每个 AIV 一个 Jetty/SQ | 单 transport service |
+| EP kernel 职责 | 直接构造并提交 WQE | 只生成 TransportCommand |
+| 并发位置 | 多 WQE producer | 多 peer/channel，单 producer |
 
-每张性能图都必须附带条件：
+因此，下面只能做报告口径的近似对齐，不能把它解释成同硬件通路上的 netlayer 0/1 严格 A/B。更严格的 layer 对比需要独立 AB 基准，并且要控制 payload、WQE 大小、rank 数和 producer 数。
 
-| 条件 | 示例 |
+### 9.1 官方报告口径
+
+官方 README 对 EP8 带宽的说明是：timings include issue and drain but exclude final epilogues。对应实现不是完整 API 端到端计时，而是 tests/ep/test_ep.py 的 profiler 采样：
+
+1. 通信 kernel 使用 dispatch_impl / combine_impl 的采样时长；
+2. 最终 copy/reduce epilogue 被拆到独立 kernel，不进入 URMA 带宽；
+3. dur_ns 来自 Torch-NPU/FFTS profiler，50 个采样求平均；
+4. 字节公式使用 per-rank 收到的逻辑 URMA 字节，而不是完整 API 逻辑字节或物理链路字节。
+
+本仓库为了靠近这个边界，没有使用完整 API 的 NPU Event 端到端时间，而是使用 stage profile 中的 service_submit + cq_wait，对应 stage_service_issue_drain。这个 proxy 覆盖 transport service 的提交和完成等待，外层 producer 和最终 epilogue 不计入。
+
+### 9.2 workload 与环境
+
+| 条件 | 值 |
 | --- | --- |
-| 硬件 | Ascend 950，单机 8 NPU |
-| CANN / HCOMM | 9.3.0，并注明 HCOMM 包来源 |
-| workload | tokens、hidden、top-k、experts、dtype |
-| 路由 | balanced / unbalanced / manifest |
-| channel | 1 / 2 / 4 |
-| 协议 | warmup、sample 数、seed |
-| 路径 | direct / hybrid、sync / async |
+| case | ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0 |
+| world size | 8 |
+| tokens per rank | 16384 |
+| hidden | 7168 |
+| top-k | 6 |
+| experts | 256 |
+| seed | 0 |
+| warmups / iterations | 10 / 50 |
+| hardware | Ascend 950DT, devices 0-7 |
+| CANN / HCOMM | 9.3.0 |
+| launch | 64 AIVs on both sides |
+| stage profile | service_submit + cq_wait |
 
-一个更稳健的结论形式是：
+Dispatch 使用 FP8 payload 加 scale 字节，并启用 expanded dispatch、zero padding 和 row-major scale factors。Combine 使用 BF16 hidden payload，并按官方公式排除 top-k 权重。
 
-> 在动态稀疏通信中，SIMT-fronted 路径减少了控制面转换，并为通信和路由计算融合提供了更自然的执行粒度；最终收益取决于消息规模、peer 分布、channel 数和 service 提交效率。
+### 9.3 结果
 
-发布前的检查很简单：
+| 操作 | 官方参考 GB/s | 本仓库近似口径 GB/s | 相对官方 |
+| --- | ---: | ---: | ---: |
+| Dispatch（expanded dispatch） | 374 | 274.49 | 0.73x |
+| Combine（reduced combine） | 346 | 285.82 | 0.83x |
 
-1. 每个数字能追溯到一个测试任务；
-2. 每张图写清硬件、CANN、rank、路由和 channel 配置；
-3. 基线和待测版本使用同一套代码路径，只改变被评估的优化项；
-4. 文中只报告测到的结论，不把架构动机写成性能结果。
+这组数字说明当前实现已经能达到官方公开参考值的三分之二以上，但它不能推出两个结论：一是“netlayer 0 达到 netlayer 1 的 73%/83%”，因为通信硬件通路不同；二是“staged transport 一定慢 17%–27%”，因为当前 proxy 的 kernel 边界、barrier 位置和 stage 计数仍与官方采样不完全一致。
 
-```text
-【图 8：性能验证占位图】
-横轴：workload / payload size / channel count
-纵轴：end-to-end latency 与 P99
-必须标注硬件、CANN、rank、top-k、warmup/sample 协议
-```
+已知差异主要有四点。第一，当前实现没有官方 set_barrier_in_prologue，外部 barrier 不能移动到通信 kernel prologue。第二，当前实现没有 defer_epilogue，最终 copy/reduce epilogue 不能按官方方式拆成独立 kernel。第三，stage profile 只有一次聚合观察，不提供 50 个迭代样本；时间用 envelope cycle 和 device seconds 校准，是近似 timer。第四，官方数据来自 Ascend 950DT、CANN 9.2.0 和特定 PoC HDK，本仓库数据来自 NPU8P、CANN 9.3.0；按对比策略，包版本差异不作为实现差异解释，但环境不同仍然限制了外推。
+
+发布这组数据时，更稳妥的表述是：在 workload、launch AIV 数、字节公式和“issue + drain、排除最终 epilogue”的时间边界都尽量对齐后，本仓库 staged transport 的 service 提交与完成路径达到官方公开参考值的 0.73x 和 0.83x。它是一个可复现的 checkpoint，不是终局性能结论。
 
 ## 10. 当前边界与后续演进
 
 当前实现的主要验证边界：
 
-- **硬件与软件**：Ascend 950，单机多 NPU，CANN/HCOMM 9.3.0；
+- **硬件与软件**：Ascend 950DT，单机 8 NPU，CANN/HCOMM 9.3.0；
 - **执行模型**：SIMT-fronted staged transport，不是 SIMT 直接 doorbell；
 - **生产能力**：以端到端验证和 capability bit 为准，不能只看代码存在；
 - **跨机能力**：物理 RoCE scale-out 仍需单独验证，不能由逻辑多主机结果外推。
@@ -374,7 +387,7 @@ DeepEP-Ascend 这条通信路径的核心不是“用一条新指令替代旧通
 
 这套设计当前的价值是可控和可验证：动态路由控制靠近数据产生位置，硬件提交集中在 service 边界，完成协议和错误处理有明确归属。它的性能收益需要按 workload 条件验证，而不是用一句“更快”概括。
 
-后续我们会继续补三件事：多 channel 的功能和性能 A/B、通信计算重叠的 pipeline 边界，以及跨机 RoCE 路径。性能数据齐了以后，再单独写一篇验证专题。
+当前与官方实现的近似对齐记录见第 9 节。后续我们会继续补三件事：多 channel 的功能和性能 A/B、通信计算重叠的 pipeline 边界，以及跨机 RoCE 路径。
 
 ## 参考入口
 
@@ -385,3 +398,5 @@ DeepEP-Ascend 这条通信路径的核心不是“用一条新指令替代旧通
 - `docs/ascend-design/epv2-ascend-simt-urma-transport.md`
 - `docs/ascend-design/deep-ep-ascend-communication-implementation-review-zh.md`
 - `docs/ascend-design/asc-comm-official-simt-comparison-zh.md`
+- docs/ascend-design/netlayer0-vs-netlayer1-analysis-zh.md
+- docs/ascend-design/netlayer0-adaptation-diagnosis-zh.md

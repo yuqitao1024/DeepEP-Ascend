@@ -357,7 +357,8 @@ DeepEP-Ascend 的通信方案不是“用一条新硬件指令替代旧通信库
 3. **控制面/数据面分离图**：UB_MEM command 与 symmetric window payload；
 4. **Team/Window/Channel 层次图**；
 5. **put 生命周期时序图**：command 编码、发布、service 解析、WQE 提交、doorbell、CQ drain；
-6. **性能对比占位图**：端到端 latency 和 p99，标注 workload 条件；
+6. **性能对比图**：官方 netlayer 1 与本仓库 netlayer 0 的所有权差异，
+   标注 workload、统计口径和通信 layer 差异；
 7. **可选**：官方 SIMT Hcomm 与 staged transport 的差异图，只放在延伸章节。
 
 ## 5. 代码与文档引用
