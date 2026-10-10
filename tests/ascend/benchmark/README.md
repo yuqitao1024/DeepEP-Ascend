@@ -32,6 +32,28 @@ and produces the official-reporting comparison tables. The methodology,
 archived result, and NPU8P smoke validation are documented in
 `docs/ascend-performance/official-reporting-alignment-zh.md`.
 
+To run the same official-reporting methodology over the complete supported
+case matrix (currently 144 cases), use the separate matrix entry point. It
+launches the unchanged single-case msprof entry and the existing stage-profile
+entry as child runs, then reuses the report alignment tool for every case:
+
+```bash
+python3 tests/ascend/benchmark/run_official_reporting_matrix.py \
+  --output-dir results/official-reporting-matrix \
+  --num-tokens 16384 --hidden 7168 --num-topk 6 --num-experts 256 \
+  --num-sms 64 --warmups 10 --iterations 50 --skip-check \
+  --stage-warmups 1 --stage-iterations 1
+```
+
+The matrix entry always preserves `bench_ep_msprof.py` as the unchanged
+single-case entry point. Per-case raw msprof JSON, stage JSON, aligned JSON,
+Markdown, and child-run logs are written under `msprof/`, `stage/`,
+`alignment/`, and `logs/`; `matrix-summary.json` and
+`matrix-summary.md` are updated after each successful case so interrupted
+runs retain partial results. `--start`, `--stop`, and `--cases` can be
+used to resume or select a subset without changing the default full-matrix
+behavior.
+
 The current msprof script times the outer communication kernels
 (`dispatch_kernel` / `combine_kernel`) for raw kernel diagnostics. The staged
 transport implementation has no single msprof kernel that is equivalent to
