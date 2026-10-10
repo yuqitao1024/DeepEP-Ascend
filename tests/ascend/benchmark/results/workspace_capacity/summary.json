@@ -1,0 +1,70 @@
+{
+  "environment": {
+    "aicore_urma_w32_sha256": "5a0c8d54caca8b10e36a4a37069356ba33433787adcaf77ff272787fd77af637",
+    "aicore_urma_w4_sha256": "958b9b7268d21a344c844ad08c17b69ee067f03134f6fad1b062eed867c528d8",
+    "cann": "/usr/local/Ascend/cann-9.3.0",
+    "devices": "0,1,2,3,4,5,6,7",
+    "host": "direct NPU8P",
+    "python": "/data/disk2/pyptouser/yuqitao/deepep-venv-py311/bin/python"
+  },
+  "operations": [
+    {
+      "delta_ms": -0.00007,
+      "operation_id": "dispatch",
+      "relative_change": 0.005352,
+      "w32_ms": 12.992807,
+      "w4_ms": 13.062718
+    },
+    {
+      "delta_ms": -0.000152,
+      "operation_id": "expanded_dispatch",
+      "relative_change": 0.002777,
+      "w32_ms": 54.577851,
+      "w4_ms": 54.729856
+    },
+    {
+      "delta_ms": -0.000157,
+      "operation_id": "cached_dispatch",
+      "relative_change": 0.013625,
+      "w32_ms": 11.380869,
+      "w4_ms": 11.538074
+    },
+    {
+      "delta_ms": -0.000079,
+      "operation_id": "combine",
+      "relative_change": 0.009688,
+      "w32_ms": 8.038813,
+      "w4_ms": 8.117452
+    },
+    {
+      "delta_ms": -0.00011,
+      "operation_id": "reduced_combine",
+      "relative_change": 0.014113,
+      "w32_ms": 7.713198,
+      "w4_ms": 7.823616
+    }
+  ],
+  "protocol": {
+    "case_id": "ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0",
+    "iterations": 30,
+    "num_tokens": 8192,
+    "order": "W32-1, W4-1, W4-2, W32-2",
+    "purpose": "A/B the 4MiB and 32MiB default runtime workspace capacities on a workload that both capacities can execute.",
+    "rank_aggregation": "maximum_latency",
+    "timer": "npu_event",
+    "warmups": 10
+  },
+  "schema_version": 1,
+  "source_files": {
+    "W32-1": "workspace-W32-1.json",
+    "W32-2": "workspace-W32-2.json",
+    "W4-1": "workspace-W4-1.json",
+    "W4-2": "workspace-W4-2.json"
+  },
+  "tasks": {
+    "W32-1": "task_20261010_082950_2790302772",
+    "W32-2": "task_20261010_083336_28483654194",
+    "W4-1": "task_20261010_083215_283959118440",
+    "W4-2": "task_20261010_083256_284345514878"
+  }
+}

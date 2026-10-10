@@ -56,7 +56,7 @@ inline constexpr std::uint32_t kCoreTilingAbiVersion = 22;
 inline constexpr std::uint64_t kDirectDeviceIndexLimit = 0x7fffffffULL;
 
 constexpr std::uint64_t default_elastic_runtime_workspace_bytes() noexcept {
-    return 2 * kPublicElasticBufferAlignment;
+    return 16 * kPublicElasticBufferAlignment;
 }
 
 struct CoreTiling {
