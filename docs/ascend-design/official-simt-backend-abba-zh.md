@@ -195,6 +195,11 @@ Dispatch 在相同 2-warmup 协议下仍有正有负，首组 +7.23% 尚未复�
 
 ## 原始数据与复现
 
+2026-10-10 在当前 main `d78a57e` 上做过一次复测，A/B 二进制均包含当时仅用于
+16K token 用例的 32MiB remote-only workspace 对齐。结果五个操作均慢
+0.19%–0.39%，结论不变。数据见
+`tests/ascend/benchmark/results/official_simt_current/`。
+
 远端实验目录下：
 
 - `artifacts/A/`、`artifacts/B/`：两份不可混用的编译产物，SHA256 见上文。

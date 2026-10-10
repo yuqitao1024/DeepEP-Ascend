@@ -1,0 +1,94 @@
+{
+  "environment": {
+    "cann": "/usr/local/Ascend/cann-9.3.0",
+    "code": "repository snapshot from main commit d78a57e with the remote-only 32MiB runtime workspace alignment patch",
+    "devices": "0,1,2,3,4,5,6,7",
+    "host": "direct NPU8P",
+    "official_simt_sha256": "5f9e713f9db8f633d21c6e1d7b4f68d470b68fb93495d09da8a22708e07315a2",
+    "python": "/data/disk2/pyptouser/yuqitao/deepep-venv-py311/bin/python",
+    "aicore_urma_sha256": "5a0c8d54caca8b10e36a4a37069356ba33433787adcaf77ff272787fd77af637"
+  },
+  "operations": [
+    {
+      "aicore_urma": {
+        "gbps": 563.701,
+        "ms": 22.971089
+      },
+      "improvement": -0.003929,
+      "official_simt": {
+        "gbps": 565.915,
+        "ms": 23.061339
+      },
+      "operation_id": "dispatch"
+    },
+    {
+      "aicore_urma": {
+        "gbps": 140.793,
+        "ms": 104.046651
+      },
+      "improvement": -0.002484,
+      "official_simt": {
+        "gbps": 141.143,
+        "ms": 104.305081
+      },
+      "operation_id": "expanded_dispatch"
+    },
+    {
+      "aicore_urma": {
+        "gbps": 692.885,
+        "ms": 18.652391
+      },
+      "improvement": -0.002812,
+      "official_simt": {
+        "gbps": 694.833,
+        "ms": 18.704841
+      },
+      "operation_id": "cached_dispatch"
+    },
+    {
+      "aicore_urma": {
+        "gbps": 1399.581,
+        "ms": 13.178433
+      },
+      "improvement": -0.00188,
+      "official_simt": {
+        "gbps": 1402.213,
+        "ms": 13.203214
+      },
+      "operation_id": "combine"
+    },
+    {
+      "aicore_urma": {
+        "gbps": 1446.064,
+        "ms": 12.618431
+      },
+      "improvement": -0.002912,
+      "official_simt": {
+        "gbps": 1450.276,
+        "ms": 12.655182
+      },
+      "operation_id": "reduced_combine"
+    }
+  ],
+  "protocol": {
+    "case_id": "ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0",
+    "iterations": 30,
+    "order": "B1, A1, A2, B2",
+    "rank_aggregation": "maximum_latency",
+    "timer": "npu_event",
+    "warmups": 10
+  },
+  "schema_version": 1,
+  "source_files": {
+    "A1": "abba1-A1.json",
+    "A2": "abba1-A2.json",
+    "B1": "abba1-B1.json",
+    "B2": "abba1-B2.json"
+  },
+  "tasks": {
+    "A1": "task_20261010_081042_267108626504",
+    "A2": "task_20261010_081126_267632222143",
+    "B1": "task_20261010_080959_266699923867",
+    "B2": "task_20261010_081749_272867917931"
+  }
+}
