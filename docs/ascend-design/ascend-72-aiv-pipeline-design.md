@@ -11,7 +11,7 @@ generation handling, transport release ordering, cached handles, and the
 five-second operation watchdog.
 
 This work is the first implementation slice of P0.1 in
-`docs/ascend-design/epv2-ascend-performance-optimization.md`. The user referred
+`docs/ascend-performance/epv2-ascend-performance-optimization.md`. The user referred
 to it as P0.0; this specification uses the repository's existing P0.1 name in
 code and test artifacts.
 

@@ -2,7 +2,7 @@
 
 日期：2026-10-08
 状态：公众号正文草稿 v0.2
-配套大纲：`docs/ascend-design/epv2-ascend-simt-urma-article-draft-outline-zh.md`
+配套大纲：`docs/ascend-articles/epv2-ascend-simt-urma-article-draft-outline-zh.md`
 
 ## 一分钟版
 
@@ -36,7 +36,7 @@ MoE dispatch 和 combine 的通信由 router 结果决定。每个 token 可能�
 
 > 一句话概括：SIMT 负责“我要发给谁、写到哪、发多少”；AICore service 负责“怎么把一批通信意图高效提交给 URMA 队列”。
 
-![DeepEP-Ascend transport stack](assets/simt-urma-architecture-v2.png)
+![DeepEP-Ascend transport stack](../ascend-assets/simt-urma-architecture-v2.png)
 
 图 1：DeepEP-Ascend transport stack。六层都在 Device 侧边界内；AICore transport service 是批量提交和完成处理的服务边界，底层继续复用 HCCL/HCOMM 拥有的 URMA 资源。
 
@@ -52,7 +52,7 @@ Router 输出 top-k 结果的那一瞬间，MoE 通信的问题才真正开始�
 
 DeepEP-Ascend 的做法是把“路由结果到通信意图”的转换留在 Device 侧。SIMT producer 在算子内部读路由结果，完成 peer 选择、rank 翻译、offset 计算和边界判断，然后生成 `put`、`put_value`、`remote_add`、`flush` 这类固定格式命令。AICore service 随后把这批命令翻译成 URMA 队列操作。
 
-![MoE routing](assets/simt-urma-moe-routing.png)
+![MoE routing](../ascend-assets/simt-urma-moe-routing.png)
 
 图 2：MoE routing。同一个 batch 里，三个 token 分别被 router 指到不同 expert 和 rank。通信目标不是静态 broadcast 计划，而是每个 token 的路由结果。
 
@@ -90,7 +90,7 @@ SIMT command encoder 接手后，把 facade 参数翻译成固定大小、trivia
 
 AICore transport service 在服务边界消费这批命令：校验参数，解析 team、window 和 channel，构造 WQE/SGE，写 SQ，用 `st_dev` ring doorbell，再处理 CQ 完成。最后一层是 HCCL/HCOMM 资源层，它继续拥有连接建立、内存注册、token、队列分配和 teardown。
 
-![put lifecycle](assets/simt-urma-put-lifecycle.png)
+![put lifecycle](../ascend-assets/simt-urma-put-lifecycle.png)
 
 图 3：put lifecycle。前半段是 facade、校验、命令编码和 count 发布；越过 AICore service 后进入 WQE/SGE、SQ、doorbell 和 CQ 完成处理。图里保留的是主干，省略了 resource resolution、cache publication、CQ 校验等实现细节。
 
@@ -178,7 +178,7 @@ struct alignas(64) TransportCommand {
 | 批量组织 SQE、doorbell、CQ 轮询 | AICore service |
 | 端到端通信与路由融合 | SIMT 生成 + AICore 提交 |
 
-![direct SIMT submission vs staged transport](assets/simt-urma-direct-vs-staged.png)
+![direct SIMT submission vs staged transport](../ascend-assets/simt-urma-direct-vs-staged.png)
 
 图 4：direct SIMT submission vs staged transport。上面的直接提交路径在当前 CANN 执行域下不可用；当前实现是下面的 staged transport，由 AICore service 承接 WQE、SQ、doorbell 和 CQ。
 
@@ -190,7 +190,7 @@ struct alignas(64) TransportCommand {
 
 UB_MEM 服务的是通信控制面：聚合固定格式命令，组织 SQE、SGE 和临时 descriptor，保存 service 阶段快速访问的状态，并配合 `st_dev` / `ld_dev` 完成 SQ/CQ 和 doorbell 操作。真正的 payload 不走这条路，它从本地注册内存出发，通过 URMA 写入 peer 的 symmetric window。
 
-![control plane vs data plane](assets/simt-urma-control-data-plane-v2.png)
+![control plane vs data plane](../ascend-assets/simt-urma-control-data-plane-v2.png)
 
 图 5：control plane vs data plane。上半部分是命令和队列组织的控制路径；下半部分是 payload 的数据路径。本地注册内存里的 token payload 不先进 UB，而是由 URMA 直接写入 peer 的 symmetric window。
 
@@ -266,7 +266,7 @@ symmetric offset = 4096, bytes = 8192
 
 这两个流程看起来不同，但通信结构是同一套：路由或 contributor 信息决定目标，SIMT 生成命令，AICore service 提交，接收端在明确的 acquire/validate 边界后才消费。
 
-![dispatch / combine call chains](assets/simt-urma-dispatch-combine-chains.png)
+![dispatch / combine call chains](../ascend-assets/simt-urma-dispatch-combine-chains.png)
 
 图 6：dispatch / combine call chains。两条链的前半段不同：dispatch 从 routing / grouping 进入，combine 从 expert outputs 进入；但都经过 SIMT command generation、TransportCommand 和 AICore service，接收端再在 acquire/validate 边界后执行 copy 或 reduce/weights。
 
@@ -284,7 +284,7 @@ capability bit 在这里起关键作用。代码里存在某个接口，不等�
 
 第四层风险是扩展方式。新增通信操作主要扩展 command opcode 和 service handler，而不是重写资源生命周期。CUDA/NCCL 路径保持独立，Ascend 后端的抽象不反向污染原有实现。
 
-![engineering progression path](assets/simt-urma-engineering-path.png)
+![engineering progression path](../ascend-assets/simt-urma-engineering-path.png)
 
 图 7：engineering progression path。ABI probe 和 multi-rank acceptance 是两个关键验证关口，前者挡住 ABI 假设，后者验证多 rank 端到端语义。
 
@@ -294,7 +294,7 @@ capability bit 在这里起关键作用。代码里存在某个接口，不等�
 
 性能比较前必须先说明基线。官方 DeepEP-Ascend 的公开 EP8 数据使用 netlayer 1：EP kernel 内 64 个 AIV 直接拥有 Jetty/SQ，每个 AIV 构造 WQE、推进自己的队列并 ring doorbell，数据面经 UBC_CTP/URMA 访问 SuperPoD 外部 Clos 网络。本仓库当前可用的 NPU8P 环境选择 netlayer 0：dispatch/combine kernel 只生成 TransportCommand，由单个 AICore transport service 解析 peer/channel、构造 WQE、提交 SQ 并 drain CQ，数据面使用每 peer 独立的 UB_CTP channel 和机内直连拓扑。
 
-![netlayer 0 vs netlayer 1](assets/simt-urma-netlayer0-vs-netlayer1.png)
+![netlayer 0 vs netlayer 1](../ascend-assets/simt-urma-netlayer0-vs-netlayer1.png)
 
 图 8：官方 netlayer 1 与本仓库 netlayer 0 的所有权模型。左边是多 producer：每个 AIV 拥有独立 Jetty/SQ；右边是单 service producer：多 AIV 只追加命令，WQE 构造和 doorbell 集中在 transport service。
 
@@ -396,7 +396,7 @@ DeepEP-Ascend 这条通信路径的核心不是“用一条新指令替代旧通
 - `csrc/backends/ascend/transport/aicore_transport_service.hpp`
 - `csrc/backends/ascend/transport/cann_transport.cpp`
 - `docs/ascend-design/epv2-ascend-simt-urma-transport.md`
-- `docs/ascend-design/deep-ep-ascend-communication-implementation-review-zh.md`
-- `docs/ascend-design/asc-comm-official-simt-comparison-zh.md`
-- docs/ascend-design/netlayer0-vs-netlayer1-analysis-zh.md
-- docs/ascend-design/netlayer0-adaptation-diagnosis-zh.md
+- `docs/ascend-reference/deep-ep-ascend-communication-implementation-review-zh.md`
+- `docs/ascend-reference/asc-comm-official-simt-comparison-zh.md`
+- docs/ascend-diagnosis/netlayer0-vs-netlayer1-analysis-zh.md
+- docs/ascend-diagnosis/netlayer0-adaptation-diagnosis-zh.md

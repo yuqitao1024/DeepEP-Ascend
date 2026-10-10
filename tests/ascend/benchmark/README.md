@@ -30,7 +30,7 @@ torchrun --standalone --nproc-per-node=8 \
 `align_official_reporting.py` combines that output with a stage-profile JSON
 and produces the official-reporting comparison tables. The methodology,
 archived result, and NPU8P smoke validation are documented in
-`docs/ascend-design/official-reporting-alignment-zh.md`.
+`docs/ascend-performance/official-reporting-alignment-zh.md`.
 
 The current msprof script times the outer communication kernels
 (`dispatch_kernel` / `combine_kernel`) for raw kernel diagnostics. The staged

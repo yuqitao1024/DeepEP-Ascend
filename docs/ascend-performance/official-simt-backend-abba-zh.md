@@ -4,7 +4,7 @@
 
 ## 接口核对
 
-此前对比见 [官方 SIMT 数据面对比](asc-comm-official-simt-comparison-zh.md)。
+此前对比见 [官方 SIMT 数据面对比](../ascend-reference/asc-comm-official-simt-comparison-zh.md)。
 本轮核对实际安装的 CANN 9.3.0，公开 `hcomm_simt.h` 与官方仓
 `9280cf6ea12a0cd7d00acc0709fe8834c669c3e1` 对应文件 SHA256 相同：
 `85a795b5d8818bbad99b5079417eab7a5e379b5ac04fc9431dfe0c34c4018cba`。

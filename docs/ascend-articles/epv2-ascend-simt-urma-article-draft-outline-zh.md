@@ -370,7 +370,7 @@ DeepEP-Ascend 的通信方案不是“用一条新硬件指令替代旧通信库
 - `docs/ascend-design/epv2-ascend-simt-urma-transport.md`
 - `docs/ascend-design/epv2-ascend-transport-contract.md`
 - `docs/ascend-design/epv2-ascend-multi-channel-design-spec-zh.md`
-- `docs/ascend-design/asc-comm-official-simt-comparison-zh.md`
+- `docs/ascend-reference/asc-comm-official-simt-comparison-zh.md`
 
 ## 6. 写作前事实核对
 

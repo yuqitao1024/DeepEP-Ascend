@@ -7,16 +7,16 @@
 | 文件 | 说明 |
 |---|---|
 | [`deep_ep/utils/testing_msprof.py`](../../deep_ep/utils/testing_msprof.py) | 官方 `bench_msprof` 采集器副本，来源 commit `3b25377 Initial public release`；内容与官方文件逐行一致，归档时仅追加了一个文件末尾空行，源文件 SHA256 为 `8ade9aa62c7cdef8d3cf061145bbc641cbd966a508a6d2be4c2dd6c9e3bc0c75`。 |
-| [`bench_ep_msprof.py`](../bench_ep_msprof.py) | 本仓库的官方语义 msprof 基准脚本。 |
-| [`align_official_reporting.py`](../align_official_reporting.py) | 报告层对齐脚本，将当前 kernel 边界、stage 计数与官方参考口径映射到同一带宽公式。 |
-| [`results/official_reporting/fp8-8rank-official-workload.json`](results/official_reporting/fp8-8rank-official-workload.json) | 历史正式对齐结果：10 warmup、50 sample。 |
-| [`results/official_reporting/fp8-8rank-official-workload.md`](results/official_reporting/fp8-8rank-official-workload.md) | 历史正式结果的可读报告。 |
-| [`results/official_reporting/fp8-8rank-smoke-summary.json`](results/official_reporting/fp8-8rank-smoke-summary.json) | NPU8P 冒烟验证摘要，保留原始文件 SHA256。 |
-| [`results/official_reporting/fp8-8rank-formal-summary.json`](results/official_reporting/fp8-8rank-formal-summary.json) | 2026-10-09 修正口径后的 NPU8P 正式结果摘要。 |
-| [`results/official_reporting/fp8-8rank-formal-service-issue-drain.json`](results/official_reporting/fp8-8rank-formal-service-issue-drain.json) | 2026-10-09 正式对齐 JSON。 |
-| [`results/official_reporting/fp8-8rank-formal-service-issue-drain.md`](results/official_reporting/fp8-8rank-formal-service-issue-drain.md) | 2026-10-09 正式对齐报告。 |
-| [`results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.json`](results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.json) | 2026-10-09 负载/字节口径对齐后的正式结果摘要。 |
-| [`results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.md`](results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.md) | 2026-10-09 负载/字节口径对齐后的可读报告。 |
+| [`bench_ep_msprof.py`](../../tests/ascend/benchmark/bench_ep_msprof.py) | 本仓库的官方语义 msprof 基准脚本。 |
+| [`align_official_reporting.py`](../../tests/ascend/benchmark/align_official_reporting.py) | 报告层对齐脚本，将当前 kernel 边界、stage 计数与官方参考口径映射到同一带宽公式。 |
+| [`results/official_reporting/fp8-8rank-official-workload.json`](../../tests/ascend/benchmark/results/official_reporting/fp8-8rank-official-workload.json) | 历史正式对齐结果：10 warmup、50 sample。 |
+| [`results/official_reporting/fp8-8rank-official-workload.md`](../../tests/ascend/benchmark/results/official_reporting/fp8-8rank-official-workload.md) | 历史正式结果的可读报告。 |
+| [`results/official_reporting/fp8-8rank-smoke-summary.json`](../../tests/ascend/benchmark/results/official_reporting/fp8-8rank-smoke-summary.json) | NPU8P 冒烟验证摘要，保留原始文件 SHA256。 |
+| [`results/official_reporting/fp8-8rank-formal-summary.json`](../../tests/ascend/benchmark/results/official_reporting/fp8-8rank-formal-summary.json) | 2026-10-09 修正口径后的 NPU8P 正式结果摘要。 |
+| [`results/official_reporting/fp8-8rank-formal-service-issue-drain.json`](../../tests/ascend/benchmark/results/official_reporting/fp8-8rank-formal-service-issue-drain.json) | 2026-10-09 正式对齐 JSON。 |
+| [`results/official_reporting/fp8-8rank-formal-service-issue-drain.md`](../../tests/ascend/benchmark/results/official_reporting/fp8-8rank-formal-service-issue-drain.md) | 2026-10-09 正式对齐报告。 |
+| [`results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.json`](../../tests/ascend/benchmark/results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.json) | 2026-10-09 负载/字节口径对齐后的正式结果摘要。 |
+| [`results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.md`](../../tests/ascend/benchmark/results/official_reporting/fp8-8rank-aligned-workload-service-issue-drain.md) | 2026-10-09 负载/字节口径对齐后的可读报告。 |
 
 ## 负载与字节口径对齐后的复测
 

@@ -1287,12 +1287,12 @@ filename so Markdown renderers and review tools can load it consistently. It
 was generated from the GPT Image prompt in section 11.1 through the
 authenticated Codex image-generation workflow.
 
-![EPv2 P5 Dispatch and Combine timeline](assets/epv2-p5-dispatch-combine-timeline.png)
+![EPv2 P5 Dispatch and Combine timeline](../ascend-assets/epv2-p5-dispatch-combine-timeline.png)
 
 Asset path:
 
 ```text
-docs/ascend-design/assets/epv2-p5-dispatch-combine-timeline.png
+docs/ascend-assets/epv2-p5-dispatch-combine-timeline.png
 ```
 
 The image is an explanatory reference. Numeric latency fields are intentionally

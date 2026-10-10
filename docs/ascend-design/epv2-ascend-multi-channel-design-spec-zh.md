@@ -10,7 +10,7 @@ scale-up 场景下使用多个独立传输 channel 的资源模型、数据切�
 
 本文是设计与验收规范，不宣称多 channel 已被证明是 rank 长尾的根因或最终修复。rank
 长尾的完整现象和排查记录见
-[EPv2 Ascend Normal Dispatch / Combine Rank 长尾问题分析](epv2-ascend-rank-tail-analysis-zh.md)。
+[EPv2 Ascend Normal Dispatch / Combine Rank 长尾问题分析](../ascend-diagnosis/epv2-ascend-rank-tail-analysis-zh.md)。
 
 当前范围：
 

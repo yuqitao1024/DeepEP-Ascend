@@ -21,7 +21,7 @@ rank 长尾问题，包括：
 8 rank 的最大完成时间、Normal Dispatch / Combine 均值与 P95、正确性和完整完成语义为准。
 
 多 channel 的通信库调研、资源模型、自适应策略和验收要求单独定义在
-[EPv2 Ascend Normal Dispatch / Combine 多 Channel 设计规范](epv2-ascend-multi-channel-design-spec-zh.md)。
+[EPv2 Ascend Normal Dispatch / Combine 多 Channel 设计规范](../ascend-design/epv2-ascend-multi-channel-design-spec-zh.md)。
 
 ## 2. 代表性环境和口径
 

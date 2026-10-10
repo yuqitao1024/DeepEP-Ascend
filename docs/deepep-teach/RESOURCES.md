@@ -4,7 +4,7 @@
 
 - [DeepEP upstream README](https://github.com/deepseek-ai/DeepEP/tree/epv2-release)
   EPv2 的功能边界、公开性能、安装依赖和 `ElasticBuffer` 接口。用于核对 V1/V2 差异、SM/QP 策略和公开基准。
-- [DeepEP v1 archived documentation](../legacy.md)
+- [DeepEP v1 archived documentation](../legacy/legacy.md)
   明确标注 H800、CX7、NVLink/RDMA 的 V1 性能和 normal/low-latency 设计。用于提供 H800 量级参考，不能替代 EPv2 同口径报告。
 - [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437)
   DeepSeekMoE、node-limited routing、无 token 丢弃、DualPipe、跨节点 all-to-all 和推理部署背景。
@@ -32,7 +32,7 @@
   单机扩展、物理多机 RoCE、hybrid、异步、FP8 和性能成熟度的已完成与未完成边界。
 - [Ascend benchmark parity](../ascend-design/epv2-ascend-benchmark-parity.md)
   144 个 case、720 个 operation、同 manifest 比较规则和 NPU8P 运行证据。
-- [Ascend performance optimization](../ascend-design/epv2-ascend-performance-optimization.md)
+- [Ascend performance optimization](../ascend-performance/epv2-ascend-performance-optimization.md)
   当前基线、8 个白盒优化项、优先级、验收信号和多 kernel 流水设计。
 - [Dispatch SIMT parallelization](../ascend-design/dispatch-simt-parallelization.md)
   当前单 block 内并行化的实现边界和后续多 AI Vector 优化的前置证据。

@@ -1,6 +1,6 @@
 # DeepEP V1 (Legacy)
 
-> **Note:** This is the archived documentation for DeepEP V1 (NVSHMEM-based). For the latest V2 documentation, see the [main README](../README.md).
+> **Note:** This is the archived documentation for DeepEP V1 (NVSHMEM-based). For the latest V2 documentation, see the [main README](../../README.md).
 
 ---
 
@@ -224,7 +224,7 @@ def combine_backward(grad_combined_x: Union[torch.Tensor, Tuple[torch.Tensor, to
 
 Moreover, inside the dispatch function, we may not know how many tokens to receive for the current rank. So an implicit CPU wait for GPU received count signal will be involved, as the following figure shows.
 
-![normal](../figures/normal.png)
+![normal](../../figures/normal.png)
 
 ### Example use in inference decoding
 
@@ -287,7 +287,7 @@ def low_latency_combine(hidden_states: torch.Tensor,
 
 For two-micro-batch overlapping, you can refer to the following figure. With our receiving hook interface, the RDMA network traffic is happening in the background, without costing any GPU SMs from the computation part. But notice, the overlapped parts can be adjusted, i.e., the 4 parts of attention/dispatch/MoE/combine may not have the exact same execution time. You may adjust the stage settings according to your workload.
 
-![low-latency](../figures/low-latency.png)
+![low-latency](../../figures/low-latency.png)
 
 ## Roadmap (V1)
 

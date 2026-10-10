@@ -36,7 +36,7 @@ Despite its lightweight design, DeepEP's performance matches or exceeds hardware
 - Reducing intermediate buffer sizes by leveraging EP replay to handle load imbalance
 - All-gather updates and reduce-scatter implementations for DP & TP
 
-For the legacy V1 documentation (NVSHMEM-based), see [docs/legacy.md](docs/legacy.md).
+For the legacy V1 documentation (NVSHMEM-based), see [docs/legacy/legacy.md](docs/legacy/legacy.md).
 
 ## Performance
 
@@ -91,11 +91,11 @@ mean/p95, and bandwidth is the reported logical bandwidth.
 These records were collected on Ascend 950DT with CANN/HCOMM 9.3.0 and the
 retained default selectors. Detailed validation tasks, ABBA evidence, and the
 selector/build-macro inventory are maintained in
-[docs/ascend-design/four-operation-performance-parity-zh.md](docs/ascend-design/four-operation-performance-parity-zh.md)
+[docs/ascend-performance/four-operation-performance-parity-zh.md](docs/ascend-performance/four-operation-performance-parity-zh.md)
 and
-[docs/ascend-design/ascend-performance-knobs-zh.md](docs/ascend-design/ascend-performance-knobs-zh.md).
+[docs/ascend-performance/ascend-performance-knobs-zh.md](docs/ascend-performance/ascend-performance-knobs-zh.md).
 
-For V1 performance data, see [docs/legacy.md](docs/legacy.md#performance).
+For V1 performance data, see [docs/legacy/legacy.md](docs/legacy/legacy.md#performance).
 
 ## Quick start
 
@@ -120,7 +120,7 @@ pip install "nvidia-nccl-cu13>=2.30.4" --no-deps
 
 ### Install NVSHMEM dependency
 
-DeepEP also depends on NVSHMEM to provide support for legacy methods. Please refer to our [NVSHMEM Installation Guide](docs/nvshmem.md) for instructions.
+DeepEP also depends on NVSHMEM to provide support for legacy methods. Please refer to our [NVSHMEM Installation Guide](docs/legacy/nvshmem.md) for instructions.
 
 ### Development
 
@@ -417,7 +417,7 @@ The library provides some environment variables, which may be useful:
     - `EP_USE_NVIDIA_TOOLS`: `0` or `1`, skip internal profiling when running under external NVIDIA tools, `0` by default
     - `EP_DISABLE_BARRIER_PROFILING`: `0` or `1`, disable barrier-based communication profiling in benchmarks, `0` by default
 - Ascend performance knobs
-    - The current production selectors and build-time switches are cataloged in [docs/ascend-design/ascend-performance-knobs-zh.md](docs/ascend-design/ascend-performance-knobs-zh.md). Qualified Dispatch/Combine selectors are enabled by default when their mode constraints are satisfied.
+    - The current production selectors and build-time switches are cataloged in [docs/ascend-performance/ascend-performance-knobs-zh.md](docs/ascend-performance/ascend-performance-knobs-zh.md). Qualified Dispatch/Combine selectors are enabled by default when their mode constraints are satisfied.
 - Build
     - `EP_NCCL_ROOT_DIR`: string, path to the NCCL installation directory; auto-detected from the Python environment if not set
     - `EP_NVSHMEM_ROOT_DIR`: string, path to the NVSHMEM installation directory; auto-detected from the Python environment if not set
