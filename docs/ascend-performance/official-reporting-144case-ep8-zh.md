@@ -58,6 +58,32 @@
 
 执行时按 3 个 case 一批提交 8 卡任务，避免长时间独占整台机器；中断后使用同一 workload fingerprint 恢复，已通过的 case 不重复执行。
 
+### Case ID 与模式差异
+
+Case ID 的格式为：
+
+```text
+ep-<dtype>-align<expert_alignment>-bias<num_bias>-hcopy<do_handle_copy>-prev<with_previous_event>-async<async_with_compute_stream>-alloc<allocate_on_comm_stream>
+```
+
+这些字段不改变 token 数、hidden、top-k、expert 数和路由 manifest；它们改变的是 Dispatch/Combine 的数据布局、API 参数和执行流模式。
+
+| 字段 | 取值 | 含义 |
+|---|---|---|
+| `dtype` | `fp8` / `bf16` | Dispatch payload 类型。`fp8` 会将 hidden payload 量化为 FP8，并携带 per-token-group scale factor；`bf16` 直接传输 BF16 hidden payload。本报告中 dispatch 的 FP8/BF16 字节数不同，combine 输出统一为 BF16。 |
+| `align` | `1` / `128` | Dispatch 的 expert alignment。`128` 表示按 128 个 token 粒度对齐 expert 分组边界，可能引入 padding；`1` 表示不启用这种 expert 粒度对齐。 |
+| `bias` | `0` / `1` / `2` | Combine 侧 bias 输入形式。`0` 表示不传 bias；`1` 表示传单个 BF16 bias tensor；`2` 表示传两个 BF16 bias tensor 组成的 tuple。 |
+| `hcopy` | `0` / `1` | Dispatch `do_handle_copy` 开关。`1` 表示返回的 handle 元数据需要拷贝，不与输入 `topk_idx` 复用存储；`0` 表示关闭该拷贝路径。 |
+| `prev` | `0` / `1` | 是否向通信操作传入 `previous_event`，用于让通信流等待前序事件。`1` 时必须启用通信流分配，因此矩阵中没有 `prev1-alloc0` 组合。 |
+| `async` | `0` / `1` | `async_with_compute_stream` 开关。`1` 表示通信返回 event handle，由当前 compute stream 等待完成；`0` 表示同步完成等待。 |
+| `alloc` | `0` / `1` | `allocate_on_comm_stream` 开关。`1` 表示输出和中间资源在专用通信流上分配，配合 event/previous-event 路径；`0` 表示使用当前执行流。 |
+
+组合展开规则为：`hcopy × align × dtype × bias × prev × async × alloc`，其中 `prev=1` 时 `alloc` 只取 `1`。因此每个 `hcopy/align/dtype/bias` 基础组合有 6 种 stream/event 模式，最终得到：
+
+```text
+2 (hcopy) × 2 (align) × 2 (dtype) × 3 (bias) × 6 (有效 stream/event 组合) = 144
+```
+
 ## 4. 维度汇总
 
 | 数据类型 | 分组 | Case 数 | Dispatch min/p50/mean/max（GB/s） | Combine min/p50/mean/max（GB/s） |
