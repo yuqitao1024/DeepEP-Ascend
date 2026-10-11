@@ -40,8 +40,7 @@ Router 输出 top-k 之后，通信才进入最难的一段。
 
 DeepEP-Ascend 的选择是：让 SIMT 直接读路由结果，生成 slot 和 WQE 字段；让每个 AIV 拥有自己的 Jetty/SQ，多个 AIV 并行准备通信描述符。
 
-【图 1 占位：MoE routing】
-建议画面：左侧是 3 个 token，中间是 router/top-k，右侧是 expert/rank。用不同颜色标出同一个 token 可能去多个 rank，同一个 rank 上可能有多个 expert。重点表达“目标不是静态 broadcast，而是每个 token 的路由结果”。
+![MoE routing：每个 token 的目标由 top-k 动态决定](../ascend-assets/deepep-ascend-simt-moe-routing.png)
 
 ## 2. 先对齐几个词
 
@@ -68,8 +67,7 @@ Host 做一次性准备：复用 HCCL communicator，选择 netlayer 1 的 Super
 
 Device 做每步路由和提交：SIMT worker 读取 top-k 和 metadata，完成 histogram、去重、prefix 和 slot 分配；把 WQE 写入本 AIV 的 SQ；scalar 更新 head 并 ring doorbell；URMA 根据 SGE 和远端地址写 payload。
 
-【图 2 占位：Host 与 Device 的分工】
-建议画面：左上放 Host 侧一次性资源准备，标签为 HCCL communicator、UB_MEM 地址发现、per-AIV Jetty、peer channel table；左下放 Device 侧每步工作，标签为 Dispatch/Combine kernel、SIMT routing、WQE 字段构造、SQ write、scalar head/doorbell、URMA。Host 到 Device 只画资源传递箭头；Device 内部按“路由结果、通信描述符、硬件传输”三段自左向右连接。右下标注 CQ/CQE 完成路径。
+![Host 与 Device 的分工：资源准备与每步通信路径](../ascend-assets/deepep-ascend-simt-host-device-architecture.png)
 
 图的核心是边界：SIMT 处理动态路由，scalar 发布提交边界，URMA 执行硬件传输。
 
@@ -83,8 +81,7 @@ Device 做每步路由和提交：SIMT worker 读取 top-k 和 metadata，完成
 
 Host 还要求所有 peer 使用同一个 local UBC_CTP endpoint。Device 因此可以按 AIV index 选 Jetty，按 peer index 选远端 metadata。
 
-【图 3 占位：per-AIV Jetty 的队列所有权】
-建议画面：上面一行放 AIV0、AIV1、AIV2、省略号、AIV63；每个 AIV 下方连一个独立盒子，分别标 Jetty0/SQ0、Jetty1/SQ1、Jetty2/SQ2、省略号、Jetty63/SQ63。每个 Jetty 右侧再连多个 peer 的远端 metadata，说明一个 Jetty 可以服务多个 peer。底部汇入 UBC_CTP/URMA network。图注写“Jetty 在 AIV 维度私有，在 peer 维度共享”。
+![per-AIV Jetty 的队列所有权：AIV 私有，peer 共享](../ascend-assets/deepep-ascend-simt-per-aiv-jetty.png)
 
 ## 5. Dispatch：从 top-k 到 WQE
 
@@ -106,8 +103,7 @@ SIMT worker 读取 top-k 后，先做三件事：
 
 去重后，worker 为远端 entry 分配 SGE index，建立 sgep_to_entry 映射，再计算 SQE 区间和接收 slot。到这里，token 路由已经变成硬件布局。
 
-【图 4 占位：Dispatch 从路由到 URMA】
-建议画面：从左到右分三组。第一组“路由输入”，画 top-k、token metadata。第二组“SIMT 处理”，依次画 expert histogram、rank histogram、rank dedup、slot/prefix、SGE index mapping，用虚线框住，旁注 ballot/popc/shuffle/reduction。第三组“硬件提交”，依次画 WQE fields、SQ、scalar head update、doorbell、URMA，最后落到远端接收窗口。三组之间用箭头串联，左半段标“不规则控制流”，右半段标“规则描述符”。
+![Dispatch 数据流：从不规则路由到规则 WQE 描述符](../ascend-assets/deepep-ascend-simt-dispatch-dataflow.png)
 
 ### 5.3 WQE 字段按 lane 展开
 
@@ -126,8 +122,7 @@ SQE header 使用前几个 lane；peer metadata 从 lane 1 开始；每个 SGE p
 
 WQE 是硬件描述符，但字段布局适合 lane 映射。SIMT 不需要理解通信硬件，只要把目标 rank、slot、源地址和长度填进对应 word。
 
-【图 5 占位：lane 到 WQE 字段的映射】
-建议画面：上面一行放 lane0 到 lane13，再放一个省略号。下面画一个 64B WQEBB，分成 8 个 u64 word 槽位。用连线标出 lane0 到 SQE header/opcode/owner/index；lane1 到 lane5 到 peer info、token id、remote address；lane6 和 lane7 到 SGE0 的 hidden length/source address；lane8 和 lane9 到 SGE1 的 metadata length/source address；lane10 到 lane13 到后续 SGE pair。右下角加一条短说明：“一个 warp 并行填一条 WQE 的字段。”
+![lane 到 WQE 字段的映射：一个 warp 并行构造一条 WQE](../ascend-assets/deepep-ascend-simt-lane-to-wqe-mapping.png)
 
 ### 5.4 Payload 不先进 UB
 
@@ -153,8 +148,7 @@ Combine 还做了批量 doorbell：每 8 个 remote task 更新一次 SQ head �
 
 Combine 也不是“先算完再通信”。当前 stage 做 reduce 时，下一个 stage 可以继续 load metadata 并构造 WQE。
 
-【图 6 占位：Combine 的任务流水】
-建议画面：画 3 个连续 stage，每个 stage 内部有 8 个 token task。task 内部分成两条路径：一条是 metadata load 到 WQE construction，另一条是 local reduce。上一个 stage 的 reduce 与下一个 stage 的 metadata load/WQE 构造在时间轴上重叠。底部单独画一个 scalar lane，标注“每 8 个 remote task 更新一次 SQ head 并 ring doorbell”。最后画 strong-order NOP/CQE，表示完成检查。
+![Combine 任务流水：通信构造与本地 reduce 重叠执行](../ascend-assets/deepep-ascend-simt-combine-pipeline.png)
 
 ## 7. SIMT 的优势是什么
 
