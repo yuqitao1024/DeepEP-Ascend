@@ -4,6 +4,8 @@
 
 ## 1. 8 rank / 64 AIV 资源模型
 
+先区分 Jetty 和 Channel：Jetty 是本地提交端点，对应一组 SQ/CQ 和 doorbell；Channel 是建在 Jetty 上的连接上下文，描述远端 endpoint、远端内存和本队列的 SQ/CQ context。Device 侧表名 jetty_ptrs 中实际存的是 ChannelHandle。
+
 README 的典型性能配置是 32 个 AI core，对应 64 个 AIV。Host 侧资源初始化和单次 kernel launch 使用两个相关但不同的参数：
 
 | 参数 | 来源 | 含义 |
@@ -233,7 +235,7 @@ lane 到字段的映射：
 | 8-9 | SGE 1：metadata length / source address |
 | 10-13 | 后续 SGE pair |
 
-如果实际 SGE 数不足 12，剩余 WQEBB 用 NOP header 补齐，保证 SQ head 始终按 4 WQEBB 对齐推进。
+如果实际 SGE 数不足 12，剩余 WQEBB 用 NOP header 补齐，保证 SQ head 始终按 4 WQEBB 对齐推进。也就是说，lane 表达的是“字段由哪个线程计算”；WQEBB 表达的是“这些字段最终落在 SQ 的哪个物理块”。二者是两个视角，不是一一对应的内存单元。
 
 ## 11. Combine WQE 布局
 

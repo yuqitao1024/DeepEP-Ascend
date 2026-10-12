@@ -56,13 +56,36 @@ Device 做每步路由和提交：SIMT worker 读取 top-k 和 metadata，完成
 
 ## 3. 关键设计：每个 AIV 一个 Jetty
 
-容易忽略但影响并发模型的一步，是 acquire_jetties。
+这一节的关键是区分 Jetty 和 Channel。
 
-它不是“每个 peer 一个 Jetty”，而是“每个 AIV 一个 Jetty”。一个 Jetty 可以服务多个 peer，但不同 AIV 不共享 Jetty。于是 AIV0 有 Jetty0/SQ0，AIV1 有 Jetty1/SQ1，直到 AIV63 有 Jetty63/SQ63。
+Jetty 是本地提交端点。它对应本 AIV 的一组 SQ/CQ 和 doorbell，回答的是“从哪个本地队列提交”。Channel 是建在 Jetty 上的连接上下文。它通过 ChannelEntity 描述远端 endpoint、远端注册内存和本队列的 SQ/CQ context，回答的是“如何找到对端资源”。
 
-这里的重点是队列所有权。多个 AIV 同时写同一个 SQ，就要处理 slot 预留、head 推进、owner bit 和 doorbell 顺序。每 AIV 一个 Jetty 绕开了这层竞争。
+所以关系不是并列的：
 
-实现上还有一个 channel 维度。num_jetties 来自 runtime 的设备 AIV 数；Host 会创建 max(num_jetties, num_peers) 个 channel，前 num_peers 个 channel 覆盖所有 peer，其余 channel 通过 channel_idx % num_jetties 复用已有 Jetty。这样即使 peer 数超过 AIV 数，Device 侧也能按 AIV 和 peer 查到对应的 channel 表。
+    Jetty endpoint
+      └── Channel
+            └── ChannelEntity
+                  ├── remoteBuffer
+                  ├── sqContext
+                  └── cqContext
+
+一个 Jetty 可以关联多个 Channel；一个 Channel 只属于一个 Jetty。
+
+DeepEP-Ascend 的选择不是“每个 peer 一个 Jetty”，而是“每个 AIV 一个 Jetty”。AIV0 有 Jetty0/SQ0，AIV1 有 Jetty1/SQ1，直到 AIV63 有 Jetty63/SQ63。不同 AIV 不共享 Jetty，因此不会同时写同一个 SQ；一个 Jetty 又可以服务多个 peer，peer 信息从 Channel 表里取。
+
+Host 侧的 acquire_jetties 会创建两类东西：
+
+1. num_jetties 个 Jetty endpoint，数量来自 runtime 的设备 AIV 数；
+2. max(num_jetties, num_peers) 个 Channel，形成 Device 侧的 channel 表。
+
+在 8 rank / 64 AIV 下，num_peers 是 7，num_jetties 是 64，所以 Host 创建 64 个 Channel。Device 侧的表名叫 jetty_ptrs，里面实际存的是 ChannelHandle，这个名字有些误导。它的用法分两类：
+
+1. AIV i 用 jetty_ptrs[i] 找到自己的 ChannelEntity，再解析出本 AIV 的 SQ/CQ；
+2. AIV 用前 num_peers 个 Channel 解析远端 peer 的 Jetty metadata、远端内存地址和 token。
+
+也就是说，AIV 的提交队列来自自己的 Jetty/Channel，远端地址信息来自 peer 对应的 Channel，SIMT 把这两部分拼成 WQE。
+
+这个设计的核心是队列所有权。多个 AIV 同时写同一个 SQ，就要处理 slot 预留、head 推进、owner bit 和 doorbell 顺序。每 AIV 一个 Jetty 绕开了这层竞争。
 
 Host 还要求所有 peer 使用同一个 local UBC_CTP endpoint。Device 因此可以按 AIV index 选 Jetty，按 peer index 选远端 metadata。
 
@@ -70,9 +93,11 @@ Host 还要求所有 peer 使用同一个 local UBC_CTP endpoint。Device 因此
 
 图 3：per-AIV Jetty。Jetty 在 AIV 维度私有，在 peer 维度共享；每个 AIV 推进自己的 SQ，避免多个 producer 争用同一个队列。
 
-## 4. Dispatch：从 top-k 到 WQE
+## 4. Dispatch：把 token 发给 expert 所在 rank
 
-Dispatch 做的事情可以概括为：把 token 路由变成远端写入描述符。
+Dispatch 的业务目标是：Router 已经为每个 token 选出 top-k expert，Dispatch 负责把这些 token 送到对应 expert 所在的 rank，并把结果整理成 expert 可以消费的布局。
+
+实现上，它要把不规则的 top-k 结果转换成规则的四件事：发给哪个 rank、写入哪个接收 slot、携带哪些 hidden/metadata payload、这些 payload 由哪些 WQE 描述。
 
 ### 4.1 每个 AIV 负责一段连续 token
 
@@ -96,26 +121,26 @@ SIMT worker 读取 top-k 后，先做三件事：
 
 ### 4.3 WQE 字段按 lane 展开
 
-WQE 不是由一个线程串行填出来的，而是按字段映射到 lane。
+先区分两层：WQE 是逻辑上的提交描述符；WQEBB 是 SQ 里的 64B 物理块。一个 WQE 可以跨多个 WQEBB。Dispatch 的一个 SQE slot 固定占 4 个 WQEBB，也就是 256B；有效内容最多是 48B SQE header 加 12 个 16B SGE，共 240B，剩余空间用 padding/NOP 补齐。
 
-lane 是 warp 内的线程编号。512 个 SIMT thread 会分成 16 个 warp；路由扫描按 top-k 分组处理 token，WQE 构造阶段再把 SQE 分片分配给这些 warp。
+WQE 不是由一个线程串行填出来的，而是按字段映射到 lane。lane 是 warp 内的线程编号。512 个 SIMT thread 会分成 16 个 warp；路由扫描按 top-k 分组处理 token，WQE 构造阶段再把 SQE 分片分配给这些 warp。
 
-SQE header 使用前几个 lane；peer metadata 从 lane 1 开始；每个 SGE pair 使用 4 个 lane，描述 hidden 和 metadata 的长度与地址。每个 WQEBB 是 64B，对应 8 个 u64 word。SIMT worker 算出 sqe_word 后，用 asc_stcg 写到 SQ。
+字段布局本身按 u64 word 组织：SQE header 使用 6 个 word；每个 SGE pair 使用 4 个 word，也就是两个 16B SGE。lane 的职责是并行计算这些 word：
 
 | lane | 字段 |
 | --- | --- |
 | 0 | SQE header / opcode / owner / index |
-| 1-5 | peer info / token id / remote address |
+| 1-5 | peer metadata / token id / remote address |
 | 6-7 | SGE 0：hidden length / source address |
 | 8-9 | SGE 1：metadata length / source address |
-| 10-13 | 后续 SGE pair |
-| 其余 | padding / NOP |
+| 10-13 | 后续 SGE pair，每个 pair 4 个 lane |
+| 14 以后 | 未参与本 SQE 有效字段，物理块内补 padding/NOP |
 
-WQE 是硬件描述符，但字段布局适合 lane 映射。SIMT 不需要理解通信硬件，只要把目标 rank、slot、源地址和长度填进对应 word。
+SIMT worker 算出 sqe_word 后，用 asc_stcg 写到 SQ。写入地址由 SQE slot 的起始 WQEBB 和 lane 所属 word 决定；lane 14 以后即使不填有效字段，最终 slot 仍按 4 个 WQEBB 推进。因此图 5 展示的是“字段来源”，不是完整 SQ 内存图。
 
 ![lane 到 WQE 字段的映射：一个 warp 并行构造一条 WQE](../ascend-assets/deepep-ascend-simt-lane-to-wqe-mapping.png)
 
-图 5：lane 到 WQE 字段的映射。lane0 到 lane13 分别填 header、peer metadata 和 SGE 字段；一个 warp 并行构造一条 WQE。
+图 5：lane 到 WQE 字段的映射。图中重点是 lane0 到 lane13 分别提供 header、peer metadata 和 SGE 字段；完整 Dispatch SQE slot 会扩展到 4 个 WQEBB，并用 padding/NOP 补齐。
 
 ### 4.4 远端 payload 不先进 UB
 
@@ -131,21 +156,41 @@ URMA 根据远端地址和 SGE 中的本地地址，直接写远端接收窗口�
 
 最后一个 SQE 设置 strong order、fence 和 CQE，覆盖前面的写入。SIMT 完成字段构造后，scalar 更新 SQ head 并 ring doorbell。benchmark 再用 barrier 等待 URMA traffic，得到包含 issue 和 drain 的时间。
 
-## 5. Combine：通信提交嵌进任务流水
+## 5. Combine：把 expert 输出送回原 rank 并聚合
 
-Combine 更能体现“通信不是孤立阶段”。
+Combine 的业务目标和 Dispatch 相反：Dispatch 把 token 发给 expert 所在 rank；Combine 要把 expert 输出送回 token 原来的 rank，并把同一个 token 的 top-k 份结果加权聚合成一份输出。
 
-DeepEP-Ascend Combine 的 load_meta_issue_wqe 是一个 SIMT VF，也就是以 SIMT 方式执行的 vector function。每个 task 最多覆盖 8 个 token。SIMT 读取来源 rank、原始 token index 和 slot，为远端 token 构造 WQE。WQE 固定带两个 SGE：一个描述 hidden payload，一个描述 top-k weights 区域；在启用 top-k weights 的路径中，weights 会先写入 send buffer，再由这个 SGE 发送。
+因此每个 token 有三类信息要处理：它来自哪个 source rank、它的原始 token index、它参与 reduce 的 slot 列表。前两类决定“结果送回哪里”，第三类决定“要聚合哪些 expert 输出”。
 
-WQE 字段同样按 lane 展开：lane 0 填 header，lane 1-5 填 peer metadata 和远端地址，lane 6-9 填 SGE。SIMT 用一次字段展开，把“输出回到哪个 rank 的哪个 slot”变成硬件可执行的写操作。
+Combine 把这些工作拆成 task。一个 task 是一个 source rank 上的最多 8 个 token 组合，结构上是三元组：source rank、token 数、起始接收 slot。之所以按 source rank 组织，是因为接收 buffer 的 token 是按来源 rank 分区排列的；task 记录起始 slot 后，就能连续定位这一小组 token。之所以最多 8 个，是 UB metadata 缓冲和 SIMT VF launch 形态共同决定的：一个 VF 最多用 8 个 warp，每个 warp 处理一个 token。
 
-Combine 还做了批量 doorbell。这里的 task 是远端通信提交单位，每个 task 最多包含 8 个 token；每 8 个这样的 remote task 更新一次 SQ head 并 ring doorbell，避免每个 token 一次 doorbell 的固定开销。结尾追加 strong-order NOP 并请求 CQE，用于完成检查。
+对每个 remote task，load_meta_issue_wqe 这个 SIMT VF 做三件事：读取 token metadata，把 top-k weights 写入 send buffer，并为其中每个 token 构造一条远端写 WQE。本地 task 不发 WQE，只做本地聚合或落位。
 
-Combine 也不是“先算完再通信”。当前 stage 做 reduce 时，下一个 stage 可以继续 load metadata 并构造 WQE。
+每个 token 的 WQE 固定带两个 SGE，因为一个 token 的远端写内容有两段：
+
+| SGE | 内容 | 来源 |
+| --- | --- | --- |
+| SGE 0 | expert 输出的 hidden payload | 输入 x 中该 token 的 slot |
+| SGE 1 | top-k weights 区域 | send buffer 中为该 token 预留的 weights 区域 |
+
+hidden 是主要 payload；weights 是 Combine 语义必需的附加数据。把它们拆成两个 SGE，可以让一个 WQE 描述两个数据段：hidden 可以来自 expert 输出，weights 可以来自 send buffer；URMA 按 SGE 分别取地址和长度，不需要把 hidden 复制进另一个打包 buffer。
+
+WQE 字段仍按 lane 展开：lane 0 填 header，lane 1-5 填 peer metadata 和远端地址，lane 6-9 填两个 SGE。也就是说，lane 分工解决的是“字段怎么并行算出来”，两个 SGE 解决的是“一个 token 要搬什么”。
+
+doorbell 做了批量提交：每 8 个 remote task 更新一次 SQ head 并 ring doorbell，避免每个 token、每个 task 都付一次发布开销。结尾追加 strong-order NOP 并请求 CQE，用最后一个完成事件覆盖前面的远端写。
+
+Stage 不是按 token 或 expert 分的，而是按 task 的软件流水阶段分。当前实现固定 kNumStages = 2：stage 0 和 stage 1 各保存一组 task metadata，两个 stage 交替复用。执行时的重叠是：
+
+    stage A: load metadata -> 写 weights -> 构造 WQE
+                    |
+                    v
+    stage B:                        local reduce / 输出落位
+
+当前 stage 在做 reduce 或落位时，软件已经提前把下一个 task 的 metadata 读进另一个 stage buffer，并构造它的 WQE。这样通信准备和本地聚合不再串行等待；当当前 stage 完成后，下一个 task 已经准备好，可以直接进入 reduce。图 6 中的两个重叠窗口，对应的就是这两个相邻 task stage 的交叠时间。
 
 ![Combine 任务流水：通信构造与本地 reduce 重叠执行](../ascend-assets/deepep-ascend-simt-combine-pipeline.png)
 
-图 6：Combine 任务流水。当前 stage 的 local reduce 与下一个 stage 的 metadata load / WQE 构造重叠，批量 doorbell 由 scalar lane 在任务边界发布。
+图 6：Combine 的两级 task 流水。Stage 不是模型层，而是相邻 task 的软件流水阶段：当前 task 做 reduce 时，下一 task 已在加载 metadata 并构造 WQE；批量 doorbell 每 8 个 remote task 发布一次。
 
 ## 6. SIMT 的优势是什么
 
