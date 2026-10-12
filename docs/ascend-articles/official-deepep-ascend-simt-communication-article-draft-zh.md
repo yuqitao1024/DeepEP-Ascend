@@ -225,6 +225,7 @@ DeepEP-Ascend 提供了一个可读性很高的 SIMT 通信样例：
 - [DeepEP-Ascend 仓库](https://github.com/deepseek-ai/DeepEP-Ascend)
 - [本文对应源码快照](https://github.com/deepseek-ai/DeepEP-Ascend/commit/3b25377d04b24fc6154698ded78a2bcb2c59afff)
 - [ASC-COMM 技术报告](https://gitcode.com/cann/cann-recipes-infer/blob/master/docs/models/deepseek_v4_1/deepseek_v4.1_asc_comm_tech_report.md)
+- [通信对象与 WQE/SQE/CQE 布局](../ascend-reference/deep-ep-ascend-communication-layouts-zh.md)
 
 ## 附录：术语表
 
@@ -245,3 +246,7 @@ DeepEP-Ascend 提供了一个可读性很高的 SIMT 通信样例：
 | MTE | Memory Transfer Engine | 承载大块本地或设备间数据搬运 |
 | doorbell | 通知硬件有新 WQE 的机制 | 由 AIV 的 scalar 侧发布 |
 | CQE | 完成队列项 | 记录 WQE 完成 |
+
+### 通信对象速览
+
+Host 侧按 AIV 数量创建 Jetty endpoint 和 channel 表；Device 侧每个 AIV 用自己的 channel 加载 SQ/CQ 元数据，并用 peer channel 加载远端内存信息。SQ 由 64B WQEBB 组成，WQE 是写入 SQ 的提交描述符；Dispatch 的一个 SQE slot 固定占 4 个 WQEBB，Combine 的单 token WQE 占 2 个 WQEBB。CQE 由硬件写入 CQ，软件通过 owner 和 status 字段判断完成与错误。完整字段表见《通信对象与 WQE/SQE/CQE 布局》。
