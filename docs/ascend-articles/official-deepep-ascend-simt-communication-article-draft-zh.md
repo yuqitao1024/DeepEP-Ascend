@@ -42,7 +42,7 @@ DeepEP-Ascend 的选择是：让 SIMT 直接读路由结果，生成 slot 和 WQ
 
 实现的边界并不复杂。
 
-Host 做一次性准备：复用 HCCL communicator，选择 netlayer 1 的 SuperPoD 外部 Clos 通路，发现远端地址，为每个 AIV 创建 Jetty，并把 channel 表交给 Device。
+Host 做一次性准备：复用 HCCL communicator，选择 netlayer 1 的 SuperPoD 外部 Clos 通路，发现远端地址，按 AIV 数量创建 Jetty endpoint，并把 channel 表交给 Device。
 
 Device 做每步路由和提交：SIMT worker 读取 top-k 和 metadata，完成 histogram、去重、prefix 和 slot 分配；把 WQE 写入本 AIV 的 SQ；scalar 更新 head 并 ring doorbell；URMA 根据 SGE 和远端地址写 payload。
 
@@ -61,6 +61,8 @@ Device 做每步路由和提交：SIMT worker 读取 top-k 和 metadata，完成
 它不是“每个 peer 一个 Jetty”，而是“每个 AIV 一个 Jetty”。一个 Jetty 可以服务多个 peer，但不同 AIV 不共享 Jetty。于是 AIV0 有 Jetty0/SQ0，AIV1 有 Jetty1/SQ1，直到 AIV63 有 Jetty63/SQ63。
 
 这里的重点是队列所有权。多个 AIV 同时写同一个 SQ，就要处理 slot 预留、head 推进、owner bit 和 doorbell 顺序。每 AIV 一个 Jetty 绕开了这层竞争。
+
+实现上还有一个 channel 维度。num_jetties 来自 runtime 的设备 AIV 数；Host 会创建 max(num_jetties, num_peers) 个 channel，前 num_peers 个 channel 覆盖所有 peer，其余 channel 通过 channel_idx % num_jetties 复用已有 Jetty。这样即使 peer 数超过 AIV 数，Device 侧也能按 AIV 和 peer 查到对应的 channel 表。
 
 Host 还要求所有 peer 使用同一个 local UBC_CTP endpoint。Device 因此可以按 AIV index 选 Jetty，按 peer index 选远端 metadata。
 
@@ -96,7 +98,7 @@ SIMT worker 读取 top-k 后，先做三件事：
 
 WQE 不是由一个线程串行填出来的，而是按字段映射到 lane。
 
-lane 是 warp 内的线程编号。512 个 SIMT thread 会分成多个 warp，每个 warp 负责构造一条 WQE 的字段。
+lane 是 warp 内的线程编号。512 个 SIMT thread 会分成 16 个 warp；路由扫描按 top-k 分组处理 token，WQE 构造阶段再把 SQE 分片分配给这些 warp。
 
 SQE header 使用前几个 lane；peer metadata 从 lane 1 开始；每个 SGE pair 使用 4 个 lane，描述 hidden 和 metadata 的长度与地址。每个 WQEBB 是 64B，对应 8 个 u64 word。SIMT worker 算出 sqe_word 后，用 asc_stcg 写到 SQ。
 
@@ -115,7 +117,7 @@ WQE 是硬件描述符，但字段布局适合 lane 映射。SIMT 不需要理�
 
 图 5：lane 到 WQE 字段的映射。lane0 到 lane13 分别填 header、peer metadata 和 SGE 字段；一个 warp 并行构造一条 WQE。
 
-### 4.4 Payload 不先进 UB
+### 4.4 远端 payload 不先进 UB
 
 WQE 中的 SGE 直接指向本地 payload：
 
@@ -123,7 +125,9 @@ WQE 中的 SGE 直接指向本地 payload：
 - metadata payload：指向 metadata_send_buffer；
 - FP8 场景还会携带 scale factors。
 
-URMA 根据远端地址和 SGE 中的本地地址，直接写远端接收窗口。token 数据不先进 UB，也不经过 Host。
+URMA 根据远端地址和 SGE 中的本地地址，直接写远端接收窗口。跨 rank 的 token 数据不先进 UB，也不经过 Host。
+
+本地 rank 是例外。为了把本地 token 写到本地接收窗口，kernel 仍会用 MTE 做一段 GM 到 UB 再到 GM 的 local copy。所以更准确的说法是“远端 URMA payload 不先进 UB”，而不是整个 Dispatch 完全没有 UB 搬运。
 
 最后一个 SQE 设置 strong order、fence 和 CQE，覆盖前面的写入。SIMT 完成字段构造后，scalar 更新 SQ head 并 ring doorbell。benchmark 再用 barrier 等待 URMA traffic，得到包含 issue 和 drain 的时间。
 
@@ -131,11 +135,11 @@ URMA 根据远端地址和 SGE 中的本地地址，直接写远端接收窗口�
 
 Combine 更能体现“通信不是孤立阶段”。
 
-DeepEP-Ascend Combine 的 load_meta_issue_wqe 是一个 SIMT VF，也就是以 SIMT 方式执行的 vector function。每个 task 覆盖 8 个 token。SIMT 读取来源 rank、原始 token index 和 slot，为远端 token 构造 WQE：两个 SGE 分别描述 hidden payload 和可选 top-k weights。
+DeepEP-Ascend Combine 的 load_meta_issue_wqe 是一个 SIMT VF，也就是以 SIMT 方式执行的 vector function。每个 task 最多覆盖 8 个 token。SIMT 读取来源 rank、原始 token index 和 slot，为远端 token 构造 WQE。WQE 固定带两个 SGE：一个描述 hidden payload，一个描述 top-k weights 区域；在启用 top-k weights 的路径中，weights 会先写入 send buffer，再由这个 SGE 发送。
 
 WQE 字段同样按 lane 展开：lane 0 填 header，lane 1-5 填 peer metadata 和远端地址，lane 6-9 填 SGE。SIMT 用一次字段展开，把“输出回到哪个 rank 的哪个 slot”变成硬件可执行的写操作。
 
-Combine 还做了批量 doorbell。这里的 task 是远端通信提交单位，每个 task 内含 8 个 token；每 8 个这样的 remote task 更新一次 SQ head 并 ring doorbell，避免每个 token 一次 doorbell 的固定开销。结尾追加 strong-order NOP 并请求 CQE，用于完成检查。
+Combine 还做了批量 doorbell。这里的 task 是远端通信提交单位，每个 task 最多包含 8 个 token；每 8 个这样的 remote task 更新一次 SQ head 并 ring doorbell，避免每个 token 一次 doorbell 的固定开销。结尾追加 strong-order NOP 并请求 CQE，用于完成检查。
 
 Combine 也不是“先算完再通信”。当前 stage 做 reduce 时，下一个 stage 可以继续 load metadata 并构造 WQE。
 
