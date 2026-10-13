@@ -659,3 +659,68 @@ same-binary AB。当前更明确的处理规则是：
 这轮数据只能说明关闭 expanded vector reduce 后 Combine 明显变慢，不能
 用于量化收益。后续所有 selector 复筛都必须使用 144-case 官方口径，至少
 覆盖代表性 case，并在修改默认值前给出 correctness 边界。
+
+### 9.5 2026-10-13 selector 复筛结果
+
+本轮复筛使用同一个 `DEEP_EP_ASCEND_OFFICIAL_DIRECT=ON` 构建，同一 case
+`ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0`，EP8、16384 tokens、
+hidden 7168、top-6、256 experts、64 AIV。raw 入口使用
+`bench_ep.py`，10 warmup / 30 iteration；official 入口使用
+`bench_ep_msprof.py --transport-mode official_direct`，10 warmup / 50
+iteration。
+
+结论按收益排序如下：
+
+| 调整 | raw `reduced_combine` mean | raw 相对默认 | msprof 受影响 kernel | 结论 |
+|---|---:|---:|---:|---|
+| 关闭 expanded vector reduce | 109683 us | +780% | `direct_combine_producer_record` 54.6 us -> 98373 us | 必须保留；关闭后灾难性退化 |
+| 关闭 direct local placement | 16224 us | +30.2% | `combine_kernel` 473 us -> 825 us | 必须保留；明显收益 |
+| vector reduce prefetch 4 -> 2 | 16052 us | +27.8% | `combine_kernel` 473 us -> 801 us | 必须保留；这是最大可控收益点 |
+| producer payload tile 3584 -> 1024 | 13980 us | +11.3% | `combine_kernel` 473 us -> 591 us | 保留 3584 |
+| vector tile 1024 vs 512（均在 depth 2） | 15942-16275 us | +26.9%-29.5% | `combine_kernel` 约 800 us | 1024 与 512 在 depth 2 下接近；相对默认的退化主要来自失去 prefetch 4，而不是 tile 从 512 变为 1024 |
+
+两点解释：
+
+1. `DEEP_EP_ASCEND_COMBINE_VECTOR_REDUCE_PREFETCH=4` 只在 512-element
+   tile 下有效。设置 `VECTOR_REDUCE_TILE=1024` 时，host selector 会把
+   prefetch 强制降回 depth 2，因此 `1024 + prefetch=4` 实际是
+   `1024 + depth2`。在该约束下，1024 与 512 在 depth 2 时差异不大；
+   真正显著的是 depth 4 相对 depth 2 的收益。
+2. official msprof 的 `urma` 字段只统计
+   `direct_combine_producer_release_kernel`，本轮 selector 主要影响
+   `combine_kernel` 或 `direct_combine_producer_record`。因此只看 release
+   kernel 会得到约 3.03 ms 的近似不变结果，掩盖上述差异。评估这些 selector
+   时必须同时读取 `all_kernels` 里的受影响 kernel，或保留 raw event 作为
+   辅助证据。
+
+raw event 覆盖用户可见的 async operation 边界，包含 epilogue 与
+current-stream wait，因此只用于同 binary 相对比较；带宽结论仍以 official
+msprof 的通信 kernel 边界为准。
+
+原始任务与输出：
+
+- raw selector 第一轮：`task_20261013_223938_241685015569`，
+  `/data/disk2/pyptouser/yuqitao/official-direct-20261012-r1/optim-ab-r1/`；
+- official selector 第一轮：`task_20261013_225118_250798323503`，
+  `/data/disk2/pyptouser/yuqitao/official-direct-20261012-r1/optim-msprof-r1/`；
+- raw direct-local / expanded-reduce 对照：
+  `task_20261013_230106_283819016957`，
+  `/data/disk2/pyptouser/yuqitao/official-direct-20261012-r1/optim-ab-r2/`；
+- official direct-local / expanded-reduce 对照：
+  `task_20261013_230519_286533518629`，
+  `/data/disk2/pyptouser/yuqitao/official-direct-20261012-r1/optim-msprof-r2/`；
+- top-8 对照：`task_20261013_230940_30572337908`，
+  `/data/disk2/pyptouser/yuqitao/official-direct-20261012-r1/optim-msprof-topk8-r1/`。
+
+补充对照：同一 workload 把 top-k 从 6 改为 8 后，official release 为
+3594 us / 345.9 GB/s，top-6 为 3024 us / 341.3 GB/s；top-8 的
+`combine_kernel` 为 380 us，top-6 为 473 us。由于 top-8 的数据量比 top-6
+高 1/3，这不能直接证明 top-6 专用 AOT 会带来等比例收益。当前证据只说明
+top-8 特化路径效率较高；在 release kernel 占主导的 official 口径下，
+补 top-6 特化的优先级低于保留现有 prefetch / direct local placement /
+expanded vector reduce。
+
+Dispatch 侧 selector 在当前 official async/expanded case 下大多不生效：
+`async_with_compute_stream=true` 会置位 stream mode，而 device prefix、
+parallel prefix、consumer tile 均要求 non-stream；token fanout 又明确排除
+expanded。因此这轮不需要把 Dispatch selector 纳入同一优先级排序。
