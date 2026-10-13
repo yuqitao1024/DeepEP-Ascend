@@ -1,4 +1,4 @@
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 
 BG = "#fbf1c7"
@@ -36,9 +36,27 @@ def center_text(draw, box, text, f, fill=TEXT):
     draw.text((x, y), text, font=f, fill=fill)
 
 
+def soft_base(base):
+    """Keep imagegen's Gruvbox texture while reducing visual noise."""
+    im = base.filter(ImageFilter.GaussianBlur(0.7))
+    im = ImageEnhance.Contrast(im).enhance(0.82)
+    im = ImageEnhance.Brightness(im).enhance(1.06)
+    return im
+
+
+def style_card(draw, box, radius=20, accent=None):
+    draw.rounded_rectangle(box, radius=radius, fill="#ffffffee", outline=BORDER, width=2)
+    if accent:
+        x1, y1, _, _ = box
+        x2, _, _, y2 = box
+        draw.rounded_rectangle((x1, y1, x1 + 6, y2), radius=3, fill=accent)
+
+
 def render_dispatch(path):
     W, H = 1680, 945
-    im = Image.new("RGB", (W, H), BG)
+    base_path = ".scratch/imagegen/deepep-ascend-simt-figure-base-v10.png"
+    base = Image.open(base_path).convert("RGB").resize((W, H), Image.Resampling.LANCZOS)
+    im = soft_base(base)
     d = ImageDraw.Draw(im)
     f_title = font(31)
     f_h = font(20)
@@ -48,7 +66,7 @@ def render_dispatch(path):
     d.text((64, 44), "Dispatch：SIMT 并行整理路由与通信描述", font=f_title, fill=TEXT)
 
     # Main matrix card.
-    rounded(d, (50, 98, 1310, 822), 26)
+    style_card(d, (50, 98, 1288, 822), 26, SIMT)
     x0, y0, x1, y1 = 74, 124, 1288, 800
     headers = ["Router 结果", "目标统计", "重复 rank 去重", "接收 slot 计算", "通信描述构造"]
     colw = (x1 - x0) / len(headers)
@@ -119,7 +137,7 @@ def render_dispatch(path):
     ]
     for i, (name, desc, color) in enumerate(cards):
         cy = 150 + i * 190
-        rounded(d, (1340, cy, 1625, cy + 145), 22)
+        style_card(d, (1340, cy, 1625, cy + 145), 22, color)
         d.rounded_rectangle((1360, cy + 24, 1605, cy + 60), radius=12, fill=color, outline=color)
         center_text(d, (1360, cy + 24, 1605, cy + 60), name, f_h, "#ffffff")
         center_text(d, (1360, cy + 74, 1605, cy + 122), desc, f_small, TEXT)
@@ -150,7 +168,9 @@ def arrow(draw, start, end, color=BORDER, width=3):
 
 def render_combine(path):
     W, H = 1680, 945
-    im = Image.new("RGB", (W, H), BG)
+    base_path = ".scratch/imagegen/deepep-ascend-simt-figure-base-v10.png"
+    base = Image.open(base_path).convert("RGB").resize((W, H), Image.Resampling.LANCZOS)
+    im = soft_base(base)
     d = ImageDraw.Draw(im)
     f_title = font(31)
     f_h = font(21)
@@ -169,16 +189,16 @@ def render_combine(path):
     ]
     for i, (name, source, color) in enumerate(tasks):
         y = 162 + i * 98
-        rounded(d, (55, y, 285, y + 78), 22)
+        style_card(d, (55, y, 285, y + 78), 22, color)
         center_text(d, (78, y + 14, 262, y + 38), name, f_h, color)
         center_text(d, (78, y + 42, 262, y + 66), source, f_small, TEXT)
 
-    rounded(d, (55, 525, 285, 645), 22)
+    style_card(d, (55, 525, 285, 645), 22, SIMT)
     center_text(d, (78, 547, 262, 571), "task D", f_h, SIMT)
     center_text(d, (78, 597, 262, 631), "本地输出", f, TEXT)
 
     # Upper track.
-    rounded(d, (350, 115, 1610, 410), 26)
+    style_card(d, (350, 115, 1610, 410), 26, SIMT)
     d.text((385, 142), "通信准备（SIMT）", font=f_h, fill=SIMT)
     upper = [("读取返回信息", "task A"), ("组织 task", "task A"), ("构造远端写描述", "task B"), ("scalar 提交", "task B")]
     for i, (name, task) in enumerate(upper):
@@ -190,7 +210,7 @@ def render_combine(path):
             arrow(d, (x - 62, 240), (x - 8, 240), SIMT, 3)
 
     # Lower track.
-    rounded(d, (350, 470, 1610, 765), 26)
+    style_card(d, (350, 470, 1610, 765), 26, SIMT)
     d.text((385, 497), "本地聚合（SIMT）", font=f_h, fill=SIMT)
     lower = [("本地 reduce", "task A"), ("写回 token 输出位置", "task A"), ("本地 reduce", "task B")]
     for i, (name, task) in enumerate(lower):
