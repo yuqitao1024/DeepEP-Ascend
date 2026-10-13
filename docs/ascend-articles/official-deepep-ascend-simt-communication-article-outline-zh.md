@@ -1,38 +1,38 @@
-# DeepEP-Ascend SIMT通信软文大纲（v0.2）
+# DeepEP-Ascend SIMT通信技术文章大纲（v0.3）
 
 日期：2026-10-13
-状态：按“通信小白可读”的结构重排，正文待按本大纲重写
+状态：正文已按大纲完成，当前为文案润色版本
 
 ## 1. 文章定位
 
-这篇软文的主线是回答一个问题：MoE通信里为什么适合用SIMT？
+这篇文章的主线是回答一个问题：MoE通信中为什么适合使用SIMT？
 
-读者不需要预先熟悉通信库实现。文章先讲清MoE业务：Router为每个token选择expert，expert分布在多个rank上，因此必须做Dispatch和Combine。然后再拆这两个操作的业务流程，标出哪些阶段由SIMT承担，最后解释为什么这些阶段天然适合SIMT。
+读者无需预先熟悉通信库实现。文章先说明MoE业务：Router为每个token选择expert，expert分布在多个rank上，因此必须执行Dispatch和Combine。随后拆解这两个操作的业务流程，标注哪些阶段由SIMT承担，最后解释这些阶段为什么天然适合SIMT。
 
 写作边界：
 
-1. 正文重点讲“为什么用SIMT”，不是逐段讲解“怎么用SIMT实现”；
-2. 通信专业细节只保留能支撑结论的最小集合，其余移到附录或删除；
+1. 正文重点解释“为什么使用SIMT”，而非逐段说明SIMT的实现方式；
+2. 通信专业细节只保留能支撑结论的最小集合，其余移到术语表或删除；
 3. 不把SIMT描述成更快的数据搬运引擎；它处理的是动态路由、统计、去重、位置计算和描述符构造，payload仍交给URMA/MTE；
 4. 准确表述提交边界：SIMT并行构造通信描述，scalar统一维护提交边界，不是每个lane独立提交。
 
 ## 2. 核心主张
 
-MoE通信的关键不是简单搬数据，而是先回答四个问题：
+MoE通信的关键并非数据搬运本身，而在于先回答四个问题：
 
 1. 这个token要发给谁？
 2. 同一个目标rank上有哪些token？
 3. 对端接收时放在什么位置？
-4. 怎么把这些不规则答案变成硬件能执行的通信描述？
+4. 如何将这些不规则答案转换成硬件能执行的通信描述？
 
 这些问题来自每个token的top-k结果，具有动态、稀疏、不均衡三个特点。SIMT适合在Device侧直接处理它们：
 
 1. token天然可并行：多个token的路由可以同时扫描；
 2. 分支和归约天然匹配：目标统计、重复rank去重、前缀位置计算是典型的比较、筛选和归约；
 3. 字段构造可并行：一条通信描述符里的目标、长度和地址可按lane分工填写；
-4. 多AIV可独立推进：每个AIV处理一段token并拥有自己的提交队列，避免所有producer挤在一个队列上。
+4. 多AIV可独立推进：每个AIV处理一段token并拥有独立的待提交描述区间，避免所有producer集中在同一提交点。
 
-一句话概括：SIMT负责把不规则的路由结果变成规则的通信描述；URMA/MTE负责按描述搬运payload。
+概括而言：SIMT负责将不规则的路由结果转换为规则的通信描述；URMA/MTE负责按描述搬运payload。
 
 ## 3. 目标读者
 
@@ -40,7 +40,7 @@ MoE通信的关键不是简单搬数据，而是先回答四个问题：
 - 关心Ascend执行模型、SIMT和通信优化的开发者；
 - 想判断SIMT是否适合自己业务的技术决策者。
 
-默认读者知道token、expert、rank等基础词；不假设熟悉通信库实现名词。首次出现时只用一句话解释，详细定义放附录。
+默认读者知道token、expert、rank等基础词；不假设熟悉通信库实现名词。首次出现时只用一句话解释，详细定义放术语表。
 
 ## 4. 推荐标题
 
@@ -56,13 +56,13 @@ MoE通信的关键不是简单搬数据，而是先回答四个问题：
 
 1. MoE让每个token走少量expert；
 2. expert分布在多个rank上，所以需要Dispatch和Combine；
-3. Router的top-k结果每一步都变，通信必须先动态决定“发给谁、放哪里、怎么描述”。
+3. Router的top-k结果每一步都变，通信必须先动态决定“发给谁、放哪里、如何描述”。
 
 结论前置：DeepEP-Ascend把这段动态决策留在Device侧，用SIMT完成，而不是把路由结果送回Host再生成通信计划。
 
 ### 1. MoE通信的业务背景
 
-面向通信小白，先用业务语言介绍：
+面向通信初学者，先以业务语言介绍：
 
 - MoE：Router为每个token选择top-k expert；
 - EP：expert分布在不同rank上；
@@ -77,11 +77,11 @@ MoE通信的关键不是简单搬数据，而是先回答四个问题：
 
 #### 2.1 Dispatch：从Router结果到expert输入
 
-先给rank 0的8个token完整路由表：token、选中的expert、expert所在rank、Dispatch要做什么。再从表推导业务结论：哪些token留在本地、每个远端rank接收哪些token。
+给出rank 0的8个token完整路由表：token、选中的expert、expert所在rank、Dispatch操作。再从表推导业务结论：哪些token保留在本地、每个远端rank接收哪些token。
 
-说明去重只作用于同一token的hidden数据：如果两个expert在同一rank，hidden只发一份；接收端再按expert信息展开成多个expert输入。用16个expert选择变成14份hidden发送的例子讲清发送去重和expert展开的边界。
+说明去重只作用于同一token的hidden数据：如果两个expert在同一rank，hidden只发送一份；接收端再按expert信息展开为多个expert输入。以16个expert选择转换为14份hidden发送的示例，说明发送去重与expert展开的边界。
 
-由此引出Dispatch要做的通用流程：
+由此引出Dispatch的通用流程：
 
 1. 读取每个token的top-k结果；
 2. 按目标rank统计数量；
@@ -92,7 +92,7 @@ MoE通信的关键不是简单搬数据，而是先回答四个问题：
 
 #### 2.2 Combine：从expert输出到token输出
 
-再以rank 0为接收方，给8个token的返回来源表：每个原始token有哪些expert输出、来自本地还是远端rank。说明Combine要把这些输出按top-k权重聚合成一个token输出。
+再以rank 0为接收方，给出8个token的返回来源表：每个原始token有哪些expert输出、来自本地还是远端rank。说明Combine需将这些输出按top-k权重聚合为一个token输出。
 
 1. 读取返回metadata：source rank、原始token、expert和slot；
 2. 按source rank组织返回工作，减少零散提交；
@@ -128,7 +128,7 @@ MoE通信的关键不是简单搬数据，而是先回答四个问题：
 
 #### 4.1 返回信息整理：source rank、token与slot
 
-解释Combine的输入比Dispatch更“散”：expert输出可能来自不同rank，还要回到原始token位置。SIMT适合并行整理这些metadata。
+解释Combine的输入比Dispatch更分散：expert输出可能来自不同rank，还需要回到原始token位置。SIMT适合并行整理这些metadata。
 
 #### 4.2 task组织：零散结果的批次化
 
@@ -136,7 +136,7 @@ MoE通信的关键不是简单搬数据，而是先回答四个问题：
 
 #### 4.3 流水执行：通信准备与本地reduce重叠
 
-解释通信准备和本地聚合可以形成流水：当前task聚合时，下一个task的描述已经在构造。这里讲清“重叠的是什么”，不展开stage实现细节。
+解释通信准备和本地聚合可以形成流水线：当前task聚合时，下一个task的描述已在构造。此处说明“重叠的具体阶段”，不展开stage实现细节。
 
 ### 5. 为什么SIMT适合MoE通信
 
@@ -160,17 +160,9 @@ MoE通信的关键不是简单搬数据，而是先回答四个问题：
 - 给出EP8-EP128的Dispatch/Combine带宽；
 - 只做边界说明，不展开内部任务和日志。
 
-### 7. 延伸阅读：staged transport
+### 7. 结语
 
-压缩为一段：
-
-producer先生成语义化通信请求，专职transport service再转换成通信描述并统一提交。该路线更容易封装队列所有权、提交顺序和错误诊断，也便于不同producer复用通信语义；代价是请求编码、service调度和中间状态传递。
-
-本节作为第二篇引子，不展开内部实现。
-
-### 8. 结语
-
-回扣四点：动态路由、分支归约、字段并行、多AIV独立推进。结尾强调通信不只是搬payload，还包括把不规则路由结果变成规则描述。
+回扣四个要点：动态路由、分支归约、字段并行、多AIV独立推进。结尾强调通信不只是payload搬运，还包括将不规则路由结果转换为规则描述。
 
 ## 6. 配图与图示策略
 
@@ -178,10 +170,12 @@ producer先生成语义化通信请求，专职transport service再转换成通�
 
 1. MoE routing图：解释token到expert/rank的动态映射；
 2. 4-rank MoE flow图：完整展示Dispatch和Combine的双向业务流程；
-3. Dispatch数据流图：说明动态路由到通信描述的转换；
-4. Combine数据流图：说明返回结果到远端写和本地reduce的两条路径；
+3. Dispatch数据流图：用Router结果、SIMT整理、通信描述和硬件路径表达动态路由到通信描述的转换；
+4. Combine数据流图：用expert输出、SIMT返回整理、远端/本地路径和加权reduce表达返回聚合；
 5. Why SIMT图：对比SIMD、SIMT线程分支与AIV并发模型；
-6. Host/Device架构图：说明资源准备和Device侧路径的边界。
+6. Host/Device架构图：用资源准备、路由读取、SIMT整理、通信描述、提交和payload传输说明边界。
+
+全套图统一使用轻字重、细线条和活泼但克制的现代信息图风格；图3、图4、图6避免出现WQE、SGE、SQ、CQ、doorbell、Jetty、Channel等实现名词，用业务阶段和抽象通信角色表达。
 
 4-rank全流程图先用正文文字流程图表达，重点用`[SIMT]`标签标注阶段。该图必须保留，作为读者定位SIMT阶段的锚点。若后续确需替换为图片，再单独评审，不在本轮处理。
 
@@ -206,17 +200,4 @@ producer先生成语义化通信请求，专职transport service再转换成通�
 - AIV：Ascend设备上的执行单元；
 - URMA：负责远端写入的通信硬件路径；
 
-附录只解释正文实际出现的术语。正文没有使用的Jetty、SQ、CQ、doorbell、WQEBB等实现名词不进入附录。
-
-## 9. 参考材料
-
-### DeepEP-Ascend代码
-
-- Repository: https://github.com/deepseek-ai/DeepEP-Ascend
-
-正文参考入口只保留DeepEP-Ascend仓库链接，不列commit和源码文件清单。
-
-### 仓库内参考
-
-- docs/ascend-reference/simt-and-aicore-main-scalar-division-zh.md
-- docs/ascend-reference/deep-ep-ascend-communication-implementation-review-zh.md
+术语表只解释正文实际出现的术语。正文没有使用的Jetty、SQ、CQ、doorbell、WQEBB等实现名词不进入术语表。
