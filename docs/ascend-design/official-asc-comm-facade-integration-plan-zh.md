@@ -575,6 +575,30 @@ expanded_dispatch，Combine 实际使用 reduced_combine。
 eligibility 条件，不是 selector 名称：例如 token fanout / early route plan
 都明确排除 expanded 模式，而 device prefix 组的 selector 不排除 expanded。
 
+### 9.3 逐项审计：哪些默认优化带 8K/top-8 形态假设
+
+| 优化 / 常量 | 代码中的形态假设 | 16K/top-6 下的实际状态 | 处理建议 |
+|---|---|---|---|
+| Dispatch token fanout，`kDispatchTokenFanoutBufferBytes=7168` | FP8 hidden row 必须是 7168 byte；top-k ≤ 8；world size ≤ 8；明确排除 expanded/cached/stream/hybrid | 官方口径 Dispatch 使用 expanded_dispatch，因此当前不会命中；top-k 6 本身满足上限 | 不需要改代码；expanded 若未来重开 fanout，已有 C20.2 ABBA 证明收益不成立 |
+| Dispatch consumer tile 8192 byte | 针对一条 7168-byte hidden row 的单次 MTE 迭代优化 | hidden=7168 不变，tile 与 top-k/token 数无关；主要受 stream/cached/cpu-sync eligibility 影响 | 保留默认；按 case 记录是否命中，不做 16K/top-6 特改 |
+| Device prefix / parallel prefix | 依赖 uncached、CPU-sync、non-stream 等模式条件 | 官方 expanded case 的 async/stream 组合会改变命中情况；这不是 token/top-k 数值特化 | 不改默认；复筛时先记录每个 case 的 selector 实际状态 |
+| Cached route plan | 历史验收在 8192 tokens/top-k 8 下做，但算法是 capacity/world/top-k 动态校验 | 16K/top-6 correctness 已通过；当前官方性能报告主要使用 expanded/reduced，cached 路径不是主统计对象 | 保留；如后续统计 cached case，需单独按 16K/top-6 复测 |
+| Combine producer payload tile 3584 elements | 3584 = 7168/2，来自 hidden=7168 的 full-record tile；与 token 数/top-k 无关 | hidden 仍为 7168，top-k 6 不破坏该假设；reduced Combine 走 expanded vector reduce 侧 | 保留默认；如 direct 后端瓶颈在 producer record，可做 3584 vs 1024 AB |
+| Combine local copy tile 32768 byte | 针对 representative hidden=7168 的本地 staging DataCopy 调优 | hidden 不变，token 数增加通常增强大 tile 方向；无 top-k 8 硬编码 | 保留默认；direct local placement 已减少该路径重要性 |
+| Combine vector reduce tile 512 / prefetch 4 | 512-element tile 与 hidden=7168 的 14 次迭代匹配；历史验收为 top-k 8 | 当前 top-k 6 仍走通用 vector reduce 分支；`kCombineCommonTopk=8` 的专用 AOT 实例不会命中，top-k 6 会落入动态模板 | 这是最明确的复筛对象：需要在 16K/top-6 下比较 512 与 1024，以及 prefetch 4 vs 2 |
+| Expanded vector reduce | 面向 expanded/reduced Combine；top-k ∈ [1,32] | top-k 6 命中，且 reduced Combine 是官方主统计对象 | 保留；它是 reduced Combine 的关键优化，不应关闭 |
+
+结论：真正带有“top-k 8 专属”硬编码的是 Combine epilogue 的
+`kCombineCommonTopk=8 / kCombineCommonHidden=7168` AOT 专用实例。当前
+top-k 6 会自然退回通用实现，不会错误启用该实例，但它也意味着历史上的
+top-k 8 专用优化在当前主口径中没有贡献。Dispatch token fanout 的 7168
+hidden 特化虽存在，但 expanded dispatch 的 selector 条件使其不会命中。
+
+因此，当前不应直接删除历史优化，也不应凭 8K/top-8 的收益继续扩大它们；
+优先复筛对象是 Combine vector reduce tile/prefetch，其次才是 producer
+payload tile。Dispatch 侧的 token fanout / early route plan 对当前
+expanded_dispatch 主路径没有影响。
+
 以下优化项只在 non-expanded Dispatch 中生效，当前官方 expanded_dispatch
 不会命中：
 
@@ -621,7 +645,7 @@ same-binary AB。当前更明确的处理规则是：
 这个顺序把“16K/top-6 适配性复筛”限定为 direct HCOMM 的后续工作，而不是
 把历史 8K/top-8 结论直接迁移到当前默认实现。
 
-### 9.3 raw bench_ep.py 数据不能作为判定依据
+### 9.4 raw bench_ep.py 数据不能作为判定依据
 
 此前有一轮 raw bench_ep.py AB 曾被用来观察 expanded vector reduce，但它
 不能作为正式结论：
