@@ -11,8 +11,9 @@ option(DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP
        "Skip redundant non-profile Dispatch epilogue no-op kernels" OFF)
 option(DEEP_EP_ASCEND_POLLING_NOP
        "Insert NOP instructions in device polling loops (diagnostic only)" OFF)
-option(DEEP_EP_ASCEND_OFFICIAL_SIMT
-       "Use official Hcomm SIMT to execute staged transport commands (experimental)" OFF)
+option(DEEP_EP_ASCEND_OFFICIAL_DIRECT
+       "Map DeviceTransportFacade directly to official Hcomm SIMT (experimental)" OFF)
+
 
 if(NOT DEEP_EP_PLATFORM STREQUAL "cuda" AND
    NOT DEEP_EP_PLATFORM STREQUAL "ascend")
@@ -98,6 +99,14 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
 
     set(HCOMM_ARCH_ROOT "${HCOMM_ROOT}/${CMAKE_SYSTEM_PROCESSOR}-linux")
     set(ASCEND_ARCH_ROOT "${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux")
+    set(ASC_COMM_OVERLAY "$ENV{ASC_COMM_OVERLAY}")
+    if(ASC_COMM_OVERLAY AND NOT EXISTS "${ASC_COMM_OVERLAY}/asc_comm_master/hcomm/hcomm_simt.h")
+        message(FATAL_ERROR "ASC_COMM_OVERLAY must contain asc_comm_master/hcomm/hcomm_simt.h")
+    endif()
+    if(ASC_COMM_OVERLAY AND
+       NOT DEEP_EP_ASCEND_OFFICIAL_DIRECT)
+        message(FATAL_ERROR "ASC_COMM_OVERLAY is only supported with an official ASC-COMM backend")
+    endif()
 
     pybind11_add_module(_C SHARED NO_EXTRAS
         csrc/python_api.cpp
@@ -168,6 +177,7 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
         csrc/backends/ascend/transport/cann_transport.cpp)
 
     target_include_directories(_C PRIVATE
+        ${ASC_COMM_OVERLAY}
         ${HCOMM_ARCH_ROOT}/pkg_inc
         ${HCOMM_ARCH_ROOT}/include
         ${HCOMM_ARCH_ROOT}/include/hcomm
@@ -194,7 +204,7 @@ if(DEEP_EP_PLATFORM STREQUAL "ascend")
         DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS=$<BOOL:${DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS}>
         DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP=$<BOOL:${DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP}>
         DEEP_EP_ASCEND_POLLING_NOP=$<BOOL:${DEEP_EP_ASCEND_POLLING_NOP}>
-        DEEP_EP_ASCEND_OFFICIAL_SIMT=$<BOOL:${DEEP_EP_ASCEND_OFFICIAL_SIMT}>
+        DEEP_EP_ASCEND_OFFICIAL_DIRECT=$<BOOL:${DEEP_EP_ASCEND_OFFICIAL_DIRECT}>
         $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_STAGED_URMA=1>
         $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_AICORE_URMA_SERVICE=1>
         $<$<COMPILE_LANGUAGE:ASC>:DEEP_EP_ASCEND_AICORE_WQE_CALLEE=__aicore__>)

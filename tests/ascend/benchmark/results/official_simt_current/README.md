@@ -8,11 +8,15 @@
 
 当前 main 上，experimental Official SIMT 执行器仍无性能收益。五个操作的平均
 延迟都比默认 AICore/URMA 执行器慢约 0.19% 到 0.39%，差异方向一致但幅度很小。
-因此 `DEEP_EP_ASCEND_OFFICIAL_SIMT` 继续保持默认关闭。
+因此当时 `DEEP_EP_ASCEND_OFFICIAL_SIMT` 继续保持默认关闭。
 
 本轮结果与 2026-09-26 旧基线的结论一致：单纯把 staged command queue 的执行
 后端替换为 HCOMM SIMT，不改变 producer/command queue/service boundary，不能
 得到稳定收益。
+
+2026-10-13 备注：该 service 内切换执行器的实验实现已从主线删除，后续保留
+默认 staged AICore/URMA 与 direct HCOMM facade 两条路线。本文只作为历史
+性能证据归档。
 
 ## 测试环境
 

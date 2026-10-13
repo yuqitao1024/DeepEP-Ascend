@@ -196,7 +196,7 @@ Ascend build 的编译宏在构建时固化，修改后必须重新构建 extens
 | `DEEP_EP_ASCEND_ACQUIRE_DIAGNOSTICS` | `OFF` | 只在需要 acquire 长尾归因时构建。性能测试不要开启 |
 | `DEEP_EP_ASCEND_SKIP_EPILOGUE_NOOP` | `OFF` | 2026-09-25 无 profile ABBA 显示无稳定收益且偏慢，保持关闭；profile 模式下该开关本身也不会生效 |
 | `DEEP_EP_ASCEND_POLLING_NOP` | `OFF` | 真实机器 polling NOP selector。Driver 25.6 已验证默认关闭无卡死；开启仅用于旧 driver 对照，不是性能优化推荐 |
-| `DEEP_EP_ASCEND_OFFICIAL_SIMT` | `OFF` | 实验用官方 Hcomm SIMT 执行器；保留现有 producer/command queue。五组 8-rank ABBA 加一组 30-warmup 对照仍无稳定正收益，继续默认关闭；见[接口核对和数据](official-simt-backend-abba-zh.md) |
+| `DEEP_EP_ASCEND_OFFICIAL_DIRECT` | `OFF` | 实验用 direct-facade 后端；producer 不再写入 command queue，由 lane 0 直接调用 Hcomm SIMT API。8-rank correctness 已通过，16K/top-6 official bench_msprof 中 Combine 达到官方参考区间、Dispatch 仍低约 10%；见[direct-facade 设计](../ascend-design/official-asc-comm-facade-integration-plan-zh.md)。旧的 service 内 Official SIMT 执行器无稳定收益且架构方向不合适，已删除 |
 
 Ascend build 还固定启用三个设备侧 staged-URMA 基础宏：
 `DEEP_EP_ASCEND_STAGED_URMA`、`DEEP_EP_ASCEND_AICORE_URMA_SERVICE` 和

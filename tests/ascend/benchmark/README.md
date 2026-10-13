@@ -71,6 +71,17 @@ commands, while service submission and CQ draining execute in later kernels.
 For official-semantic comparison, use `stage_service_issue_drain`
 (`service_submit + cq_wait`).
 
+For the experimental direct HCOMM SIMT backend, pass
+`--transport-mode official_direct` to `bench_ep_msprof.py` or the matrix
+runner. This changes the timed kernel to
+`direct_dispatch_producer_release_kernel` /
+`direct_combine_producer_release_kernel`, which issue and drain HCOMM SIMT
+work in the producer kernel. In this mode the aligned report uses
+`msprof_raw_outer_kernel_time` (despite the historical mapping name) as its
+preferred mapping and omits the staged-service cycle mappings. The default
+`--transport-mode staged` preserves the existing single-case and matrix
+behavior.
+
 ## Ascend data-block profiles
 
 Ascend direct EP resolves the device's AI Vector data-block count at runtime

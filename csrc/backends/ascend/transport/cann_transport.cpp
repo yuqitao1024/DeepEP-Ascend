@@ -13,12 +13,16 @@
 
 #if __has_include(<acl/acl.h>) && __has_include(<hccl/hccl_comm.h>) && \
     __has_include(<hccl/hccl_channel.h>) && \
-    __has_include(<hccl/hccl_rank_graph.h>)
+    __has_include(<hccl/hccl_rank_graph.h>) && \
+    __has_include(<hccl/hccl_team.h>) && \
+    __has_include(<hcomm/hcomm_res.h>)
 #define DEEP_EP_ASCEND_HAS_CANN_HOST_API 1
 #include <acl/acl.h>
 #include <hccl/hccl_channel.h>
 #include <hccl/hccl_comm.h>
 #include <hccl/hccl_rank_graph.h>
+#include <hccl/hccl_team.h>
+#include <hcomm/hcomm_res.h>
 #else
 #define DEEP_EP_ASCEND_HAS_CANN_HOST_API 0
 #endif
@@ -50,6 +54,8 @@ bool valid_api(const CannHostApi& api) {
         api.copy_from_device != nullptr && api.free_device != nullptr && api.destroy_channels != nullptr &&
         api.deregister_memory != nullptr;
 }
+
+HcclComm comm_handle(std::int64_t handle);
 
 class CannHostTransport final : public HostTransport {
 public:
@@ -188,12 +194,9 @@ public:
         return TransportStatus::success();
     }
 
-    TransportStatus read_diagnostic(DeviceTransportDiagnostic* diagnostic) override {
-        return read_diagnostic(diagnostic, {});
-    }
+    TransportStatus read_diagnostic(DeviceTransportDiagnostic* diagnostic) override { return read_diagnostic(diagnostic, {}); }
 
-    TransportStatus read_diagnostic(
-        DeviceTransportDiagnostic* diagnostic, const DiagnosticReadback& readback) override {
+    TransportStatus read_diagnostic(DeviceTransportDiagnostic* diagnostic, const DiagnosticReadback& readback) override {
         if (diagnostic == nullptr)
             return TransportStatus::invalid("read_diagnostic", "diagnostic must not be null");
         if (teardown_started_ || diagnostic_ == nullptr)
@@ -265,8 +268,10 @@ public:
 
 private:
     constexpr std::uint64_t command_capacity_bytes() const {
-        return static_cast<std::uint64_t>(command_capacity_) * sizeof(TransportCommand);
+        return static_cast<std::uint64_t>(command_capacity_) * sizeof(TransportCommand) + fetch_result_bytes();
     }
+
+    constexpr std::uint64_t fetch_result_bytes() const { return static_cast<std::uint64_t>(world_size_) * sizeof(std::uint64_t); }
 
     static std::uintptr_t pointer_value(const void* pointer) { return reinterpret_cast<std::uintptr_t>(pointer); }
 
@@ -450,6 +455,23 @@ private:
         return copy_to_device(channel_table_, table, "initialize_channel_table");
     }
 
+    TransportStatus allocate_hcomm_zero(std::uint64_t bytes, void** pointer, const char* operation) {
+        if (bytes == 0 || pointer == nullptr)
+            return runtime_failure(operation, "invalid Hcomm allocation");
+        const int result = static_cast<int>(HcommMemAlloc(pointer, static_cast<std::size_t>(bytes)));
+        if (result != HCCL_SUCCESS)
+            return backend_failure(operation, result);
+        if (*pointer == nullptr)
+            return runtime_failure(operation, "CANN returned a null Hcomm allocation");
+        const int zero_result = api_.zero_device(api_.user_data, *pointer, bytes);
+        if (zero_result != 0) {
+            (void)HcommMemFree(*pointer);
+            *pointer = nullptr;
+            return backend_failure(operation, zero_result);
+        }
+        return TransportStatus::success();
+    }
+
     TransportStatus initialize_resources() {
         if (resources_initialized_)
             return TransportStatus::success();
@@ -472,6 +494,8 @@ private:
             return status;
         TransportServiceState service_state;
         service_state.default_retry_limit = kDefaultRetryLimit;
+        service_state.reserved[0] = world_size_;
+        service_state.reserved[1] = rank_;
         status = copy_to_device(service_, service_state, "initialize_service");
         if (!status.ok())
             return status;
@@ -496,6 +520,11 @@ private:
     TransportStatus publish_staged_context(const char* operation) {
         StagedTransportContext context;
         context.command_queue = pointer_value(queue_);
+        context.team = 0;
+        context.window = 0;
+        context.signal_window = 0;
+        context.fetch_results = pointer_value(commands_) + static_cast<std::uint64_t>(command_capacity_) * sizeof(TransportCommand);
+        context.fetch_result_bytes = fetch_result_bytes();
         context.stage_profile = pointer_value(stage_profile_);
         context.stage_profile_bytes = stage_profile_ == nullptr ? 0 : sizeof(TransportStageProfile);
         context.reserved = command::registration_cookie(
@@ -508,6 +537,15 @@ private:
             return;
         const int result = api_.free_device(api_.user_data, pointer);
         if (result != 0 && first_error.ok())
+            first_error = backend_failure(operation, result);
+        pointer = nullptr;
+    }
+
+    void free_hcomm_resource(void*& pointer, const char* operation, TransportStatus& first_error) {
+        if (pointer == nullptr)
+            return;
+        const int result = static_cast<int>(HcommMemFree(pointer));
+        if (result != HCCL_SUCCESS && first_error.ok())
             first_error = backend_failure(operation, result);
         pointer = nullptr;
     }

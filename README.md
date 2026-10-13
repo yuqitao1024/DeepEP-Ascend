@@ -95,6 +95,32 @@ selector/build-macro inventory are maintained in
 and
 [docs/ascend-performance/ascend-performance-knobs-zh.md](docs/ascend-performance/ascend-performance-knobs-zh.md).
 
+### Ascend EP8 transport comparison
+
+The following comparison uses the official DeepEP-Ascend benchmark semantics:
+EP8, 16,384 tokens per rank, hidden size 7,168, top-6 routing over 256 experts,
+64 AIVs, FP8 dispatch with alignment 128 and row-major scales, and BF16 combine.
+Each local result uses 10 warmups and 50 samples, flushes L2, applies a cold-L2
+epilogue, and reports the communication kernel time including issue and drain
+while excluding the final epilogue. Bandwidth is per-rank logical scale-up
+bandwidth.
+
+| Operation | Staged transport | Direct HCOMM | Official DeepEP-Ascend |
+|--|--:|--:|--:|
+| Dispatch | 1,977.41 us / 274.49 GB/s | 1,635.61 us / 331.87 GB/s | 373–375 GB/s |
+| Combine | 3,647.37 us / 285.82 GB/s | 3,021.62 us / 345.02 GB/s | 345–347 GB/s |
+
+The local staged and direct results were collected on Ascend 950DT with
+CANN/HCOMM 9.3.0. The official values are the EP8 reference range published by
+DeepSeek on Ascend 950DT with CANN 9.2.0 and netlayer 1. They are included as a
+same-workload engineering reference rather than a claim of identical hardware or
+network configuration. The direct HCOMM path is experimental and currently keeps
+its release stage as one control block with lane 0 issuing and draining HCOMM
+operations.
+
+Detailed methodology and result locations are recorded in
+[docs/ascend-design/official-asc-comm-facade-integration-plan-zh.md](docs/ascend-design/official-asc-comm-facade-integration-plan-zh.md).
+
 For V1 performance data, see [docs/legacy/legacy.md](docs/legacy/legacy.md#performance).
 
 ## Quick start

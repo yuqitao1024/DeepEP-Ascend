@@ -27,7 +27,7 @@
 官方覆盖当前使用的底层通信原语，但没有直接等价的项目 request/barrier API。
 本轮切换的是设备通信执行器，不是删除整个项目传输抽象。
 
-## 宏及实验边界
+## 宏及实验边界（历史实现，已删除）
 
 `DEEP_EP_ASCEND_OFFICIAL_SIMT` 是编译开关，默认 `OFF` / `0`。
 
@@ -45,6 +45,11 @@
 CMake：`-DDEEP_EP_ASCEND_OFFICIAL_SIMT=ON/OFF`。
 setup.py：`DEEP_EP_ASCEND_OFFICIAL_SIMT=1/0` 后重新编译 extension。
 只使用选定 CANN 安装树中的官方头文件及配套库，不复制修改官方实现。
+
+2026-10-13 更新：该 service 内切换执行器的实现已从主线删除。原因是它
+仍保留 producer/GM command queue 和 service → SIMT VF 边界，后续 direct
+HCOMM facade 方案已经在 producer release kernel 内直接执行 HCOMM API。
+本文保留当时的 ABBA 证据和历史结论，避免把旧开关误认为当前可用后端。
 
 结果只回答替换通信执行层的效果，不能外推为 producer 直接提交、移除
 command/service 层后的性能。是否继续做直接提交需要独立实验。
@@ -134,8 +139,8 @@ Dispatch 的合并均值快约 1.02%，主要来自第一组；第二、三组�
 不能按“稳定复现即可保留”的标准作为默认性能优化。
 Combine 三组均慢，合并延迟增加约 1.71%。其余三个操作也没有稳定正收益。
 
-保留 `DEEP_EP_ASCEND_OFFICIAL_SIMT=OFF` 为默认，自研 API 和 URMA 实现不删除。
-官方路径保留为显式 opt-in 实验分支，便于进一步对照。
+当时保留 `DEEP_EP_ASCEND_OFFICIAL_SIMT=OFF` 为默认，自研 API 和 URMA 实现
+不删除。后续主线已删除该 opt-in 实验分支，改为评估 direct HCOMM facade。
 
 这不是对官方 API 性能上限的判断：当前 B 仍保留 GM command queue，
 并增加 service → SIMT VF 边界，尚未测 producer 直接提交或延迟批量 commit。

@@ -1,6 +1,8 @@
 #pragma once
 
-#if defined(DEEP_EP_ASCEND_STAGED_URMA) && DEEP_EP_ASCEND_STAGED_URMA
+#if defined(DEEP_EP_ASCEND_OFFICIAL_DIRECT) && DEEP_EP_ASCEND_OFFICIAL_DIRECT
+#include "official_direct_device_transport.hpp"
+#elif defined(DEEP_EP_ASCEND_STAGED_URMA) && DEEP_EP_ASCEND_STAGED_URMA
 #include "device_transport_commands.hpp"
 #else
 #include "device_transport_stub.hpp"

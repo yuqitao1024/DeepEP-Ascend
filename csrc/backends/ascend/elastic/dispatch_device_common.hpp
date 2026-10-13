@@ -36,17 +36,26 @@ DEEP_EP_ASCEND_SIMT_CALLEE void dispatch_simt_poll_nop() {
 
 DEEP_EP_ASCEND_SIMT_CALLEE std::uint64_t
 cached_route_digest_entry(std::uint64_t expert, std::uint64_t encoded) noexcept {
-    // A commutative route fingerprint: each entry contributes an
-    // independent positive word, so parallel producers may accumulate it with
-    // 64-bit atomics instead of overwriting a lane-local reduction.
-    auto mix_word = [](std::uint64_t value) noexcept {
-        value += 0x9e3779b97f4a7c15ULL;
-        value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
-        value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
-        return value ^ (value >> 31U);
-    };
-    return (mix_word(expert + 0x243f6a8885a308d3ULL) ^
-            mix_word(encoded + 0x13198a2e03707344ULL)) | 1ULL;
+    // Keep this helper free of lambdas. The CANN SIMT VF lowering used by
+    // DeepEP-Ascend can fold the previous lambda-based 64-bit mix to zero.
+    // The expanded 32-bit mix below is commutative, nonzero for every input,
+    // and has been validated on 2-rank and 8-rank FP8 matrices.
+    const std::uint32_t expert_word =
+        static_cast<std::uint32_t>(expert + 0x243f6a88U);
+    const std::uint32_t encoded_word =
+        static_cast<std::uint32_t>(encoded + 0x13198a2eU);
+    std::uint32_t mixed_expert =
+        (expert_word ^ (expert_word >> 16U)) * 0xbf58476dU;
+    std::uint32_t mixed_encoded =
+        (encoded_word ^ (encoded_word >> 16U)) * 0xbf58476dU;
+    mixed_expert =
+        (mixed_expert ^ (mixed_expert >> 15U)) * 0x94d049bbU;
+    mixed_encoded =
+        (mixed_encoded ^ (mixed_encoded >> 15U)) * 0x94d049bbU;
+    mixed_expert ^= mixed_expert >> 15U;
+    mixed_encoded ^= mixed_encoded >> 15U;
+    return (static_cast<std::uint64_t>(mixed_expert) << 32U) |
+           (static_cast<std::uint64_t>(mixed_encoded) | 1U);
 }
 
 DEEP_EP_ASCEND_SIMT_CALLEE void direct_dispatch_store_scale_factor_pack(
@@ -102,7 +111,9 @@ DEEP_EP_ASCEND_SIMT_CALLEE void record_dispatch_protocol_error(
     const auto failure = make_dispatch_protocol_failure(
         world_rank, stage, generation, error);
     transport.store_release(status_address, failure.scratch_status);
-#if defined(DEEP_EP_ASCEND_STAGED_URMA) && DEEP_EP_ASCEND_STAGED_URMA
+#if defined(DEEP_EP_ASCEND_STAGED_URMA) && DEEP_EP_ASCEND_STAGED_URMA && \
+    !(defined(DEEP_EP_ASCEND_OFFICIAL_DIRECT) && \
+      DEEP_EP_ASCEND_OFFICIAL_DIRECT)
     auto* queue = transport::device::detail::command_queue(context);
     transport::device::detail::record_error(
         queue, transport::DeviceTransportError::kInvalidProtocol,

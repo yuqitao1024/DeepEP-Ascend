@@ -8,7 +8,7 @@
 
 namespace deep_ep::ascend::transport {
 
-inline constexpr std::uint32_t kTransportCommandAbiVersion = 3;
+inline constexpr std::uint32_t kTransportCommandAbiVersion = 4;
 inline constexpr std::uint32_t kStagedTransportCannCompatibility =
     0x00090300U;
 inline constexpr std::uint32_t kScaleUpTeamMask = 1U;
@@ -97,6 +97,7 @@ struct alignas(64) StagedTransportContext {
     std::uintptr_t command_queue = 0;
     std::uintptr_t team = 0;
     std::uintptr_t window = 0;
+    std::uintptr_t signal_window = 0;
     std::uintptr_t fetch_results = 0;
     std::uint64_t fetch_result_bytes = 0;
     std::uintptr_t stage_profile = 0;

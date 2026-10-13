@@ -10,16 +10,23 @@
 #include "transport_commands.hpp"
 #include "urma_wqe.hpp"
 
-#if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && DEEP_EP_ASCEND_AICORE_URMA_SERVICE
+#if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && DEEP_EP_ASCEND_AICORE_URMA_SERVICE && \
+    !(defined(DEEP_EP_ASCEND_OFFICIAL_DIRECT) && DEEP_EP_ASCEND_OFFICIAL_DIRECT)
 #include "aicore_intrinsics.hpp"
-#if DEEP_EP_ASCEND_OFFICIAL_SIMT
-#include "official_simt_transport_service.hpp"
 #endif
+#if defined(DEEP_EP_ASCEND_OFFICIAL_DIRECT) && DEEP_EP_ASCEND_OFFICIAL_DIRECT
+#include "official_direct_service_shim.hpp"
+#include "aicore_intrinsics.hpp"
+#endif
+#undef DEEP_EP_ASCEND_TRANSPORT_SERVICE_IMPL
+#if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && DEEP_EP_ASCEND_AICORE_URMA_SERVICE && \
+    !(defined(DEEP_EP_ASCEND_OFFICIAL_DIRECT) && DEEP_EP_ASCEND_OFFICIAL_DIRECT)
+#define DEEP_EP_ASCEND_TRANSPORT_SERVICE_IMPL 1
 #endif
 
 namespace deep_ep::ascend::transport::service {
 
-#if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && DEEP_EP_ASCEND_AICORE_URMA_SERVICE
+#if defined(DEEP_EP_ASCEND_TRANSPORT_SERVICE_IMPL) && DEEP_EP_ASCEND_TRANSPORT_SERVICE_IMPL
 #define DEEP_EP_ASCEND_POLL_INLINE __aicore__ inline
 #else
 #define DEEP_EP_ASCEND_POLL_INLINE inline constexpr
@@ -163,8 +170,7 @@ inline std::uint64_t fetch_result_offset(std::uint32_t peer) {
     return static_cast<std::uint64_t>(peer) * sizeof(std::uint64_t);
 }
 
-#if defined(DEEP_EP_ASCEND_AICORE_URMA_SERVICE) && DEEP_EP_ASCEND_AICORE_URMA_SERVICE
-
+#if defined(DEEP_EP_ASCEND_TRANSPORT_SERVICE_IMPL) && DEEP_EP_ASCEND_TRANSPORT_SERVICE_IMPL
 namespace detail {
 
 enum class TransportDrainReason : std::uint32_t {
@@ -1505,36 +1511,6 @@ __aicore__ inline void execute_body(const DeviceTransportContext& context) {
         return;
     auto* state = detail::service_state(queue);
     auto* output = detail::diagnostic(queue);
-#if DEEP_EP_ASCEND_OFFICIAL_SIMT
-    // Validate the same command contract as the native executor before crossing
-    // into SIMT. The backend switch applies to every service invocation, so the
-    // two incompatible SQ-tail conventions never share a channel.
-    auto* table = detail::device_channel_table(context);
-    if (table == nullptr) {
-        detail::record_error(queue, DeviceTransportError::kInvalidChannel, 0, TransportCommandOpcode::kNone, 0, 0);
-        return;
-    }
-    auto* official_commands = reinterpret_cast<__gm__ TransportCommand*>(queue->commands);
-    for (std::uint32_t index = state->consumed_count; index < queue->count; ++index) {
-        auto* current = official_commands + index;
-        aicore::flush_cacheline(current);
-        auto error = detail::validate_command(context, current);
-        int failed_peer = current->world_peer;
-        if (error == DeviceTransportError::kNone)
-            error = detail::preflight_command_channels(context, current, failed_peer);
-        if (error != DeviceTransportError::kNone) {
-            detail::record_error(queue, error, index, current->opcode, failed_peer, current->channel);
-            return;
-        }
-    }
-    asc_vf_call<official_simt::execute_vf>(dim3(32), staged, queue, table,
-        static_cast<std::uint64_t>(context.local_window_base),
-        static_cast<std::uint32_t>(context.topology.scale_up_size),
-        static_cast<std::uint32_t>(context.topology.scale_out_size));
-    asc_sync_vec();
-    aicore::system_fence();
-    return;
-#endif
     AscendC::TPipe pipe;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> scratch_buffer;
     if (!pipe.InitBuffer(scratch_buffer, detail::kServiceScratchBytes)) {

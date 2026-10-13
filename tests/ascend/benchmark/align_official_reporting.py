@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 
+TRANSPORT_MODES = ("staged", "official_direct")
+
+
 OFFICIAL_OPERATION_MAP = {
     "dispatch": "expanded_dispatch",
     "combine": "reduced_combine",
@@ -160,6 +163,12 @@ def build_report(msprof_path: Path, stage_path: Path) -> dict[str, Any]:
     if msprof.get("case_id") != stage_case_id:
         raise ValueError("msprof and stage reports use different case IDs")
 
+    transport_mode = msprof.get("timing_protocol", {}).get(
+        "transport_mode", "staged"
+    )
+    if transport_mode not in TRANSPORT_MODES:
+        raise ValueError(f"unknown transport_mode: {transport_mode!r}")
+
     operations: list[dict[str, Any]] = []
     for official_name, current_name in OFFICIAL_OPERATION_MAP.items():
         stage_op = _select_operation(stage, current_name)
@@ -189,14 +198,17 @@ def build_report(msprof_path: Path, stage_path: Path) -> dict[str, Any]:
                 ),
             }
         }
-        for mapping_name, timing in _stage_mappings(stage_op, stage_profile).items():
-            mappings[mapping_name] = {
-                "seconds": timing["seconds"],
-                "cycles": timing["cycles"],
-                "description": (
-                    "Single aggregated stage-profile observation; not 50-sample msprof statistics"
-                ),
-            }
+        if transport_mode == "staged":
+            for mapping_name, timing in _stage_mappings(
+                    stage_op, stage_profile).items():
+                mappings[mapping_name] = {
+                    "seconds": timing["seconds"],
+                    "cycles": timing["cycles"],
+                    "description": (
+                        "Single aggregated stage-profile observation; "
+                        "not 50-sample msprof statistics"
+                    ),
+                }
 
         bandwidths: dict[str, Any] = {}
         for mapping_name, mapping in mappings.items():
@@ -229,16 +241,25 @@ def build_report(msprof_path: Path, stage_path: Path) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "alignment_scope": "reporting-only",
+        "transport_mode": transport_mode,
         "case_id": stage_case_id,
         "workload": msprof.get("workload"),
         "timing_protocol": msprof.get("timing_protocol"),
         "operations": operations,
         "comparability_caveats": {
             "kernel_boundary": (
-                "The current implementation has no single msprof kernel that "
-                "matches official URMA issue-and-drain. producer_release only "
-                "appends transport commands; use "
-                "stage_service_issue_drain for the preferred proxy."
+                (
+                    "The direct backend times "
+                    "direct_*_producer_release_kernel, which executes HCOMM "
+                    "SIMT issue and drain in the producer kernel."
+                )
+                if transport_mode == "official_direct" else
+                (
+                    "The staged implementation has no single msprof kernel "
+                    "that matches official URMA issue-and-drain. "
+                    "producer_release only appends transport commands; use "
+                    "stage_service_issue_drain for the preferred proxy."
+                )
             ),
             "set_barrier_in_prologue": (
                 "Current implementation lacks the official "
@@ -273,7 +294,14 @@ def build_report(msprof_path: Path, stage_path: Path) -> dict[str, Any]:
         },
         "notes": [
             "Bandwidth uses the official per-rank received-token byte formula.",
-            "stage_service_issue_drain maps service_submit + cq_wait and is the preferred proxy for official URMA issue-and-drain.",
+            (
+                "official_direct reports msprof_raw_outer_kernel_time from "
+                "the direct producer-release kernel; it is the preferred "
+                "mapping for that backend."
+                if transport_mode == "official_direct" else
+                "stage_service_issue_drain maps service_submit + cq_wait and "
+                "is the preferred proxy for official URMA issue-and-drain."
+            ),
             "stage_network maps publication + service_submit + cq_wait + barrier_wait.",
             "stage_producer_plus_network is an upper-bound communication window.",
         ],

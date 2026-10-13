@@ -37,6 +37,16 @@ KERNEL_MATCHES = {
         "combine_epilogue_complete_kernel",
     ),
 }
+DIRECT_KERNEL_MATCHES = {
+    "expanded_dispatch": (
+        "direct_dispatch_producer_release_kernel",
+        "dispatch_epilogue_complete_kernel",
+    ),
+    "reduced_combine": (
+        "direct_combine_producer_release_kernel",
+        "combine_epilogue_complete_kernel",
+    ),
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,6 +69,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--skip-check", action="store_true")
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--transport-mode",
+        choices=("staged", "official_direct"),
+        default=os.environ.get(
+            "DEEP_EP_ASCEND_BENCHMARK_TRANSPORT", "staged"
+        ),
+        help=(
+            "Select the msprof kernel boundary. staged uses the outer "
+            "dispatch/combine kernels and requires stage issue-and-drain "
+            "alignment; official_direct times the producer-release kernel "
+            "that directly drives HCOMM SIMT."
+        ),
+    )
     return parser
 
 
@@ -183,11 +206,16 @@ def main() -> int:
                 barrier=runtime.buffer.barrier,
                 return_all_kernels=True,
             )
+            kernel_matches = (
+                DIRECT_KERNEL_MATCHES
+                if args.transport_mode == "official_direct"
+                else KERNEL_MATCHES
+            )
             urma_name, urma_profile = select_profile(
-                profiles, KERNEL_MATCHES[operation_id][0]
+                profiles, kernel_matches[operation_id][0]
             )
             epilogue_name, epilogue_profile = select_profile(
-                profiles, KERNEL_MATCHES[operation_id][1]
+                profiles, kernel_matches[operation_id][1]
             )
             urma_bytes = int(prepared.traffic[operation_id]["scaleup"])
             local_results.append({
@@ -233,7 +261,11 @@ def main() -> int:
                     "reason": "current ElasticBuffer lacks official set_barrier_in_prologue API",
                     "cold_l2_epilogue_zero": "1<<26 int32 elements after communication launch",
                     "bandwidth_bytes": "per-rank scaleup logical bytes",
+                    "transport_mode": args.transport_mode,
                     "timing": (
+                        "direct producer-release kernel including HCOMM SIMT "
+                        "issue and drain"
+                        if args.transport_mode == "official_direct" else
                         "outer communication kernel for raw msprof collection; "
                         "the staged transport has no single official-equivalent "
                         "URMA issue-and-drain kernel"

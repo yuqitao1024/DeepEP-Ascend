@@ -8,7 +8,7 @@
 
 namespace transport = deep_ep::ascend::transport;
 
-static_assert(transport::kTransportCommandAbiVersion == 3);
+static_assert(transport::kTransportCommandAbiVersion == 4);
 namespace {
 
 int failures = 0;

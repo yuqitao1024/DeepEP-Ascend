@@ -75,6 +75,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage-iterations", type=int, default=1)
     parser.add_argument("--skip-check", action="store_true")
     parser.add_argument(
+        "--transport-mode",
+        choices=("staged", "official_direct"),
+        default="staged",
+        help=(
+            "staged reports stage_service_issue_drain; official_direct "
+            "reports the direct producer-release kernel that executes HCOMM "
+            "SIMT issue and drain"
+        ),
+    )
+    parser.add_argument(
         "--case-timeout-seconds",
         type=int,
         default=1800,
@@ -235,6 +245,11 @@ def _base_arguments(args: argparse.Namespace) -> list[str]:
 
 def _summarize_alignment(alignment_path: Path) -> dict[str, Any]:
     payload = json.loads(alignment_path.read_text(encoding="utf-8"))
+    preferred_mapping_name = (
+        "msprof_raw_outer_kernel_time"
+        if payload.get("transport_mode") == "official_direct" else
+        "stage_service_issue_drain"
+    )
     summary: dict[str, Any] = {
         "case_id": payload.get("case_id"),
         "bytes_per_rank": {},
@@ -244,7 +259,7 @@ def _summarize_alignment(alignment_path: Path) -> dict[str, Any]:
         name = operation.get("official_operation")
         summary["bytes_per_rank"][name] = operation.get("bytes_per_rank")
         mapping = operation.get("bandwidth_mappings", {}).get(
-            "stage_service_issue_drain", {}
+            preferred_mapping_name, {}
         )
         summary["preferred_mapping"][name] = mapping.get("gbps")
     return summary
@@ -278,9 +293,14 @@ def _write_markdown(
         f"- Passed: {passed}",
         f"- Failed: {failed}",
         "",
-        "## Preferred proxy bandwidth",
+        "## Preferred bandwidth",
         "",
-        "The preferred proxy is stage_service_issue_drain.",
+        (
+            "The preferred mapping is msprof_raw_outer_kernel_time from the "
+            "direct producer-release kernel."
+            if workload.get("transport_mode") == "official_direct" else
+            "The preferred proxy is stage_service_issue_drain."
+        ),
         "",
         "| Index | Case | Status | Dispatch GB/s | Combine GB/s |",
         "|---:|---|---|---:|---:|",
@@ -339,6 +359,7 @@ def _write_matrix_summary(
         },
         "workload_fingerprint": manifest.fingerprint,
         "workload": manifest.to_dict()["spec"],
+        "transport_mode": args.transport_mode,
         "cases": rows,
     }
     _write_json_atomic(output_dir / "matrix-summary.json", summary)
@@ -407,6 +428,11 @@ def run_matrix(args: argparse.Namespace) -> int:
                 "cannot resume: workload fingerprint does not match the "
                 "existing matrix summary"
             )
+        if previous.get("transport_mode") != args.transport_mode:
+            raise ValueError(
+                "cannot resume: transport_mode does not match the existing "
+                "matrix summary"
+            )
         rows = list(previous.get("cases", []))
         selected_count = len(all_cases)
 
@@ -443,6 +469,7 @@ def run_matrix(args: argparse.Namespace) -> int:
         msprof_command = torchrun + launcher_arguments + [
             str(repository / "tests/ascend/benchmark/bench_ep_msprof.py"),
             "--case", case_id,
+            "--transport-mode", args.transport_mode,
             "--output", str(msprof_path),
         ] + _base_arguments(args)
         msprof_result = _run_child(
