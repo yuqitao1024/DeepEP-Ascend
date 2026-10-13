@@ -1,7 +1,7 @@
 # Official ASC-COMM SIMT Facade 对接设计草案
 
-日期：2026-10-10，更新于 2026-10-12
-状态：Phase B 开发中；默认路径不变，official_direct / official_ain 仍为实验开关
+日期：2026-10-10，更新于 2026-10-13
+状态：Phase B correctness/performance 已验证；默认路径不变，official_direct 仍为实验开关
 
 ## 1. 目标
 
@@ -337,7 +337,7 @@ Profile pipeline 会在 `ProducerRelease` 后额外拆出
 lane 最多约 7 个；其余 lane 仍应承担数据预处理。若后续启用多 channel，
 可并发 owner 数近似为 `7 × channel_count`，但仍受 channel 表资源限制。
 
-## 6. 分阶段计划
+## 6. 分阶段计划与 16K/top-6 复筛边界
 
 ### Phase A：单 lane direct probe
 
@@ -527,6 +527,19 @@ correctness，最后才做 official reporting performance。staged 后端使用
 bench_msprof 采集协议，但计时对象改为实际执行 HCOMM SIMT issue/drain 的
 producer-release kernel，不使用 raw bench_ep.py。
 
+2026-10-13 的 Phase B 验收只覆盖一个代表性 case：
+`ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0`。它不能替代：
+
+- staged transport 的 144-case 全量基线；
+- BF16 dispatch / FP8 dispatch 的差异；
+- alignment 1、bias、handle copy、previous event、sync/async 和 comm-stream
+  allocation 组合；
+- direct HCOMM 后端的 144-case correctness 和性能边界。
+
+在 direct HCOMM 后端完成自己的 144-case 矩阵前，不应把单 case 的
+“Combine 达到官方参考区间、Dispatch 低约 10%”外推为 direct 后端的全矩阵
+结论。
+
 ## 7. 风险
 
 1. direct-facade 改动会触碰 operator hot path，风险高于 service executor 实验；
@@ -574,6 +587,18 @@ eligibility 条件，不是 selector 名称：例如 token fanout / early route 
 - `DEEP_EP_ASCEND_DISPATCH_PARALLEL_PREFIX`；
 - `DEEP_EP_ASCEND_DISPATCH_CONSUMER_TILE_BYTES=8192`。
 
+补充修正：仅从 selector 名称推导“expanded 模式下仍生效”并不充分。当前
+官方 benchmark 的 expanded_dispatch 在 async/stream overlap 打开时，
+`do_cpu_sync` 路径与 stream-mode eligibility 会影响 device prefix 与
+parallel prefix 的实际选择；144-case 中也存在同步、异步、previous-event
+和 comm-stream allocation 的组合。因此本节应按下述方式理解：
+
+- expanded/async case 只说明 token fanout 与 early route plan 不适用；
+- device prefix、parallel prefix、consumer tile 和 Combine vector-reduce
+  系列是否真正命中，必须以每个 case 的 runtime selector 记录或 stage
+  trace 为准；
+- 不能把某一个同步 case 的命中结果外推到全部 144 case。
+
 当前 reduced Combine 相关的 selector 包括：
 
 - `DEEP_EP_ASCEND_COMBINE_EXPANDED_VECTOR_REDUCE`；
@@ -583,8 +608,18 @@ eligibility 条件，不是 selector 名称：例如 token fanout / early route 
 - `DEEP_EP_ASCEND_COMBINE_LOCAL_COPY_DATACOPY=32768`；
 - `DEEP_EP_ASCEND_COMBINE_DIRECT_LOCAL_PLACEMENT=1`。
 
-这些仍是优化候选，但需要先用官方口径做 same-binary AB。不能因为历史
-8K/top-8 有收益就修改默认值，也不能因为 case 形态变化而直接删除。
+这些仍是优化候选，但 direct HCOMM Phase B 尚未做逐 selector 的
+same-binary AB。当前更明确的处理规则是：
+
+1. 保留代码和默认 selector，不做实现删除或默认值调整；
+2. 先采集 direct HCOMM 的 144-case 基线；
+3. 从报告中筛出 Dispatch 或 Combine 明显低于 staged 全量基线的 case；
+4. 对这些 case 检查实际 runtime selector 命中情况；
+5. 只对已命中且收益方向可疑的 selector 做 same-binary AB；
+6. AB 的默认值修改必须另过 correctness 边界，不能由一轮性能 run 直接决定。
+
+这个顺序把“16K/top-6 适配性复筛”限定为 direct HCOMM 的后续工作，而不是
+把历史 8K/top-8 结论直接迁移到当前默认实现。
 
 ### 9.3 raw bench_ep.py 数据不能作为判定依据
 

@@ -6,6 +6,11 @@
 
 本报告按 DeepSeek 官方 DeepEP-Ascend bench_msprof 性能采集口径，覆盖当前支持的完整 144 个 EP8 case。全部 144 个 case 均通过，无失败项。
 
+本报告的 backend 是默认 staged transport，不是 experimental direct HCOMM。
+其 `stage_service_issue_drain` 口径不能直接替换为 direct 后端的
+producer-release kernel 口径；direct HCOMM 需要单独完成同 workload 的
+144-case correctness/performance 基线。
+
 | 指标 | 数值 |
 |---|---:|
 | Case 总数 | 144 |

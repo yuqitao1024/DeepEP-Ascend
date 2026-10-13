@@ -198,6 +198,12 @@ Ascend build 的编译宏在构建时固化，修改后必须重新构建 extens
 | `DEEP_EP_ASCEND_POLLING_NOP` | `OFF` | 真实机器 polling NOP selector。Driver 25.6 已验证默认关闭无卡死；开启仅用于旧 driver 对照，不是性能优化推荐 |
 | `DEEP_EP_ASCEND_OFFICIAL_DIRECT` | `OFF` | 实验用 direct-facade 后端；producer 不再写入 command queue，由 lane 0 直接调用 Hcomm SIMT API。8-rank correctness 已通过，16K/top-6 official bench_msprof 中 Combine 达到官方参考区间、Dispatch 仍低约 10%；见[direct-facade 设计](../ascend-design/official-asc-comm-facade-integration-plan-zh.md)。旧的 service 内 Official SIMT 执行器无稳定收益且架构方向不合适，已删除 |
 
+`DEEP_EP_ASCEND_OFFICIAL_DIRECT=ON` 的性能结论目前只覆盖
+`ep-fp8-align128-bias0-hcopy0-prev0-async1-alloc0` 一个 case；它尚未完成
+144-case 全量 direct 基线，也不能与 staged 的 144-case 报告逐 case 对比。
+开启该后端做 selector 复筛时，必须重新采集 direct 版本的同 workload 基线，
+不能把 staged 基线的 selector 命中情况当作 direct 后端的证据。
+
 Ascend build 还固定启用三个设备侧 staged-URMA 基础宏：
 `DEEP_EP_ASCEND_STAGED_URMA`、`DEEP_EP_ASCEND_AICORE_URMA_SERVICE` 和
 `DEEP_EP_ASCEND_AICORE_WQE_CALLEE=__aicore__`。它们是当前 AICore transport
