@@ -2,46 +2,48 @@
 
 ## 一分钟概览
 
-MoE通信的难点不在数据搬运本身，而在发送前如何确定通信计划。
+MoE通信需要在搬运数据之前，先根据动态路由确定通信计划。
 
 Router为每个token选择top-k expert，而这些expert分布在多个rank上。因此，每个token的发送目标、接收端存放位置，以及同一token多个结果的聚合方式，都必须在运行时确定。
 
 [DeepEP-Ascend](https://github.com/deepseek-ai/DeepEP-Ascend)将这一动态决策过程放在`Device`侧：`SIMT`负责路由扫描、目标统计、去重、slot计算和通信描述构造；`URMA`/`MTE`负责按描述搬运数据。
 
-`SIMT`的价值不在于替代通信硬件，而在于高效处理“每个token各不相同”的分支、归约和字段构造。
+`SIMT`适合处理“每个token各不相同”的分支、统计和字段构造，为数据搬运准备通信计划。
 
 ## 1. MoE通信的业务背景
 
-MoE模型由多个expert和一个Router组成。每个token进入模型时，Router会从大量expert中选出少量expert。这一机制通常称为top-k：每个token选择k个expert。
+MoE（混合专家）模型由多个expert（专家）和一个Router（路由器）组成。每个token进入模型时，Router会从大量expert中选出少量expert，通常执行前馈网络（FFN）计算。这一选择机制称为top-k：每个token选择k个expert。
 
-在多卡训练中，expert分布在不同rank上。rank表示一个参与训练的计算单元，每个rank负责一部分expert。由此产生两个必要的通信操作：
+一次MoE计算从路由开始，经由expert计算，再回到原始token的输出：
+
+![MoE通信的业务闭环](../ascend-assets/deepep-ascend-simt-moe-business-loop.png)
+
+图1：Router选择expert后，Dispatch把token送到对应rank，Expert/FFN完成计算，Combine把结果送回并按权重聚合。
+
+在多卡训练或推理中，expert分布在不同rank上。rank表示一个参与计算的进程，本文示例可将其理解为一张卡。每个rank负责一部分expert，由此产生两个必要的通信操作：
 
 - Dispatch：把token发送到expert所在rank，并整理成expert可直接处理的输入布局；
 - Combine：把expert输出送回token原始rank，并把top-k结果聚合成一个输出。
 
 通信的复杂性来自Router的动态选择：token 0在这一步可能发送至rank 1和rank 2，下一步可能发送至rank 0和rank 3；同一个rank也可能被多个token选中。因此，发送目标、每个rank的接收数量以及接收端的数据布局，都无法在运行前固定。
 
+![Router动态路由带来的通信变化](../ascend-assets/deepep-ascend-simt-router-dynamic-flow.png)
+
+图2：同一个token在不同step可能去往不同rank，各rank接收的token数量也随路由变化。图中数量只统计这4个示例token，并对同一token的目标rank去重。
+
 MoE通信因此呈现三个特点：
 
 - 动态：路由结果每一步都可能变化；
-- 稀疏：每个rank接收的数据量通常不相等；
+- 稀疏：每个token只选择全部expert中的少量expert；
 - 不均衡：热门expert所在rank可能接收更多token，容易成为通信瓶颈。
-
-![MoE routing：token到expert的动态映射](../ascend-assets/deepep-ascend-simt-moe-routing-v5.png)
-
-图1：MoE routing。左侧token经过Router选择top-k expert，连线终止在右侧具体expert上。
-
-![MoE完整业务流程：从输入token到输出token](../ascend-assets/deepep-ascend-simt-moe-business-flow-v5.png)
-
-图2：MoE完整业务流程。Router选择expert，Dispatch发送token，Expert/FFN计算，Combine返回并加权聚合。
 
 ## 2. Dispatch与Combine的4-rank示例
 
-以下使用一个简化示例：4个rank，每个rank本地有8个token，每个token选择2个expert。示例先给出路由表和返回关系，再由图3拆解通信操作。
+以下使用一个简化示例：4个rank，每个rank本地有8个token，每个token选择2个expert。这里只追踪rank 0的8个token，其他rank的token不计入图中的数量。expert编号及其所在rank按下表设定，用于说明业务关系。
 
 ### 2.1 Dispatch：从Router结果到expert输入
 
-Dispatch的输入是rank 0本地的8个token，以及Router为每个token选出的2个expert。图1展示token、expert与rank的对应关系，下表列出完整的8-token路由结果：
+Dispatch的输入是rank 0本地的8个token，以及Router为每个token选出的2个expert。下表列出完整路由结果：
 
 | token | 选中的expert | expert所在rank | Dispatch操作 |
 | --- | --- | --- | --- |
@@ -53,6 +55,12 @@ Dispatch的输入是rank 0本地的8个token，以及Router为每个token选出�
 | 5 | E9, E11 | 2, 2 | 两个expert都在rank 2，向量只发一份 |
 | 6 | E4, E14 | 0, 3 | 本地保留一份，远端发送一份 |
 | 7 | E13, E16 | 1, 3 | 分别发送给rank 1和rank 3 |
+
+这8个token经过发送去重，再在接收端按expert展开，数据关系如下：
+
+![4-rank Dispatch数据流](../ascend-assets/deepep-ascend-simt-dispatch-case.png)
+
+图3：同一token命中同一rank上的多个expert时，只保留一份向量。16个expert选择对应14份向量：3份留在本地，11份发送至远端；展开后仍形成16个expert输入。
 
 由此可以整理出rank 0的发送关系：
 
@@ -87,23 +95,33 @@ expert计算完成后，每个输出都需要返回原始token所在的rank 0，
 | 6 | 本地E4，rank 3的E14 | 加权聚合本地与远端输出 |
 | 7 | rank 1的E13，rank 3的E16 | 加权聚合两个输出 |
 
+这16个expert输出最终还原为8个token输出，本地与远端来源都参与同一token的聚合：
+
+![4-rank Combine数据流](../ascend-assets/deepep-ascend-simt-combine-case.png)
+
+图4：16个expert输出中，3个来自本地，13个来自远端。每个token的两个expert结果按路由权重聚合，最终得到8个输出。
+
+图中的13个远端输出是expert结果的数量。实现可以先在同一rank内合并同一token的多个结果，实际发送份数不一定等于expert输出数。按权重聚合描述的是模型业务：权重可以在expert侧应用，Combine再对已加权的结果求和。
+
 Combine的业务流程如下：
 
-1. 读取每个expert输出携带的返回信息，包括来源rank、原始token、expert和slot；
-2. 按来源rank组织返回工作，减少零散提交；
-3. 远端expert输出生成远端写描述，由通信硬件写回rank 0；
-4. 本地expert输出直接进入本地聚合；
-5. rank 0根据原始token和slot，将多个expert输出加权reduce，并写回token输出位置。
+1. 各expert所在rank读取返回信息，确定结果属于哪个原始token、需要返回哪个rank；
+2. 按返回目标和token批次组织工作；同一token在该rank上的多个expert结果可以先局部归约；
+3. 为需要返回远端的结果生成通信描述，准备就绪后由通信硬件写回原始rank；
+4. 本地结果直接保留，无需远端传输；
+5. 原始rank等待所需结果到齐，再按token聚合并写回输出。
 
 Dispatch和Combine的业务方向相反，但通信前都需要完成一层动态整理：Dispatch将“token到expert”的路由整理为发送清单；Combine将“expert输出到原始token”的返回关系整理为聚合计划。
 
-![Dispatch与Combine操作拆解：SIMT、scalar与URMA/MTE的执行路径](../ascend-assets/deepep-ascend-simt-dispatch-combine-operations-v5.png)
-
-图3：Dispatch与Combine操作拆解。节点颜色和角色徽标标明SIMT、scalar与URMA/MTE的执行路径。
-
 ## 3. 为什么SIMT适合MoE通信
 
-将Dispatch和Combine拆解后，可以看到`SIMT`的三类优势：
+前面的示例表明：不同token的目标不同，但整理路由的程序相同。多个线程可以分别处理这些token，并在需要时协作完成统计和位置计算。
+
+![为什么SIMT适合MoE通信](../ascend-assets/deepep-ascend-simt-parallel-routing.png)
+
+图5：多个线程执行同一套整理程序，根据各自token的路由处理不同情况。重复rank需要去重，本地与远端结果也需要不同处理。
+
+这类工作与`SIMT`的匹配主要体现在三个方面：
 
 - 结构契合：token可独立并行，统计、去重和slot计算属于分支与归约；
 - 表达自然：通信描述字段可按`lane`分工填写，动态路由能直接映射到线程组织；
@@ -120,21 +138,19 @@ Dispatch和Combine的业务方向相反，但通信前都需要完成一层动�
 | 提交边界 | 协作分工 | scalar | 需要明确的发布顺序 |
 | 数据搬运 | 硬件分工 | URMA/MTE | 硬件传输路径更高效 |
 
-因此，`SIMT`并不替代`URMA`，而是把每个token各不相同的通信需求，转换为硬件可执行的规则描述。
+`SIMT`将每个token各不相同的通信需求，转换为硬件可执行的规则描述，再交给传输路径执行。
 
-`SIMD`与`SIMT`的差异也体现在这里。`SIMD`由一条指令同时处理连续数据，适合规则、连续、少分支的向量计算；`SIMT`则由大量线程执行同一程序，每个线程可执行不同分支，并通过筛选、交换和归约操作协作。MoE通信更符合后者的执行形态：不同token的目标rank不同，重复rank需要去重，接收slot来自动态前缀，通信描述字段也不同。如果只用规则向量计算表达这些逻辑，需要额外展开、掩码和中间状态；`SIMT`则能将这些分支和协作直接写入线程模型。
+`SIMD`用一条指令处理多个数据元素，适合规则、少分支的向量计算；`SIMT`由多个线程执行同一程序，各线程根据数据处理不同分支，并通过筛选、交换和归约协作。图5用一个线程对应一个token来说明这种关系，实际实现也可以让一组线程协作处理一个token。
 
-![Why SIMT：SIMD与SIMT的执行形态对比](../ascend-assets/deepep-ascend-simt-why-simt-v5.png)
-
-图4：Why SIMT。左卡展示SIMD，右卡展示SIMT；AIV作为SIMT卡片内部的执行单元，lane只出现在AIV内部。
+两种方式各有适合的工作。SIMD可以通过掩码等方式处理不规则数据；SIMT则更便于表达不同token的目标判断、重复rank去重和通信字段构造。在Combine中，连续向量的数值归约仍交给SIMD，SIMT整理返回信息。收益既来自表达方式与业务结构的匹配，也来自并行整理和流水组织；实际性能还取决于分支分歧、线程协作和同步成本。
 
 ## 4. Dispatch中的SIMT阶段
 
-图5先给出整体执行方式：8个token分别进入不同AIV，再同步推进路由扫描、目标统计、去重、slot计算和描述构造。后续小节按这张图的阶段展开。
+图6把rank 0的8个token展开为并行整理过程：路由扫描、目标统计与去重、slot计算和描述构造。每个token可以独立整理路由，统计和位置计算则需要线程间协作。
 
-![Dispatch的SIMT并行流程：8个token并行完成路由整理和通信描述构造](../ascend-assets/deepep-ascend-simt-dispatch-dataflow-v6.png)
+![Dispatch的SIMT并行流程](../ascend-assets/deepep-ascend-simt-dispatch-parallel-flow.png)
 
-图5：Dispatch的SIMT并行流程。8个token按AIV分组并行推进目标统计、去重、slot计算和描述构造，随后交给scalar提交和URMA/MTE搬运。
+图6：SIMT整理8个token的路由，去重后形成14份向量的发送关系。slot只示意这批token在各目标rank内的位置；实际地址还要结合其他来源rank的计数。14份逻辑发送关系不等于14条硬件通信描述。
 
 ### 4.1 路由扫描：token独立并行
 
@@ -151,13 +167,13 @@ Dispatch的第一步是读取路由结果。这项工作与`SIMT`高度匹配：
 
 第一个问题需要统计；第二个问题需要去重。以token 2为例，两个expert均位于rank 1，向量只需发送一份，接收端再根据expert展开。
 
-这些操作由大量比较、筛选、前缀和归约组成：判断目标rank是否相同、筛选第一次出现的rank、计算它在目标rank接收队列中的位置。它们虽然不规则，但高度并行，符合`SIMT`的执行形态。
+这些操作由大量比较、筛选、前缀和归约组成：判断目标rank是否相同、保留第一次出现的rank、计算它在接收区域中的位置。它们虽然不规则，但具有较多可并行的工作，符合`SIMT`的执行形态。
 
 ### 4.3 接收slot计算：位置来自动态统计
 
 接收端需要为每个token分配明确的接收slot；expert计算和Combine聚合都依赖该位置。
 
-slot并非预先为某个token固定，而是根据“此前发送至同一个rank的token情况”动态计算。因此，它依赖上一节的统计和去重结果，也是典型的并行归约问题。
+slot并非预先为某个token固定，而是根据目标rank的接收计数，以及token在发送批次中的相对顺序计算。实际接收布局还要结合其他来源rank的计数，因此图6中的编号仅是局部示例。计数汇总和前缀计算可以通过并行归约完成。
 
 ### 4.4 通信描述构造：动态路由的固定表达
 
@@ -173,35 +189,35 @@ slot并非预先为某个token固定，而是根据“此前发送至同一个ra
 
 ## 5. Combine中的SIMT阶段
 
-图6从task视角展示Combine：返回结果先按来源rank分组，通信准备与本地聚合形成流水线。后续小节解释每个环节中SIMT承担的工作。
+Combine既要找到每个结果的返回位置，也要处理expert输出向量。图7将这两类工作放在各发送rank内的流水线中：SIMT整理返回信息，SIMD完成局部归约；结果准备就绪后再提交传输。
 
-![Combine的SIMT流水线：通信准备与本地聚合重叠推进](../ascend-assets/deepep-ascend-simt-combine-dataflow-v6.png)
+![Combine的SIMT流水线与执行分工](../ascend-assets/deepep-ascend-simt-combine-pipeline.png)
 
-图6：Combine的SIMT流水线。返回结果按来源rank组织为task；当前task做本地reduce时，下一个task的通信准备已经推进。
+图7：各发送rank组织自己的返回任务，交错推进信息整理与数据处理。结果来源数量沿用第2章案例，流水线只说明执行分工与依赖，不代表实际耗时比例。
 
-### 5.1 返回信息整理：来源rank、token与slot
+### 5.1 返回信息整理：找到原始token与目标位置
 
-Combine的输入比Dispatch更分散。rank 0接收的expert输出可能来自不同rank；每个输出还携带返回信息，记录其所属原始token、接收slot以及参与的加权聚合。
+expert计算完成后，结果分散在各expert所在rank。Dispatch保留的返回信息记录了原始token、其所属rank，以及expert输入与输出位置之间的对应关系。
 
-这些返回信息同样可以按token并行整理。`SIMT`读取后，将分散结果还原为“每个原始token有哪些输入、分别来自哪里”。
+发送端用`SIMT`并行读取这些信息，确定每个结果从哪里读取、返回哪个rank、放入哪个token对应的位置。业务目标各不相同，但计算地址和填写字段的程序可以并行执行。
 
-### 5.2 task组织：零散结果的批次化
+### 5.2 task组织：按返回目标分批处理
 
-DeepEP-Ascend按task组织Combine。task并非模型层概念，而是通信上的分组，表示来自同一个rank的一组token结果。将返回工作按来源归组，可以减少零散提交，并提前构造远端写描述。
+DeepEP-Ascend把需要返回同一个目标rank的一批token结果组织为task。这里的目标rank是token原始所在的rank；task是执行批次，实际数量取决于token数量、批次大小和执行单元划分。图7中的4个结果来源分组只是业务视角，并不意味着内核固定执行4个task。
 
-`SIMT`可以并行读取返回信息、组织task，并为远端结果生成通信描述；本地结果则不需要远端写，直接进入本地聚合或写回目标位置。
+task划分后，`SIMT`并行读取其中各token的返回信息并构造远端写描述。同一rank上属于同一token的多个expert结果，可先由`SIMD`完成局部归约。以token 2为例，rank 1上的E5和E8可以先合并结果，再返回rank 0；本地结果直接保留。
 
-### 5.3 流水执行：通信准备与本地reduce重叠
+### 5.3 流水执行：信息准备与数据处理协作
 
-Combine并不严格要求“先构造完所有通信，再做本地聚合”。当前task执行本地reduce时，下一个task的返回信息读取和通信描述构造可以并行推进。
+流水线预先整理后续task的信息，使当前task的数据处理能够与后续任务的准备交错推进。`SIMT`负责返回信息和描述，`SIMD`与`MTE`负责向量归约和搬运；数据与描述都准备就绪后，再由`scalar`提交远端传输。
 
-通信准备与本地聚合由此形成流水线：远端写描述尽早提交，本地聚合无需等待全部描述构造完成。`SIMT`适合承担流水线中的返回信息整理和描述构造，因为每个task、每个token的工作同样不规则但可并行。
+发送端局部归约与接收端最终聚合是两个阶段。rank 0只有在所需结果到齐后，才能按原始token完成最终聚合；图7中的流水准备不意味着提前得到最终输出，也不意味着SIMT与SIMD在同一执行资源上同时运行。
 
 多`AIV`并发是另一个重要原因。每个`AIV`处理一段token，并拥有独立的待提交描述区间。多个`AIV`因此可以同时完成路由统计和描述构造，避免所有工作集中在同一个提交点。
 
 ## 6. 性能数据
 
-DeepEP-Ascend官方性能报告给出以下带宽数据：
+DeepEP-Ascend的[官方性能报告](https://github.com/deepseek-ai/DeepEP-Ascend#performance)给出以下带宽数据。测试使用Ascend 950DT、CANN 9.2.0及报告说明的PoC HDK配置，通过netlayer 1网络通信；每rank容量为16,384个token，向量维度7168，top-6路由、256个expert。Dispatch使用FP8，Combine使用BF16。
 
 | EP size | Dispatch GB/s | Combine GB/s |
 | ---: | ---: | ---: |
@@ -211,13 +227,13 @@ DeepEP-Ascend官方性能报告给出以下带宽数据：
 | EP64 | 323-327 | 294-298 |
 | EP128 | 313-320 | 272-278 |
 
-统计范围包含通信描述提交和等待传输完成，不包含最后的模型计算阶段。Dispatch在EP32以内达到物理数据带宽的约90%-95%。
+表中区间覆盖各rank的测量结果。计时包含通信提交和等待传输完成，排除最终后处理阶段，包括Dispatch的expert输入展开和Combine的最终聚合。按报告口径，Dispatch在EP32以内达到物理数据带宽上限的约90%-95%。
 
-这组数据说明：当动态路由和描述构造被有效并行化后，通信路径仍能接近硬件数据带宽。但这并不表示所有MoE负载都会得到相同结果；实际收益取决于token数、top-k、expert分布和rank间均衡度。
+这组数据呈现的是完整实现中上述计时范围的通信吞吐，并非SIMT与SIMD的单独对照实验，不能据此计算SIMT带来的独立加速比。实际收益还取决于token数、top-k、expert分布和rank间均衡度。
 
 ## 7. 结语
 
-DeepEP-Ascend给出了一个清晰示例：MoE通信中最复杂的部分，是将动态top-k结果转换为确定的发送计划和通信描述。
+DeepEP-Ascend展示了MoE通信中的一个关键环节：将动态top-k结果转换为确定的发送计划和通信描述。
 
 这类工作与`SIMT`高度匹配：token可并行，统计和去重属于分支与归约，通信描述字段可并行构造；`scalar`和`URMA`/`MTE`继续负责提交边界和数据搬运。
 
@@ -227,7 +243,10 @@ DeepEP-Ascend给出了一个清晰示例：MoE通信中最复杂的部分，是�
 
 - `AIV`：Ascend设备上的执行单元；
 - `SIMT`：同一指令流驱动大量线程，适合并行处理独立数据；
-- `lane`：`SIMT`执行中的线程编号，可用于分工填写通信描述字段；
+- `SIMD`：一条指令处理多个数据元素，适合规则的向量计算；
+- `lane`：同一线程组内的线程位置编号，可用于分工填写通信描述字段；
+- `slot`：接收区域中为token或返回结果安排的位置；
+- `task`：按返回目标和token批次组织的一组执行工作；
 - `Host` / `Device`：`Host`负责控制流和资源初始化，`Device`执行设备侧计算和通信路径；
 - `scalar`：AICore上的标量执行路径，适合维护明确提交边界；
 - `URMA`：负责远端写入的通信硬件路径；

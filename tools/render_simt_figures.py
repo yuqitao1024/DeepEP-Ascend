@@ -1,3 +1,11 @@
+"""Historical mixed-rendering experiment; current article figures use imagegen.
+
+Outputs go to the scratch archive so this script cannot recreate retired article
+assets in the published documentation directory.
+"""
+
+from pathlib import Path
+
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 
@@ -246,5 +254,7 @@ def render_combine(path):
 
 
 if __name__ == "__main__":
-    render_dispatch("docs/ascend-assets/deepep-ascend-simt-dispatch-dataflow-v6.png")
-    render_combine("docs/ascend-assets/deepep-ascend-simt-combine-dataflow-v6.png")
+    archive_dir = Path(".scratch/imagegen/legacy-renderer")
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    render_dispatch(str(archive_dir / "deepep-ascend-simt-dispatch-dataflow-v6.png"))
+    render_combine(str(archive_dir / "deepep-ascend-simt-combine-dataflow-v6.png"))
