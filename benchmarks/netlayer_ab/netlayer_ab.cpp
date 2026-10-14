@@ -30,6 +30,7 @@ struct Options {
     std::uint32_t iterations = 10;
     std::uint32_t warmup = 3;
     std::uint32_t timeout_cycles = 100000000;
+    std::uint32_t drain_mode = 0;
     std::string root_info_path;
     bool publish_root_info = false;
     std::string make_root_info_path;
@@ -69,6 +70,11 @@ Options parse_options(int argc, char** argv) {
             options.warmup = static_cast<std::uint32_t>(std::stoul(next()));
         } else if (argument == "--timeout-cycles") {
             options.timeout_cycles = static_cast<std::uint32_t>(std::stoul(next()));
+        } else if (argument == "--drain-mode") {
+            const auto mode = std::stoul(next());
+            if (mode > 1)
+                std::exit(2);
+            options.drain_mode = static_cast<std::uint32_t>(mode);
         } else if (argument == "--root-info") {
             options.root_info_path = next();
         } else if (argument == "--publish-root-info") {
@@ -98,6 +104,8 @@ Options parse_options(int argc, char** argv) {
         std::fprintf(stderr, "payload_bytes must be a positive multiple of chunk_bytes <= 4GB\n");
         std::exit(2);
     }
+    if (!making_root_info && options.drain_mode > 1)
+        std::exit(2);
     if (making_root_info)
         options.root_info_path = options.make_root_info_path;
     if (!making_root_info && options.root_info_path.empty()) {
@@ -540,7 +548,7 @@ bool verify(Resources& resources, const Options& options, std::string* error) {
 
 bool run(Resources& resources,
          const Options& options,
-         std::vector<double>& elapsed_ms,
+         std::vector<double>& wall_elapsed_ms,
          std::string* error) {
     netlayer_ab::DeviceControl control{};
     control.local_payload = reinterpret_cast<std::uint64_t>(resources.payload);
@@ -553,6 +561,7 @@ bool run(Resources& resources,
     control.channels =
         reinterpret_cast<std::uint64_t>(resources.channels);
     control.timeout_cycles = options.timeout_cycles;
+    control.drain_mode = options.drain_mode;
     if (!check_acl(aclrtMemcpy(resources.control,
                                sizeof(control),
                                &control,
@@ -598,9 +607,10 @@ bool run(Resources& resources,
             *error = buffer;
             return false;
         }
-        if (iteration >= options.warmup)
-            elapsed_ms.push_back(
+        if (iteration >= options.warmup) {
+            wall_elapsed_ms.push_back(
                 std::chrono::duration<double, std::milli>(end - start).count());
+        }
     }
     if (!verify(resources, options, error))
         return false;
@@ -624,9 +634,9 @@ int netlayer_ab_main(const std::vector<std::string>& argument_values) {
         return make_root_info(options) ? 0 : 1;
     Resources resources{};
     std::string error;
-    std::vector<double> elapsed_ms;
+    std::vector<double> wall_elapsed_ms;
     if (!initialize(resources, options, &error) ||
-        !run(resources, options, elapsed_ms, &error)) {
+        !run(resources, options, wall_elapsed_ms, &error)) {
         std::fprintf(stderr,
                      "rank=%u ERROR %s\n",
                      options.rank,
@@ -636,36 +646,39 @@ int netlayer_ab_main(const std::vector<std::string>& argument_values) {
     }
 
     double total = 0;
-    double minimum = elapsed_ms.empty() ? 0 : elapsed_ms[0];
-    double maximum = 0;
-    for (const auto value : elapsed_ms) {
+    double wall_minimum = wall_elapsed_ms.empty() ? 0 : wall_elapsed_ms[0];
+    double wall_maximum = 0;
+    for (const auto value : wall_elapsed_ms) {
         total += value;
-        minimum = std::min(minimum, value);
-        maximum = std::max(maximum, value);
+        wall_minimum = std::min(wall_minimum, value);
+        wall_maximum = std::max(wall_maximum, value);
     }
-    const double mean = elapsed_ms.empty() ? 0 : total / elapsed_ms.size();
+    const double wall_mean = wall_elapsed_ms.empty() ? 0 : total / wall_elapsed_ms.size();
     const double bytes = static_cast<double>(resources.active_peers.size()) *
                          options.payload_bytes;
-    const double gbps = elapsed_ms.empty() ?
-        0 : bytes / (mean / 1000.0) / (1024.0 * 1024.0 * 1024.0);
+    const double wall_gibps = wall_elapsed_ms.empty() ?
+        0 : bytes / (wall_mean / 1000.0) / (1024.0 * 1024.0 * 1024.0);
     std::printf(
-        "rank=%u layer=%u payload=%llu chunk=%llu iterations=%u "
-        "mean_ms=%.6f min_ms=%.6f max_ms=%.6f send_gibps=%.6f\n",
+        "rank=%u layer=%u payload=%llu chunk=%llu iterations=%u drain_mode=%u "
+        "wall_mean_ms=%.6f wall_min_ms=%.6f wall_max_ms=%.6f "
+        "wall_send_gibps=%.6f\n",
         options.rank,
         options.layer_index,
         static_cast<unsigned long long>(options.payload_bytes),
         static_cast<unsigned long long>(options.chunk_bytes),
         options.iterations,
-        mean,
-        minimum,
-        maximum,
-        gbps);
+        options.drain_mode,
+        wall_mean,
+        wall_minimum,
+        wall_maximum,
+        wall_gibps);
     if (!options.result_path.empty()) {
-        std::string content = std::to_string(mean) + "\n" +
-                              std::to_string(minimum) + "\n" +
-                              std::to_string(maximum) + "\n" +
-                              std::to_string(gbps) + "\n" +
-                              std::to_string(resources.active_peers.size()) + "\n";
+        std::string content =
+            "wall_mean_ms=" + std::to_string(wall_mean) + "\n" +
+            "wall_min_ms=" + std::to_string(wall_minimum) + "\n" +
+            "wall_max_ms=" + std::to_string(wall_maximum) + "\n" +
+            "wall_send_gibps=" + std::to_string(wall_gibps) + "\n" +
+            "peer_count=" + std::to_string(resources.active_peers.size()) + "\n";
         if (!write_file(options.result_path, content)) {
             std::fprintf(stderr, "rank=%u failed to write result\n", options.rank);
             destroy(resources, options);

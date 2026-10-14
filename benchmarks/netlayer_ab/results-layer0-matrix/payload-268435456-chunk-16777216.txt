@@ -1,0 +1,1 @@
+layer=0 world_size=8 payload_bytes=268435456 chunk_bytes=16777216 iterations=20 warmup=5 wall_slowest_mean_ms=36.509876 wall_mean_rank_ms=36.416655 wall_send_sum_gibps=384.440248 wall_slowest_rank_gibps=47.932236 peer_counts=7,7,7,7,7,7,7,7 min_peer_count=7

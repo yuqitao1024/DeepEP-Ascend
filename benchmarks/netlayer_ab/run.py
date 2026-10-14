@@ -4,10 +4,10 @@
 import argparse
 import pathlib
 import random
-import statistics
 import subprocess
 import sys
 import tempfile
+import statistics
 
 
 def parse_args():
@@ -20,13 +20,38 @@ def parse_args():
     parser.add_argument("--iterations", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--timeout-cycles", type=int, default=100_000_000)
+    parser.add_argument("--drain-mode", choices=("per-peer", "post-all"), default="per-peer")
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--output", default=None)
     return parser.parse_args()
 
 
+def parse_rank_result(path: pathlib.Path) -> dict:
+    values = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+    required = (
+        "wall_mean_ms", "wall_min_ms", "wall_max_ms", "wall_send_gibps",
+        "peer_count",
+    )
+    missing = [key for key in required if key not in values]
+    if missing:
+        raise ValueError(f"{path}: missing result fields: {', '.join(missing)}")
+    return values
+
+
+def percentile(values, fraction):
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, round(fraction * (len(ordered) - 1))))
+    return ordered[index]
+
+
 def main():
     args = parse_args()
+    drain_mode = {"per-peer": 0, "post-all": 1}[args.drain_mode]
     script_dir = pathlib.Path(__file__).resolve().parent
     binary = pathlib.Path(args.binary or script_dir / "build" / "netlayer_ab")
     if not binary.is_file():
@@ -52,6 +77,7 @@ def main():
             print(bootstrap.stdout, end="")
             print(bootstrap.stderr, end="", file=sys.stderr)
             raise SystemExit("failed to generate HCCL root info")
+
         result_files = [
             pathlib.Path(directory) / f"rank-{rank}.txt"
             for rank in range(args.world_size)
@@ -68,6 +94,7 @@ def main():
                 "--iterations", str(args.iterations),
                 "--warmup", str(args.warmup),
                 "--timeout-cycles", str(args.timeout_cycles),
+                "--drain-mode", str(drain_mode),
                 "--root-info", str(root_info),
                 *(["--publish-root-info"] if rank == 0 else []),
                 "--result", str(result_files[rank]),
@@ -103,29 +130,26 @@ def main():
         if timed_out:
             raise SystemExit(124)
 
-        means = []
-        bandwidths = []
-        peer_counts = []
-        for rank in range(args.world_size):
-            values = result_files[rank].read_text().splitlines()
-            mean, _minimum, _maximum, bandwidth = map(float, values[:4])
-            means.append(mean)
-            bandwidths.append(bandwidth)
-            peer_counts.append(int(values[4]))
+        ranks = [parse_rank_result(path) for path in result_files]
+        wall_means = [float(rank["wall_mean_ms"]) for rank in ranks]
+        peer_counts = [int(rank["peer_count"]) for rank in ranks]
 
-        slowest = max(means)
-        aggregate_gibps = sum(bandwidths)
-        slowest_rank_gibps = (
-            (args.world_size - 1) * args.payload_bytes
-            / (slowest / 1000.0) / (1024 ** 3)
+        slowest_wall = max(wall_means)
+        aggregate_wall_gibps = sum(float(rank["wall_send_gibps"]) for rank in ranks)
+        slowest_rank_wall_gibps = (
+            min(peer_counts) * args.payload_bytes
+            / (slowest_wall / 1000.0) / (1024 ** 3)
         )
+
         line = (
             f"layer={args.layer_index} world_size={args.world_size} "
             f"payload_bytes={args.payload_bytes} chunk_bytes={args.chunk_bytes} "
-            f"slowest_mean_ms={slowest:.6f} "
-            f"mean_rank_ms={statistics.mean(means):.6f} "
-            f"send_sum_gibps={aggregate_gibps:.6f} "
-            f"slowest_rank_gibps={slowest_rank_gibps:.6f} "
+            f"drain_mode={args.drain_mode} "
+            f"iterations={args.iterations} warmup={args.warmup} "
+            f"wall_slowest_mean_ms={slowest_wall:.6f} "
+            f"wall_mean_rank_ms={statistics.mean(wall_means):.6f} "
+            f"wall_send_sum_gibps={aggregate_wall_gibps:.6f} "
+            f"wall_slowest_rank_gibps={slowest_rank_wall_gibps:.6f} "
             f"peer_counts={','.join(map(str, peer_counts))} "
             f"min_peer_count={min(peer_counts)}"
         )

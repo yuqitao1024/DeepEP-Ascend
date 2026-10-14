@@ -125,7 +125,7 @@ struct alignas(64) DeviceControl {
     std::uint32_t failed_peer;
     std::uint32_t failed_stage;
     std::uint32_t backend_status;
-    std::uint32_t reserved0;
+    std::uint32_t drain_mode;
     std::uint64_t cycle_counter;
     std::uint64_t cycle_frequency;
     std::uint64_t reserved1[4];
