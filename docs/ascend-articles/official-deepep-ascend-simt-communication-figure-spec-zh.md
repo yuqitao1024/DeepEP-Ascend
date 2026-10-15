@@ -1113,3 +1113,257 @@ Set title and ALL section headers to REGULAR or LIGHT sans-serif weight. No bold
 - 结果来源分组不是实际固定task数量；发送端按原始token所在的返回目标划分批次。
 - 权重聚合是模型业务；权重可以提前应用，Combine归约已加权结果。
 - 性能表核对[官方README](https://github.com/deepseek-ai/DeepEP-Ascend#performance)，排除最终后处理，不作为SIMT相对SIMD的独立加速比。
+
+## 内部分析：两个rank的通信往返与主动方
+
+日期：2026-10-15。用途：个人学习与协议分析，不加入软文正文，也不改变正文7张图的编号。本节允许WQE、SGE、SQ、CQ、CQE、doorbell、Jetty、UBMEM、metadata等通信术语；前文的软文禁用词不适用于本节。视觉仍沿用Gruvbox Light。
+
+### 实现基线与分析范围
+
+沿用软文所引用的官方DeepEP-Ascend，固定源码版本为 `3b25377d04b24fc6154698ded78a2bcb2c59afff`。这里分析非cached、expanded Dispatch/Combine；将完成等待放在epilogue，即 `barrier_in_prologue=false`。初始化、Host计数同步及deferred epilogue只说明作用，不展开额外分支。
+
+本目录fork的 `csrc/backends/ascend/` 还包含其他transport/service协议，本节不将这些路径的控制标志混入官方直接构造并提交WQE的流程。
+
+### 核心答案：相同代码怎样既发送又接收
+
+每个rank维护自己的输入、通信窗口、workspace、Jetty/SQ/CQ，以及本地expert输入输出。相同代码的参数 `rank_idx` 和本地路由、地址、返回metadata不同，因此“发给其他rank”和“处理其他rank发来的数据”分别作用于本rank的发送列表和接收窗口。
+
+这条实现的数据面是URMA单边远端写。发送rank的AIV构造并提交WQE，URMA硬件读取发送侧数据并写入目标rank已注册的HBM窗口。目标rank的AIV无需针对每个WRITE调用post-recv，也不需要被远端调用或回调唤醒。对端内存被硬件写入，可以与本rank准备或提交自己的发送并行进行。
+
+接收后的计算由本rank自己调度：先完成本地发送CQ drain并参与跨rank barrier，再执行copy/reduce epilogue处理已接收的数据。因此，“同一个rank兼任发送和接收”指同一轮集合操作中的双重角色，并不要求一个SIMT线程在同一时刻同时执行发送和接收代码。[发送描述与提交](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/impls/ep/dispatch.hpp#L327)、[本地CQ与barrier](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/comm/barrier.hpp#L112)。
+
+### 两rank示例与符号
+
+只设两个rank，top-k=1：
+
+| 对象 | 原始rank | 被选expert | expert所在rank | 完整业务方向 |
+| --- | --- | --- | --- | --- |
+| token A | rank 0 | E1 | rank 1 | rank 0 → rank 1计算 → rank 0输出 |
+| token B | rank 1 | E0 | rank 0 | rank 1 → rank 0计算 → rank 1输出 |
+
+A是主要跟踪对象，B说明另一rank同时执行的镜像工作。两者没有本地expert命中，因此示例没有本地保留的数据路径；若出现本地命中，则通过本地MTE复制或归约处理，无需为该结果生成远端WRITE。
+
+- `N01=1`：rank 0需要给rank 1发送1份去重后的token向量。
+- `N10=1`：rank 1需要给rank 0发送1份去重后的token向量。
+- `M`：每个来源rank的预留token容量，来自 `num_max_tokens_per_rank`。
+- `s01=0`、`s10=0`：例中各来源区域的局部slot。实际实现还分配各AIV的区间和前缀。
+- `A'`：E1对A计算得到的expert结果；`B'`：E0对B计算得到的expert结果。
+
+### 0. 一次性准备：两端分别准备自己的通信资源
+
+两边Host都创建通信上下文，分配并注册本地HBM通信窗口与workspace，建立peer地址和Jetty资源。资源信息下发给本地kernel，后续WQE才能计算对端地址，UBMEM访问才能定位对端控制信息。
+
+`get_sym_ptr` 使用“对端workspace基地址 + 当前字段在本地workspace中的偏移”得到对端控制字段地址；`HcommPeerInfo`提供URMA远端窗口基地址与访问凭据。资源预先就绪，所以每个token发送前不需要rank 1临时返回一条“同意接收”的消息。[对称地址映射](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/layout/common/signals.hpp#L19)、[peer信息](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/comm/handle.hpp#L49)。
+
+### 1. Dispatch：原始token主动推送至expert所在rank
+
+| 步骤 | rank 0主动做什么 | rank 1主动做什么 | 通信方向、执行路径与等待条件 |
+| --- | --- | --- | --- |
+| D1：进入本轮 | 调用本地Dispatch，参与入口barrier | 同样调用Dispatch并参与入口barrier | 两边通过UBMEM信号对齐本轮；不是rank 0远程调用rank 1的Dispatch |
+| D2：扫描路由 | SIMT扫描A→E1，得到目标rank 1，统计并分配s01 | SIMT扫描B→E0，得到目标rank 0，统计并分配s10 | 两边都先处理自己的输入；目标去重、计数、slot由本地SIMT完成 |
+| D3：发布计数 | 将N01发布到rank 1的remote-rank histogram；向E1所在rank贡献expert计数 | 将N10发布到rank 0的对应字段；向E0所在rank贡献expert计数 | UBMEM远端store/atomic；N01由rank 0发起，N10由rank 1独立发起 |
+| D4：处理输入规模 | 等自己workspace里的各来源计数，生成rank/expert接收前缀 | 同样等各来源计数，生成本地接收前缀 | 本rank轮询本rank的计数字段；统计到齐仅证明计划已到齐，不证明token向量已到达 |
+| D5：准备发送 | 构造指向rank 1接收窗口的WRITE WQE/SGE，准备A和metadata | 构造指向rank 0接收窗口的WRITE WQE/SGE，准备B和metadata | 两边都写自己的SQ；metadata包含top-k信息、原始token全局编号等，FP8还携带scales |
+| D6：提交发送 | scalar等待SIMT与必要本地数据准备完成，推进SQ head并ring doorbell | 执行同样的本地提交 | doorbell由本rank的scalar发起，通知本rank的URMA发送硬件 |
+| D7：异步WRITE | rank 0的URMA读取A及metadata，写入rank 1的来源rank 0区域 | rank 1的URMA读取B及metadata，写入rank 0的来源rank 1区域 | A：0→1；B：1→0；接收rank不主动READ，也不逐消息post-recv |
+| D8：发送完成等待 | scalar对自己的各Jetty执行drain，poll本地CQ并检查CQE状态 | 同样drain自己的Jetty/CQ | rank 0确认的是自己的A发送完成，rank 1确认的是自己的B发送完成；这一步尚不是接收后的expert展开 |
+| D9：跨rank完成同步 | 本地drain完成后，通过UBMEM向各rank发送barrier signal，再轮询自己的signal | 同样先drain，再发布自己的signal并等待全体到齐 | 各rank发出signal前已完成各自发送；双方barrier通过后，所需远端WRITE均满足该协议的完成条件 |
+| D10：处理收到的数据 | 本地copy epilogue读取接收窗口中的B，展开/整理为E0输入，保存回传metadata | 本地copy epilogue读取A，展开/整理为E1输入，保存回传metadata | 数据展开由接收rank自己的AIV/MTE主动执行；不是远端WRITE自动执行expert计算 |
+
+D3与D4中的rank计数及expert计数均包括到达状态；即使某个贡献值为0，也要发布相应参与状态。SIMT worker先发布控制信息再等待其他rank的控制信息。向量WRITE要等本地描述就绪并由scalar提交，不能把“已经收到计数”当成“已经收到数据”。
+
+Dispatch接收缓冲按来源rank预留独立区域。发送rank 0写到rank 1窗口中的 `source_rank=0` 区域，发送rank 1写到rank 0窗口中的 `source_rank=1` 区域。目的地址可以由“peer窗口基地址 + 来源rank区域偏移 + slot×token_stride”构造，不需要为每份向量和接收rank做临时地址握手。接收端再根据各来源计数确定有效范围，形成expert输入布局。[计数发布与等待](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/impls/ep/dispatch.hpp#L315)、[WRITE字段](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/impls/ep/dispatch.hpp#L388)、[接收缓冲分区](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/layout/ep/token.hpp#L115)。
+
+### 2. FFN：接收端自己的模型计算
+
+rank 1在本地Dispatch copy epilogue完成后，将A交给本地E1/FFN，得到A'；rank 0将B交给本地E0/FFN，得到B'。这里只标记计算位置，不展开FFN内部。
+
+FFN是模型在本rank上的正常计算调用。rank 0的URMA WRITE没有远程触发rank 1执行FFN；rank 1的应用根据本地算子完成依赖自行执行。两端的计算耗时可以不同，较快的一端可先到Combine入口等待另一端。
+
+### 3. Combine：expert所在rank主动将结果写回原始rank
+
+| 步骤 | rank 0主动做什么 | rank 1主动做什么 | 通信方向、执行路径与等待条件 |
+| --- | --- | --- | --- |
+| C1：进入本轮 | E0/FFN完成后调用本地Combine，参与入口barrier | E1/FFN完成后调用本地Combine，参与入口barrier | 两边都调用相同Combine；此时rank 0持有B'，rank 1持有A' |
+| C2：恢复返回目标 | 读取Dispatch保存的src_metadata，发现B'应返回rank 1/token B | 读取src_metadata，发现A'应返回rank 0/token A | SIMT读取输入位置、原始token编号、master top-k槽等；沿用Dispatch handle，无需重做Router和计数交换 |
+| C3：组织task与准备 | 按原始rank 1和批次组织task，构造B'返回WRITE描述 | 按原始rank 0和批次组织task，构造A'返回WRITE描述 | task的rank是原始token所在rank，也是当前结果的返回目标；不是expert结果的来源rank |
+| C4：准备数据与提交 | 如同一token在本rank有多个expert结果，用SIMD局部归约；准备后由scalar提交 | 同样处理并提交A' | 示例top-k=1，远端单结果可直接从expert输出地址发送，无需必经send_buffer；末尾追加strong-order NOP请求CQE，再doorbell |
+| C5：结果WRITE | rank 0的URMA将B'写入rank 1的Combine接收slot | rank 1的URMA将A'写入rank 0的Combine接收slot | B'：0→1；A'：1→0。A结果的返回由rank 1主动发起，rank 0不发起READ拉取 |
+| C6：发送完成等待 | scalar drain本地CQ，确认自己发出的B'完成 | scalar drain本地CQ，确认自己发出的A'完成 | CQ是各发送rank本地的完成队列；末尾ordered NOP作为发送批次的完成标记 |
+| C7：跨rank完成同步 | drain后通过UBMEM发布本rank barrier signal，并等待自己的signal达到本轮目标 | 同样发布并等待 | rank 0的自己的CQ只证明B'发送完成；还要等rank 1的barrier参与状态，才能按该协议确认A'已完成写回 |
+| C8：最终聚合 | 本地reduce epilogue读取A'及其他有效贡献，写出A最终输出 | 同样读取B'并写出B最终输出 | 归约由原始token所在rank自己的SIMD/MTE执行；top-k=1只是单个有效贡献，top-k>1需归约各rank的部分结果 |
+
+Combine远端地址按“原始token编号 + top-k master槽或来源rank分组”定位，和Dispatch发送slot不同。示例A的原始编号属于rank 0；rank 1用保存的metadata构造rank 0对应返回地址。top-k较大且同一rank有多个expert命中时，发送端可以先局部归约，每个参与rank返回一个token部分结果，原始rank再做最终归约。[返回信息与WQE](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/impls/ep/combine.hpp#L59)、[task、局部归约与ordered NOP](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/impls/ep/combine.hpp#L239)、[最终归约](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/impls/ep/combine_reduce_epilogue.hpp#L100)。
+
+### 4. 谁通知谁：容易混淆的三个层次
+
+| 对象 | 由谁主动产生 | 谁检查或使用 | 表示什么 |
+| --- | --- | --- | --- |
+| rank/expert计数 | 每个来源rank发布自己的统计贡献 | expert所在rank检查本地workspace | 需要接收多少有效token或expert输入，携带统计到达状态 |
+| 发送侧CQE | 发送侧URMA完成协议产生本地CQE | 同一发送rank的scalar poll CQ | 本rank已提交的发送批次完成；不是对端AIV处理完FFN的通知 |
+| 跨rank barrier signal | 每个rank的AIV通过UBMEM remote atomic主动发布 | 每个rank轮询自己的barrier_signals | 所有rank到达相同完成边界；完成barrier在各rank的CQ drain之后发布 |
+
+CQ所在rank与最终消费数据的rank不同：A的Dispatch WRITE对应rank 0的发送完成状态；rank 1通过全体完成barrier确认可处理自己的接收窗口。A'的Combine WRITE对应rank 1的发送完成状态；rank 0通过相同机制确认可读最终返回数据。
+
+barrier不是每个token一条软件ACK。该实现使用循环phase/sign和本地counter复用控制状态，不是每轮清空所有signal，也不是所有轮次都简单等待数值等于2。图中的“双向barrier信号”只表示两个rank均参与本轮，省略了phase复用、自身贡献及多个AIV同步细节。[barrier完整实现](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/comm/barrier.hpp#L112)、[CQ poll与drain](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/comm/handle.hpp#L397)。
+
+### 5. 为什么等待不会阻止另一端把数据写进来
+
+1. UBMEM计数由各rank先发布，再等待其他来源；两端不会都只等对方“先给数据量”。
+2. scalar ring doorbell后，URMA负责异步推进WRITE。接收rank的AIV可以忙于自己的路由或在轮询控制状态，接收窗口仍可由通信硬件写入。
+3. 完成barrier要求各rank先drain自己的发送。rank 0等rank 1的signal时，rank 1先完成自己的发送并发布signal；镜像路径遵循相同规则。
+4. 应用必须让所有rank按一致顺序进入匹配的Dispatch、Combine和barrier轮次。没有需要发送的payload，也仍要完成相应控制参与；空CQ drain不会凭空等待一份不存在的发送。
+5. kernel已返回或普通NPU event完成，不单独等于URMA传输完成。官方Host包装保留x、metadata_send_buffer、send_buffer等源张量生命周期，直到epilogue排入drain；缓冲不能在异步WRITE读完之前被回收或覆盖。[源张量生命周期](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/csrc/buffers/ep.hpp#L284)、[Combine生命周期](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/csrc/buffers/ep.hpp#L509)。
+
+### 6. 可复查的Mermaid时序稿
+
+以下是同一流程的代码形式。图中将每个rank的多个AIV压缩成一个“本地程序”参与者，将该rank的URMA、HBM和CQ压缩成一个资源参与者。UBMEM消息与URMA WRITE分别标注，避免把控制面误画成数据面。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P0 as rank 0 本地程序
+    participant H0 as rank 0 URMA/HBM/CQ
+    participant H1 as rank 1 URMA/HBM/CQ
+    participant P1 as rank 1 本地程序
+
+    Note over P0,P1: 初始化后，两端已有peer地址、注册窗口与各自SQ/CQ
+    Note over P0,P1: 两端都执行Dispatch入口barrier（细节省略）
+    P0->>P0: SIMT扫描A→E1，计数与slot分配
+    P1->>P1: SIMT扫描B→E0，计数与slot分配
+    P0->>H1: UBMEM发布N01和E1计数贡献
+    P1->>H0: UBMEM发布N10和E0计数贡献
+    P0->>H0: 读取本地收到的来源计数
+    P1->>H1: 读取本地收到的来源计数
+    Note over P0,P1: 计数到齐与payload到齐是不同状态
+
+    P0->>H0: SIMT写本地WQE/SGE，scalar doorbell
+    P1->>H1: SIMT写本地WQE/SGE，scalar doorbell
+    par A由rank 0主动发送
+        H0->>H1: URMA WRITE A + metadata
+    and B由rank 1主动发送
+        H1->>H0: URMA WRITE B + metadata
+    end
+    P0->>H0: scalar drain/poll本地发送CQ
+    P1->>H1: scalar drain/poll本地发送CQ
+    Note over P0,P1: 各rank仅在本地drain完成后发布本轮signal
+    P0->>H1: UBMEM remote atomic：barrier signal
+    P1->>H0: UBMEM remote atomic：barrier signal
+    P0->>H0: 等待本地barrier_signals满足本轮目标
+    P1->>H1: 等待本地barrier_signals满足本轮目标
+    P0->>H0: copy epilogue：读取B，形成E0输入
+    P1->>H1: copy epilogue：读取A，形成E1输入
+    P0->>P0: FFN(B) → B'
+    P1->>P1: FFN(A) → A'
+
+    Note over P0,P1: 两端都执行Combine入口barrier（细节省略）
+    P0->>P0: src_metadata确定B'返回rank 1/token B
+    P1->>P1: src_metadata确定A'返回rank 0/token A
+    P0->>H0: SIMT构造WQE；数据就绪后scalar提交
+    P1->>H1: SIMT构造WQE；数据就绪后scalar提交
+    Note over P0,P1: 各自发送序列末尾追加strong-order NOP请求CQE
+    par A'由rank 1主动返回
+        H1->>H0: URMA WRITE A'至rank 0 Combine slot
+    and B'由rank 0主动返回
+        H0->>H1: URMA WRITE B'至rank 1 Combine slot
+    end
+    P0->>H0: scalar drain/poll本地发送CQ
+    P1->>H1: scalar drain/poll本地发送CQ
+    P0->>H1: UBMEM remote atomic：完成barrier signal
+    P1->>H0: UBMEM remote atomic：完成barrier signal
+    P0->>H0: 等待本地barrier通过
+    P1->>H1: 等待本地barrier通过
+    P0->>H0: reduce epilogue读取A'，输出token A
+    P1->>H1: reduce epilogue读取B'，输出token B
+```
+
+### 7. 图片构成与文案
+
+单张16:9复合时序图，保持Gruvbox Light。左面板为Dispatch至FFN，右面板为Combine；每个面板仅画rank 0和rank 1两条生命线，面板内时间向下，整体先读左面板再读右面板。
+
+- 标题：两个rank的通信往返：谁发起，谁处理。
+- 副标题：A：rank 0 → rank 1 → rank 0；B走镜像路径。
+- A的Dispatch WRITE为青蓝实线，A的Combine WRITE为橙色实线；B的镜像数据用灰色细线。
+- UBMEM计数和barrier信号为紫色虚线，局部处理为贴在本rank生命线旁的白色小框。
+- CQ drain在两rank各自的本地动作框内，不绘制“接收rank去查发送rank CQ”。
+- FFN仅显示rank 0的FFN(B)和rank 1的FFN(A)两个小框。
+- entry barrier、Host同步和资源初始化在文字中说明，图片省略，避免虚构握手箭头。
+- 本图是依赖时序，不是耗时比例图；双向消息画在相邻高度，不要求它们按图片上下顺序严格串行。
+
+图片验收重点：A先0→1、结果再1→0；N10不是N01的ACK；WRITE由数据持有rank主动提交；两端自己的CQ drain在自己的barrier signal前；epilogue在barrier通过后；FFN在Dispatch之后、Combine之前。
+
+### 8. imagegen生成提示词
+
+```text
+Use case: infographic-diagram
+Asset type: one private technical sequence diagram for studying the official DeepEP-Ascend two-rank round trip. This is NOT an article illustration; communication terminology is explicitly allowed.
+
+Style: Use the existing Gruvbox Light specification exactly. 16:9 landscape, flat cream #fbf1c7, white rounded panels, hairline #d5c4a1 borders, dark #3c3836 text, secondary #665c54. Noto Sans SC/Inter REGULAR or LIGHT including title, no bold, 3D, gradients, shadows or texture. Teal #458588 for Dispatch main data, orange #d65d0e for Combine main data, purple #b16286 for UBMEM control, olive #98971a for completed local work, muted gray for mirrored B flow. All labels must be precise, legible Chinese/English.
+
+Title exactly "两个rank的通信往返：谁发起，谁处理"
+Subtitle exactly "A：rank 0 → rank 1 → rank 0；B走镜像路径"
+One composite sequence diagram, two equal white panels side by side: left "Dispatch → FFN", right "Combine". Each panel has TWO vertical dashed lifelines headed "rank 0" and "rank 1". Time goes DOWN within each panel. Read the left panel before the right panel. Clear phase headers and thin arrows. All cross-rank message arrows must attach to the correct originating and destination rank lifelines. Local work is a compact box next to the same rank's lifeline, not a cross-rank message.
+
+LEFT panel, EXACT sequence from top to bottom:
+1. Local boxes on both ranks: "SIMT：路由、计数、slot".
+2. rank 0 → rank 1, purple dashed arrow: "UBMEM计数：N01=1".
+3. rank 1 → rank 0, purple dashed arrow: "UBMEM计数：N10=1".
+4. Local boxes on BOTH ranks: "SIMT写WQE/SGE" then "scalar：doorbell".
+5. rank 0 → rank 1, teal solid arrow: "URMA WRITE：A + metadata".
+6. rank 1 → rank 0, thin gray solid arrow: "URMA WRITE：B + metadata".
+7. Local boxes on BOTH ranks: "scalar：drain本地CQ".
+8. Two purple dashed arrows, one rank 0 → rank 1 and one rank 1 → rank 0, at slightly different heights, bracketed with label "UBMEM barrier信号". This signal exchange happens AFTER each sender's local drain. Both local barriers finish only after all ranks have signalled.
+9. Local box at rank 0: "copy epilogue：B → E0".
+   Local box at rank 1: "copy epilogue：A → E1".
+10. One slim coarse FFN box at EACH rank:
+   rank 0 "FFN(B)".
+   rank 1 "FFN(A)".
+Do NOT show FFN internals.
+
+RIGHT panel, EXACT sequence top to bottom:
+1. Local boxes on BOTH ranks: "src_metadata → 返回目标".
+2. Local boxes on BOTH ranks: "SIMT构造WQE" then "scalar：提交 + ordered NOP".
+3. rank 1 → rank 0, thick orange solid arrow: "URMA WRITE：A的expert结果".
+4. rank 0 → rank 1, thin gray solid arrow: "URMA WRITE：B的expert结果".
+5. Local boxes on BOTH ranks: "scalar：drain本地CQ".
+6. Two purple dashed arrows, one each direction at slightly different heights, grouped as "UBMEM barrier信号". Each rank signals only after its own local drain.
+7. Local box rank 0: "reduce epilogue：输出A".
+   Local box rank 1: "reduce epilogue：输出B".
+
+Three short footer notes, exact:
+"数据：发送rank提交，URMA单边写入对端HBM"
+"接收：本rank等barrier，再执行epilogue"
+"CQ在发送侧；barrier信号不是逐token ACK"
+
+IMPORTANT accuracy invariants:
+- N10 is rank 1's independently computed outbound count, NOT an ACK to N01.
+- Both ranks submit their OWN outbound operations before waiting for the collective completion barrier.
+- CQ drain is LOCAL to each sender; never draw rank 1 AIV polling rank 0 CQ.
+- Inbound one-sided URMA WRITE needs no per-message post-recv or remote AIV callback.
+- Do not show a rank 0 READ pulling A results. rank 1 actively WRITEs them back.
+- Barrier and counts are UBMEM control, not URMA data writes.
+- FFN begins only after Dispatch completion and copy epilogue.
+- Final reduce follows Combine drain and barrier.
+- Each round uses the same code with different rank_idx, buffers, route data and src_metadata.
+- This is a dependency sequence, not measured timing. Do not add imaginary per-token readiness flags, ACK messages or RPCs.
+```
+
+### 9. 图注与归档状态
+
+图注：各rank执行相同的Dispatch/Combine代码，分别提交自己的URMA WRITE，并在本地CQ drain及跨rank完成barrier后处理接收数据。A的发送由rank 0发起，A的结果返回由rank 1发起；B走镜像路径。
+
+状态：文字流程、源码核对、Mermaid时序稿、imagegen提示词与最终PNG均已归档。时序图逐项核对通过：A与结果的方向正确，B镜像路径正确，两端的本地CQ drain先于各自barrier signal，copy/reduce epilogue位于完成barrier之后。本节作为个人学习材料归档，未加入软文正文。
+
+最终图片：[两个rank的通信往返时序图](../ascend-assets/deepep-ascend-two-rank-round-trip-sequence.png)
+
+![两个rank的通信往返：谁发起，谁处理](../ascend-assets/deepep-ascend-two-rank-round-trip-sequence.png)
+
+最终图片使用内置imagegen生成，再使用同一工具局部修正字重，没有使用Pillow或代码覆盖文字。图片省略入口barrier和Host同步，详细顺序以本节文字及Mermaid稿为准。
+
+### 10. 最终字重修订提示词
+
+```text
+Use case: precise-object-edit
+Change ONLY typography of the supplied two-rank technical sequence diagram. Preserve every word, arrow direction, dashed/solid line, step, data mapping, footer note, panel, timeline, count and rank label exactly.
+Make the title "两个rank的通信往返：谁发起，谁处理" REGULAR/light Noto Sans SC, not bold. Make panel headers "Dispatch → FFN" and "Combine" and all other text REGULAR weight too. Keep colors and layout unchanged, maintain Gruvbox Light flat style. Do not redraw or change any communication step. Especially preserve A Dispatch rank 0→1, A Combine rank 1→0, all LOCAL CQ drain boxes and BOTH directions of UBMEM barrier after CQ drain.
+```
