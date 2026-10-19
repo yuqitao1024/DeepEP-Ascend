@@ -512,96 +512,47 @@ token卡片文案：
 
 图4：4-rank Combine数据流。expert输出按来源rank返回rank 0；本地输出直接参与聚合，远端输出送回后在原始token处按top-k权重聚合。
 
-## 图5：为什么SIMT适合MoE通信
+## 图5：SIMT在MoE通信中的优势
 
 ### 目标
 
-用一张图回答第3章的核心问题：MoE通信前的整理工作为什么是“不规则但可并行”的，以及SIMT为什么契合这种工作形态。重点呈现三件事：
+展示MoE通信预处理中的线程组协作与组间并行，重点呈现三件事：
 
 1. 每个token的路由不同，需要不同分支；
-2. 多个线程可以执行同一套整理程序，分别处理不同token；
-3. 与SIMD相比，SIMT更自然地表达这种动态分支。
+2. 一个线程组协作处理一个token的top-k目标，多个线程组执行同一套路由处理程序；
+3. 同一rank重复时去重，本地与远端目标分别处理。
 
 ### 放置位置
 
-放在第3章第一段之后、三类优势列表之前。读者先通过这张图看到“token不同、线程并行、结果不同”的直观关系，再阅读结构契合、表达自然、并发友好的文字总结。
+放在第3章第一段之后、SIMD与SIMT对比文字之前。先展示“组内协作、组间并行”的直观关系，再解释SIMT的通信并行粒度与三类优势。
 
 ### 画面结构
 
-整体分为三个区域：
+保留上方四个程序步骤和下方四行token示例，不再放置底部SIMD/SIMT特性对比卡片。保留内容在16:9画布内重新排布，避免底部留下大块空白。
 
-1. 上方主体：4行token的并行整理过程；
-2. 中间阶段卡：SIMT程序与4个线程；
-3. 底部对比条：SIMD与SIMT的执行形态差异。
-
-上方主体采用四行三列：
-
-1. 左列：路由结果；
-2. 中列：SIMT线程与分支；
-3. 右列：整理后的通信信息。
+四行示例从左到右展示路由结果、线程组与分支、生成的通信信息，逐行对齐。
 
 ### 具体文案
 
-主标题：为什么SIMT适合MoE通信
+主标题：SIMT在MoE通信中的优势
 
-左列标题：路由结果
+程序步骤：读取路由 → 比较rank → 判断是否重复 → 生成通信信息
 
-左列卡片文案：
+共享标签：SIMT：同一程序，多个线程组
 
-- token 0：rank 1、rank 2
-- token 1：rank 0、rank 3
-- token 2：rank 1、rank 1
-- token 3：rank 2、rank 3
-
-中列标题：SIMT：同一程序，多个线程
-
-中列卡片文案：
-
-- 线程0 / token 0：两个目标rank不同，两条分支
-- 线程1 / token 1：一个本地rank，一个远端rank
-- 线程2 / token 2：两个目标rank相同，去重后只保留一份
-- 线程3 / token 3：两个目标rank不同，两条分支
-
-程序步骤标签：
-
-- 读取路由
-- 比较rank
-- 判断是否重复
-- 生成通信信息
-
-右列标题：整理后的通信信息
-
-右列卡片文案：
-
-- token 0：发送到rank 1和rank 2
-- token 1：本地保留，另发送到rank 3
-- token 2：只发送一份到rank 1
-- token 3：发送到rank 2和rank 3
-
-底部对比条标题：执行形态对比
-
-SIMD卡片文案：
-
-- SIMD
-- 一条指令处理连续数据
-- 适合规则、少分支的计算
-
-SIMT卡片文案：
-
-- SIMT
-- 多个线程执行同一程序
-- 每个线程可走不同分支
-- 适合token路由各不相同的整理工作
+| 路由结果 | 线程组 | 分支说明 | 通信信息 |
+| --- | --- | --- | --- |
+| token 0：rank 1、rank 2 | 线程组0 | 两个目标rank不同，两条分支 | 发送到rank 1和rank 2 |
+| token 1：rank 0、rank 3 | 线程组1 | 一个本地rank，一个远端rank | 本地保留，另发送到rank 3 |
+| token 2：rank 1、rank 1 | 线程组2 | 两个目标rank相同，去重后只保留一份 | 只发送一份到rank 1 |
+| token 3：rank 2、rank 3 | 线程组3 | 两个目标rank不同，两条分支 | 发送到rank 2和rank 3 |
 
 ### 布局细节
 
-- 上方主体占画面高度约70%，底部对比条占约30%。
-- 四行token从上到下排列，左列、中列、右列保持水平对齐，让读者能沿一行看到“路由结果、线程分支、通信信息”的对应关系。
-- 中列使用一个浅青蓝色大卡片承载4个线程行，卡片顶部放置4个程序步骤标签，表示所有线程执行同一套程序。
-- token 2所在行使用橙色“去重”徽标，突出同一rank重复时只生成一份通信信息。
-- 左列token卡片使用黄色，中列SIMT卡片使用青蓝色，右列通信信息卡片使用绿色。
-- 底部对比条使用两个并排卡片，SIMD使用浅灰色，SIMT使用浅青蓝色。
-- 图中不绘制复杂交叉线，行与行之间保持独立，突出“多个线程并行处理不同token”。
+- 线程组标签适当加宽，完整显示“线程组0”至“线程组3”，不换行或遮挡相邻文字。
+- 四行高度和间距均衡，保留程序步骤、路由、分支说明、结果之间的对应关系。
+- token 2保留橙色“去重”徽标。
+- 不新增比较卡片、页脚、示例或图例，不改变四条路由和输出关系。
 
 ### 颜色语义
 
@@ -610,7 +561,6 @@ SIMT卡片文案：
 - SIMT区域：青蓝色 #458588
 - 去重徽标：橙色 #d65d0e
 - 通信信息卡片：绿色 #98971a
-- SIMD卡片：浅灰 #ebdbb2
 - 主文字：深灰 #3c3836
 - 次文字：浅灰 #665c54
 
@@ -618,13 +568,14 @@ SIMT卡片文案：
 
 - 不出现AIV、lane、scalar、URMA、MTE、slot、通信描述等实现细节。
 - 不出现WQE、SGE、SQ、CQ、queue、doorbell、Jetty、Channel、staged transport、payload、hidden、metadata。
-- 不把SIMT画成单独硬件模块，只表达“多个线程执行同一程序”的执行形态。
-- 不用长句填充卡片，所有文案保持短标签化。
+- 不把一个token标为由单个线程独立处理，不指定线程组大小或固定warp数量。
+- 不把SIMT画成单独硬件模块，只表达线程组执行同一程序的形态。
+- 不恢复底部SIMD/SIMT特性卡片。
 - 图注不描述画面构图。
 
 ### 图注
 
-图5：为什么SIMT适合MoE通信。不同token的路由结果不同，多个线程可以执行同一套整理程序并分别走不同分支；相比处理连续数据的SIMD，SIMT更贴近这种动态、分支密集的通信整理工作。
+图5：多个线程组执行同一套路由处理程序，组内协作处理一个token的top-k目标，组间并行处理不同token。重复rank需要去重，本地与远端结果也需要不同处理。
 
 ## 图6：Dispatch的SIMT并行流程
 
@@ -635,7 +586,7 @@ SIMT卡片文案：
 1. token路由可独立处理，线程组织为示意；统计和位置计算需要协作；
 2. token 2和token 5命中重复rank，去重后只生成一份通信信息；
 3. slot由同一rank内的前序token数量动态决定；
-4. SIMT负责整理通信信息，scalar负责提交，URMA/MTE负责数据搬运。
+4. SIMT负责通信预处理，scalar负责提交，URMA/MTE负责数据搬运。
 
 ### 放置位置
 
@@ -659,13 +610,13 @@ SIMT卡片文案：
 2. URMA：远端数据搬运；
 3. MTE：本地数据搬运。
 
-主矩阵上方放置一个横向标签“SIMT：多个线程同时整理”，覆盖前5列，明确这些阶段由SIMT完成。
+主矩阵上方放置一个横向标签“SIMT：多个线程协作处理”，覆盖前5列，明确这些阶段由SIMT完成。
 
 ### 具体文案
 
-主标题：Dispatch：SIMT并行整理通信信息
+主标题：Dispatch：SIMT并行处理路由信息
 
-左侧主矩阵标题：SIMT：多个线程同时整理
+左侧主矩阵标题：SIMT：多个线程协作处理
 
 列标题：
 
@@ -748,7 +699,7 @@ SIMT卡片文案：
 
 ### 图注
 
-图6：Dispatch的SIMT并行流程。8个token并行整理路由，去重后形成14份向量关系。slot只示意局部顺序，硬件描述数量取决于实际实现；scalar维护提交边界，URMA和MTE分别负责远端与本地搬运。
+图6：Dispatch的SIMT并行流程。8个token并行处理路由，去重后形成14份向量关系。slot只示意局部顺序，硬件描述数量取决于实际实现；scalar维护提交边界，URMA和MTE分别负责远端与本地搬运。
 
 ## 图7：Combine的SIMT流水线
 
@@ -786,7 +737,7 @@ SIMT卡片文案：
 - 当前task：数据归约
 - 下一task：信息已准备
 
-这里的task是同一发送rank内的相邻任务，不把它们固定对应为来自rank 1或rank 2的分组。状态条说明预先整理下一任务的信息，并不承诺SIMT与SIMD在同一执行资源上同时执行。
+这里的task是同一发送rank内的相邻任务，不把它们固定对应为来自rank 1或rank 2的分组。状态条说明预先解析下一任务的返回信息，并不承诺SIMT与SIMD在同一执行资源上同时执行。
 
 ### 最终聚合文案
 
@@ -819,7 +770,7 @@ rank 0等待所需结果到齐，再按原始token聚合并写回输出。
 
 ### 图注
 
-图7：Combine将SIMT返回信息整理与SIMD局部归约组成流水线，数据和描述准备就绪后由scalar提交远端传输；本地结果直接保留，最终在原始token所在rank聚合。
+图7：Combine将SIMT返回信息解析与SIMD局部归约组成流水线，数据和描述准备就绪后由scalar提交远端传输；本地结果直接保留，最终在原始token所在rank聚合。
 
 ### 准确性依据
 
@@ -833,7 +784,7 @@ rank 0等待所需结果到齐，再按原始token聚合并写回输出。
 | 图2 | Router动态路由带来的通信变化 | 第1章动态选择段后 | 直观说明通信计划必须运行时生成 |
 | 图3 | 4-rank Dispatch数据流 | 第2章路由表后 | 将8-token case从路由结果讲到expert输入 |
 | 图4 | 4-rank Combine数据流 | 第2章返回关系表后 | 将8-token case从expert输出讲到token输出 |
-| 图5 | 为什么SIMT适合MoE通信 | 第3章开头 | 先给出执行形态差异，再解释适配原因 |
+| 图5 | SIMT在MoE通信中的优势 | 第3章开头 | 先展示线程组协作与组间并行，再解释适配原因 |
 | 图6 | Dispatch的SIMT并行流程 | 第4章开头 | 先看并行处理方式，再拆阶段讲 |
 | 图7 | Combine的SIMT流水线 | 第5章开头 | 先看流水线，再讲task和重叠 |
 
@@ -948,29 +899,28 @@ Render eight cards “token 0输出” through “token 7输出”, each labeled
 
 ### 图5提示词
 
-Create a flat, clean 16:9 infographic titled “为什么SIMT适合MoE通信”. Use the same Gruvbox Light style, white rounded cards, thin borders, and no bold text.
+Create a flat, clean 16:9 infographic titled exactly “SIMT在MoE通信中的优势”. Use the approved Gruvbox Light style: solid cream #fbf1c7 background, white #ffffff rounded cards, thin #d5c4a1 borders, dark #3c3836 text, Noto Sans SC / Inter regular/light typography including title. No bold, gradients, shadows, texture, 3D or watermark.
+
+Place four shared program steps above the example rows: “读取路由” → “比较rank” → “判断是否重复” → “生成通信信息”. Shared label exactly “SIMT：同一程序，多个线程组”.
 
 Create four aligned rows showing these exact transformations:
 
-- token 0：rank 1、rank 2 → 线程0 / token 0：两个目标rank不同，两条分支 → 发送到rank 1和rank 2
-- token 1：rank 0、rank 3 → 线程1 / token 1：一个本地rank，一个远端rank → 本地保留，另发送到rank 3
-- token 2：rank 1、rank 1 → 线程2 / token 2：两个目标rank相同，去重后只保留一份 → 只发送一份到rank 1
-- token 3：rank 2、rank 3 → 线程3 / token 3：两个目标rank不同，两条分支 → 发送到rank 2和rank 3
+- token 0：rank 1、rank 2 → 线程组0 / token 0：两个目标rank不同，两条分支 → 发送到rank 1和rank 2
+- token 1：rank 0、rank 3 → 线程组1 / token 1：一个本地rank，一个远端rank → 本地保留，另发送到rank 3
+- token 2：rank 1、rank 1 → 线程组2 / token 2：两个目标rank相同，去重后只保留一份 → 只发送一份到rank 1
+- token 3：rank 2、rank 3 → 线程组3 / token 3：两个目标rank不同，两条分支 → 发送到rank 2和rank 3
 
-Place the shared program steps above the four threads: “读取路由”, “比较rank”, “判断是否重复”, “生成通信信息”. Add an orange “去重” badge on token 2.
+Add an orange “去重” badge on token 2. Widen thread-group labels just enough to fit without wrapping or overlap. Do not specify a thread count, warp size or fixed group size. Each group cooperates on one token; groups process different tokens in parallel.
 
-At the bottom, show two comparison cards:
-
-- SIMD：一条指令处理连续数据 / 适合规则、少分支的计算
-- SIMT：多个线程执行同一程序 / 每个线程可走不同分支 / 适合token路由各不相同的整理工作
+Do not include bottom SIMD/SIMT feature comparison cards or any new footer, legend or example. Fill the canvas with the program steps and four-row region using balanced spacing and compact aligned cards, without a large blank bottom band.
 
 Use token #d79921, rank #8f3f71, SIMT #458588, dedup badge #d65d0e, communication information #98971a. Do not show AIV, lane, scalar, URMA, MTE, slot, or communication descriptors.
 
 ### 图6提示词
 
-Create a high-density flat 16:9 infographic titled “Dispatch：SIMT并行整理通信信息”. Use the same Gruvbox Light style, white rounded cards, thin borders, and no bold text.
+Create a high-density flat 16:9 infographic titled “Dispatch：SIMT并行处理路由信息”. Use the same Gruvbox Light style, white rounded cards, thin borders, and no bold text.
 
-Create an 8-row by 5-stage matrix. The header above the matrix must say “SIMT：多个线程同时整理”. Column headers are “Router结果”, “目标rank统计”, “重复rank去重”, “接收slot计算”, “通信描述构造”.
+Create an 8-row by 5-stage matrix. The header above the matrix must say “SIMT：多个线程协作处理”. Column headers are “Router结果”, “目标rank统计”, “重复rank去重”, “接收slot计算”, “通信描述构造”.
 
 Render the exact rows:
 
@@ -998,7 +948,7 @@ Use exactly 8 token rows, without merging, omitting or duplicating any. This is 
 Use case: infographic-diagram
 Asset type: figure 7 of the same Chinese technical article, a precise Combine pipeline.
 Global approved style: 16:9, Gruvbox Light. Solid cream #fbf1c7, white cards #ffffff, dark text #3c3836, secondary #665c54, hairline borders #d5c4a1, Noto Sans SC / Inter Light or Regular ONLY including title. Flat rounded cards, no bold, gradient, shadow, texture or 3D. SIMT #458588, scalar #b16286, URMA #d65d0e, MTE #98971a, token #d79921, expert #cc241d, rank #8f3f71.
-Title exactly "Combine：SIMT流水线整理返回结果", medium regular font, compact margins. Keep 16:9, readable text, no complex crossing wires.
+Title exactly "Combine：SIMT流水线解析返回信息", medium regular font, compact margins. Keep 16:9, readable text, no complex crossing wires.
 
 LEFT 22%: an area headed "结果来源（业务视角）", four stacked cards:
 "rank 1" / "5个expert输出"
@@ -1042,7 +992,7 @@ Constraints: readable precise text, no duplicated nodes, no made-up labels. No A
 | 图2 | [deepep-ascend-simt-router-dynamic-flow.png](../ascend-assets/deepep-ascend-simt-router-dynamic-flow.png) | 两步路由、接收token和计数 |
 | 图3 | [deepep-ascend-simt-dispatch-case.png](../ascend-assets/deepep-ascend-simt-dispatch-case.png) | 8条路由、14份向量、16个expert输入 |
 | 图4 | [deepep-ascend-simt-combine-case.png](../ascend-assets/deepep-ascend-simt-combine-case.png) | 16个expert输出、3本地、13远端、8输出 |
-| 图5 | [deepep-ascend-simt-parallel-routing.png](../ascend-assets/deepep-ascend-simt-parallel-routing.png) | 4条示例路由、重复rank去重、SIMD/SIMT对比 |
+| 图5 | [deepep-ascend-simt-parallel-routing.png](../ascend-assets/deepep-ascend-simt-parallel-routing.png) | 4条示例路由、线程组协作、重复rank去重；已移除底部特性对比 |
 | 图6 | [deepep-ascend-simt-dispatch-parallel-flow.png](../ascend-assets/deepep-ascend-simt-dispatch-parallel-flow.png) | 8行5阶段、slot、token 2/5去重、提交与搬运分工 |
 | 图7 | [deepep-ascend-simt-combine-pipeline.png](../ascend-assets/deepep-ascend-simt-combine-pipeline.png) | 来源分组、SIMT/SIMD/scalar分工、本地绕过远端传输 |
 
@@ -1082,13 +1032,24 @@ Change ONLY color styling of this accurate Combine infographic to the approved G
 Replace the near-white outer background with flat solid cream #fbf1c7. Main panels and cards white #ffffff. All borders hairline #d5c4a1; title regular/light #3c3836, not bold. Use muted purple #8f3f71 for rank groups, olive #98971a for local, teal #458588 for remote, orange #d65d0e for aggregation, mustard #d79921 for token output, red #cc241d for expert. No gradient/shadow/texture.
 Data invariants: rank 0 token 1/E3,4/E1,6/E4; rank 1 token 0/E7,2/E5,2/E8,4/E6,7/E13; rank 2 token 0/E10,3/E15,5/E9,5/E11; rank 3 token 1/E12,3/E2,6/E14,7/E16. Counts 16 expert outputs, 3 local, 13 remote, 8 token outputs. Preserve every return relationship.
 
-#### 图5局部修订
+#### 图5局部修订（2026-10-19，以此版为准）
 
 Use case: precise-object-edit
-Change ONLY typography and flat visual styling of this figure to match the approved Gruvbox Light article specification. Preserve ALL row texts, all 4 rows, all mappings, bottom SIMD/SIMT comparison, badges and arrows exactly.
-Replace the large bold title with a much smaller REGULAR-weight title "为什么SIMT适合MoE通信" in dark gray #3c3836. All fonts including SIMD/SIMT headings must be regular/light, never bold. Make background a uniform cream #fbf1c7, cards white #ffffff, hairline borders #d5c4a1; flat pale accent fills only, no gradients, texture, shadows or 3D.
-Add one short regular label above the thread column, without covering existing text: "SIMT：同一程序，多个线程".
-Keep all other content and geometry invariant.
+Edit target: the supplied existing Gruvbox Light infographic. Apply ONLY the following user-approved changes. Preserve all 4 token/rank mappings, conditional explanations, arrows, icons, semantic colors, regular/light typography, cream background and rounded white card style.
+
+1. Replace title with exactly "SIMT在MoE通信中的优势".
+2. REMOVE the entire bottom comparison section: both the SIMD card and the SIMT card, including their icons and all their feature text. There must be NO SIMD/SIMT feature comparison cards anywhere in the resulting image.
+3. Keep the upper four program-step cards exactly "读取路由" → "比较rank" → "判断是否重复" → "生成通信信息".
+4. Replace the little shared label with exactly "SIMT：同一程序，多个线程组".
+5. Replace the four narrow labels "线程0", "线程1", "线程2", "线程3" with exactly "线程组0", "线程组1", "线程组2", "线程组3". Widen those label cards just enough to fit without wrapping or overlap. Do NOT specify thread counts, warp size or any fixed group size.
+6. Keep all four example rows exactly:
+token 0: rank 1、rank 2 → 线程组0 → "token 0：两个目标rank不同，两条分支" → "发送到 rank 1 和 rank 2".
+token 1: rank 0、rank 3 → 线程组1 → "token 1：一个本地rank，一个远端rank" → "本地保留，另发送到 rank 3".
+token 2: rank 1、rank 1 → 线程组2 → "token 2：两个目标rank相同，去重后只保留一份" with orange "去重" badge → "只发送一份到 rank 1".
+token 3: rank 2、rank 3 → 线程组3 → "token 3：两个目标rank不同，两条分支" → "发送到 rank 2 和 rank 3".
+7. Retain a 16:9 landscape canvas. Reflow ONLY the retained upper content to fill the available height neatly: enlarge the four-row region and use balanced spacing, without leaving the large blank area where the bottom cards were removed. Keep all rows aligned and compact. No new sections, footers, examples, legends, decoration or text.
+
+Color/style invariants: flat #fbf1c7 background, white #ffffff cards, thin #d5c4a1 borders, regular/light Noto Sans SC/Inter, dark #3c3836 text, mustard tokens, purple rank chips, teal SIMT accents, orange dedup badge, green output accents. No bold, shadows, gradients, 3D or watermark.
 
 #### 图6局部修订
 
@@ -1096,7 +1057,7 @@ Use case: precise-object-edit
 Edit the supplied 8-row Dispatch matrix. Preserve all eight row labels, all expert/rank mappings, ALL slot values, all counts, role cards, layout and arrows exactly.
 ONE critical data correction: in row "token 2", final column "通信描述构造", change "生成2条通信信息" to exactly "生成1条通信信息". Keep its second line "接收端展开为2个expert输入". Row "token 5" already correctly has "生成1条通信信息"; preserve it.
 Put the word "去重" in an orange #d65d0e small badge in the token 2 and token 5 third-stage cells, without changing any adjacent text.
-Make title "Dispatch：SIMT并行整理通信信息" regular/light typography, not bold. Make all fills flat (no gradients); maintain the approved Gruvbox Light #fbf1c7 background, white cards, #d5c4a1 thin borders. Do not add, remove, reorder, duplicate or alter any token row. Exact data accuracy is critical.
+Make title "Dispatch：SIMT并行处理路由信息" regular/light typography, not bold. Make all fills flat (no gradients); maintain the approved Gruvbox Light #fbf1c7 background, white cards, #d5c4a1 thin borders. Do not add, remove, reorder, duplicate or alter any token row. Exact data accuracy is critical.
 
 #### 图7局部修订
 
@@ -1109,10 +1070,35 @@ Set title and ALL section headers to REGULAR or LIGHT sans-serif weight. No bold
 - 同一token的重复目标rank去重，只减少向量发送，expert输入仍需展开。
 - 第2章数量仅来自rank 0的8个token；其他来源rank的计数不在图中。
 - slot是局部顺序示例，14条通信信息是逻辑发送关系，不保证相同硬件描述数量。
-- Combine数值归约使用SIMD，SIMT整理返回信息并构造描述；scalar提交属于单独边界。
+- Combine数值归约使用SIMD，SIMT解析返回信息并构造描述；scalar提交属于单独边界。
 - 结果来源分组不是实际固定task数量；发送端按原始token所在的返回目标划分批次。
 - 权重聚合是模型业务；权重可以提前应用，Combine归约已加权结果。
 - 性能表核对[官方README](https://github.com/deepseek-ai/DeepEP-Ascend#performance)，排除最终后处理，不作为SIMT相对SIMD的独立加速比。
+
+## 2026-10-19定向修订记录
+
+本次只实施用户敲定的7项优化：第3章标题、线程组表述与通信并行粒度补充，通信预处理术语，一分钟概览，以及Combine流水执行段落的适度压缩。正文保留task交错执行、各执行单元分工及局部归约与最终聚合的区别，并检查前后衔接。
+
+图片仍使用内置imagegen，延续Gruvbox Light既定风格，覆盖原资产路径：图5删除底部特性卡片、改为线程组；图6只替换主标题与SIMT横幅；图7只替换主标题。图1—4、案例数据与本文件后续“两rank内部分析”均不改动。上方逐图规格与生成提示词已同步为当前版本。
+
+### 图6本次实际编辑提示词
+
+Use case: text-localization
+Edit ONLY TWO text areas in the supplied existing Dispatch matrix. Everything else is immutable.
+1. Replace the main title "Dispatch：SIMT并行整理通信信息" with exactly "Dispatch：SIMT并行处理路由信息".
+2. Replace the teal banner "SIMT：多个线程同时整理" with exactly "SIMT：多个线程协作处理".
+
+Preserve all other pixels and composition as closely as possible: all E IDs, rank IDs, all 8 token rows, 5 stage headers, every slot, every number, every badge, all scalar/URMA/MTE cards and arrows, summary counts and footer. Do not reflow the matrix, add/delete/reorder/duplicate rows, or revise wording elsewhere.
+Critical invariants: token 2 and token 5 both generate 1 communication information entry, both have dedup orange badges; all other tokens generate 2. Counts remain 16,14,3,11. The per-rank count footer remains rank 0=3,rank 1=4,rank 2=3,rank 3=4.
+Keep exact Gruvbox Light palette and flat style, light/regular fonts (including the new title), original 16:9 landscape. No new labels, no new effects, no new color choices.
+
+### 图7本次实际编辑提示词
+
+Use case: text-localization
+In the supplied existing Combine infographic, change ONLY the main title from "Combine：SIMT流水线整理返回结果" to exactly "Combine：SIMT流水线解析返回信息".
+
+All other contents and geometry are immutable: preserve the source-rank cards (rank 1:5, rank 2:4, rank 3:4, rank 0 local:3), the SIMT and SIMD+MTE tracks, scalar/URMA cards, every arrow, the local bypass, the entire pipeline illustration, footer and all 16/3/13/8 counts. Do not remove, add, reorder or rename any node, step or timeline bar.
+Preserve regular/light font weight, exact existing Gruvbox Light color palette and flat styling. Keep 16:9. Fit the new title naturally on the same top line. Do not alter any other text or introduce gradients, shadows, icons or decoration.
 
 ## 内部分析：两个rank的通信往返与主动方
 
