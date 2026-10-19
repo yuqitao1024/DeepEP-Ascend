@@ -1,5 +1,11 @@
 # DeepEP-Ascend：为什么SIMT适合MoE通信？
 
+## DeepSeek实践：从GPU到Ascend 950
+
+DeepSeek团队自主研发的[DeepEP](https://github.com/deepseek-ai/DeepEP)在GPU版本中采用`SIMT`编程方式，以线程协作处理MoE通信中的动态路由、统计与去重。迁移到Ascend 950时，[DeepEP-Ascend](https://github.com/deepseek-ai/DeepEP-Ascend)利用类似的`SIMT`能力延续这一并行实现思路，并使公开buffer API与GPU版本对齐，为上层应用的平滑迁移提供便利。
+
+在[官方报告](https://github.com/deepseek-ai/DeepEP-Ascend#performance)的测试条件与计时口径下，Ascend 950DT上的Dispatch在EP32以内达到物理数据带宽上限的约90%-95%，展现了良好的通信性能。这一跨平台实践体现了Ascend 950的`SIMT`能力在DeepSeek客户侧兼顾开发易用性与高效通信的落地价值。
+
 ## 一分钟概览
 
 MoE通信需要根据动态路由生成通信计划。Router为每个token选择的expert可能不同，且这些expert分布在多个rank上，因此发送目标、接收位置和结果返回关系都需要在运行时确定。
