@@ -148,7 +148,11 @@ Dispatch和Combine的业务方向相反，但都需要根据动态信息完成�
 
 `SIMD`用一条指令处理多个数据元素，适合规则、少分支的向量计算；`SIMT`由多个线程执行同一程序，各线程根据数据处理不同分支，并通过筛选、交换和归约协作。
 
-具体到MoE通信，SIMT可以让线程组内的线程分工处理一个token的top-k目标，并协作完成rank去重；多个线程组则并行处理不同token。通信描述构造时，线程还可按目标、长度、地址等字段分工，从路由处理到描述生成发挥细粒度并行能力。
+以Dispatch同时处理多个token为例，CANN的[MC2算子在一条SIMD实现路径中](https://raw.gitcode.com/cann/ops-transformer/raw/a70c47cccf275b41960ca1d5f0089ec02dd24423/mc2/moe_distribute_dispatch_v2/op_kernel/moe_distribute_dispatch_v2.h)先将路由项分配给多个`AIV`，各`AIV`内由标量循环逐条组织发送，再调用向量运算批量计算目标expert的计数与发送位置。开发者需要配合管理向量临时数据，以及标量控制与向量计算之间的同步。
+
+[DeepEP-Ascend](https://github.com/deepseek-ai/DeepEP-Ascend/blob/3b25377d04b24fc6154698ded78a2bcb2c59afff/deep_ep/include/deep_ep/impls/ep/dispatch.hpp#L156)则在同一`AIV`内组织多个SIMT线程组：组内线程分工读取一个token的top-k目标、协作完成rank去重，多个线程组并行处理不同token。开发者可以围绕“一个token如何处理”编写线程程序，再通过线程组组织扩展到多token并行，让动态目标判断与分支处理更贴近业务逻辑。通信描述构造时，线程还可按目标、长度、地址等字段分工，从路由处理到描述生成发挥细粒度并行能力。
+
+从代码组织看，SIMT的优势在于减少将逐token逻辑转换为批量向量操作的组织工作，使不规则通信预处理更易表达和扩展，而不是让开发者免于处理同步与数据依赖。
 
 两种方式各有适合的工作。SIMD可以通过掩码等方式处理不规则数据；SIMT则更便于表达不同token的目标判断、重复rank去重和通信字段构造。在Combine中，连续向量的数值归约仍交给SIMD，SIMT解析返回信息。收益既来自表达方式与业务结构的匹配，也来自通信预处理的并行化和各阶段协作；实际性能还取决于分支分歧、线程协作和同步成本。
 

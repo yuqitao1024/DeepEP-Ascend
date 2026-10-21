@@ -1100,6 +1100,26 @@ In the supplied existing Combine infographic, change ONLY the main title from "C
 All other contents and geometry are immutable: preserve the source-rank cards (rank 1:5, rank 2:4, rank 3:4, rank 0 local:3), the SIMT and SIMD+MTE tracks, scalar/URMA cards, every arrow, the local bypass, the entire pipeline illustration, footer and all 16/3/13/8 counts. Do not remove, add, reorder or rename any node, step or timeline bar.
 Preserve regular/light font weight, exact existing Gruvbox Light color palette and flat styling. Keep 16:9. Fit the new title naturally on the same top line. Do not alter any other text or introduce gradients, shadows, icons or decoration.
 
+## 2026-10-21图6主标题定向修订
+
+最终按用户确定的像素工具方式，使用Pillow直接修改原图，主标题为“Dispatch：SIMT完成路由处理与通信准备”。下方青色横条“SIMT：多个线程协作处理”保留，不新增线程组图标或组内协作展开图；线程组织由图5说明。结果覆盖 `../ascend-assets/deepep-ascend-simt-dispatch-parallel-flow.png`，正文引用无需调整。imagegen试作未采用。
+
+像素编辑范围为左上角坐标系下的矩形 `(40, 27, 1250, 83)`（右、下边界不包含）。从同一标题卡片的空白区域逐行采样背景，使用Noto Sans CJK SC Regular、46px字号及4倍超采样绘制整行标题，再无损保存为PNG。逐像素校验通过：编辑范围之外零像素变化，尺寸保持1672×941；下方表格、横条、数据及其抗锯齿均保留原样。重绘标题的字体细节与原图可能略有差异。
+
+### imagegen试作提示词（未采用，保留归档）
+
+```text
+Use case: text-localization
+Asset type: Figure 6 of a Chinese technical article, existing Dispatch infographic.
+Input image: edit target, the supplied current 8-row Dispatch matrix.
+Primary request: Edit ONLY the topmost main title within the white rounded rectangle. Replace "Dispatch：SIMT并行处理路由信息" with exactly "Dispatch：SIMT并行完成路由处理与通信准备".
+Fit this title on ONE line with regular/light sans-serif typography, adjusting only the title font size if needed. Keep the title box position and size.
+Keep the teal banner immediately below exactly "SIMT：多个线程协作处理". Do NOT add any thread-group icons, thread diagrams, insets, explanatory callouts or new sections.
+All other contents and geometry must remain unchanged: all eight token rows, five stage column headers, expert IDs, rank IDs, slot values, dedup badges, scalar/URMA/MTE cards, arrows, counts, aggregate row, footer, colors and spacing.
+Critical data invariants: token 2 = E5/E8 to rank 1, rank 1 slot 1, generates 1 communication entry with receiver expanding to 2 expert inputs. token 5 = E9/E11 to rank 2, rank 2 slot 2, generates 1 communication entry with receiver expanding to 2 expert inputs. All other tokens generate 2. Summary counts 16 expert choices, 14 logical communication entries, 3 local vectors, 11 remote vectors. Bottom per-rank counts rank 0=3, rank 1=4, rank 2=3, rank 3=4. Preserve all original remaining mappings verbatim.
+Preserve the existing Gruvbox Light palette, cream background, rounded white cards, thin borders, regular/light fonts and landscape aspect ratio. No global restyling, no bold, no added effects. Preserve original resolution if possible. Keep everything outside the topmost white title rectangle as close to identical as possible.
+```
+
 ## 内部分析：两个rank的通信往返与主动方
 
 日期：2026-10-15。用途：个人学习与协议分析，不加入软文正文，也不改变正文7张图的编号。本节允许WQE、SGE、SQ、CQ、CQE、doorbell、Jetty、UBMEM、metadata等通信术语；前文的软文禁用词不适用于本节。视觉仍沿用Gruvbox Light。
