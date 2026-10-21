@@ -61,7 +61,7 @@ Router动态选择expert，发送目标、接收位置和返回关系都需要�
 
 对比SIMD与SIMT的适用形态，同时说明SIMD也能通过掩码处理不规则工作；SIMT的表达优势不自动等同于固定性能加速比。正文与图片统一使用线程组，说明组内按top-k目标协作、组间并行处理不同token，以及线程按字段协作构造通信描述，不指定线程组大小。
 
-以Dispatch多token路由处理为具体对比：MC2的fullmesh_v1 MTE路径采用多AIV分摊路由、核内标量循环组织发送及SIMD批量计数；DeepEP在同一AIV内用多个SIMT线程组并行处理token，组内协作处理top-k目标和rank去重。从代码组织角度突出逐token逻辑更易表达、扩展，减少向量化组织工作；不泛化为所有MC2/SIMD实现，不宣称免除同步，也不据此推导固定性能加速比。
+以Dispatch多token路由处理为具体对比：MC²的fullmesh_v1 MTE路径采用多AIV分摊路由、核内标量循环组织发送及SIMD批量计数；DeepEP在同一AIV内用多个SIMT线程组并行处理token，组内协作处理top-k目标和rank去重。从代码组织角度突出逐token逻辑更易表达、扩展，减少向量化组织工作；不泛化为所有MC²/SIMD实现，不宣称免除同步，也不据此推导固定性能加速比。
 
 ### 4. Dispatch中的SIMT阶段
 
