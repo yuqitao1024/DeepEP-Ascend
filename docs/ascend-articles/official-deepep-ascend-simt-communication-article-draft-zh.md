@@ -1,10 +1,12 @@
-# DeepEP-Ascend：为什么SIMT适合MoE通信？
+# DeepEP-Ascend：混合编程中SIMT如何助力MoE通信
+
+Ascend 950采用以`SIMD`为主、`SIMT`为辅的混合编程模式：SIMD承担规则、密集的计算，SIMT补充动态分支、离散访存等不规则逻辑的处理能力。DeepEP-Ascend的MoE通信实现也遵循这一分工，由SIMD处理向量归约等数值计算，SIMT处理动态路由与通信描述，并与数据搬运环节协同完成通信。本文以这一混合实现为背景，重点介绍SIMT在通信预处理中的作用，以及它如何让动态通信逻辑更易表达和并行组织。
 
 ## DeepSeek实践：从GPU到Ascend 950
 
 DeepSeek团队自主研发的[DeepEP](https://github.com/deepseek-ai/DeepEP)在GPU版本中采用`SIMT`编程方式，以线程协作处理MoE通信中的动态路由、统计与去重。迁移到Ascend 950时，[DeepEP-Ascend](https://github.com/deepseek-ai/DeepEP-Ascend)利用类似的`SIMT`能力延续这一并行实现思路，并使公开buffer API与GPU版本对齐，为上层应用的平滑迁移提供便利。
 
-在[官方报告](https://github.com/deepseek-ai/DeepEP-Ascend#performance)的测试条件与计时口径下，Ascend 950DT上的Dispatch在EP32以内达到物理数据带宽上限的约90%-95%，展现了良好的通信性能。这一跨平台实践体现了Ascend 950的`SIMT`能力在DeepSeek客户侧兼顾开发易用性与高效通信的落地价值。
+在[官方报告](https://github.com/deepseek-ai/DeepEP-Ascend#performance)的测试条件与计时口径下，Ascend 950DT上的Dispatch在EP32以内达到物理数据带宽上限的约90%-95%，展现了良好的通信性能。这一跨平台实践展示了Ascend 950混合编程模式在DeepSeek MoE通信场景中的应用价值：`SIMT`为延续GPU侧的通信预处理思路提供了便利，整体通信性能则由`SIMD`、`SIMT`与数据搬运等环节共同支撑。
 
 ## 一分钟概览
 
@@ -14,7 +16,7 @@ MoE通信需要根据动态路由生成通信计划。Router为每个token选择
 
 `SIMT`通过线程组内协作处理单个token的路由，通过线程组间并行推进多个token的处理。这种执行方式能够自然表达不同token的目标判断、重复rank识别和通信字段构造。
 
-远端通信描述准备就绪并提交后，由`URMA`执行传输；本地数据由`MTE`在接收位置就绪后搬运。`SIMT`的核心价值，是将动态、不规则的通信预处理并行化，让通信计划的生成更贴近MoE业务的执行特点。
+在整体执行中，`SIMD`承担向量归约等数值处理，与`SIMT`的通信预处理相配合。远端通信描述准备就绪并提交后，由`URMA`执行传输；本地数据由`MTE`在接收位置就绪后搬运。`SIMT`在其中的价值，是将动态、不规则的通信预处理并行化，让通信计划的生成更贴近MoE业务的执行特点。
 
 ## 1. MoE通信的业务背景
 
